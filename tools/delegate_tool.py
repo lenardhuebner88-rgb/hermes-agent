@@ -105,6 +105,29 @@ def _get_subagent_approval_callback():
         return _subagent_auto_approve
     return _subagent_auto_deny
 
+
+def _restricted_kanban_worker_disallows_delegation() -> bool:
+    """Return True when dispatcher evidence excludes delegate_task.
+
+    This is a defense-in-depth builder guard.  Normal restricted workers never
+    see ``delegate_task`` in their model schema and model_tools denies a stray
+    runtime call before this module is reached.  If a test or internal path still
+    tries to construct a child agent inside a restricted worker, do not derive or
+    inherit broad toolsets/MCP toolsets for that child.
+    """
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    raw = os.environ.get("HERMES_KANBAN_EFFECTIVE_TOOLSETS")
+    if raw is None:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        return True
+    return "delegate_task" not in {item.strip() for item in parsed}
+
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
 # (hermes-* prefixed), and scenario toolsets.
@@ -961,6 +984,10 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+
+    if _restricted_kanban_worker_disallows_delegation():
+        child_toolsets = []
+        effective_role = "leaf"
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(

@@ -422,6 +422,14 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.ScopeAttestationError as scope_err:
+                return tool_error(
+                    "kanban_complete blocked: this task requires "
+                    "completion_policy.require_scope_attestation=true metadata. "
+                    "Provide metadata with scope_contract_version >= 2, "
+                    "scope_attestation=true, and forbidden_actions_taken=0. "
+                    f"Missing/invalid: {', '.join(scope_err.missing)}."
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
@@ -459,7 +467,7 @@ def _handle_block(args: dict, **kw) -> str:
             if not ok:
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
-                    f"running/ready)"
+                    f"running/ready/todo/triage)"
                 )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
