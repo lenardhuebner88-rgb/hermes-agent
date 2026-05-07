@@ -420,11 +420,11 @@ class TestCmdUpdateLaunchdRestart:
         )
 
         # ``find_gateway_pids`` is invoked twice: once to enumerate manual
-         # PIDs to restart, then again ~3s later by the post-restart survivor
-         # sweep (#17648). Return the live PID first, then an empty list to
-         # simulate the process actually exiting after the graceful restart
-         # — otherwise the sweep would SIGKILL pid 12345 even though graceful
-         # drain succeeded, and ``kill.assert_not_called()`` would fire.
+        # PIDs to restart, then again ~3s later by the post-restart survivor
+        # sweep (#17648). Return the live PID first, then an empty list to
+        # simulate the process actually exiting after the graceful restart
+        # — otherwise the sweep would SIGKILL pid 12345 even though graceful
+        # drain succeeded, and ``kill.assert_not_called()`` would fire.
         with patch.object(gateway_cli, "find_gateway_pids", side_effect=[[12345], []]), \
              patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
@@ -958,10 +958,10 @@ class TestServicePidExclusion:
         )
 
         # Survivor sweep (#17648) re-queries ``find_gateway_pids`` after
-         # SIGTERM. ``os.kill`` is mocked, so the PID never "dies" — track
-         # the killed-via-SIGTERM PIDs ourselves and exclude them on later
-         # calls to simulate the OS reaping the process. Without this the
-         # sweep escalates with SIGKILL and ``manual_kills == 2`` instead of 1.
+        # SIGTERM. ``os.kill`` is mocked, so the PID never "dies" — track
+        # the killed-via-SIGTERM PIDs ourselves and exclude them on later
+        # calls to simulate the OS reaping the process. Without this the
+        # sweep escalates with SIGKILL and ``manual_kills == 2`` instead of 1.
         _killed_pids: set[int] = set()
 
         def fake_find(exclude_pids=None, all_profiles=False):
