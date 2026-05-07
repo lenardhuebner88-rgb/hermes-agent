@@ -44,8 +44,10 @@ import json
 import logging
 import os
 import re
+import html as html_lib
 import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from urllib.parse import parse_qs, unquote as url_unquote, urlparse
 import httpx
 # NOTE: `from firecrawl import Firecrawl` is deliberately NOT at module top —
 # the SDK pulls ~200 ms of imports (httpcore, firecrawl.v1/v2 type trees) and
@@ -126,7 +128,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "duckduckgo", "searxng", "brave-free", "ddgs"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -204,6 +206,8 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("BRAVE_SEARCH_API_KEY")
     if backend == "ddgs":
         return _ddgs_package_importable()
+    if backend == "duckduckgo":
+        return True
     return False
 
 
@@ -463,6 +467,134 @@ def _normalize_tavily_documents(response: dict, fallback_url: str = "") -> List[
             "metadata": {"sourceURL": url_str},
         })
     return documents
+
+
+# ─── DuckDuckGo HTML fallback ────────────────────────────────────────────────
+
+_DDG_HTML_URL = "https://html.duckduckgo.com/html/"
+_DDG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    )
+}
+
+
+def _strip_html_to_text(raw_html: str) -> str:
+    """Best-effort stdlib HTML-to-text cleanup for fallback extraction."""
+    text = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", raw_html)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|li|h[1-6]|tr)>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _decode_duckduckgo_result_url(url: str) -> str:
+    """Decode DuckDuckGo redirect URLs to their target URL when possible."""
+    parsed = urlparse(html_lib.unescape(url))
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            return url_unquote(target)
+    return html_lib.unescape(url)
+
+
+def _duckduckgo_search(query: str, limit: int = 5) -> dict:
+    """No-key web search using DuckDuckGo's HTML endpoint."""
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return {"error": "Interrupted", "success": False}
+
+    logger.info("DuckDuckGo HTML search: '%s' (limit=%d)", query, limit)
+    response = httpx.post(
+        _DDG_HTML_URL,
+        data={"q": query},
+        headers=_DDG_HEADERS,
+        timeout=20,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+
+    results: List[Dict[str, Any]] = []
+    for match in re.finditer(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        response.text,
+        flags=re.I | re.S,
+    ):
+        href, title_html = match.groups()
+        title = _strip_html_to_text(title_html)
+        url = _decode_duckduckgo_result_url(href)
+        if not url or not title:
+            continue
+        if not is_safe_url(url):
+            continue
+
+        snippet = ""
+        tail = response.text[match.end(): match.end() + 2500]
+        snippet_match = re.search(
+            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>|<div[^>]+class="result__snippet"[^>]*>(.*?)</div>',
+            tail,
+            flags=re.I | re.S,
+        )
+        if snippet_match:
+            snippet = _strip_html_to_text(next(g for g in snippet_match.groups() if g))
+
+        results.append({
+            "url": url,
+            "title": title,
+            "description": snippet,
+            "position": len(results) + 1,
+        })
+        if len(results) >= limit:
+            break
+
+    return {"success": True, "data": {"web": results}}
+
+
+async def _duckduckgo_extract(urls: List[str]) -> List[Dict[str, Any]]:
+    """Dependency-free HTTP extraction fallback for DuckDuckGo backend."""
+    from tools.interrupt import is_interrupted
+
+    results: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(headers=_DDG_HEADERS, follow_redirects=True, timeout=30) as client:
+        for url in urls:
+            if is_interrupted():
+                results.append({"url": url, "error": "Interrupted", "title": ""})
+                continue
+            blocked = check_website_access(url)
+            if blocked:
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "raw_content": "",
+                    "error": blocked["message"],
+                    "blocked_by_policy": {
+                        "host": blocked["host"],
+                        "rule": blocked["rule"],
+                        "source": blocked["source"],
+                    },
+                })
+                continue
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                text = _strip_html_to_text(response.text)[:50_000]
+                title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", response.text)
+                title = _strip_html_to_text(title_match.group(1)) if title_match else ""
+                results.append({
+                    "url": str(response.url),
+                    "title": title,
+                    "content": text,
+                    "raw_content": text,
+                    "metadata": {"sourceURL": str(response.url), "title": title},
+                })
+            except Exception as exc:
+                results.append({"url": url, "title": "", "content": "", "raw_content": "", "error": str(exc)})
+    return results
 
 
 def _to_plain_object(value: Any) -> Any:
@@ -1259,6 +1391,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             _debug.save()
             return result_json
 
+        if backend == "duckduckgo":
+            response_data = _duckduckgo_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
 
         response = _get_firecrawl_client().search(
@@ -1401,6 +1542,8 @@ async def web_extract_tool(
                     "error": f"{_label} is a search-only backend and cannot extract URL content. "
                              "Set web.extract_backend to firecrawl, tavily, exa, or parallel.",
                 }, ensure_ascii=False)
+            elif backend == "duckduckgo":
+                results = await _duckduckgo_extract(safe_urls)
             else:
                 # ── Firecrawl extraction ──
                 # Determine requested formats for Firecrawl v2
@@ -2080,7 +2223,7 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "duckduckgo", "searxng", "brave-free", "ddgs"):
         return _is_backend_available(configured)
     return any(
         _is_backend_available(backend)
