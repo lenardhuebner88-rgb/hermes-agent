@@ -981,6 +981,85 @@ class TestToolsetInjection:
             assert validate_toolset("mcp-terminal") is True
             assert "mcp_terminal_run" in resolve_toolset("mcp-terminal")
 
+    def test_kanban_worker_without_mcp_allowed_skips_discovery_and_process_start(self, monkeypatch):
+        """P1.16: restricted Kanban workers without MCP tools in their effective
+        allowlist must not start MCP discovery/server lifecycle at all.
+
+        This is a fake/test-only process-boundary proof: configured MCP servers
+        are present, but ``discover_mcp_tools()`` must return before loading
+        config into a real transport path, starting the MCP loop, or calling
+        ``_connect_server``. Schema absence is tested separately in
+        TestKanbanWorkerEffectiveToolSchema; this test proves the lifecycle
+        boundary.
+        """
+        fake_config = {"fs": {"command": "python", "args": ["fake-mcp-server.py"]}}
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_p1_16_no_mcp_process")
+        monkeypatch.setenv("HERMES_KANBAN_EFFECTIVE_TOOLSETS", json.dumps(["todo"]))
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._servers", {}), \
+             patch("tools.mcp_tool._load_mcp_config", return_value=fake_config) as load_config, \
+             patch("tools.mcp_tool._ensure_mcp_loop") as ensure_loop, \
+             patch("tools.mcp_tool._connect_server") as connect_server:
+            from tools.mcp_tool import discover_mcp_tools
+            result = discover_mcp_tools()
+
+        assert result == []
+        load_config.assert_not_called()
+        ensure_loop.assert_not_called()
+        connect_server.assert_not_called()
+
+    def test_kanban_worker_without_mcp_allowed_skips_explicit_registration(self, monkeypatch):
+        """P1.16: direct register_mcp_servers() is also fail-closed for workers
+        whose effective allowlist contains no MCP tools.
+        """
+        fake_config = {"fs": {"command": "python", "args": ["fake-mcp-server.py"]}}
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_p1_16_no_mcp_register")
+        monkeypatch.setenv("HERMES_KANBAN_EFFECTIVE_TOOLSETS", json.dumps(["todo"]))
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._servers", {}), \
+             patch("tools.mcp_tool._ensure_mcp_loop") as ensure_loop, \
+             patch("tools.mcp_tool._connect_server") as connect_server:
+            from tools.mcp_tool import register_mcp_servers
+            result = register_mcp_servers(fake_config)
+
+        assert result == []
+        ensure_loop.assert_not_called()
+        connect_server.assert_not_called()
+
+    def test_kanban_worker_with_mcp_allowed_keeps_fake_discovery_path(self, monkeypatch):
+        """P1.16 positive control: explicit MCP tool allowlist keeps the normal
+        discovery path available. Uses fake connect only; no real process.
+        """
+        from tools.mcp_tool import MCPServerTask
+
+        mock_tools = [_make_mcp_tool("allowed", "Allowed fake MCP tool")]
+        fresh_servers = {}
+        fake_config = {"fs": {"command": "python", "args": ["fake-mcp-server.py"]}}
+        call_count = 0
+
+        async def fake_connect(name, config):
+            nonlocal call_count
+            call_count += 1
+            server = MCPServerTask(name)
+            server.session = MagicMock()
+            server._tools = mock_tools
+            return server
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_p1_16_mcp_allowed")
+        monkeypatch.setenv("HERMES_KANBAN_EFFECTIVE_TOOLSETS", json.dumps(["mcp_fs_allowed"]))
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._servers", fresh_servers), \
+             patch("tools.mcp_tool._load_mcp_config", return_value=fake_config), \
+             patch("tools.mcp_tool._connect_server", side_effect=fake_connect):
+            from tools.mcp_tool import discover_mcp_tools
+            result = discover_mcp_tools()
+
+        assert "mcp_fs_allowed" in result
+        assert call_count == 1
+
     def test_server_connection_failure_skipped(self):
         """If one server fails to connect, others still proceed."""
         from tools.mcp_tool import MCPServerTask
