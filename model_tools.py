@@ -24,6 +24,8 @@ import json
 import re
 import asyncio
 import logging
+import os
+import sys
 import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
@@ -253,11 +255,108 @@ _LEGACY_TOOLSET_MAP = {
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 
 
+def _kanban_effective_tool_filter_fingerprint() -> Optional[str]:
+    """Return the raw worker effective-tool env value when schema narrowing applies.
+
+    The dispatcher sets ``HERMES_KANBAN_TASK`` for worker processes and may set
+    ``HERMES_KANBAN_EFFECTIVE_TOOLSETS`` after validating
+    ``scope_contract.allowed_tools``. Only that worker context should affect the
+    model-native schema; normal CLI/Discord/cron sessions without the env var
+    keep their existing tool selection.
+    """
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return None
+    return os.environ.get("HERMES_KANBAN_EFFECTIVE_TOOLSETS")
+
+
+def _parse_kanban_effective_tool_filter() -> Optional[set[str]]:
+    """Return a concrete allowed-tool set, or ``None`` when no filter applies.
+
+    Malformed dispatcher env fails closed to an empty set. Falling back to the
+    broad profile/platform schema would make runtime isolation appear Green
+    while leaking tools.
+    """
+    raw = _kanban_effective_tool_filter_fingerprint()
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(parsed, list):
+        return set()
+    allowed: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, str):
+            return set()
+        name = item.strip()
+        if not name:
+            return set()
+        allowed.add(name)
+    return allowed
+
+
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
     schema dependencies change (e.g. discord capability cache reset,
     execute_code sandbox reconfigured)."""
     _tool_defs_cache.clear()
+
+
+def _maybe_emit_kanban_schema_audit(tool_defs: List[Dict[str, Any]]) -> None:
+    """Emit a safe, opt-in worker schema snapshot for spawned-worker proof.
+
+    This deliberately logs only schema names and booleans. It must never emit
+    raw env values, task ids, prompts, tool arguments, config contents, or
+    credential-bearing data.
+    """
+    if os.environ.get("HERMES_KANBAN_SCHEMA_AUDIT") != "1":
+        return
+    names = sorted(
+        name
+        for tool_def in tool_defs
+        for name in [tool_def.get("function", {}).get("name")]
+        if isinstance(name, str)
+    )
+    payload = {
+        "event": "kanban_worker_tool_schema",
+        "kanban_task_context": bool(os.environ.get("HERMES_KANBAN_TASK")),
+        "effective_tool_filter_active": _kanban_effective_tool_filter_fingerprint() is not None,
+        "tool_count": len(names),
+        "tool_names": names,
+    }
+    print(
+        "HERMES_KANBAN_SCHEMA_AUDIT " + json.dumps(payload, sort_keys=True),
+        file=sys.stderr,
+    )
+
+
+def _get_kanban_runtime_tool_denial(function_name: str) -> Optional[str]:
+    """Return a fail-closed denial JSON for disallowed worker tool execution.
+
+    Restricted Kanban workers already receive a narrowed model-native schema via
+    ``HERMES_KANBAN_EFFECTIVE_TOOLSETS``.  This runtime guard covers the next
+    boundary: if a provider, test, or malicious worker still submits a synthetic
+    tool call for a name outside the dispatcher-validated list, deny before any
+    registry handler, agent-loop tool, read-loop notification, or plugin hook can
+    execute.  The result is deliberately audit-shaped but contains no task id,
+    raw env value, arguments, prompts, config, or credential-bearing data.
+    """
+    allowed = _parse_kanban_effective_tool_filter()
+    if allowed is None:
+        return None
+    if function_name in allowed:
+        return None
+    return json.dumps(
+        {
+            "error": f"Kanban worker runtime denied tool call: {function_name} is not in effective_toolsets",
+            "event": "kanban_worker_tool_call_denied",
+            "tool_name": function_name,
+            "kanban_task_context": bool(os.environ.get("HERMES_KANBAN_TASK")),
+            "effective_tool_filter_active": True,
+        },
+        ensure_ascii=False,
+    )
 
 
 def get_tool_definitions(
@@ -299,6 +398,7 @@ def get_tool_definitions(
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
             cfg_fp,
+            _kanban_effective_tool_filter_fingerprint(),
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -308,6 +408,7 @@ def get_tool_definitions(
             _last_resolved_tool_names = [t["function"]["name"] for t in cached]
             # Return a shallow copy of the list but share the dict references —
             # schemas are treated as read-only by all known callers.
+            _maybe_emit_kanban_schema_audit(cached)
             return list(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
@@ -320,7 +421,9 @@ def get_tool_definitions(
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
         _tool_defs_cache[cache_key] = result
+        _maybe_emit_kanban_schema_audit(result)
         return list(result)
+    _maybe_emit_kanban_schema_audit(result)
     return result
 
 
@@ -377,6 +480,14 @@ def _compute_tool_definitions(
     # all check the tool registry for plugin-provided toolsets.  No bypass
     # needed; plugins respect enabled_toolsets / disabled_toolsets like any
     # other toolset.
+
+    # Kanban dispatcher workers can be narrowed further by the validated
+    # task-level allowed_tools evidence passed as HERMES_KANBAN_EFFECTIVE_TOOLSETS.
+    # Apply this before registry schema lookup so dynamic schema rebuilds below
+    # only reference tools that are actually present.
+    kanban_effective_filter = _parse_kanban_effective_tool_filter()
+    if kanban_effective_filter is not None:
+        tools_to_include.intersection_update(kanban_effective_filter)
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
@@ -754,6 +865,15 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
+    # Restricted Kanban workers must fail closed at runtime too.  Schema
+    # narrowing prevents normal model calls from seeing forbidden tools, but a
+    # synthetic/stray tool call can still arrive at this dispatcher.  Deny it
+    # before argument coercion, plugin hooks, agent-loop stubs, read-loop
+    # notifications, or registry handlers can run.
+    kanban_denial = _get_kanban_runtime_tool_denial(function_name)
+    if kanban_denial is not None:
+        return kanban_denial
+
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 
