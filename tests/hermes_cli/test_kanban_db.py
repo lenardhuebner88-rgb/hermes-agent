@@ -1204,6 +1204,46 @@ completion_policy:
         ]
 
 
+def test_dispatch_preflight_accepts_safe_workspace_runner_tool(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - write_file
+    - read_file
+    - kanban_run_workspace_command
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="safe runner", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "write_file",
+            "read_file",
+            "kanban_run_workspace_command",
+            "kanban_complete",
+            "kanban_block",
+        ]
+
+
 def test_validate_created_cards_dry_run_reports_verified_and_phantom_without_mutation(kanban_home):
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent", assignee="alice")
@@ -1718,6 +1758,7 @@ class TestPathResolutionAndWorkerEnv:
             default_home / "kanban" / "workspaces"
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
+        assert env["HERMES_KANBAN_WORKSPACE_KIND"] == "scratch"
 
     def test_default_spawn_inherits_schema_audit_env_for_one_dispatch(
         self, tmp_path, monkeypatch

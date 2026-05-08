@@ -47,6 +47,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     import tools.kanban_tools  # ensure registered
+    import tools.kanban_workspace_runner  # ensure registered
     from tools.registry import invalidate_check_fn_cache, registry
     from toolsets import resolve_toolset
 
@@ -57,7 +58,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     expected = {
         "kanban_show", "kanban_complete", "kanban_validate_created_cards",
         "kanban_block", "kanban_heartbeat", "kanban_comment",
-        "kanban_create", "kanban_link",
+        "kanban_create", "kanban_link", "kanban_run_workspace_command",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -110,7 +111,8 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_list",
-        "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
+        "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
         "kanban_unblock",
     }
