@@ -60,11 +60,12 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-    # Kanban multi-agent coordination — only in schema when the agent is
-    # spawned as a kanban worker (HERMES_KANBAN_TASK env set), otherwise
+    # Kanban tools are model-visible only for dispatcher-spawned workers
+    # or profiles that explicitly enable the kanban toolset, so normal chat has
     # zero schema footprint. Gated via check_fn in tools/kanban_tools.py.
-    "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-    "kanban_comment", "kanban_create", "kanban_link",
+    "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+    "kanban_block", "kanban_heartbeat", "kanban_comment",
+    "kanban_create", "kanban_link",
 ]
 
 
@@ -224,8 +225,8 @@ TOOLSETS = {
             "orchestrators) fan out into child tasks."
         ),
         "tools": [
-            "kanban_show", "kanban_complete", "kanban_block",
-            "kanban_heartbeat", "kanban_comment",
+            "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+            "kanban_block", "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
         ],
         "includes": [],

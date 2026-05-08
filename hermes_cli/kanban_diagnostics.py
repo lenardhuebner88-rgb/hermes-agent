@@ -30,6 +30,7 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import json
 import time
@@ -519,6 +520,192 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_stale_heartbeat(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A running worker emitted heartbeats before, but the latest one is old.
+
+    Phase 4A is intentionally advisory/read-only: it only fires for tasks
+    that already have ``last_heartbeat_at``. Short-running workers that never
+    promised heartbeat liveness stay silent to avoid false positives.
+    """
+    if _task_field(task, "status") != "running":
+        return []
+
+    last = _task_field(task, "last_heartbeat_at")
+    if not last:
+        return []
+
+    threshold = int(cfg.get("heartbeat_stale_after_seconds", 300))
+    age = int(now) - int(last)
+    if age < threshold:
+        return []
+
+    return [Diagnostic(
+        kind="stale_heartbeat",
+        severity="warning",
+        title="Worker heartbeat is stale",
+        detail=(
+            f"Task has not emitted a heartbeat for {age}s "
+            f"(threshold {threshold}s). The worker may still be alive, "
+            "but operator-visible progress has gone stale."
+        ),
+        actions=_generic_recovery_actions(task, running=True),
+        first_seen_at=int(last) + threshold,
+        last_seen_at=int(now),
+        count=1,
+        data={
+            "last_heartbeat_at": int(last),
+            "heartbeat_age_seconds": age,
+            "threshold_seconds": threshold,
+        },
+    )]
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    """Return True only when ``path`` resolves under ``root``.
+
+    Any resolution error is treated as unsafe / not owned. Diagnostics should
+    drop questionable paths rather than classify external data as Kanban-owned.
+    """
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _configured_workspace_root(cfg: dict) -> Optional[Path]:
+    raw = cfg.get("workspace_root")
+    if raw:
+        return Path(str(raw)).expanduser()
+    try:
+        from hermes_cli import kanban_db as kb  # lazy import avoids module-cycle cost in tests
+        return kb.workspaces_root()
+    except Exception:
+        return None
+
+
+def _rule_workspace_missing(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A running task's persisted workspace path disappeared.
+
+    Phase 5A is read-only: surface the broken workspace invariant, but do not
+    recreate directories, reclaim automatically, or delete anything.
+    """
+    if _task_field(task, "status") != "running":
+        return []
+
+    raw_path = _task_field(task, "workspace_path")
+    if not raw_path:
+        return []
+
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute() or path.exists():
+        return []
+
+    task_id = _task_field(task, "id")
+    actions: list[DiagnosticAction] = []
+    if task_id:
+        actions.append(DiagnosticAction(
+            kind="cli_hint",
+            label=f"Check worker log: hermes kanban log {task_id}",
+            payload={"command": f"hermes kanban log {task_id}"},
+            suggested=True,
+        ))
+    actions.extend(_generic_recovery_actions(task, running=True))
+
+    return [Diagnostic(
+        kind="workspace_missing",
+        severity="error",
+        title="Running task workspace is missing",
+        detail=(
+            f"Task is running with workspace_path={str(path)!r}, but that "
+            "directory does not exist. The worker may fail file operations or "
+            "may already be detached from its expected workspace."
+        ),
+        actions=actions,
+        first_seen_at=int(now),
+        last_seen_at=int(now),
+        count=1,
+        data={
+            "workspace_path": str(path),
+            "workspace_kind": _task_field(task, "workspace_kind", "scratch") or "scratch",
+            "status": "running",
+        },
+    )]
+
+
+def _rule_stale_workspace(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """An archived scratch task still owns a removable workspace directory.
+
+    Only scratch workspaces under the configured Kanban workspaces root are
+    treated as owned cleanup candidates. External ``dir``/``worktree`` paths
+    are intentionally silent.
+    """
+    if _task_field(task, "status") != "archived":
+        return []
+    if (_task_field(task, "workspace_kind", "scratch") or "scratch") != "scratch":
+        return []
+
+    archived_at = 0
+    for ev in events:
+        if _event_kind(ev) == "archived":
+            archived_at = max(archived_at, _event_ts(ev))
+    if not archived_at:
+        return []
+
+    threshold_hours = float(cfg.get("workspace_stale_after_hours", 24))
+    age_hours = (int(now) - archived_at) / 3600.0
+    if age_hours < threshold_hours:
+        return []
+
+    raw_path = _task_field(task, "workspace_path")
+    if not raw_path:
+        task_id = _task_field(task, "id")
+        if not task_id:
+            return []
+        root = _configured_workspace_root(cfg)
+        if root is None:
+            return []
+        path = root / str(task_id)
+    else:
+        path = Path(str(raw_path)).expanduser()
+
+    if not path.is_absolute() or not path.exists() or not path.is_dir():
+        return []
+
+    root = _configured_workspace_root(cfg)
+    if root is None or not _path_is_under(path, root):
+        return []
+
+    actions = [DiagnosticAction(
+        kind="cli_hint",
+        label="Run Kanban garbage collection: hermes kanban gc",
+        payload={"command": "hermes kanban gc"},
+        suggested=True,
+    )]
+
+    return [Diagnostic(
+        kind="stale_workspace",
+        severity="warning",
+        title="Archived scratch workspace still exists",
+        detail=(
+            f"Task was archived {age_hours:.1f}h ago and its scratch "
+            f"workspace still exists at {str(path)!r}. Kanban owns scratch "
+            "workspaces under the workspaces root, so this is a candidate "
+            "for explicit garbage collection."
+        ),
+        actions=actions,
+        first_seen_at=int(archived_at + threshold_hours * 3600),
+        last_seen_at=int(now),
+        count=1,
+        data={
+            "workspace_path": str(path),
+            "workspace_kind": "scratch",
+            "archived_age_hours": round(age_hours, 1),
+            "threshold_hours": int(threshold_hours) if threshold_hours.is_integer() else threshold_hours,
+        },
+    )]
+
+
 def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Task has been in ``blocked`` status for too long without a comment.
 
@@ -577,6 +764,9 @@ _RULES: list[RuleFn] = [
     _rule_prose_phantom_refs,
     _rule_repeated_failures,
     _rule_repeated_crashes,
+    _rule_stale_heartbeat,
+    _rule_workspace_missing,
+    _rule_stale_workspace,
     _rule_stuck_in_blocked,
 ]
 
@@ -588,6 +778,9 @@ DIAGNOSTIC_KINDS = (
     "prose_phantom_refs",
     "repeated_failures",
     "repeated_crashes",
+    "stale_heartbeat",
+    "workspace_missing",
+    "stale_workspace",
     "stuck_in_blocked",
 )
 
@@ -597,6 +790,8 @@ DEFAULT_CONFIG = {
     # Legacy alias accepted at read time by _rule_repeated_failures.
     "spawn_failure_threshold": 3,
     "crash_threshold": 2,
+    "heartbeat_stale_after_seconds": 300,
+    "workspace_stale_after_hours": 24,
     "blocked_stale_hours": 24,
 }
 

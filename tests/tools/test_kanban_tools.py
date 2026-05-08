@@ -39,7 +39,7 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 
 
 def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
-    """Worker sessions (HERMES_KANBAN_TASK set) must have all 7 tools."""
+    """Worker sessions (HERMES_KANBAN_TASK set) must have all kanban tools."""
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fake")
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -53,8 +53,9 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     names = {s["function"].get("name") for s in schema if "function" in s}
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
-        "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_comment", "kanban_create", "kanban_link",
+        "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_block", "kanban_heartbeat", "kanban_comment",
+        "kanban_create", "kanban_link",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -179,6 +180,34 @@ def test_complete_rejects_non_dict_metadata(worker_env):
     assert json.loads(out).get("error")
 
 
+def test_validate_created_cards_reports_phantoms_without_completing(worker_env):
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        owned = kb.create_task(conn, title="owned child", assignee="peer", created_by="test-worker")
+        foreign = kb.create_task(conn, title="foreign child", assignee="peer", created_by="other-worker")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_validate_created_cards({"created_cards": [owned, foreign, "t_deadbeef"]})
+    d = json.loads(out)
+    assert d["ok"] is False
+    assert d["task_id"] == worker_env
+    assert d["verified_cards"] == [owned]
+    assert d["phantom_cards"] == [foreign, "t_deadbeef"]
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        events = [e.kind for e in kb.list_events(conn, worker_env)]
+    finally:
+        conn.close()
+    assert task.status == "running"
+    assert "completed" not in events
+    assert "completion_blocked_hallucination" not in events
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
@@ -190,6 +219,35 @@ def test_block_happy_path(worker_env):
         assert kb.get_task(conn, worker_env).status == "blocked"
     finally:
         conn.close()
+
+
+def test_block_accepts_context_comment_id(worker_env):
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        comment_id = kb.add_comment(
+            conn,
+            worker_env,
+            "test-worker",
+            "Detailed context for the human before the short block reason.",
+        )
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_block({
+        "reason": "Need human choice; see linked context.",
+        "context_comment_id": comment_id,
+    })
+    assert json.loads(out)["ok"] is True
+
+    conn = kb.connect()
+    try:
+        event = [e for e in kb.list_events(conn, worker_env) if e.kind == "blocked"][-1]
+    finally:
+        conn.close()
+    assert event.payload["context_comment_id"] == comment_id
+    assert event.payload["context_snippet"].startswith("Detailed context")
 
 
 def test_block_rejects_empty_reason(worker_env):

@@ -371,6 +371,75 @@ def test_events_capture_lifecycle(kanban_home):
     assert "completed" in kinds
 
 
+def test_block_event_can_link_context_comment(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked context", assignee="a")
+        kb.claim_task(conn, t)
+        comment_id = kb.add_comment(
+            conn,
+            t,
+            "worker",
+            "Detailed blocker context: checked inputs A and B; need Piet to choose C.",
+        )
+
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Need Piet to choose C; see context comment.",
+            context_comment_id=comment_id,
+        )
+
+        blocked = [e for e in kb.list_events(conn, t) if e.kind == "blocked"][-1]
+
+    assert blocked.payload["reason"] == "Need Piet to choose C; see context comment."
+    assert blocked.payload["context_comment_id"] == comment_id
+    assert blocked.payload["context_snippet"].startswith("Detailed blocker context")
+
+
+def test_terminal_events_include_run_outcome_profile_and_handoff(kanban_home):
+    with kb.connect() as conn:
+        done_task = kb.create_task(conn, title="done", assignee="alice")
+        kb.claim_task(conn, done_task)
+        assert kb.complete_task(conn, done_task, summary="finished cleanly")
+        completed = [e for e in kb.list_events(conn, done_task) if e.kind == "completed"][-1]
+
+        blocked_task = kb.create_task(conn, title="blocked", assignee="bob")
+        kb.claim_task(conn, blocked_task)
+        assert kb.block_task(conn, blocked_task, reason="need decision")
+        blocked = [e for e in kb.list_events(conn, blocked_task) if e.kind == "blocked"][-1]
+
+    assert completed.run_id is not None
+    assert completed.payload["run_id"] == completed.run_id
+    assert completed.payload["outcome"] == "completed"
+    assert completed.payload["profile"] == "alice"
+    assert completed.payload["summary"] == "finished cleanly"
+    assert completed.payload["ended_at"] is not None
+
+    assert blocked.run_id is not None
+    assert blocked.payload["run_id"] == blocked.run_id
+    assert blocked.payload["outcome"] == "blocked"
+    assert blocked.payload["profile"] == "bob"
+    assert blocked.payload["summary"] == "need decision"
+    assert blocked.payload["ended_at"] is not None
+
+
+def test_spawn_failure_terminal_event_includes_error_and_outcome(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="spawn failure", assignee="coder")
+        kb.claim_task(conn, t)
+
+        kb._record_spawn_failure(conn, t, "No Codex credentials stored", failure_limit=3)
+
+        event = [e for e in kb.list_events(conn, t) if e.kind == "spawn_failed"][-1]
+
+    assert event.run_id is not None
+    assert event.payload["run_id"] == event.run_id
+    assert event.payload["outcome"] == "spawn_failed"
+    assert event.payload["profile"] == "coder"
+    assert event.payload["error"] == "No Codex credentials stored"
+    assert event.payload["ended_at"] is not None
+
+
 def test_worker_context_includes_parent_results_and_comments(kanban_home):
     with kb.connect() as conn:
         p = kb.create_task(conn, title="p")
@@ -649,6 +718,57 @@ completion_policy:
         assert kb.get_task(conn, t).status == "blocked"
 
 
+def test_dispatch_preflight_blocks_scope_contract_v2_without_core_forbidden_systems(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing forbidden systems", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "scope_contract.forbidden_systems is missing required entries" in (task.result or "")
+        assert "OpenClaw" in (task.result or "")
+        assert "Atlas" in (task.result or "")
+        assert "Mission-Control" in (task.result or "")
+        assert "Telegram" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_partial_core_forbidden_systems(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="partial forbidden systems", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "Mission-Control" in (task.result or "")
+        assert "Telegram" in (task.result or "")
+
+
 def test_dispatch_allows_scope_contract_v2_task_to_spawn(kanban_home, all_assignees_spawnable):
     spawns = []
     body = """
@@ -657,6 +777,11 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
 completion_policy:
   require_scope_attestation: true
 """
@@ -807,6 +932,11 @@ scope_contract:
     - kanban_complete
     - kanban_block
     - kanban_comment
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
 completion_policy:
   require_scope_attestation: true
 """
@@ -825,6 +955,59 @@ completion_policy:
             "kanban_block",
             "kanban_comment",
         ]
+
+
+def test_validate_created_cards_dry_run_reports_verified_and_phantom_without_mutation(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        owned = kb.create_task(conn, title="owned", assignee="worker", created_by="alice")
+        foreign = kb.create_task(conn, title="foreign", assignee="worker", created_by="bob")
+        linked = kb.create_task(conn, title="linked", assignee="worker", created_by="dashboard")
+        kb.link_tasks(conn, parent, linked)
+        before = kb.get_task(conn, parent).status
+
+        result = kb.validate_created_cards(
+            conn,
+            parent,
+            [owned, foreign, linked, "t_deadbeef"],
+        )
+        after = kb.get_task(conn, parent).status
+        events = kb.list_events(conn, parent)
+
+    assert result == {
+        "ok": False,
+        "task_id": parent,
+        "claimed_cards": [owned, foreign, linked, "t_deadbeef"],
+        "verified_cards": [owned, linked],
+        "phantom_cards": [foreign, "t_deadbeef"],
+    }
+    assert after == before == "ready"
+    assert "completed" not in [e.kind for e in events]
+    assert "completion_blocked_hallucination" not in [e.kind for e in events]
+    assert "created_cards_validated" not in [e.kind for e in events]
+
+
+def test_complete_task_reuses_created_cards_validation_gate(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        owned = kb.create_task(conn, title="owned", assignee="worker", created_by="alice")
+        foreign = kb.create_task(conn, title="foreign", assignee="worker", created_by="bob")
+
+        dry_run = kb.validate_created_cards(conn, parent, [owned, foreign])
+        with pytest.raises(kb.HallucinatedCardsError) as err:
+            kb.complete_task(conn, parent, summary="done", created_cards=[owned, foreign])
+        parent_task = kb.get_task(conn, parent)
+        blocked = [
+            e for e in kb.list_events(conn, parent)
+            if e.kind == "completion_blocked_hallucination"
+        ][-1]
+
+    assert dry_run["verified_cards"] == [owned]
+    assert dry_run["phantom_cards"] == [foreign]
+    assert err.value.phantom == [foreign]
+    assert parent_task.status == "ready"
+    assert blocked.payload["verified_cards"] == dry_run["verified_cards"]
+    assert blocked.payload["phantom_cards"] == dry_run["phantom_cards"]
 
 
 def test_completion_attestation_requires_effective_toolsets_when_allowed_tools_declared(kanban_home):
@@ -871,6 +1054,11 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
 completion_policy:
   require_scope_attestation: true
 """
@@ -915,6 +1103,11 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
 completion_policy:
   require_scope_attestation: true
 """
@@ -1394,3 +1587,94 @@ def test_latest_summaries_batch_omits_tasks_without_summary(kanban_home):
         assert out == {t1: "alpha", t3: "charlie"}
         # Empty input → empty dict, no SQL syntax error from "IN ()".
         assert kb.latest_summaries(conn, []) == {}
+
+
+
+def test_dispatch_preflight_blocks_scope_v2_with_unknown_assignee(kanban_home, monkeypatch):
+    """Scope v2 task with unknown assignee must be blocked, not silently skipped.
+
+    Regression for autonomy-sprint 2026-05-08 finding: planner produced child
+    cards with assignees ``researcher``/``analyst``/``reviewer`` outside the
+    OS-spec ``{default|coder|admin}`` set. Old behavior silently skipped them,
+    leaving the chain stuck in ``ready`` forever.
+    """
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="planner-bug task", assignee="researcher", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        assert t not in res.skipped_nonspawnable
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "researcher" in (task.result or "")
+        assert "not a known Hermes profile" in (task.result or "")
+        events = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (t,)
+        ).fetchall()]
+        assert "dispatch_preflight_invalid_assignee" in events
+
+
+def test_dispatch_preflight_skips_unknown_assignee_without_scope_contract(kanban_home, monkeypatch):
+    """Tasks WITHOUT scope_contract keep human-lane skip behavior (regression guard).
+
+    Interactive Claude Code terminals (e.g. ``orion-cc``) and other
+    human-pulled lanes deliberately use assignees that don't map to
+    Hermes profiles. They must continue to be bucketed as
+    ``skipped_nonspawnable`` rather than blocked.
+    """
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = "Plain task body with no scope contract."
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="orion-cc lane task", assignee="orion-cc", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.skipped_nonspawnable
+        assert t not in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"  # still ready, not blocked
+
+
+def test_dispatch_preflight_allows_known_profile_with_scope_v2(kanban_home, monkeypatch):
+    """Scope v2 task with valid assignee passes preflight and spawns."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="valid-assignee task", assignee="admin", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert spawns == [t]
+        assert t not in res.preflight_blocked
+        assert t not in res.skipped_nonspawnable
