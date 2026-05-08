@@ -1775,6 +1775,58 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
 
 
+def _terminal_event_payload(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+    *,
+    outcome: str,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> dict:
+    """Build a self-contained terminal event payload.
+
+    Terminal state is also persisted on ``task_runs``; duplicating the
+    small operator-facing subset here lets dashboards/notifiers reconstruct
+    lifecycle state from ``task_events`` without a second table join.
+    """
+    payload: dict[str, Any] = {"outcome": outcome}
+    if run_id is not None:
+        payload["run_id"] = int(run_id)
+        run = conn.execute(
+            "SELECT profile, status, outcome, summary, error, ended_at "
+            "FROM task_runs WHERE id = ?",
+            (int(run_id),),
+        ).fetchone()
+        if run:
+            payload.update(
+                {
+                    "profile": run["profile"],
+                    "status": run["status"],
+                    "outcome": run["outcome"] or outcome,
+                    "ended_at": run["ended_at"],
+                }
+            )
+            if summary is None:
+                summary = run["summary"]
+            if error is None:
+                error = run["error"]
+    else:
+        row = conn.execute(
+            "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row:
+            payload["profile"] = row["assignee"]
+    if summary:
+        payload["summary"] = str(summary).strip().splitlines()[0][:400]
+    if error:
+        payload["error"] = str(error)[:500]
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _synthesize_ended_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2221,6 +2273,18 @@ def reassign_task(
         return False
 
 
+def _normalize_created_card_claims(claimed_ids: Iterable[str]) -> list[str]:
+    """Return non-empty claimed card ids, deduped while preserving order."""
+    claimed = [str(x).strip() for x in (claimed_ids or []) if str(x).strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for cid in claimed:
+        if cid not in seen:
+            seen.add(cid)
+            ordered.append(cid)
+    return ordered
+
+
 def _verify_created_cards(
     conn: sqlite3.Connection,
     completing_task_id: str,
@@ -2246,16 +2310,9 @@ def _verify_created_cards(
     but don't satisfy any of the three trust conditions. The caller
     decides what to do with each bucket; this helper never mutates.
     """
-    claimed = [str(x).strip() for x in (claimed_ids or []) if str(x).strip()]
-    if not claimed:
+    ordered = _normalize_created_card_claims(claimed_ids)
+    if not ordered:
         return [], []
-    # Dedupe while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for cid in claimed:
-        if cid not in seen:
-            seen.add(cid)
-            ordered.append(cid)
 
     row = conn.execute(
         "SELECT assignee FROM tasks WHERE id = ?", (completing_task_id,),
@@ -2294,6 +2351,29 @@ def _verify_created_cards(
         else:
             phantom.append(cid)
     return verified, phantom
+
+
+def validate_created_cards(
+    conn: sqlite3.Connection,
+    completing_task_id: str,
+    claimed_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Dry-run the ``created_cards`` completion gate without mutating state.
+
+    This is the public, side-effect-free preflight counterpart to the
+    ``complete_task(..., created_cards=...)`` gate. Keep completion wired
+    through this helper so workers can validate claims before risking a
+    terminal handoff and both paths cannot drift.
+    """
+    claimed = _normalize_created_card_claims(claimed_ids)
+    verified, phantom = _verify_created_cards(conn, completing_task_id, claimed)
+    return {
+        "ok": not phantom,
+        "task_id": completing_task_id,
+        "claimed_cards": claimed,
+        "verified_cards": verified,
+        "phantom_cards": phantom,
+    }
 
 
 # Task-id pattern used both by ``kanban_create`` (``t_<12 hex>``) and
@@ -2415,6 +2495,12 @@ _FORBIDDEN_SCOPE_ALLOWED_TOOL_MARKERS = {
     "auth",
     "secrets",
     "cron_write",
+}
+_REQUIRED_SCOPE_FORBIDDEN_SYSTEMS = {
+    "openclaw": "OpenClaw",
+    "atlas": "Atlas",
+    "mission-control": "Mission-Control",
+    "telegram": "Telegram",
 }
 
 
@@ -2714,9 +2800,9 @@ def complete_task(
     # surfacing HallucinatedCardsError to the worker; this function
     # never mutates task state on a phantom-card rejection.
     if created_cards:
-        verified_cards, phantom_cards = _verify_created_cards(
-            conn, task_id, created_cards
-        )
+        card_validation = validate_created_cards(conn, task_id, created_cards)
+        verified_cards = card_validation["verified_cards"]
+        phantom_cards = card_validation["phantom_cards"]
         if phantom_cards:
             with write_txn(conn):
                 _append_event(
@@ -2792,10 +2878,14 @@ def complete_task(
         # full summary stays on the run row.
         ev_summary = (summary if summary is not None else result) or ""
         ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
-        completed_payload: dict = {
-            "result_len": len(result) if result else 0,
-            "summary": ev_summary or None,
-        }
+        completed_payload = _terminal_event_payload(
+            conn,
+            task_id,
+            run_id,
+            outcome="completed",
+            summary=ev_summary or None,
+            extra={"result_len": len(result) if result else 0},
+        )
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
         _append_event(
@@ -2907,6 +2997,7 @@ def block_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    context_comment_id: Optional[int] = None,
 ) -> bool:
     """Transition an active or queued task to ``blocked``.
 
@@ -2958,7 +3049,26 @@ def block_task(
                 outcome="blocked",
                 summary=reason,
             )
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        block_payload_extra: dict[str, Any] = {"reason": reason}
+        if context_comment_id is not None:
+            comment = conn.execute(
+                "SELECT body FROM task_comments WHERE id = ? AND task_id = ?",
+                (int(context_comment_id), task_id),
+            ).fetchone()
+            if comment:
+                block_payload_extra["context_comment_id"] = int(context_comment_id)
+                snippet = (comment["body"] or "").strip().replace("\n", " ")[:200]
+                if snippet:
+                    block_payload_extra["context_snippet"] = snippet
+        block_payload = _terminal_event_payload(
+            conn,
+            task_id,
+            run_id,
+            outcome="blocked",
+            summary=reason,
+            extra=block_payload_extra,
+        )
+        _append_event(conn, task_id, "blocked", block_payload, run_id=run_id)
         return True
 
 
@@ -3279,6 +3389,45 @@ def _scope_contract_allowed_tools(body: Optional[str]) -> Optional[list[str]]:
             return [str(item).strip() for item in allowed if str(item).strip()]
         return []
     return None
+
+
+def _scope_contract_forbidden_systems(body: Optional[str]) -> Optional[list[str]]:
+    """Return structured ``scope_contract.forbidden_systems`` when present."""
+    for mapping in _iter_task_policy_mappings(body):
+        contract = mapping.get("scope_contract")
+        if not isinstance(contract, dict) or "forbidden_systems" not in contract:
+            continue
+        forbidden = contract.get("forbidden_systems")
+        if isinstance(forbidden, str):
+            return [forbidden]
+        if isinstance(forbidden, (list, tuple)):
+            return [str(item).strip() for item in forbidden if str(item).strip()]
+        return []
+    return None
+
+
+def _normalize_forbidden_system_name(name: str) -> str:
+    return re.sub(r"[\s_]+", "-", str(name).strip().lower())
+
+
+def _validate_scope_forbidden_systems(body: Optional[str]) -> list[str]:
+    """Validate core Hermes-only forbidden-system declarations."""
+    declared = _scope_contract_forbidden_systems(body)
+    if declared is None:
+        declared_keys: set[str] = set()
+    else:
+        declared_keys = {_normalize_forbidden_system_name(item) for item in declared}
+    missing = [
+        canonical
+        for key, canonical in _REQUIRED_SCOPE_FORBIDDEN_SYSTEMS.items()
+        if key not in declared_keys
+    ]
+    if not missing:
+        return []
+    return [
+        "scope_contract.forbidden_systems is missing required entries: "
+        + ", ".join(missing)
+    ]
 
 
 def _validate_scope_allowed_tools(body: Optional[str]) -> tuple[list[str], list[str]]:
@@ -3700,8 +3849,16 @@ def enforce_max_runtime(
                     error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
                     metadata=payload,
                 )
+                timeout_payload = _terminal_event_payload(
+                    conn,
+                    tid,
+                    run_id,
+                    outcome="timed_out",
+                    error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
+                    extra=payload,
+                )
                 _append_event(
-                    conn, tid, "timed_out", payload, run_id=run_id,
+                    conn, tid, "timed_out", timeout_payload, run_id=run_id,
                 )
                 timed_out.append(tid)
         # Increment the unified failure counter. Outside the write_txn
@@ -3822,9 +3979,17 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     error=error_text,
                     metadata=dict(event_payload),
                 )
+                crash_payload = _terminal_event_payload(
+                    conn,
+                    row["id"],
+                    run_id,
+                    outcome="crashed",
+                    error=error_text,
+                    extra=event_payload,
+                )
                 _append_event(
                     conn, row["id"], event_kind,
-                    event_payload,
+                    crash_payload,
                     run_id=run_id,
                 )
                 crashed.append(row["id"])
@@ -3977,8 +4142,16 @@ def _record_task_failure(
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
+            gave_up_payload = _terminal_event_payload(
+                conn,
+                task_id,
+                run_id,
+                outcome="gave_up",
+                error=error[:500],
+                extra=payload,
+            )
             _append_event(
-                conn, task_id, "gave_up", payload, run_id=run_id,
+                conn, task_id, "gave_up", gave_up_payload, run_id=run_id,
             )
             blocked = True
         else:
@@ -4008,9 +4181,17 @@ def _record_task_failure(
                     error=error[:500],
                     metadata={"failures": failures},
                 )
+                failure_payload = _terminal_event_payload(
+                    conn,
+                    task_id,
+                    run_id,
+                    outcome=outcome,
+                    error=error[:500],
+                    extra={"failures": failures},
+                )
                 _append_event(
                     conn, task_id, outcome,
-                    {"error": error[:500], "failures": failures},
+                    failure_payload,
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
@@ -4236,6 +4417,27 @@ def dispatch_once(
         except Exception:
             profile_exists = None  # type: ignore[assignment]
         if profile_exists is not None and not profile_exists(row["assignee"]):
+            # Distinguish autonomous-task-mistake from human-pulled lane:
+            # tasks that carry a scope_contract are autonomous-spawned
+            # workloads (planner output etc.). If the planner produced an
+            # unknown assignee, the task must fail closed instead of
+            # looping forever in the ready queue. Tasks WITHOUT a scope
+            # contract are typically human-pulled lanes (e.g. orion-cc
+            # Claude Code terminals) where skipping is intentional.
+            if _task_requires_dispatcher_scope_preflight(row["body"]):
+                reason = (
+                    "dispatch preflight blocked task: assignee "
+                    f"'{row['assignee']}' is not a known Hermes "
+                    "profile (scope_contract v2 task)"
+                )
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_invalid_assignee",
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -4275,6 +4477,20 @@ def dispatch_once(
                 )
                 if _block_dispatch_preflight(
                     conn, row["id"], reason, kind="dispatch_preflight_invalid_allowed_tools"
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
+            forbidden_system_errors = _validate_scope_forbidden_systems(row["body"])
+            if forbidden_system_errors:
+                reason = (
+                    "dispatch preflight blocked task: invalid scope_contract.forbidden_systems: "
+                    + "; ".join(forbidden_system_errors)
+                )
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_missing_forbidden_systems",
                 ):
                     result.preflight_blocked.append(row["id"])
                 continue
