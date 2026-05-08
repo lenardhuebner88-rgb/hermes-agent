@@ -400,6 +400,22 @@ class TestResolveSkillCommandKey:
 
 
 class TestBuildPreloadedSkillsPrompt:
+    def test_loads_default_root_skill_when_running_under_profile_home(self, tmp_path):
+        profile_skills = tmp_path / "profiles" / "dispatcher" / "skills"
+        root_skills = tmp_path / "skills"
+        profile_skills.mkdir(parents=True)
+        _make_skill(root_skills, "shared-worker-skill", body="Root skill content.")
+
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", profile_skills),
+            patch("tools.skills_tool.get_default_hermes_root", return_value=tmp_path),
+        ):
+            prompt, loaded, missing = build_preloaded_skills_prompt(["shared-worker-skill"])
+
+        assert missing == []
+        assert loaded == ["shared-worker-skill"]
+        assert "Root skill content." in prompt
+
     def test_builds_prompt_for_multiple_named_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "first-skill")

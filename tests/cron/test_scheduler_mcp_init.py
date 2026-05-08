@@ -52,7 +52,9 @@ def test_run_job_calls_discover_mcp_tools_before_agent_construction():
                 "messages": [],
             }
 
+    fake_runtime = {"provider": "openai", "model": "gpt-test", "api_key": "sk-test"}
     with patch("tools.mcp_tool.discover_mcp_tools", side_effect=fake_discover), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime), \
          patch("run_agent.AIAgent", _FakeAgent), \
          patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
         scheduler.run_job(job)
@@ -96,10 +98,12 @@ def test_run_job_tolerates_discover_mcp_tools_failure():
     def fake_discover_that_raises():
         raise RuntimeError("MCP server unreachable")
 
+    fake_runtime = {"provider": "openai", "model": "gpt-test", "api_key": "sk-test"}
     with patch(
         "tools.mcp_tool.discover_mcp_tools",
         side_effect=fake_discover_that_raises,
-    ), patch("run_agent.AIAgent", _FakeAgent), \
+    ), patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime), \
+         patch("run_agent.AIAgent", _FakeAgent), \
          patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
         # Should NOT raise
         success, doc, final_response, error = scheduler.run_job(job)

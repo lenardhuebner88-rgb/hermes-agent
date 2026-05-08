@@ -15,8 +15,12 @@ from tools import browser_tool as bt
 
 
 @pytest.fixture(autouse=True)
-def _reset_chromium_cache():
+def _reset_chromium_cache(monkeypatch):
     bt._cached_chromium_installed = None
+    # Keep these tests hermetic on developer machines that have a system
+    # Chrome/Chromium in PATH. Individual tests fake agent-browser discovery
+    # directly; Chromium presence should come only from their temp roots.
+    monkeypatch.setattr(bt.shutil, "which", lambda _name: None)
     yield
     bt._cached_chromium_installed = None
 

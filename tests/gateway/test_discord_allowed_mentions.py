@@ -82,6 +82,9 @@ def _ensure_discord_mock():
 _ensure_discord_mock()
 
 from gateway.platforms.discord import _build_allowed_mentions  # noqa: E402
+import gateway.platforms.discord as _discord_platform  # noqa: E402
+
+_discord_platform.discord.AllowedMentions = _FakeAllowedMentions
 
 
 # The four DISCORD_ALLOW_MENTION_* env vars that _build_allowed_mentions reads.

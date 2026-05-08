@@ -521,6 +521,22 @@ class ShellFileOperations(FileOperations):
             result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
             self._command_cache[cmd] = result.stdout.strip() == 'yes'
         return self._command_cache[cmd]
+
+    def _has_runnable_command(self, cmd: str) -> bool:
+        """Check whether a discovered command can actually execute.
+
+        ``command -v`` can succeed for a binary built for the wrong platform
+        (for example an aarch64 ``rg`` on an x86_64 host). Search backends need
+        an executable tool, not just a path, so verify the command starts before
+        choosing it over a slower fallback.
+        """
+        cache_key = f"{cmd}:runnable"
+        if cache_key not in self._command_cache:
+            result = self._exec(
+                f"command -v {cmd} >/dev/null 2>&1 && {cmd} --version >/dev/null 2>&1 && echo 'yes'"
+            )
+            self._command_cache[cache_key] = result.stdout.strip() == 'yes'
+        return self._command_cache[cache_key]
     
     def _is_likely_binary(self, path: str, content_sample: str = None) -> bool:
         """
@@ -1241,11 +1257,11 @@ class ShellFileOperations(FileOperations):
         # Prefer ripgrep: respects .gitignore, excludes hidden dirs by
         # default, and has parallel directory traversal (~200x faster than
         # find on wide trees).  Mirrors _search_content which already uses rg.
-        if self._has_command('rg'):
+        if self._has_runnable_command('rg'):
             return self._search_files_rg(search_pattern, path, limit, offset)
 
         # Fallback: find (slower, no .gitignore awareness)
-        if not self._has_command('find'):
+        if not self._has_runnable_command('find'):
             return SearchResult(
                 error="File search requires 'rg' (ripgrep) or 'find'. "
                       "Install ripgrep for best results: "
@@ -1353,10 +1369,10 @@ class ShellFileOperations(FileOperations):
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Search for content inside files (grep-like)."""
         # Try ripgrep first (fast), fallback to grep (slower but works)
-        if self._has_command('rg'):
+        if self._has_runnable_command('rg'):
             return self._search_with_rg(pattern, path, file_glob, limit, offset, 
                                         output_mode, context)
-        elif self._has_command('grep'):
+        elif self._has_runnable_command('grep'):
             return self._search_with_grep(pattern, path, file_glob, limit, offset,
                                           output_mode, context)
         else:

@@ -57,32 +57,11 @@ def _ensure_telegram_mock():
 
 # Ensure discord module is available (mock it if not installed)
 def _ensure_discord_mock():
-    """Install mock discord modules so DiscordAdapter can be imported."""
-    if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
-        return # Real library installed
+    """Install the shared comprehensive discord mock before DiscordAdapter import."""
+    from tests.gateway.conftest import _ensure_discord_mock as _ensure_gateway_discord_mock
 
-    discord_mod = MagicMock()
-    discord_mod.Intents.default.return_value = MagicMock()
-    discord_mod.DMChannel = type("DMChannel", (), {})
-    discord_mod.Thread = type("Thread", (), {})
-    discord_mod.ForumChannel = type("ForumChannel", (), {})
-    discord_mod.Interaction = object
-    discord_mod.app_commands = SimpleNamespace(
-        describe=lambda **kwargs: (lambda fn: fn),
-        choices=lambda **kwargs: (lambda fn: fn),
-        Choice=lambda **kwargs: SimpleNamespace(**kwargs),
-    )
-    discord_mod.opus.is_loaded.return_value = True
-
-    ext_mod = MagicMock()
-    commands_mod = MagicMock()
-    commands_mod.Bot = MagicMock
-    ext_mod.commands = commands_mod
-
-    sys.modules.setdefault("discord", discord_mod)
-    sys.modules.setdefault("discord.ext", ext_mod)
-    sys.modules.setdefault("discord.ext.commands", commands_mod)
-    sys.modules.setdefault("discord.opus", discord_mod.opus)
+    _ensure_gateway_discord_mock()
+    sys.modules.setdefault("discord.opus", sys.modules["discord"].opus)
 
 
 def _ensure_slack_mock():
@@ -121,6 +100,19 @@ from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 import gateway.platforms.slack as _slack_mod  # noqa: E402
 _slack_mod.SLACK_AVAILABLE = True
 from gateway.platforms.slack import SlackAdapter  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clear_platform_env_leaks(monkeypatch):
+    """Keep local gateway env from changing hermetic e2e routing tests."""
+    for name in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+        "DISCORD_AUTO_THREAD",
+        "DISCORD_REQUIRE_MENTION",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # Platform-generic factories

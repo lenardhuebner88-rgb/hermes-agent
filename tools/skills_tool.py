@@ -69,7 +69,7 @@ Usage:
 import json
 import logging
 
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
 import os
 import re
 from enum import Enum
@@ -91,6 +91,38 @@ SKILLS_DIR = HERMES_HOME / "skills"
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
+
+def _skill_search_dirs() -> List[Path]:
+    """Return skill roots in lookup precedence order.
+
+    Profile-scoped Hermes workers run with ``HERMES_HOME`` set to
+    ``~/.hermes/profiles/<profile>``.  Their profile-local ``skills/`` remains
+    first priority, but the shared default-root ``~/.hermes/skills`` must remain
+    visible so dispatcher-spawned workers can preload curated local skills
+    without copying them into every profile.
+    """
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        try:
+            key = path.resolve()
+        except Exception:
+            key = path
+        if key in seen or not path.exists():
+            return
+        seen.add(key)
+        dirs.append(path)
+
+    add(SKILLS_DIR)
+    add(get_default_hermes_root() / "skills")
+
+    from agent.skill_utils import get_external_skills_dirs
+
+    for external_dir in get_external_skills_dirs():
+        add(external_dir)
+    return dirs
+
 
 # Platform identifiers for the 'platforms' frontmatter field.
 # Maps user-friendly names to sys.platform prefixes.
@@ -557,7 +589,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     Returns:
         List of skill metadata dicts (name, description, category).
     """
-    from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+    from agent.skill_utils import iter_skill_index_files
 
     skills = []
     seen_names: set = set()
@@ -565,13 +597,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
-    # Scan local dir first, then external dirs (local takes precedence)
-    dirs_to_scan = []
-    if SKILLS_DIR.exists():
-        dirs_to_scan.append(SKILLS_DIR)
-    dirs_to_scan.extend(get_external_skills_dirs())
-
-    for scan_dir in dirs_to_scan:
+    for scan_dir in _skill_search_dirs():
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
@@ -936,13 +962,10 @@ def skill_view(
             if bare:
                 local_category_name = f"{namespace}/{bare}"
 
-        from agent.skill_utils import get_external_skills_dirs
-
-        # Build list of all skill directories to search
-        all_dirs = []
-        if SKILLS_DIR.exists():
-            all_dirs.append(SKILLS_DIR)
-        all_dirs.extend(get_external_skills_dirs())
+        # Build list of all skill directories to search.
+        # Profile-local skills win; the shared default-root skills dir remains
+        # visible for spawned profile workers.
+        all_dirs = _skill_search_dirs()
 
         if not all_dirs:
             return json.dumps(

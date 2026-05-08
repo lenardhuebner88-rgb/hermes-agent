@@ -557,7 +557,8 @@ class TestGetTextAuxiliaryClient:
                    return_value=("https://api.openai.com/v1", "sk-test", "codex_responses")), \
              patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.3-codex"), \
              patch("agent.auxiliary_client.OpenAI") as mock_openai:
-            client, model = get_text_auxiliary_client()
+            from agent.auxiliary_client import _try_custom_endpoint
+            client, model = _try_custom_endpoint()
 
         from agent.auxiliary_client import CodexAuxiliaryClient
         assert isinstance(client, CodexAuxiliaryClient)

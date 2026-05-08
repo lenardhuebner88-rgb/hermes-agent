@@ -187,7 +187,10 @@ class HomeAssistantAdapter(BasePlatformAdapter):
     async def _cleanup_ws(self) -> None:
         """Close WebSocket and session."""
         if self._ws and not self._ws.closed:
-            await self._ws.close()
+            try:
+                await asyncio.wait_for(self._ws.close(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Timed out closing Home Assistant WebSocket", self.name)
         self._ws = None
         if self._session and not self._session.closed:
             await self._session.close()

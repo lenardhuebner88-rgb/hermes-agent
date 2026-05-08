@@ -96,7 +96,11 @@ def _ensure_discord_mock() -> None:
     this function (it short-circuits when already present) rather than
     maintaining their own mock setup.
     """
-    if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
+    if (
+        "discord" in sys.modules
+        and hasattr(sys.modules["discord"], "__file__")
+        and not isinstance(sys.modules["discord"], MagicMock)
+    ):
         return  # Real library is installed — nothing to mock
 
     from types import SimpleNamespace
@@ -110,6 +114,15 @@ def _ensure_discord_mock() -> None:
     discord_mod.ForumChannel = type("ForumChannel", (), {})
     discord_mod.Interaction = object
     discord_mod.Message = type("Message", (), {})
+    discord_mod.MessageType = SimpleNamespace(
+        default="default",
+        reply="reply",
+        channel_name_change="channel_name_change",
+        pins_add="pins_add",
+        new_member="new_member",
+        premium_guild_subscription="premium_guild_subscription",
+        recipient_add="recipient_add",
+    )
 
     # Embed: accept the kwargs production code / tests use
     # (title, description, color). MagicMock auto-attributes work too,
@@ -218,6 +231,22 @@ def _ensure_discord_mock() -> None:
 # Run at collection time — before any test file's module-level imports.
 _ensure_telegram_mock()
 _ensure_discord_mock()
+
+
+@pytest.fixture(autouse=True)
+def _clear_gateway_env_leaks(monkeypatch):
+    """Keep Piet's live gateway environment from changing hermetic tests."""
+    for name in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+        "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_REQUIRE_MENTION",
+        "DISCORD_AUTO_THREAD",
+        "DISCORD_SLASH_SYNC_POLICY",
+        "DISCORD_COMMAND_SYNC_POLICY",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # ---------------------------------------------------------------------------

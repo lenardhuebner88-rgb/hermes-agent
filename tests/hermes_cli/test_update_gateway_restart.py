@@ -1364,9 +1364,17 @@ class TestCmdUpdateLegacyGatewayWarning:
 
 
 def _systemctl_calls(mock_run, subcommand):
-    """Return every subprocess.run call that was `systemctl [--user] <subcommand>`."""
+    """Return every subprocess.run call that was `systemctl [--user] <subcommand>`.
+
+    Some mocked update paths can record chained mock calls without positional
+    argv (for example from incidental attribute access on a mocked return
+    value). Ignore those non-subprocess invocations instead of treating them as
+    command calls.
+    """
     out = []
     for call in mock_run.call_args_list:
+        if not call.args:
+            continue
         argv = call.args[0]
         joined = " ".join(str(c) for c in argv)
         if "systemctl" in joined and subcommand in joined:
@@ -1434,6 +1442,8 @@ class TestCmdUpdateResetFailedBeforeRestart:
         first_reset_idx = None
         first_restart_idx = None
         for idx, call in enumerate(mock_run.call_args_list):
+            if not call.args:
+                continue
             joined = " ".join(str(c) for c in call.args[0])
             if "systemctl" in joined and "reset-failed" in joined and first_reset_idx is None:
                 first_reset_idx = idx

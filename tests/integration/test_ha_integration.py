@@ -31,11 +31,18 @@ from tools.homeassistant_tool import (
 
 
 def _adapter_for(server: FakeHAServer, **extra) -> HomeAssistantAdapter:
-    """Create an adapter pointed at the fake server."""
+    """Create an adapter pointed at the fake server.
+
+    The adapter is closed-by-default in production unless watch filters or
+    watch_all are configured. These integration tests exercise the historical
+    fake-server event-forwarding path, so default to watch_all here while still
+    allowing tests to override it explicitly.
+    """
+    adapter_extra = {"watch_all": True, **extra}
     config = PlatformConfig(
         enabled=True,
         token=server.token,
-        extra={"url": server.url, **extra},
+        extra={"url": server.url, **adapter_extra},
     )
     return HomeAssistantAdapter(config)
 
