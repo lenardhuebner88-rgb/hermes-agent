@@ -2457,6 +2457,7 @@ _KNOWN_SCOPE_ALLOWED_TOOLS = {
     "kanban_heartbeat",
     "kanban_create",
     "kanban_link",
+    "kanban_run_workspace_command",
     "read_file",
     "search_files",
     "write_file",
@@ -4657,6 +4658,7 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    env["HERMES_KANBAN_WORKSPACE_KIND"] = task.workspace_kind or "scratch"
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
