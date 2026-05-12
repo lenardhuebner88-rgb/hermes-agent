@@ -1452,11 +1452,30 @@ class TestCmdUpdateLegacyGatewayWarning:
 # ---------------------------------------------------------------------------
 
 
+def _mock_call_args(call):
+    """Return positional args from a mock call without touching call.args.
+
+    Some mock entries in this cluster can expose a pathological ``call.args``
+    property under the per-test timeout handler. The tuple representation is
+    stable for both ``call(args, kwargs)`` and named ``call.name(args, kwargs)``
+    forms.
+    """
+    raw = tuple(call)
+    if len(raw) == 3:
+        return raw[1]
+    if len(raw) == 2:
+        return raw[0]
+    return ()
+
+
 def _systemctl_calls(mock_run, subcommand):
     """Return every subprocess.run call that was `systemctl [--user] <subcommand>`."""
     out = []
     for call in mock_run.call_args_list:
-        argv = call.args[0]
+        args = _mock_call_args(call)
+        if not args:
+            continue
+        argv = args[0]
         joined = " ".join(str(c) for c in argv)
         if "systemctl" in joined and subcommand in joined:
             out.append(argv)
@@ -1523,7 +1542,10 @@ class TestCmdUpdateResetFailedBeforeRestart:
         first_reset_idx = None
         first_restart_idx = None
         for idx, call in enumerate(mock_run.call_args_list):
-            joined = " ".join(str(c) for c in call.args[0])
+            args = _mock_call_args(call)
+            if not args:
+                continue
+            joined = " ".join(str(c) for c in args[0])
             if "systemctl" in joined and "reset-failed" in joined and first_reset_idx is None:
                 first_reset_idx = idx
             if "systemctl" in joined and "restart" in joined and "hermes-gateway" in joined:
