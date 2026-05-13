@@ -373,7 +373,13 @@ class TestKanbanWorkerEffectiveToolSchema:
         "kanban_comment",
     }
 
-    def _schema_names(self, *, clear_cache=True, enabled_toolsets=None):
+    def _schema_names(
+        self,
+        *,
+        clear_cache=True,
+        enabled_toolsets=None,
+        disabled_toolsets=None,
+    ):
         import model_tools
         from tools.registry import invalidate_check_fn_cache
 
@@ -382,6 +388,7 @@ class TestKanbanWorkerEffectiveToolSchema:
             invalidate_check_fn_cache()
         tools = get_tool_definitions(
             enabled_toolsets=enabled_toolsets or ["hermes-cli"],
+            disabled_toolsets=disabled_toolsets,
             quiet_mode=True,
         )
         return {t["function"]["name"] for t in tools if "function" in t}
@@ -404,6 +411,37 @@ class TestKanbanWorkerEffectiveToolSchema:
         assert "terminal" not in names
         assert "read_file" not in names
         assert "kanban_create" not in names
+
+    def test_worker_effective_toolsets_survive_profile_disabled_kanban_toolset(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Dispatcher-validated worker tools are the narrow allowlist.
+
+        A profile may disable the broad kanban toolset for normal chats, but a
+        spawned worker with HERMES_KANBAN_EFFECTIVE_TOOLSETS must still receive
+        exactly those concrete Kanban tools. Otherwise reviewer/admin profiles
+        can be safe in chat yet unusable when dispatched.
+        """
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_schema_disabled_kanban")
+        monkeypatch.setenv(
+            "HERMES_KANBAN_EFFECTIVE_TOOLSETS",
+            json.dumps(sorted(self.KANBAN_MINIMAL_TOOLS)),
+        )
+
+        names = self._schema_names(
+            enabled_toolsets=["hermes-cli"],
+            disabled_toolsets=["kanban", "terminal", "file", "skills"],
+        )
+
+        assert names == self.KANBAN_MINIMAL_TOOLS
+        assert "terminal" not in names
+        assert "read_file" not in names
+        assert "skill_view" not in names
 
     def test_worker_minimal_schema_excludes_fake_mcp_despite_broad_toolset_context(
         self,

@@ -481,12 +481,18 @@ def _compute_tool_definitions(
     # needed; plugins respect enabled_toolsets / disabled_toolsets like any
     # other toolset.
 
-    # Kanban dispatcher workers can be narrowed further by the validated
-    # task-level allowed_tools evidence passed as HERMES_KANBAN_EFFECTIVE_TOOLSETS.
-    # Apply this before registry schema lookup so dynamic schema rebuilds below
-    # only reference tools that are actually present.
+    # Kanban dispatcher workers are governed by the validated task-level
+    # concrete-tool allowlist passed as HERMES_KANBAN_EFFECTIVE_TOOLSETS.
+    # In worker context this allowlist is authoritative: profile-level
+    # disabled_toolsets may intentionally disable the broad `kanban` toolset for
+    # normal chat, but must not strip the dispatcher-approved concrete
+    # coordination tools from spawned workers. Union first to restore any
+    # concrete allowed tool removed by profile disabled_toolsets, then intersect
+    # so the final schema is still exactly the dispatcher allowlist (or empty on
+    # malformed env).
     kanban_effective_filter = _parse_kanban_effective_tool_filter()
     if kanban_effective_filter is not None:
+        tools_to_include.update(kanban_effective_filter)
         tools_to_include.intersection_update(kanban_effective_filter)
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
