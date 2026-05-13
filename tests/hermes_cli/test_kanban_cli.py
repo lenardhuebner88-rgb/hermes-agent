@@ -74,6 +74,14 @@ def test_run_slash_create_and_list(kanban_home):
     assert "alice" in out
 
 
+def test_run_slash_create_coordinator_blocks_without_control_plane_gate(kanban_home):
+    out = kc.run_slash("create 'coordinator bypass' --assignee coordinator")
+
+    assert "control_plane_gate" in out
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
 def test_run_slash_create_with_parent_and_cascade(kanban_home):
     # Parent then child via --parent
     out1 = kc.run_slash("create 'parent' --assignee alice")

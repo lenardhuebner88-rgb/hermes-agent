@@ -433,6 +433,117 @@ def test_complete_retry_with_corrected_created_cards_succeeds(worker_env):
         conn.close()
 
 
+def _hub_plan_spec(workflow_id="wf-target-handoff"):
+    return {
+        "workflow_id": workflow_id,
+        "source_role": "hub",
+        "goal": "wire target architecture coordinator handoff",
+        "risk_class": "low",
+        "scope_contract": {
+            "version": 2,
+            "allowed_systems": ["hermes-agent", "hermes-kanban"],
+            "forbidden_systems": ["OpenClaw", "Atlas", "Mission-Control", "Telegram"],
+        },
+    }
+
+
+def _approved_reviewer_metadata(workflow_id="wf-target-handoff"):
+    return {
+        "workflow_id": workflow_id,
+        "verdict": "APPROVED",
+        "evidence_audited": ["hub_plan_spec", "tests"],
+        "residual_risk": "none for hermes-only handoff test",
+        "scope_attestation": True,
+        "scope_contract_version": 2,
+        "forbidden_actions_taken": 0,
+    }
+
+
+def _control_plane_gate(**overrides):
+    hub_plan = _hub_plan_spec()
+    gate = {
+        "hub_plan_spec": hub_plan,
+        "reviewer_metadata": _approved_reviewer_metadata(),
+        "coordinator_plan_spec": {**hub_plan, "workflow_id": "wf-target-handoff-coordinator"},
+        "mechanical_fields": ["workflow_id"],
+    }
+    gate.update(overrides)
+    return gate
+
+
+def test_create_coordinator_handoff_blocks_without_approved_reviewer_metadata(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    rejected = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(
+            reviewer_metadata={**_approved_reviewer_metadata(), "verdict": "NEEDS_REVISION"},
+        ),
+    }))
+
+    assert rejected.get("ok") is not True
+    assert "reviewer_verdict_not_approved" in rejected.get("error", "")
+
+    conn = kb.connect()
+    try:
+        assert [t.id for t in kb.list_tasks(conn, assignee="coordinator")] == []
+    finally:
+        conn.close()
+
+
+def test_create_coordinator_handoff_blocks_substantive_plan_change(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    changed = {**_hub_plan_spec(), "risk_class": "medium"}
+    rejected = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(coordinator_plan_spec=changed),
+    }))
+
+    assert rejected.get("ok") is not True
+    assert "risk_class" in rejected.get("error", "")
+
+    conn = kb.connect()
+    try:
+        assert [t.id for t in kb.list_tasks(conn, assignee="coordinator")] == []
+    finally:
+        conn.close()
+
+
+def test_create_coordinator_handoff_accepts_mechanical_normalization_and_records_diffs(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    created = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(),
+    }))
+
+    assert created["ok"] is True
+    assert created["control_plane_gate"]["reason"] == "reviewer_approved_and_only_mechanical_changes"
+    assert created["control_plane_gate"]["mechanical_diffs"] == {
+        "workflow_id": {"from": "wf-target-handoff", "to": "wf-target-handoff-coordinator"}
+    }
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, created["task_id"])
+    finally:
+        conn.close()
+    assert len(comments) == 1
+    assert comments[0].author == "control-plane-gate"
+    assert "mechanical_diffs" in comments[0].body
+    assert "wf-target-handoff-coordinator" in comments[0].body
+
+
 def test_validate_created_cards_reports_phantoms_without_completing(worker_env):
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
@@ -959,6 +1070,13 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "kanban_create" in prompt
     # Anti-shell guidance
     assert "Do not shell out" in prompt or "tools — they work" in prompt
+
+
+def test_kanban_guidance_tells_orchestrators_to_poll_child_review_tasks():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "Do not block merely because a child task is `ready` or `running`" in KANBAN_GUIDANCE
+    assert "poll it with `kanban_show(task_id=...)`" in KANBAN_GUIDANCE
 
 
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):

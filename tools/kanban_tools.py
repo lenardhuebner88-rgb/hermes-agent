@@ -596,6 +596,66 @@ def _handle_comment(args: dict, **kw) -> str:
         return tool_error(f"kanban_comment: {e}")
 
 
+def _coordinator_handoff_gate(args: dict, assignee: Any) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """Validate target-architecture Hub->Reviewer->Coordinator handoffs.
+
+    The model-native ``kanban_create`` tool is the real handoff path into a
+    spawned Coordinator task. For Coordinator assignments, require the Hub
+    PlanSpec and Reviewer verdict metadata to pass the target-architecture gate
+    before the task row is created.
+    """
+    if str(assignee).strip().lower() != "coordinator":
+        return None, None
+
+    gate = args.get("control_plane_gate")
+    if not isinstance(gate, dict):
+        return tool_error(
+            "coordinator handoff requires control_plane_gate with "
+            "hub_plan_spec, reviewer_metadata, coordinator_plan_spec, "
+            "and mechanical_fields"
+        ), None
+
+    hub_plan_spec = gate.get("hub_plan_spec")
+    reviewer_metadata = gate.get("reviewer_metadata")
+    coordinator_plan_spec = gate.get("coordinator_plan_spec")
+    mechanical_fields = gate.get("mechanical_fields") or []
+    if not isinstance(hub_plan_spec, dict):
+        return tool_error("coordinator handoff blocked: hub_plan_spec must be an object"), None
+    if reviewer_metadata is not None and not isinstance(reviewer_metadata, dict):
+        return tool_error("coordinator handoff blocked: reviewer_metadata must be an object"), None
+    if not isinstance(coordinator_plan_spec, dict):
+        return tool_error("coordinator handoff blocked: coordinator_plan_spec must be an object"), None
+    if isinstance(mechanical_fields, str):
+        mechanical_fields = [mechanical_fields]
+    if not isinstance(mechanical_fields, (list, tuple, set)):
+        return tool_error("coordinator handoff blocked: mechanical_fields must be a list"), None
+
+    try:
+        from hermes_cli.control_plane_gate import (
+            SubstantiveCoordinatorChangeError,
+            coordinator_gate_decision,
+        )
+
+        decision = coordinator_gate_decision(
+            hub_plan_spec=hub_plan_spec,
+            reviewer_metadata=reviewer_metadata,
+            coordinator_plan_spec=coordinator_plan_spec,
+            mechanical_fields=[str(item) for item in mechanical_fields],
+        )
+    except SubstantiveCoordinatorChangeError as exc:
+        return tool_error(f"coordinator handoff blocked: substantive_plan_change: {exc}"), None
+
+    if not decision.allowed:
+        findings = "; ".join(decision.blocking_findings)
+        return tool_error(f"coordinator handoff blocked: {decision.reason}: {findings}"), None
+
+    return None, {
+        "reason": decision.reason,
+        "blocking_findings": decision.blocking_findings,
+        "mechanical_diffs": decision.mechanical_diffs,
+    }
+
+
 def _handle_create(args: dict, **kw) -> str:
     """Create a child task. Orchestrator workers use this to fan out.
 
@@ -636,6 +696,9 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
+    gate_error, gate_audit = _coordinator_handoff_gate(args, assignee)
+    if gate_error:
+        return gate_error
     try:
         kb, conn = _connect()
         try:
@@ -657,12 +720,16 @@ def _handle_create(args: dict, **kw) -> str:
                 ),
                 skills=skills,
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                control_plane_gate=args.get("control_plane_gate"),
             )
             new_task = kb.get_task(conn, new_tid)
-            return _ok(
-                task_id=new_tid,
-                status=new_task.status if new_task else None,
-            )
+            response = {
+                "task_id": new_tid,
+                "status": new_task.status if new_task else None,
+            }
+            if gate_audit is not None:
+                response["control_plane_gate"] = gate_audit
+            return _ok(**response)
         finally:
             conn.close()
     except ValueError as e:
@@ -1092,6 +1159,17 @@ KANBAN_CREATE_SCHEMA = {
                     "task, ['github-code-review'] for a reviewer task. "
                     "The names must match skills installed on the "
                     "assignee's profile."
+                ),
+            },
+            "control_plane_gate": {
+                "type": "object",
+                "description": (
+                    "Required when assignee='coordinator' for the target "
+                    "architecture handoff. Object with hub_plan_spec, "
+                    "reviewer_metadata, coordinator_plan_spec, and "
+                    "mechanical_fields. The gate blocks unless Reviewer "
+                    "metadata has APPROVED verdict and Coordinator changes "
+                    "only declared mechanical fields."
                 ),
             },
         },

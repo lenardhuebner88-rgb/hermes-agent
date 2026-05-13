@@ -81,7 +81,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from toolsets import get_toolset_names
 
@@ -1233,6 +1233,70 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _coordinator_control_plane_gate_audit(
+    *,
+    assignee: Optional[str],
+    control_plane_gate: Optional[Mapping[str, Any]],
+    internal_test_bypass_control_plane_gate: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Validate Coordinator task creation at the DB/kernel boundary.
+
+    Model-native tools and the CLI both end here. Keeping the target
+    Hub->Reviewer->Coordinator guard in this kernel path prevents direct DB
+    callers from bypassing the Reviewer verdict gate.
+    """
+    if str(assignee or "").strip().lower() != "coordinator":
+        return None
+    if internal_test_bypass_control_plane_gate:
+        return None
+    if not isinstance(control_plane_gate, Mapping):
+        raise ValueError(
+            "coordinator handoff requires control_plane_gate with "
+            "hub_plan_spec, reviewer_metadata, coordinator_plan_spec, "
+            "and mechanical_fields"
+        )
+
+    hub_plan_spec = control_plane_gate.get("hub_plan_spec")
+    reviewer_metadata = control_plane_gate.get("reviewer_metadata")
+    coordinator_plan_spec = control_plane_gate.get("coordinator_plan_spec")
+    mechanical_fields = control_plane_gate.get("mechanical_fields") or []
+    if not isinstance(hub_plan_spec, Mapping):
+        raise ValueError("coordinator handoff blocked: hub_plan_spec must be an object")
+    if reviewer_metadata is not None and not isinstance(reviewer_metadata, Mapping):
+        raise ValueError("coordinator handoff blocked: reviewer_metadata must be an object")
+    if not isinstance(coordinator_plan_spec, Mapping):
+        raise ValueError("coordinator handoff blocked: coordinator_plan_spec must be an object")
+    if isinstance(mechanical_fields, str):
+        mechanical_fields = [mechanical_fields]
+    if not isinstance(mechanical_fields, (list, tuple, set)):
+        raise ValueError("coordinator handoff blocked: mechanical_fields must be a list")
+
+    from hermes_cli.control_plane_gate import (
+        SubstantiveCoordinatorChangeError,
+        coordinator_gate_decision,
+    )
+
+    try:
+        decision = coordinator_gate_decision(
+            hub_plan_spec=hub_plan_spec,
+            reviewer_metadata=reviewer_metadata,
+            coordinator_plan_spec=coordinator_plan_spec,
+            mechanical_fields=[str(item) for item in mechanical_fields],
+        )
+    except SubstantiveCoordinatorChangeError as exc:
+        raise ValueError(f"coordinator handoff blocked: substantive_plan_change: {exc}") from exc
+
+    if not decision.allowed:
+        findings = "; ".join(decision.blocking_findings)
+        raise ValueError(f"coordinator handoff blocked: {decision.reason}: {findings}")
+
+    return {
+        "reason": decision.reason,
+        "blocking_findings": decision.blocking_findings,
+        "mechanical_diffs": decision.mechanical_diffs,
+    }
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -1250,6 +1314,8 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    control_plane_gate: Optional[Mapping[str, Any]] = None,
+    internal_test_bypass_control_plane_gate: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1276,6 +1342,11 @@ def create_task(
     translation skill regardless of the profile's default config).
     """
     assignee = _canonical_assignee(assignee)
+    gate_audit = _coordinator_control_plane_gate_audit(
+        assignee=assignee,
+        control_plane_gate=control_plane_gate,
+        internal_test_bypass_control_plane_gate=internal_test_bypass_control_plane_gate,
+    )
     if not title or not title.strip():
         raise ValueError("title is required")
     if workspace_kind not in VALID_WORKSPACE_KINDS:
@@ -1421,6 +1492,19 @@ def create_task(
                         "skills": list(skills_list) if skills_list else None,
                     },
                 )
+                if gate_audit is not None:
+                    gate_body = json.dumps({"control_plane_gate": gate_audit}, sort_keys=True)
+                    conn.execute(
+                        "INSERT INTO task_comments (task_id, author, body, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (task_id, "control-plane-gate", gate_body, now),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "control_plane_gate_passed",
+                        gate_audit,
+                    )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -3359,18 +3443,32 @@ class DispatchResult:
     """Task ids blocked before claim/spawn because they failed dispatcher preflight."""
 
 
-def _task_has_scope_contract_v2(body: Optional[str]) -> bool:
+def _selected_scope_contract(body: Optional[str]) -> Optional[dict]:
+    """Return the policy contract for the current task body.
+
+    Coordinator tasks may embed child/reviewer task templates before their own
+    top-level ``scope_contract``. In that shape, the final structured contract
+    is the current task's contract; earlier contracts belong to embedded child
+    templates and must not narrow the spawned worker schema or completion
+    attestation for the parent task.
+    """
+    selected: Optional[dict] = None
     for mapping in _iter_task_policy_mappings(body):
         contract = mapping.get("scope_contract")
-        if not isinstance(contract, dict):
-            continue
-        version = contract.get("version")
-        try:
-            if int(version) >= 2:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+        if isinstance(contract, dict):
+            selected = contract
+    return selected
+
+
+def _task_has_scope_contract_v2(body: Optional[str]) -> bool:
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict):
+        return False
+    version = contract.get("version")
+    try:
+        return int(version) >= 2
+    except (TypeError, ValueError):
+        return False
 
 
 def _scope_contract_allowed_tools(body: Optional[str]) -> Optional[list[str]]:
@@ -3380,32 +3478,28 @@ def _scope_contract_allowed_tools(body: Optional[str]) -> Optional[list[str]]:
     model-native tool isolation. Dispatcher preflight uses them as the narrow
     allowed surface and records the effective list for worker attestation.
     """
-    for mapping in _iter_task_policy_mappings(body):
-        contract = mapping.get("scope_contract")
-        if not isinstance(contract, dict) or "allowed_tools" not in contract:
-            continue
-        allowed = contract.get("allowed_tools")
-        if isinstance(allowed, str):
-            return [allowed]
-        if isinstance(allowed, (list, tuple)):
-            return [str(item).strip() for item in allowed if str(item).strip()]
-        return []
-    return None
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict) or "allowed_tools" not in contract:
+        return None
+    allowed = contract.get("allowed_tools")
+    if isinstance(allowed, str):
+        return [allowed]
+    if isinstance(allowed, (list, tuple)):
+        return [str(item).strip() for item in allowed if str(item).strip()]
+    return []
 
 
 def _scope_contract_forbidden_systems(body: Optional[str]) -> Optional[list[str]]:
     """Return structured ``scope_contract.forbidden_systems`` when present."""
-    for mapping in _iter_task_policy_mappings(body):
-        contract = mapping.get("scope_contract")
-        if not isinstance(contract, dict) or "forbidden_systems" not in contract:
-            continue
-        forbidden = contract.get("forbidden_systems")
-        if isinstance(forbidden, str):
-            return [forbidden]
-        if isinstance(forbidden, (list, tuple)):
-            return [str(item).strip() for item in forbidden if str(item).strip()]
-        return []
-    return None
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict) or "forbidden_systems" not in contract:
+        return None
+    forbidden = contract.get("forbidden_systems")
+    if isinstance(forbidden, str):
+        return [forbidden]
+    if isinstance(forbidden, (list, tuple)):
+        return [str(item).strip() for item in forbidden if str(item).strip()]
+    return []
 
 
 def _normalize_forbidden_system_name(name: str) -> str:

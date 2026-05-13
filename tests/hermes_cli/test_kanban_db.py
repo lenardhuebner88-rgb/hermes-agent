@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import time
 from pathlib import Path
@@ -78,6 +79,110 @@ def test_create_task_unknown_parent_errors(kanban_home):
 def test_workspace_kind_validation(kanban_home):
     with kb.connect() as conn, pytest.raises(ValueError, match="workspace_kind"):
         kb.create_task(conn, title="bad ws", workspace_kind="cloud")
+
+
+def _hub_plan_spec(workflow_id="wf-kernel-gate"):
+    return {
+        "workflow_id": workflow_id,
+        "source_role": "hub",
+        "goal": "enforce coordinator handoff gate in kernel",
+        "risk_class": "low",
+        "scope_contract": {
+            "version": 2,
+            "allowed_systems": ["hermes-agent", "hermes-kanban"],
+            "forbidden_systems": ["OpenClaw", "Atlas", "Mission-Control", "Telegram"],
+        },
+    }
+
+
+def _approved_reviewer_metadata(workflow_id="wf-kernel-gate"):
+    return {
+        "workflow_id": workflow_id,
+        "verdict": "APPROVED",
+        "evidence_audited": ["hub_plan_spec", "tests"],
+        "residual_risk": "none for hermes-only kernel gate test",
+        "scope_attestation": True,
+        "scope_contract_version": 2,
+        "forbidden_actions_taken": 0,
+    }
+
+
+def _control_plane_gate(**overrides):
+    hub_plan = _hub_plan_spec()
+    gate = {
+        "hub_plan_spec": hub_plan,
+        "reviewer_metadata": _approved_reviewer_metadata(),
+        "coordinator_plan_spec": {**hub_plan, "workflow_id": "wf-kernel-gate-coordinator"},
+        "mechanical_fields": ["workflow_id"],
+    }
+    gate.update(overrides)
+    return gate
+
+
+def test_create_coordinator_task_blocks_without_control_plane_gate(kanban_home):
+    with kb.connect() as conn, pytest.raises(ValueError, match="control_plane_gate"):
+        kb.create_task(conn, title="coordinator bypass", assignee="coordinator")
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+def test_create_coordinator_task_blocks_without_approved_reviewer_metadata(kanban_home):
+    rejected_gate = _control_plane_gate(
+        reviewer_metadata={**_approved_reviewer_metadata(), "verdict": "NEEDS_REVISION"}
+    )
+
+    with kb.connect() as conn, pytest.raises(ValueError, match="reviewer_verdict_not_approved"):
+        kb.create_task(
+            conn,
+            title="coordinator bypass",
+            assignee="coordinator",
+            control_plane_gate=rejected_gate,
+        )
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("goal", "expanded goal"),
+    ("risk_class", "medium"),
+    ("scope_contract", {"version": 2, "forbidden_systems": ["OpenClaw"]}),
+])
+def test_create_coordinator_task_blocks_substantive_plan_change(kanban_home, field, value):
+    changed = {**_hub_plan_spec(), field: value}
+
+    with kb.connect() as conn, pytest.raises(ValueError, match=field):
+        kb.create_task(
+            conn,
+            title="coordinator bypass",
+            assignee="coordinator",
+            control_plane_gate=_control_plane_gate(coordinator_plan_spec=changed),
+        )
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+def test_create_coordinator_task_accepts_mechanical_normalization_and_records_diffs(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="coordinator gated",
+            assignee="coordinator",
+            control_plane_gate=_control_plane_gate(),
+        )
+        task = kb.get_task(conn, tid)
+        comments = kb.list_comments(conn, tid)
+
+    assert task is not None
+    assert task.assignee == "coordinator"
+    assert len(comments) == 1
+    assert comments[0].author == "control-plane-gate"
+    payload = json.loads(comments[0].body)
+    assert payload["control_plane_gate"]["mechanical_diffs"] == {
+        "workflow_id": {"from": "wf-kernel-gate", "to": "wf-kernel-gate-coordinator"}
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +784,68 @@ completion_policy:
                 "scope_contract_version": 2,
                 "scope_attestation": True,
                 "forbidden_actions_taken": 0,
+            },
+        )
+        assert kb.get_task(conn, t).status == "done"
+
+
+def test_scope_attestation_policy_uses_outer_contract_after_embedded_child_template(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+workflow_id: wf-test
+
+Reviewer task body template:
+---REVIEWER_BODY_START---
+scope_contract:
+  version: 2
+  assignee: reviewer
+  allowed_tools: [kanban_show, kanban_complete, kanban_block, kanban_comment]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+completion_policy:
+  require_scope_attestation: true
+---REVIEWER_BODY_END---
+
+scope_contract:
+  version: 2
+  assignee: coordinator
+  allowed_tools: [kanban_show, kanban_create, kanban_complete, kanban_block, kanban_comment]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+completion_policy:
+  require_scope_attestation: true
+"""
+    expected_tools = [
+        "kanban_show",
+        "kanban_create",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_comment",
+    ]
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="coordinator with embedded reviewer",
+            assignee="coordinator",
+            body=body,
+            internal_test_bypass_control_plane_gate=True,
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 43210)
+        assert [item[0] for item in res.spawned] == [t]
+
+        passed = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert passed[-1].payload["effective_toolsets"] == expected_tools
+
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="reviewer verdict collected",
+            metadata={
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+                "effective_toolsets": expected_tools,
+                "reviewer_verdict": {"verdict": "APPROVED"},
             },
         )
         assert kb.get_task(conn, t).status == "done"
