@@ -452,13 +452,13 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     Also works for external skill dirs configured via skills.external_dirs.
     """
     # Try the module-level SKILLS_DIR first (respects monkeypatching in tests),
-    # then fall back to external dirs from config.
-    dirs_to_check = [SKILLS_DIR]
+    # then external dirs, then the trusted shared root fallback for profile
+    # workers.
     try:
-        from agent.skill_utils import get_external_skills_dirs
-        dirs_to_check.extend(get_external_skills_dirs())
+        from agent.skill_utils import get_all_skills_dirs
+        dirs_to_check = get_all_skills_dirs(SKILLS_DIR)
     except Exception:
-        pass
+        dirs_to_check = [SKILLS_DIR]
     for skills_dir in dirs_to_check:
         try:
             rel_path = skill_path.relative_to(skills_dir)
@@ -558,7 +558,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     Returns:
         List of skill metadata dicts (name, description, category).
     """
-    from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+    from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
 
     skills = []
     seen_names: set = set()
@@ -566,11 +566,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
-    # Scan local dir first, then external dirs (local takes precedence)
-    dirs_to_scan = []
-    if SKILLS_DIR.exists():
-        dirs_to_scan.append(SKILLS_DIR)
-    dirs_to_scan.extend(get_external_skills_dirs())
+    # Scan local dir first, then external dirs, then trusted shared root fallback
+    # when running as a profile worker. Local/profile skills take precedence.
+    dirs_to_scan = get_all_skills_dirs(SKILLS_DIR)
 
     for scan_dir in dirs_to_scan:
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
@@ -937,15 +935,14 @@ def skill_view(
             if bare:
                 local_category_name = f"{namespace}/{bare}"
 
-        from agent.skill_utils import get_external_skills_dirs
+        from agent.skill_utils import get_all_skills_dirs
 
-        # Build list of all skill directories to search
-        all_dirs = []
-        if SKILLS_DIR.exists():
-            all_dirs.append(SKILLS_DIR)
-        all_dirs.extend(get_external_skills_dirs())
+        # Build list of all trusted skill directories to search. Keep the
+        # module-level SKILLS_DIR first so profile-local skills override shared
+        # root fallback and tests can monkeypatch it.
+        all_dirs = get_all_skills_dirs(SKILLS_DIR)
 
-        if not all_dirs:
+        if not any(d.exists() for d in all_dirs):
             return json.dumps(
                 {
                     "success": False,

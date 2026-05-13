@@ -3771,6 +3771,18 @@ def run_conversation(
                     exc_info=True,
                 )
 
+    if final_response is not None and not interrupted:
+        try:
+            _ra()._maybe_block_kanban_task_after_final_response(
+                os.environ.get("HERMES_KANBAN_TASK"),
+                final_response,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to apply Kanban final-response terminal-call guard",
+                exc_info=True,
+            )
+
     # Determine if conversation completed successfully
     completed = final_response is not None and api_call_count < agent.max_iterations
 
