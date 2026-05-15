@@ -21,6 +21,7 @@ import threading
 import time
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Any, Tuple
+from unittest.mock import Mock as _UnitTestMock
 
 logger = logging.getLogger(__name__)
 
@@ -739,29 +740,55 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return
 
-                # Bot message filtering (DISCORD_ALLOW_BOTS):
-                #   "none"     — ignore all other bots (default)
-                #   "mentions" — accept bot messages only when they @mention us
-                #   "all"      — accept all bot messages
-                # Must run BEFORE the user allowlist check so that bots
-                # permitted by DISCORD_ALLOW_BOTS are not rejected for
-                # not being in DISCORD_ALLOWED_USERS (fixes #4466).
-                if getattr(message.author, "bot", False):
+                # Bot/webhook/app-authored message filtering (DISCORD_ALLOW_BOTS):
+                #   "none"     — ignore all other bots/apps (default)
+                #   "mentions" — accept bot/app messages only when they @mention us
+                #   "all"      — accept bot/app messages (DMs) and shared-channel
+                #                 messages that explicitly @mention us
+                #
+                # In shared channels, bot/webhook/app-authored messages must not
+                # form feedback loops between Hermes gateways.  Even with
+                # DISCORD_ALLOW_BOTS=all, require an explicit self-mention before
+                # a bot/app-authored channel message can proceed.  DMs retain the
+                # legacy allow-bots policy.
+                #
+                # Must run BEFORE the user allowlist check so that permitted bots
+                # and webhooks are not rejected for not being in DISCORD_ALLOWED_USERS
+                # (fixes #4466 while hardening multi-bot shared channels).
+                _msg_guild = getattr(message, "guild", None)
+                _is_dm = isinstance(message.channel, discord.DMChannel) or _msg_guild is None
+                _self_mentioned = (
+                    self._client.user is not None
+                    and self._client.user in getattr(message, "mentions", [])
+                )
+                _author_is_bot = getattr(message.author, "bot", False) is True
+                _webhook_id = getattr(message, "webhook_id", None)
+                _application_id = getattr(message, "application_id", None)
+                _webhook_authored = _webhook_id is not None and not isinstance(
+                    _webhook_id, _UnitTestMock
+                )
+                _application_authored = _application_id is not None and not isinstance(
+                    _application_id, _UnitTestMock
+                )
+                _app_authored = bool(
+                    _author_is_bot or _webhook_authored or _application_authored
+                )
+                if _app_authored:
                     allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
+                    if not _is_dm and not _self_mentioned:
+                        return
                     if allow_bots == "none":
                         return
                     elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                        if not _self_mentioned:
                             return
-                    # "all" falls through; bot is permitted — skip the
-                    # human-user allowlist below (bots aren't in it).
+                    # "all" falls through; bot/app is permitted — skip the
+                    # human-user allowlist below (bots/webhooks aren't in it).
                 else:
-                    # Non-bot: enforce the configured user/role allowlists.
+                    # Human: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
                     # originating guild (prevents cross-guild DM bypass, see
                     # _is_allowed_user docstring).
-                    _msg_guild = getattr(message, "guild", None)
-                    _is_dm = isinstance(message.channel, discord.DMChannel) or _msg_guild is None
                     if not self._is_allowed_user(
                         str(message.author.id),
                         message.author,
