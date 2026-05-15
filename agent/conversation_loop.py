@@ -178,6 +178,7 @@ def run_conversation(
     agent._codex_incomplete_retries = 0
     agent._thinking_prefill_retries = 0
     agent._post_tool_empty_retried = False
+    agent._kanban_terminal_recovery_retries = 0
     agent._last_content_with_tools = None
     agent._last_content_tools_all_housekeeping = False
     agent._mute_post_response = False
@@ -3642,7 +3643,31 @@ def run_conversation(
                     length_continue_retries = 0
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
-                
+
+                _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+                if (
+                    _kanban_task
+                    and agent.valid_tool_names
+                    and _ra()._kanban_task_still_running(_kanban_task)
+                    and getattr(agent, "_kanban_terminal_recovery_retries", 0) < 2
+                ):
+                    agent._kanban_terminal_recovery_retries += 1
+                    final_msg = agent._build_assistant_message(assistant_message, "incomplete")
+                    final_msg["_kanban_terminal_recovery_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _ra()._kanban_terminal_recovery_prompt(final_response),
+                        "_kanban_terminal_recovery_synthetic": True,
+                    })
+                    agent._emit_status(
+                        "⚠️ Kanban worker returned final prose before terminal call — "
+                        "nudging for kanban_complete/kanban_block"
+                    )
+                    agent._session_messages = messages
+                    agent._save_session_log(messages)
+                    continue
+
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
                 # Pop thinking-only prefill and empty-response retry
@@ -3656,6 +3681,7 @@ def run_conversation(
                         messages[-1].get("_thinking_prefill")
                         or messages[-1].get("_empty_recovery_synthetic")
                         or messages[-1].get("_empty_terminal_sentinel")
+                        or messages[-1].get("_kanban_terminal_recovery_synthetic")
                     )
                 ):
                     messages.pop()

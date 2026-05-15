@@ -99,6 +99,42 @@ def _kanban_final_response_block_reason(final_response: str | None) -> str:
     return reason
 
 
+def _kanban_terminal_recovery_prompt(final_response: str | None) -> str:
+    """Build a bounded self-correction prompt for Kanban terminal calls."""
+    excerpt = (final_response or "").strip().replace("\n", " ")[:500]
+    return (
+        "[System: You are running as a Kanban worker. Your previous response "
+        "was final prose, but this task is still running. You must make exactly "
+        "one terminal Kanban tool call now: kanban_complete if the task is done, "
+        "or kanban_block if it is not done. Do not provide more final prose "
+        "before that terminal tool call. Previous prose excerpt: "
+        f"{excerpt or '(empty)'}]"
+    )
+
+
+def _kanban_task_still_running(kanban_task_id: str | None) -> bool:
+    """Return True when the current Kanban task is still in running state."""
+    task_id = (kanban_task_id or "").strip()
+    if not task_id:
+        return False
+    try:
+        from hermes_cli import kanban_db as kb
+    except Exception:
+        logger.warning("Could not import kanban_db for final-response guard", exc_info=True)
+        return False
+    try:
+        with kb.connect() as conn:
+            task = kb.get_task(conn, task_id)
+            return bool(task is not None and task.status == "running")
+    except Exception:
+        logger.warning(
+            "Failed to inspect Kanban task state for final-response guard: %s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+
+
 def _maybe_block_kanban_task_after_final_response(
     kanban_task_id: str | None,
     final_response: str | None,

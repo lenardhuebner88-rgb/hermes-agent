@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import run_agent
 from hermes_cli import kanban_db as kb
-from run_agent import _maybe_block_kanban_task_after_final_response
+from run_agent import (
+    _kanban_terminal_recovery_prompt,
+    _kanban_task_still_running,
+    _maybe_block_kanban_task_after_final_response,
+)
 
 
 @pytest.fixture
@@ -75,6 +81,128 @@ def test_final_response_guard_does_not_double_mutate_completed_task(kanban_home,
 
     assert task.status == "done"
     assert [e.kind for e in events].count("blocked") == 0
+
+
+def test_running_kanban_task_detection_tracks_terminal_state(kanban_home, monkeypatch):
+    tid, run_id = _running_task_with_env(monkeypatch)
+
+    assert _kanban_task_still_running(tid) is True
+
+    with kb.connect() as conn:
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="completed via kanban_complete",
+            expected_run_id=run_id,
+        )
+
+    assert _kanban_task_still_running(tid) is False
+
+
+def test_terminal_recovery_prompt_preserves_prose_and_demands_tool_call():
+    prompt = _kanban_terminal_recovery_prompt(
+        "Reviewer prose without terminal call.\nSecond line."
+    )
+
+    assert "kanban_complete" in prompt
+    assert "kanban_block" in prompt
+    assert "Do not provide more final prose" in prompt
+    assert "Reviewer prose without terminal call. Second line." in prompt
+
+
+def test_run_conversation_recovers_final_prose_into_terminal_kanban_call(
+    kanban_home, monkeypatch
+):
+    tid, run_id = _running_task_with_env(monkeypatch)
+
+    responses = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="APPROVED but forgot the terminal tool.",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[SimpleNamespace(
+                        id="call_terminal",
+                        function=SimpleNamespace(
+                            name="kanban_complete",
+                            arguments='{"task_id":"%s","result":"terminal after nudge"}' % tid,
+                        ),
+                    )],
+                    reasoning_content=None,
+                ),
+                finish_reason="tool_calls",
+            )],
+            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4, total_tokens=16),
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Done after terminal call.",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=8, completion_tokens=4, total_tokens=12),
+        ),
+    ]
+
+    def fake_api_call(_api_kwargs):
+        return responses.pop(0)
+
+    def fake_handle_function_call(name, args, _task_id=None, **_kwargs):
+        assert name == "kanban_complete"
+        with kb.connect() as conn:
+            assert kb.complete_task(
+                conn,
+                args["task_id"],
+                result=args["result"],
+                expected_run_id=run_id,
+            )
+        return "completed"
+
+    monkeypatch.setattr(run_agent, "handle_function_call", fake_handle_function_call)
+    agent = run_agent.AIAgent(
+        model="test/model",
+        api_key="test-key",
+        base_url="http://localhost:1234/v1",
+        quiet_mode=True,
+        skip_memory=True,
+        skip_context_files=True,
+        max_iterations=5,
+    )
+    agent._interruptible_api_call = fake_api_call
+    agent._disable_streaming = True
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    agent._save_session_log = lambda messages: None
+    agent.valid_tool_names = {"kanban_complete"}
+
+    result = agent.run_conversation("work kanban task", task_id="test-run")
+
+    assert result["final_response"] == "Done after terminal call."
+    assert responses == []
+    assert any(
+        m.get("_kanban_terminal_recovery_synthetic")
+        for m in result["messages"]
+        if isinstance(m, dict)
+    )
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+    assert task.status == "done"
+    assert run.outcome == "completed"
 
 
 def test_final_response_guard_does_not_double_mutate_blocked_task(kanban_home, monkeypatch):
