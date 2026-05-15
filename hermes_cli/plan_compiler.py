@@ -1,8 +1,9 @@
-"""Strict Contract-to-Taskgraph compiler v1.
+"""Strict Contract-to-Taskgraph compiler v1.1.
 
 Compiles a Vault Markdown plan with YAML frontmatter into a normalized
-``contract.yaml`` and a human receipt. v1 deliberately emits only the contract;
-``taskgraph_hints`` remain optional and non-binding preparation for v1.1.
+``contract.yaml``, a clearly non-binding ``taskgraph.draft.yaml``, and a
+human receipt. ``taskgraph_hints`` remain optional planning hints only; the
+emitted taskgraph draft is never an execution contract.
 """
 
 from __future__ import annotations
@@ -121,6 +122,42 @@ def _as_list(data: dict[str, Any], key: str) -> list[str]:
     return []
 
 
+def _role_hint(roles: list[str], index: int) -> str | None:
+    if not roles:
+        return None
+    if index < len(roles):
+        return roles[index]
+    return roles[0]
+
+
+def build_taskgraph_draft(contract: PlanContract) -> dict[str, Any]:
+    """Build a non-binding taskgraph draft from optional taskgraph hints."""
+
+    hints = contract.taskgraph_hints
+    tasks = []
+    for index, title in enumerate(hints.candidate_tasks):
+        task: dict[str, Any] = {
+            "id": slugify(title),
+            "title": title,
+        }
+        role = _role_hint(hints.recommended_roles, index)
+        if role:
+            task["role_hint"] = role
+        tasks.append(task)
+
+    return {
+        "schema_version": "taskgraph.draft.v1.1",
+        "non_binding": True,
+        "binding": "non-binding",
+        "disclaimer": "NON-BINDING DRAFT — planning aid only; not approved for dispatch or execution.",
+        "source": "contract.taskgraph_hints",
+        "contract_goal": contract.goal,
+        "tasks": tasks,
+        "dependencies": hints.dependencies,
+        "recommended_roles": hints.recommended_roles,
+    }
+
+
 def parse_plan(path: Path) -> PlanContract:
     text = path.read_text(encoding="utf-8")
     frontmatter, body = _extract_frontmatter(text)
@@ -183,6 +220,7 @@ def compile_plan(path: Path, *, compiled_root: Path = DEFAULT_COMPILED_ROOT, tem
 
     source_path = out_dir / "source.md"
     contract_path = out_dir / "contract.yaml"
+    taskgraph_draft_path = out_dir / "taskgraph.draft.yaml"
     receipt_path = out_dir / "contract.receipt.md"
     schema_path = export_schema(templates_root)
 
@@ -191,13 +229,17 @@ def compile_plan(path: Path, *, compiled_root: Path = DEFAULT_COMPILED_ROOT, tem
         yaml.safe_dump(contract.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+    taskgraph_draft_path.write_text(
+        yaml.safe_dump(build_taskgraph_draft(contract), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     receipt_path.write_text(
         "\n".join(
             [
                 "---",
                 "status: GREEN",
                 f"created: {_utc_now()}",
-                "compiler: hermes-plan-compile v1",
+                "compiler: hermes-plan-compile v1.1",
                 "---",
                 "",
                 "# Contract Compile Receipt",
@@ -207,10 +249,11 @@ def compile_plan(path: Path, *, compiled_root: Path = DEFAULT_COMPILED_ROOT, tem
                 "## Artifacts",
                 f"- source: `{source_path}`",
                 f"- contract: `{contract_path}`",
+                f"- taskgraph draft: `{taskgraph_draft_path}` (NON-BINDING)",
                 f"- schema: `{schema_path}`",
                 "",
                 "## Non-binding Taskgraph Hints",
-                "`taskgraph_hints` are optional preparation only; v1 does not emit a taskgraph draft.",
+                "`taskgraph_hints` are optional preparation only; `taskgraph.draft.yaml` is a non-binding planning aid and must not be dispatched.",
                 "",
                 "## Next Decision",
                 contract.next_decision,
@@ -219,7 +262,7 @@ def compile_plan(path: Path, *, compiled_root: Path = DEFAULT_COMPILED_ROOT, tem
         ),
         encoding="utf-8",
     )
-    return {"source": source_path, "contract": contract_path, "receipt": receipt_path, "schema": schema_path}
+    return {"source": source_path, "contract": contract_path, "taskgraph_draft": taskgraph_draft_path, "receipt": receipt_path, "schema": schema_path}
 
 
 def build_parser() -> argparse.ArgumentParser:

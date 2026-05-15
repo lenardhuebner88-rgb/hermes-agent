@@ -27,7 +27,14 @@ forbidden_actions:
   - restart services
 requires_approval:
   - deploy or restart
- taskgraph_hints: {}
+ taskgraph_hints:
+  candidate_tasks:
+    - Draft compiler output
+    - Review non-binding marker
+  dependencies:
+    - Review non-binding marker depends_on Draft compiler output
+  recommended_roles:
+    - reviewer
 ---
 ## Goal
 Ship the compiler.
@@ -67,7 +74,19 @@ def test_compile_plan_emits_contract_receipt_source_and_schema(tmp_path: Path):
     assert contract["contract_version"] == 1
     assert contract["goal"] == "Ship a local contract compiler"
     assert contract["taskgraph_hints"]["non_binding"] is True
-    assert "Result: GREEN" in artifacts["receipt"].read_text(encoding="utf-8")
+    draft = yaml.safe_load(artifacts["taskgraph_draft"].read_text(encoding="utf-8"))
+    assert draft["schema_version"] == "taskgraph.draft.v1.1"
+    assert draft["non_binding"] is True
+    assert draft["binding"] == "non-binding"
+    assert draft["disclaimer"].startswith("NON-BINDING DRAFT")
+    assert draft["tasks"] == [
+        {"id": "draft-compiler-output", "title": "Draft compiler output", "role_hint": "reviewer"},
+        {"id": "review-non-binding-marker", "title": "Review non-binding marker", "role_hint": "reviewer"},
+    ]
+    assert draft["dependencies"] == ["Review non-binding marker depends_on Draft compiler output"]
+    receipt = artifacts["receipt"].read_text(encoding="utf-8")
+    assert "Result: GREEN" in receipt
+    assert "taskgraph draft" in receipt
     schema = json.loads(artifacts["schema"].read_text(encoding="utf-8"))
     assert schema["title"] == "PlanContract"
 
@@ -110,3 +129,4 @@ def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):
     assert code == 0
     assert payload["status"] == "GREEN"
     assert Path(payload["artifacts"]["contract"]).exists()
+    assert Path(payload["artifacts"]["taskgraph_draft"]).name == "taskgraph.draft.yaml"
