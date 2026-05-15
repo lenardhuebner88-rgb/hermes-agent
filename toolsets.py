@@ -66,6 +66,7 @@ _HERMES_CORE_TOOLS = [
     # tools/kanban_tools.py.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_validate_created_cards",
+    "kanban_completion_template", "kanban_review_lane",
     "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_run_workspace_command",
@@ -254,7 +255,9 @@ TOOLSETS = {
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete",
-            "kanban_validate_created_cards", "kanban_block",
+            "kanban_validate_created_cards", "kanban_completion_template",
+            "kanban_review_lane",
+            "kanban_block",
             "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_run_workspace_command",

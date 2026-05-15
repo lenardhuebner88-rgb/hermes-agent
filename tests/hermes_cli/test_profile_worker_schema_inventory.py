@@ -20,6 +20,7 @@ from tools.registry import invalidate_check_fn_cache
 KANBAN_TOOLS = {
     "kanban_show",
     "kanban_complete",
+    "kanban_completion_template",
     "kanban_block",
     "kanban_heartbeat",
     "kanban_comment",
@@ -33,6 +34,7 @@ WORKER_PROFILE_NAMES = ("dispatcher", "planner", "admin", "coder")
 WORKER_ALLOWED_TOOLS = [
     "kanban_show",
     "kanban_complete",
+    "kanban_completion_template",
     "kanban_block",
     "kanban_comment",
     "read_file",
@@ -44,6 +46,7 @@ WORKER_EXPECTED_SCHEMA = [
     "kanban_block",
     "kanban_comment",
     "kanban_complete",
+    "kanban_completion_template",
     "kanban_show",
     "read_file",
     "search_files",
@@ -136,6 +139,13 @@ def _schema_names_for_home(monkeypatch, home: Path) -> list[str]:
         for schema in schemas
         if isinstance(schema, dict) and isinstance(schema.get("function"), dict)
     )
+
+
+def test_kanban_tool_inventory_exposes_completion_template_in_model_visible_surfaces():
+    from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+
+    assert "kanban_completion_template" in _HERMES_CORE_TOOLS
+    assert "kanban_completion_template" in TOOLSETS["kanban"]["tools"]
 
 
 def _worker_profile_home(tmp_path: Path, profile_name: str) -> Path:
