@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,15 +100,103 @@ def test_running_kanban_task_detection_tracks_terminal_state(kanban_home, monkey
     assert _kanban_task_still_running(tid) is False
 
 
-def test_terminal_recovery_prompt_preserves_prose_and_demands_tool_call():
+def test_terminal_recovery_prompt_preserves_task_id_prose_and_demands_tool_call():
     prompt = _kanban_terminal_recovery_prompt(
-        "Reviewer prose without terminal call.\nSecond line."
+        "Reviewer prose without terminal call.\nSecond line.",
+        task_id="t_reviewer123",
     )
 
+    assert "t_reviewer123" in prompt
     assert "kanban_complete" in prompt
     assert "kanban_block" in prompt
     assert "Do not provide more final prose" in prompt
     assert "Reviewer prose without terminal call. Second line." in prompt
+
+
+def test_reviewer_lane_e2e_blocks_after_bounded_recovery_without_terminal_tool(
+    kanban_home, monkeypatch
+):
+    tid, run_id = _running_task_with_env(monkeypatch)
+    responses = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=f"APPROVED prose for {tid}, but no terminal tool.",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Still prose after first recovery nudge.",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5, total_tokens=17),
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Still prose after second recovery nudge.",
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=13, completion_tokens=5, total_tokens=18),
+        ),
+    ]
+    captured_api_messages = []
+
+    def fake_api_call(api_kwargs):
+        captured_api_messages.append(copy.deepcopy(api_kwargs["messages"]))
+        return responses.pop(0)
+
+    agent = run_agent.AIAgent(
+        model="test/model",
+        api_key="test-key",
+        base_url="http://localhost:1234/v1",
+        quiet_mode=True,
+        skip_memory=True,
+        skip_context_files=True,
+        max_iterations=5,
+    )
+    agent._interruptible_api_call = fake_api_call
+    agent._disable_streaming = True
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    agent._save_session_log = lambda messages: None
+    agent.valid_tool_names = {"kanban_complete", "kanban_block"}
+
+    result = agent.run_conversation("review gate task", task_id="test-run")
+
+    assert result["final_response"] == "Still prose after second recovery nudge."
+    assert responses == []
+    recovery_prompts = [
+        message["content"]
+        for message in captured_api_messages[-1]
+        if isinstance(message, dict) and message.get("_kanban_terminal_recovery_synthetic")
+        and message.get("role") == "user"
+    ]
+    assert len(recovery_prompts) == 2
+    assert all(tid in prompt for prompt in recovery_prompts)
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        events = kb.list_events(conn, tid)
+    assert task.status == "blocked"
+    assert run.id == run_id
+    assert run.outcome == "blocked"
+    assert "worker-final-response-without-terminal-call" in run.summary
+    assert "Still prose after second recovery nudge" in run.summary
+    assert [e.kind for e in events].count("blocked") == 1
 
 
 def test_run_conversation_recovers_final_prose_into_terminal_kanban_call(

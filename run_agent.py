@@ -99,12 +99,18 @@ def _kanban_final_response_block_reason(final_response: str | None) -> str:
     return reason
 
 
-def _kanban_terminal_recovery_prompt(final_response: str | None) -> str:
+def _kanban_terminal_recovery_prompt(
+    final_response: str | None,
+    *,
+    task_id: str | None = None,
+) -> str:
     """Build a bounded self-correction prompt for Kanban terminal calls."""
     excerpt = (final_response or "").strip().replace("\n", " ")[:500]
+    task_clause = f" Task id: {task_id.strip()}." if task_id and task_id.strip() else ""
     return (
         "[System: You are running as a Kanban worker. Your previous response "
-        "was final prose, but this task is still running. You must make exactly "
+        "was final prose, but this task is still running."
+        f"{task_clause} You must make exactly "
         "one terminal Kanban tool call now: kanban_complete if the task is done, "
         "or kanban_block if it is not done. Do not provide more final prose "
         "before that terminal tool call. Previous prose excerpt: "

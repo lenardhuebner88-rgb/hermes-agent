@@ -3657,7 +3657,10 @@ def run_conversation(
                     messages.append(final_msg)
                     messages.append({
                         "role": "user",
-                        "content": _ra()._kanban_terminal_recovery_prompt(final_response),
+                        "content": _ra()._kanban_terminal_recovery_prompt(
+                            final_response,
+                            task_id=_kanban_task,
+                        ),
                         "_kanban_terminal_recovery_synthetic": True,
                     })
                     agent._emit_status(
