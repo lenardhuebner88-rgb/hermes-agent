@@ -25,6 +25,7 @@ KANBAN_TOOLS = {
     "kanban_comment",
     "kanban_create",
     "kanban_link",
+    "kanban_update_profile_model",
 }
 
 WORKER_PROFILE_NAMES = ("dispatcher", "planner", "admin", "coder")
@@ -57,6 +58,7 @@ WORKER_FORBIDDEN_TOOLS = {
     "web_search",
     "web_extract",
     "kanban_create",
+    "kanban_update_profile_model",
     "memory",
     "skill_manage",
     "delegate_task",
