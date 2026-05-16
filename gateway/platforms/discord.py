@@ -782,6 +782,38 @@ class DiscordAdapter(BasePlatformAdapter):
                     elif allow_bots == "mentions":
                         if not _self_mentioned:
                             return
+                    # v1.1 (2026-05-16) — Stop-Code-Gate für Bot-Author in Channels.
+                    # Verhindert Hub↔Coord-Feedback-Loops: in shared channels darf
+                    # ein Bot nur dann triggern, wenn die Message einen Inbound-
+                    # Stop-Code aus playbooks/hub-coordinator-reporting-v1.md §6.2
+                    # trägt.  Reine "[idle]"/"[ready]" Chatter wird verworfen.
+                    # Konfiguration: env HERMES_DISCORD_INBOUND_STOP_CODES (CSV)
+                    # überschreibt die Default-Liste; ein einzelner Wert "*"
+                    # deaktiviert das Gate.  RCA: vault/03-Agents/Hermes/analyses/
+                    # bot-loop-rca-and-architecture-2026-05-16T1748.md
+                    if not _is_dm:
+                        _stop_codes_csv = os.getenv(
+                            "HERMES_DISCORD_INBOUND_STOP_CODES",
+                            "hub-plan-ready,hub-budget-warn,hub-memory-warn,"
+                            "hub-shutdown,coord-ack-required,reviewer-rejected",
+                        )
+                        _inbound_codes = {
+                            c.strip().lower()
+                            for c in _stop_codes_csv.split(",")
+                            if c.strip()
+                        }
+                        if "*" not in _inbound_codes:
+                            import re as _stopcode_re
+                            _body_text = (getattr(message, "content", None) or "")
+                            _stop_match = _stopcode_re.search(
+                                r"\[STOP-CODE:\s*([a-zA-Z0-9_-]+)\]",
+                                _body_text,
+                            )
+                            if (
+                                not _stop_match
+                                or _stop_match.group(1).lower() not in _inbound_codes
+                            ):
+                                return
                     # "all" falls through; bot/app is permitted — skip the
                     # human-user allowlist below (bots/webhooks aren't in it).
                 else:
@@ -3798,6 +3830,29 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] Failed to fetch channel history: %s", self.name, e)
             return ""
 
+    def _discord_mention_required_channels(self) -> set:
+        """Return Discord channel IDs where the bot MUST be @-mentioned.
+
+        This overrides a globally-permissive ``require_mention=false`` for
+        specific channels (e.g. shared lanes like ``#hermes-koordinator``
+        where the bot is a member but should only respond when explicitly
+        addressed).  Used by ``_handle_message`` to demand a mention even
+        when the global setting would let Human-author messages through.
+
+        Source order:
+          1. ``discord.mention_required_channels`` in config.yaml (list or CSV).
+          2. ``DISCORD_MENTION_REQUIRED_CHANNELS`` env (CSV) as fallback.
+        """
+        raw = self.config.extra.get("mention_required_channels")
+        if raw is None:
+            raw = os.getenv("DISCORD_MENTION_REQUIRED_CHANNELS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
+        return set()
+
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
         return getattr(channel, "parent", None) or channel
@@ -4507,6 +4562,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids.add(parent_channel_id)
 
             require_mention = self._discord_require_mention()
+            # Channel-specific mention-required override (added 2026-05-16, Sprint 2P).
+            # If the current channel is listed in ``discord.mention_required_channels``
+            # (config.yaml) or ``DISCORD_MENTION_REQUIRED_CHANNELS`` (env), force
+            # ``require_mention=True`` locally — even when the global setting is
+            # ``false``.  Prevents the Hub from answering human messages in shared
+            # lanes (e.g. ``#hermes-koordinator``) where the Coordinator is the
+            # primary responder.
+            _mention_req_channels = self._discord_mention_required_channels()
+            if _mention_req_channels and bool(channel_ids & _mention_req_channels):
+                require_mention = True
             # Voice-linked text channels act as free-response while voice is active.
             # Only the exact bound channel gets the exemption, not sibling threads.
             voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
