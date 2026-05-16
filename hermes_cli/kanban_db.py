@@ -2704,7 +2704,7 @@ class ScopeAttestationError(ValueError):
         )
 
 
-_KANBAN_POLICY_KEYS = {"completion_policy", "scope_contract"}
+_KANBAN_POLICY_KEYS = {"completion_policy", "scope_contract", "review_lane"}
 _KNOWN_SCOPE_ALLOWED_TOOLS = {
     "kanban_show",
     "kanban_complete",
@@ -2760,6 +2760,11 @@ _REQUIRED_SCOPE_FORBIDDEN_SYSTEMS = {
     "mission-control": "Mission-Control",
     "telegram": "Telegram",
 }
+_REQUIRED_SCOPE_LIFECYCLE_TOOLS = [
+    "kanban_show",
+    "kanban_complete",
+    "kanban_block",
+]
 
 
 def _truthy_policy_value(value: Any) -> bool:
@@ -3877,6 +3882,103 @@ def _validate_scope_allowed_tools(body: Optional[str]) -> tuple[list[str], list[
     return normalized, problems
 
 
+@contextlib.contextmanager
+def _temporary_env(updates: dict[str, Optional[str]]):
+    """Temporarily patch ``os.environ`` and restore it exactly afterwards."""
+    sentinel = object()
+    previous = {key: os.environ.get(key, sentinel) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value  # type: ignore[assignment]
+
+
+def _resolve_scope_runtime_tool_schema_names(
+    allowed_toolsets: list[str],
+    *,
+    task_id: Optional[str] = None,
+) -> list[str]:
+    """Resolve the model-native worker schema for a scoped allowlist.
+
+    ``scope_contract.allowed_tools`` is only the declared policy. The worker's
+    usable lifecycle surface is the schema that ``model_tools`` can actually
+    build in a Kanban task context after registry ``check_fn`` filtering. Use
+    that same runtime path here so dispatcher preflight blocks before spawn if
+    a declared lifecycle tool is not present in the real worker schema.
+    """
+    requested = [str(name).strip() for name in (allowed_toolsets or []) if str(name).strip()]
+    if not requested:
+        return []
+
+    try:
+        # Importing the tool module is idempotent and ensures module-level
+        # registry.register(...) calls have happened in import-order-sensitive
+        # test and CLI contexts.
+        import tools.kanban_tools  # noqa: F401
+        from model_tools import _clear_tool_defs_cache, get_tool_definitions
+        from tools.registry import invalidate_check_fn_cache
+    except Exception:
+        return []
+
+    env_updates = {
+        "HERMES_KANBAN_TASK": task_id or "__dispatch_preflight__",
+        "HERMES_KANBAN_EFFECTIVE_TOOLSETS": json.dumps(requested),
+    }
+    schemas = []
+    with _temporary_env(env_updates):
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+        try:
+            schemas = get_tool_definitions(enabled_toolsets=[], disabled_toolsets=[], quiet_mode=True)
+        finally:
+            _clear_tool_defs_cache()
+            invalidate_check_fn_cache()
+
+    available = {
+        str(schema.get("function", {}).get("name"))
+        for schema in (schemas or [])
+        if isinstance(schema, dict) and schema.get("function", {}).get("name")
+    }
+    return [name for name in requested if name in available]
+
+
+def _validate_effective_scope_runtime_tools(
+    effective_toolsets: list[str],
+    *,
+    declared_allowed_tools: Optional[list[str]] = None,
+) -> list[str]:
+    """Fail closed when a scoped worker would lack lifecycle Kanban tools."""
+    resolved = [str(name).strip() for name in (effective_toolsets or []) if str(name).strip()]
+    if not resolved:
+        return ["runtime tool schema resolved empty after scope_contract.allowed_tools validation"]
+
+    resolved_set = set(resolved)
+    declared = [str(name).strip() for name in (declared_allowed_tools or []) if str(name).strip()]
+    missing_declared = [name for name in declared if name not in resolved_set]
+    if missing_declared:
+        return [
+            "runtime tool schema missing declared allowed tools: "
+            + ", ".join(missing_declared)
+        ]
+
+    missing = [name for name in _REQUIRED_SCOPE_LIFECYCLE_TOOLS if name not in resolved_set]
+    if missing:
+        return [
+            "runtime tool schema missing required terminal Kanban lifecycle tools: "
+            + ", ".join(missing)
+        ]
+    return []
+
+
 def _task_requires_dispatcher_scope_preflight(body: Optional[str]) -> bool:
     if _body_requires_scope_attestation(body):
         return True
@@ -3907,6 +4009,7 @@ def _block_dispatch_preflight(
     reason: str,
     *,
     kind: str = "dispatch_preflight_blocked",
+    evidence: Optional[dict[str, Any]] = None,
 ) -> bool:
     now = int(time.time())
     with write_txn(conn):
@@ -3918,11 +4021,14 @@ def _block_dispatch_preflight(
         )
         if cur.rowcount != 1:
             return False
+        payload = {"reason": reason[:500], "blocked_at": now, "task_id": task_id}
+        if isinstance(evidence, dict):
+            payload.update(evidence)
         _append_event(
             conn,
             task_id,
             kind,
-            {"reason": reason[:500], "blocked_at": now},
+            payload,
         )
         return True
 
@@ -3950,6 +4056,10 @@ _REVIEW_REQUIRED_REVIEWER_ALLOWED_TOOLS = [
     "kanban_complete",
     "kanban_block",
 ]
+_AUTO_REVIEWER_CHILD_EVENT = "dispatch_auto_reviewer_child_created"
+_AUTO_REVIEWER_COMMENT_AUTHOR = "kanban-dispatcher"
+_AUTO_REVIEWER_MAX_RUNTIME_SECONDS = 12 * 60
+_AUTO_REVIEWER_MAX_RETRIES = 1
 
 
 def _is_iteration_budget_guard_reason(summary: Optional[str]) -> bool:
@@ -4196,6 +4306,122 @@ def _dispatch_review_required_handoffs(conn: sqlite3.Connection) -> list[str]:
             )
         created_or_promoted.append(reviewer_task_id)
     return created_or_promoted
+
+
+def _auto_reviewer_child_body(
+    source_task: Task,
+    *,
+    source_run_id: int,
+    lane: str,
+    stage: str,
+    completion_summary: str,
+) -> str:
+    lines = [
+        f"# Review {source_task.id}: {source_task.title}",
+        "",
+        "Auto-created reviewer child after coder completion.",
+        "",
+        f"parent_task: {source_task.id}",
+        f"parent_run: {int(source_run_id)}",
+        f"review_lane: {lane}",
+        f"review_stage: {stage}",
+        f"completion_summary: {completion_summary}",
+        "",
+        "Scope:",
+        "- Deliver verdict-only review feedback for the parent task output.",
+        "- Do not mutate forbidden systems.",
+    ]
+    return "\n".join(lines)
+
+
+def _dispatch_standard_review_children(conn: sqlite3.Connection) -> list[str]:
+    """Create STANDARD_REVIEW reviewer-b children after coder completion.
+
+    Scope intentionally excludes CRITICAL_REVIEW pre-coder Reviewer-A flow.
+    """
+    done_coder_rows = conn.execute(
+        """
+        SELECT id FROM tasks
+         WHERE status = 'done' AND LOWER(COALESCE(assignee, '')) = 'coder'
+         ORDER BY completed_at ASC, id ASC
+        """
+    ).fetchall()
+
+    created_children: list[str] = []
+    for row in done_coder_rows:
+        source_task = get_task(conn, row["id"])
+        if source_task is None:
+            continue
+        run = latest_run(conn, source_task.id)
+        if run is None or run.outcome != "completed" or run.ended_at is None:
+            continue
+        if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+            continue
+
+        changed_paths: list[str] = []
+        if isinstance(run.metadata, dict):
+            raw_changed = run.metadata.get("changed_files")
+            if isinstance(raw_changed, list):
+                changed_paths = [str(p) for p in raw_changed if str(p).strip()]
+
+        lane_result = classify_kanban_review_lane(
+            title=source_task.title,
+            body=source_task.body,
+            changed_paths=changed_paths,
+        )
+        lane = str(lane_result.get("lane") or "").strip().upper()
+        if lane != "STANDARD_REVIEW":
+            continue
+
+        completion_summary = (run.summary or source_task.result or "").strip()
+        if not completion_summary:
+            completion_summary = "(no completion summary provided)"
+        completion_summary = completion_summary.splitlines()[0][:300]
+
+        reviewer_title = f"Review {source_task.id}: {source_task.title}".strip()
+        if len(reviewer_title) > 80:
+            reviewer_title = reviewer_title[:80]
+
+        reviewer_task_id = create_task(
+            conn,
+            title=reviewer_title,
+            body=_auto_reviewer_child_body(
+                source_task,
+                source_run_id=run.id,
+                lane="STANDARD_REVIEW",
+                stage="reviewer_b",
+                completion_summary=completion_summary,
+            ),
+            assignee="reviewer",
+            created_by="dispatcher",
+            workspace_kind=source_task.workspace_kind,
+            workspace_path=source_task.workspace_path,
+            priority=source_task.priority,
+            parents=[source_task.id],
+            idempotency_key=f"auto-reviewer:{source_task.id}:{run.id}",
+            skills=["kanban-reviewer"],
+            max_runtime_seconds=_AUTO_REVIEWER_MAX_RUNTIME_SECONDS,
+            max_retries=_AUTO_REVIEWER_MAX_RETRIES,
+        )
+
+        with write_txn(conn):
+            if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+                continue
+            _append_event(
+                conn,
+                source_task.id,
+                _AUTO_REVIEWER_CHILD_EVENT,
+                {
+                    "source_task": source_task.id,
+                    "source_run_id": run.id,
+                    "reviewer_task_id": reviewer_task_id,
+                    "review_lane": "STANDARD_REVIEW",
+                    "review_stage": "reviewer_b",
+                },
+                run_id=run.id,
+            )
+        created_children.append(reviewer_task_id)
+    return created_children
 
 
 def _task_has_undone_parents(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -5209,6 +5435,7 @@ def dispatch_once(
         result.auto_continued.extend(auto_continued)
         result.continuation_capped.extend(continuation_capped)
         _dispatch_review_required_handoffs(conn)
+        _dispatch_standard_review_children(conn)
     result.promoted = recompute_ready(conn)
 
     # Count tasks already running so max_spawn enforces concurrency rather
@@ -5330,11 +5557,46 @@ def dispatch_once(
                 ):
                     result.preflight_blocked.append(row["id"])
                 continue
+            runtime_effective_toolsets = _resolve_scope_runtime_tool_schema_names(
+                effective_toolsets,
+                task_id=row["id"],
+            )
+            runtime_tool_errors = _validate_effective_scope_runtime_tools(
+                runtime_effective_toolsets,
+                declared_allowed_tools=effective_toolsets,
+            )
+            if runtime_tool_errors:
+                reason = (
+                    "dispatch preflight blocked task: empty/incomplete effective runtime tools: "
+                    + "; ".join(runtime_tool_errors)
+                )
+                evidence = {
+                    "failure_reason": reason[:500],
+                    "declared_allowed_tools": effective_toolsets,
+                    "effective_toolsets": runtime_effective_toolsets,
+                    "required_lifecycle_tools": list(_REQUIRED_SCOPE_LIFECYCLE_TOOLS),
+                    "skills_requested": [
+                        str(s).strip() for s in (task_for_preflight.skills or []) if str(s).strip()
+                    ],
+                    "skill_resolution": {
+                        "status": "ok" if not missing_skills else "missing",
+                        "missing": list(missing_skills),
+                    },
+                }
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_empty_toolset",
+                    evidence=evidence,
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
             _append_event(
                 conn,
                 row["id"],
                 "dispatch_preflight_passed",
-                {"effective_toolsets": effective_toolsets},
+                {"effective_toolsets": runtime_effective_toolsets},
             )
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
@@ -5515,9 +5777,14 @@ def _default_spawn(
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
-    effective_toolsets, allowed_tool_errors = _validate_scope_allowed_tools(task.body)
-    if not allowed_tool_errors and effective_toolsets:
-        env["HERMES_KANBAN_EFFECTIVE_TOOLSETS"] = json.dumps(effective_toolsets)
+    declared_toolsets, allowed_tool_errors = _validate_scope_allowed_tools(task.body)
+    if not allowed_tool_errors and declared_toolsets:
+        effective_toolsets = _resolve_scope_runtime_tool_schema_names(
+            declared_toolsets,
+            task_id=task.id,
+        )
+        if effective_toolsets:
+            env["HERMES_KANBAN_EFFECTIVE_TOOLSETS"] = json.dumps(effective_toolsets)
 
     cmd = [
         *_resolve_hermes_argv(),

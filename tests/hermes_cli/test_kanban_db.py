@@ -1840,6 +1840,7 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+    - kanban_block
   forbidden_systems:
     - OpenClaw
     - Atlas
@@ -1860,7 +1861,115 @@ completion_policy:
         assert kb.get_task(conn, t).status == "running"
         events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
         assert events
-        assert events[-1].payload["effective_toolsets"] == ["kanban_show", "kanban_complete"]
+        assert events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
+
+
+def test_dispatch_preflight_blocks_when_required_lifecycle_tool_missing(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing lifecycle tool", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "empty/incomplete effective runtime tools" in (task.result or "")
+        assert "kanban_block" in (task.result or "")
+
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_empty_toolset"]
+        assert events
+        payload = events[-1].payload
+        assert payload["task_id"] == t
+        assert payload["effective_toolsets"] == ["kanban_show", "kanban_complete"]
+        assert payload["required_lifecycle_tools"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
+        assert payload["skills_requested"] == []
+        assert payload["skill_resolution"] == {"status": "ok", "missing": []}
+        assert "kanban_block" in payload["failure_reason"]
+
+
+def test_dispatch_preflight_blocks_when_runtime_schema_missing_required_lifecycle_tool(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    from model_tools import _clear_tool_defs_cache
+    from tools.registry import invalidate_check_fn_cache, registry
+
+    entry = registry.get_entry("kanban_block")
+    assert entry is not None
+    original_check_fn = entry.check_fn
+    entry.check_fn = lambda: False
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    try:
+        spawns = []
+        with kb.connect() as conn:
+            t = kb.create_task(conn, title="runtime schema missing lifecycle tool", assignee="alice", body=body)
+            res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+            assert not spawns
+            assert t in res.preflight_blocked
+            task = kb.get_task(conn, t)
+            assert task.status == "blocked"
+            assert "runtime tool schema" in (task.result or "")
+            assert "kanban_block" in (task.result or "")
+
+            events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_empty_toolset"]
+            assert events
+            payload = events[-1].payload
+            assert payload["task_id"] == t
+            assert payload["declared_allowed_tools"] == [
+                "kanban_show",
+                "kanban_complete",
+                "kanban_block",
+            ]
+            assert payload["effective_toolsets"] == ["kanban_show", "kanban_complete"]
+            assert payload["required_lifecycle_tools"] == [
+                "kanban_show",
+                "kanban_complete",
+                "kanban_block",
+            ]
+            assert payload["skill_resolution"] == {"status": "ok", "missing": []}
+    finally:
+        entry.check_fn = original_check_fn
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
 
 
 def test_dispatch_preflight_blocks_scope_contract_v2_without_allowed_tools(kanban_home, all_assignees_spawnable):
@@ -2157,6 +2266,7 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+    - kanban_block
   forbidden_systems:
     - OpenClaw
     - Atlas
@@ -2175,6 +2285,7 @@ completion_policy:
         assert preflight_events[-1].payload["effective_toolsets"] == [
             "kanban_show",
             "kanban_complete",
+            "kanban_block",
         ]
 
         with pytest.raises(kb.ScopeAttestationError, match="effective_toolsets mismatch"):
@@ -2206,6 +2317,7 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+    - kanban_block
   forbidden_systems:
     - OpenClaw
     - Atlas
@@ -2226,7 +2338,7 @@ completion_policy:
                 "scope_contract_version": 2,
                 "scope_attestation": True,
                 "forbidden_actions_taken": 0,
-                "effective_toolsets": ["kanban_show", "kanban_complete"],
+                "effective_toolsets": ["kanban_show", "kanban_complete", "kanban_block"],
             },
         )
         completed_events = [e for e in kb.list_events(conn, t) if e.kind == "completed"]
@@ -2235,6 +2347,7 @@ completion_policy:
         assert completed_runs[-1].metadata["effective_toolsets"] == [
             "kanban_show",
             "kanban_complete",
+            "kanban_block",
         ]
 
 
@@ -3135,6 +3248,7 @@ scope_contract:
   allowed_tools:
     - kanban_show
     - kanban_complete
+    - kanban_block
   forbidden_systems:
     - OpenClaw
     - Atlas
