@@ -48,6 +48,16 @@ def _fmt_ts(ts: Optional[int]) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
+def _fmt_runtime(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return "unset"
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{seconds}s ({seconds // 3600}h)"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds}s ({seconds // 60}m)"
+    return f"{seconds}s"
+
+
 def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
@@ -1112,7 +1122,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
     else:
-        print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        print(
+            f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'}, "
+            f"max-runtime: {_fmt_runtime(task.max_runtime_seconds)})"
+        )
 
         # Warn when the task would sit in `ready` because no dispatcher is
         # present. Only warn on ready+assigned tasks — triage/todo are
@@ -1232,6 +1245,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  tenant:    {task.tenant}")
     print(f"  workspace: {task.workspace_kind}" +
           (f" @ {task.workspace_path}" if task.workspace_path else ""))
+    print(f"  max-runtime: {_fmt_runtime(task.max_runtime_seconds)}")
     if task.skills:
         print(f"  skills:    {', '.join(task.skills)}")
     # Effective retry threshold. Show the per-task override if set,
@@ -1279,6 +1293,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
                     print(f"       → {a.label}")
     if task.started_at:
         print(f"  started:   {_fmt_ts(task.started_at)}")
+        if task.status == "running" and task.max_runtime_seconds:
+            elapsed = max(0, int(time.time()) - task.started_at)
+            remaining = task.max_runtime_seconds - elapsed
+            if remaining > 0:
+                print(f"  remaining: {_fmt_runtime(remaining)}")
+            else:
+                print(f"  remaining: 0s (expired by {-remaining}s)")
     if task.completed_at:
         print(f"  completed: {_fmt_ts(task.completed_at)}")
     if parents:

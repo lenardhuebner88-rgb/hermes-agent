@@ -1355,6 +1355,78 @@ def test_cli_show_json_includes_max_runtime_seconds(kanban_home):
     assert shown["task"]["max_runtime_seconds"] == 12 * 60
 
 
+def test_fmt_runtime_humanizes_operator_friendly_values():
+    from hermes_cli.kanban import _fmt_runtime
+
+    assert _fmt_runtime(None) == "unset"
+    assert _fmt_runtime(95) == "95s"
+    assert _fmt_runtime(720) == "720s (12m)"
+    assert _fmt_runtime(7200) == "7200s (2h)"
+
+
+def test_cli_create_text_prints_default_max_runtime(kanban_home):
+    """Human create output should surface the runtime cap without requiring JSON."""
+    out = run_slash("create 'text runtime task'")
+
+    assert "max-runtime: 720s (12m)" in out
+
+
+def test_cli_show_text_prints_max_runtime(kanban_home):
+    """Human show output should make max-runtime directly visible to operators."""
+    out = run_slash("create 'show text runtime task' --json")
+    tid = json.loads(out)["id"]
+
+    shown = run_slash(f"show {tid}")
+
+    assert "max-runtime: 720s (12m)" in shown
+
+
+def test_cli_show_text_prints_remaining_when_running(kanban_home, monkeypatch):
+    """Running tasks should show their remaining runtime budget in text show."""
+    out = run_slash("create 'running runtime task' --json")
+    tid = json.loads(out)["id"]
+    conn = kb.connect()
+    try:
+        kb.assign_task(conn, tid, "worker")
+        kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setattr("hermes_cli.kanban.time.time", lambda: task.started_at + 60)
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining: 660s (11m)" in shown
+
+
+def test_cli_show_text_flags_expired_runtime_when_running(kanban_home, monkeypatch):
+    """Expired running tasks should show an explicit expired runtime budget."""
+    out = run_slash("create 'expired runtime task' --max-runtime 1s --json")
+    tid = json.loads(out)["id"]
+    conn = kb.connect()
+    try:
+        kb.assign_task(conn, tid, "worker")
+        kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setattr("hermes_cli.kanban.time.time", lambda: task.started_at + 10)
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining: 0s (expired by 9s)" in shown
+
+
+def test_cli_show_text_omits_remaining_when_not_running(kanban_home):
+    """Only running tasks should show a remaining runtime line."""
+    out = run_slash("create 'idle runtime task' --json")
+    tid = json.loads(out)["id"]
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining:" not in shown
+
+
 def test_cli_create_max_runtime_bad_format_exits_nonzero(kanban_home):
     out = run_slash("create 'bad' --max-runtime fish")
     assert "max-runtime" in out.lower() or "malformed" in out.lower()
