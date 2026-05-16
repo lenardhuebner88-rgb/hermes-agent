@@ -601,10 +601,9 @@ class Task:
     current_run_id: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
-    # Force-loaded skills for the worker on this task (appended to the
-    # dispatcher's built-in `kanban-worker` via --skills). Stored as a
-    # JSON array of skill names. None = use only the defaults; empty
-    # list = explicitly no extra skills.
+    # Force-loaded skills for the worker on this task. Stored as a JSON
+    # array of skill names. None/empty = no per-task preloaded skills;
+    # dispatcher guidance is injected separately via KANBAN_GUIDANCE.
     skills: Optional[list] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
@@ -795,9 +794,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- them; the dispatcher doesn't consult them for routing yet.
     workflow_template_id TEXT,
     current_step_key     TEXT,
-    -- Force-loaded skills for the worker on this task, stored as JSON.
-    -- Appended to the dispatcher's built-in `--skills kanban-worker`.
-    -- NULL or empty array = no extras.
+    -- Force-loaded per-task skills, stored as JSON.
+    -- NULL or empty array = no per-task preloaded skills.
     skills               TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
@@ -1071,9 +1069,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "current_step_key", "current_step_key TEXT"
         )
     if "skills" not in cols:
-        # JSON array of skill names the dispatcher force-loads into the
-        # worker (additive to the built-in `kanban-worker`). NULL is fine
-        # for existing rows.
+        # JSON array of optional specialist skill names the dispatcher
+        # force-loads into the worker. Kanban lifecycle guidance is injected
+        # separately via KANBAN_GUIDANCE, so NULL is fine for existing rows.
         _add_column_if_missing(conn, "tasks", "skills", "skills TEXT")
 
     if "max_retries" not in cols:
@@ -1338,10 +1336,10 @@ def create_task(
 
     ``skills`` is an optional list of skill names to force-load into
     the worker when dispatched. Stored as JSON; the dispatcher passes
-    each name to ``hermes --skills ...`` alongside the built-in
-    ``kanban-worker``. Use this to pin a task to a specialist skill
-    (e.g. ``skills=["translation"]`` so the worker loads the
-    translation skill regardless of the profile's default config).
+    each name to ``hermes --skills ...``. Use this to pin a task to a
+    specialist skill (e.g. ``skills=["translation"]`` so the worker
+    loads the translation skill regardless of the profile's default
+    config).
     """
     assignee = _canonical_assignee(assignee)
     gate_audit = _coordinator_control_plane_gate_audit(
@@ -5524,23 +5522,16 @@ def _default_spawn(
     cmd = [
         *_resolve_hermes_argv(),
         "-p", profile_arg,
-        # Auto-load the kanban-worker skill so every dispatched worker
-        # has the pattern library (good summary/metadata shapes, retry
-        # diagnostics, block-reason examples) in its context, even if
-        # the profile hasn't wired it into skills config. The MANDATORY
-        # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
-        # this skill is the deeper reference. Users can point a profile
-        # at a different/additional skill via config if they want —
-        # --skills is additive to the profile's default skill set.
-        "--skills", "kanban-worker",
     ]
     # Per-task force-loaded skills. Each name goes in its own
     # `--skills X` pair rather than a single comma-joined arg: the CLI
     # accepts both forms (action='append' + comma-split), but
     # per-name pairs are easier to read in `ps` output and avoid any
     # quoting ambiguity if a skill name ever contains unusual chars.
-    # Dedupe against the built-in so we don't double-load kanban-worker
-    # if a task author asks for it explicitly.
+    # Do not force-load the old built-in `kanban-worker` skill here:
+    # profile-scoped + global skill bundles can collide and make the
+    # child exit before it can block its task. Mandatory Kanban lifecycle
+    # guidance is injected through KANBAN_GUIDANCE instead.
     if task.skills:
         for sk in task.skills:
             if sk and sk != "kanban-worker":

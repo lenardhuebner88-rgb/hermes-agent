@@ -1255,12 +1255,13 @@ KANBAN_CREATE_SCHEMA = {
                 "items": {"type": "string"},
                 "description": (
                     "Skill names to force-load into the dispatched "
-                    "worker (in addition to the built-in kanban-worker "
-                    "skill). Use this to pin a task to a specialist "
-                    "context — e.g. ['translation'] for a translation "
-                    "task, ['github-code-review'] for a reviewer task. "
-                    "The names must match skills installed on the "
-                    "assignee's profile."
+                    "worker. Kanban lifecycle guidance is injected "
+                    "separately by the dispatcher; do not pass "
+                    "'kanban-worker' here. Use this to pin a task to "
+                    "a specialist context — e.g. ['translation'] for "
+                    "a translation task, ['github-code-review'] for "
+                    "a reviewer task. The names must match skills "
+                    "installed on the assignee's profile."
                 ),
             },
             "control_plane_gate": {

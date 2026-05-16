@@ -2742,13 +2742,13 @@ def test_build_worker_context_caps_huge_summary(kanban_home):
         conn.close()
 
 
-def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
-    """The dispatcher's _default_spawn must include --skills kanban-worker
-    in its argv so every worker loads the skill automatically, even if
-    the profile hasn't wired it into its default skills config.
+def test_default_spawn_does_not_force_load_kanban_worker_skill(kanban_home, monkeypatch):
+    """Dispatcher must not inject `--skills kanban-worker` unconditionally.
 
-    We intercept Popen to capture the argv without actually spawning a
-    hermes subprocess (which would hang trying to call an LLM).
+    Reviewer profiles can have profile-local and global `kanban-worker` skill
+    bundles at the same time. Force-loading that skill makes the child CLI exit
+    on skill-name collision before it can produce a verdict or block the task.
+    Kanban lifecycle instructions are delivered through worker context instead.
     """
     captured = {}
 
@@ -2775,11 +2775,7 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
         conn.close()
 
     cmd = captured["cmd"]
-    assert "--skills" in cmd, f"spawn argv missing --skills: {cmd}"
-    idx = cmd.index("--skills")
-    assert cmd[idx + 1] == "kanban-worker", (
-        f"expected 'kanban-worker', got {cmd[idx + 1]!r}"
-    )
+    assert "--skills" not in cmd, f"spawn argv should not force-load skills: {cmd}"
     # Assignee + task env are still present
     assert "some-profile" in cmd
     env = captured["env"]
@@ -2895,8 +2891,7 @@ def test_create_task_skills_lists_all_toolset_typos(kanban_home):
 
 
 def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
-    """Dispatcher argv must carry one `--skills X` pair per task skill,
-    in addition to the built-in kanban-worker."""
+    """Dispatcher argv must carry one `--skills X` pair per non-reserved task skill."""
     captured = {}
 
     class FakeProc:
@@ -2929,10 +2924,8 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     for i, tok in enumerate(cmd):
         if tok == "--skills" and i + 1 < len(cmd):
             skill_names.append(cmd[i + 1])
-    # kanban-worker first (built-in), then per-task extras in order.
-    assert skill_names[0] == "kanban-worker", skill_names
-    assert "translation" in skill_names
-    assert "github-code-review" in skill_names
+    # Per-task extras only, in order. Reserved kanban-worker is not injected.
+    assert skill_names == ["translation", "github-code-review"]
     # --skills must appear BEFORE the `chat` subcommand so argparse
     # attaches them to the top-level parser, not the subcommand.
     chat_idx = cmd.index("chat")
@@ -2944,8 +2937,8 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     )
 
 
-def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monkeypatch):
-    """If a task explicitly lists 'kanban-worker', we don't double-pass it."""
+def test_default_spawn_drops_reserved_kanban_worker_from_task_skills(kanban_home, monkeypatch):
+    """If a task explicitly lists 'kanban-worker', do not pass it to child CLI."""
     captured = {}
 
     class FakeProc:
@@ -2974,9 +2967,41 @@ def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monke
         i for i, tok in enumerate(cmd)
         if tok == "--skills" and i + 1 < len(cmd) and cmd[i + 1] == "kanban-worker"
     ]
-    assert len(worker_pairs) == 1, (
-        f"kanban-worker appeared {len(worker_pairs)} times in argv: {cmd}"
+    assert len(worker_pairs) == 0, (
+        f"kanban-worker must not be passed in argv: {cmd}"
     )
+    assert [
+        cmd[i + 1] for i, tok in enumerate(cmd)
+        if tok == "--skills" and i + 1 < len(cmd)
+    ] == ["translation"]
+
+
+def test_default_spawn_drops_only_reserved_kanban_worker_skill(kanban_home, monkeypatch):
+    """All-reserved task skills produce no --skills argv entries."""
+    captured = {}
+
+    class FakeProc:
+        pid = 1
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="reserved", assignee="x", skills=["kanban-worker"]
+        )
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert "--skills" not in cmd, f"reserved skill should be omitted: {cmd}"
 
 
 def test_cli_create_skill_flag_repeatable(kanban_home):

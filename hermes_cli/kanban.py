@@ -294,10 +294,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--created-by", default="user",
                           help="Author name recorded on the task (default: user)")
     p_create.add_argument("--skill", action="append", default=[], dest="skills",
-                          help="Skill to force-load into the worker "
-                               "(repeatable). Appended to the built-in "
-                               "kanban-worker skill. Example: "
-                               "--skill translation --skill github-code-review")
+                          help="Optional specialist skill to force-load into "
+                               "the worker (repeatable). Do not pass "
+                               "kanban-worker; lifecycle guidance is injected "
+                               "separately. Example: --skill translation "
+                               "--skill github-code-review")
     p_create.add_argument("--max-retries", type=int, default=None,
                           metavar="N",
                           help="Per-task override for the consecutive-failure "
