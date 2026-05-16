@@ -864,6 +864,67 @@ def _handle_ensure_needs_revision_fix(args: dict, **kw) -> str:
         logger.exception("kanban_ensure_needs_revision_fix failed")
         return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
 
+def _handle_rewire_superseding_review(args: dict, **kw) -> str:
+    """Explicitly replace a superseded review parent edge with a new review."""
+    guard = _require_orchestrator_tool("kanban_rewire_superseding_review")
+    if guard:
+        return guard
+    required = ["source_task", "old_review_task", "new_review_task", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.rewire_superseding_review_parent(
+                conn,
+                source_task=str(args["source_task"]),
+                old_review_task=str(args["old_review_task"]),
+                new_review_task=str(args["new_review_task"]),
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_rewire_superseding_review failed")
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+
+
+def _handle_ensure_needs_revision_fix(args: dict, **kw) -> str:
+    """Create/return the deterministic fix task for a NEEDS_REVISION verdict."""
+    guard = _require_orchestrator_tool("kanban_ensure_needs_revision_fix")
+    if guard:
+        return guard
+    required = ["source_task", "review_task", "reviewer_metadata", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    reviewer_metadata = args.get("reviewer_metadata")
+    if not isinstance(reviewer_metadata, dict):
+        return tool_error("reviewer_metadata must be an object")
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.ensure_needs_revision_fix_task(
+                conn,
+                source_task=str(args["source_task"]),
+                review_task=str(args["review_task"]),
+                reviewer_metadata=reviewer_metadata,
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+    except Exception as e:
+        logger.exception("kanban_ensure_needs_revision_fix failed")
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+
+
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
     parent_id = args.get("parent_id")
