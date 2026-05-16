@@ -1190,6 +1190,120 @@ completion_policy:
 
 
 
+def test_superseding_review_rewire_helper_is_explicit_and_audited(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="source waiting on old review", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+        kb.link_tasks(conn, old_review, source)
+
+        result = kb.rewire_superseding_review_parent(
+            conn,
+            source_task=source,
+            old_review_task=old_review,
+            new_review_task=new_review,
+            reason="NEEDS_REVISION fixed and re-reviewed",
+        )
+
+        assert result == {
+            "source_task": source,
+            "old_review_task": old_review,
+            "new_review_task": new_review,
+            "old_parent_removed": True,
+            "new_parent_added": True,
+            "reason": "NEEDS_REVISION fixed and re-reviewed",
+        }
+        assert kb.parent_ids(conn, source) == [new_review]
+        events = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "superseding_review_rewired"
+        ]
+        assert len(events) == 1
+        assert events[0].payload == result
+
+
+def test_superseding_review_rewire_is_noop_without_old_edge(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+
+        result = kb.rewire_superseding_review_parent(
+            conn,
+            source_task=source,
+            old_review_task=old_review,
+            new_review_task=new_review,
+            reason="operator requested audit-only check",
+        )
+
+        assert result["old_parent_removed"] is False
+        assert result["new_parent_added"] is True
+        assert kb.parent_ids(conn, source) == [new_review]
+        event = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "superseding_review_rewired"
+        ][-1]
+        assert event.payload["old_parent_removed"] is False
+        assert event.payload["new_parent_added"] is True
+
+
+def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_blocked(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="implement lifecycle", assignee="coder")
+        kb.claim_task(conn, source)
+        run = kb.active_run(conn, source)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            source,
+            reason="review-required: implementation ready for verdict",
+            expected_run_id=run.id,
+        )
+        old_review = kb.create_task(conn, title="review implementation", assignee="reviewer")
+        reviewer_metadata = {
+            "verdict": "NEEDS_REVISION",
+            "blocking_findings": ["missing supersedes relation"],
+            "required_verification": ["pytest tests/hermes_cli/test_kanban_db.py -q"],
+            "evidence_audited": [source, old_review],
+            "residual_risk": "source must remain blocked until finalization gate",
+        }
+
+        first = kb.ensure_needs_revision_fix_task(
+            conn,
+            source_task=source,
+            review_task=old_review,
+            reviewer_metadata=reviewer_metadata,
+            reason="Reviewer requested deterministic fix",
+        )
+        second = kb.ensure_needs_revision_fix_task(
+            conn,
+            source_task=source,
+            review_task=old_review,
+            reviewer_metadata=reviewer_metadata,
+            reason="Reviewer requested deterministic fix",
+        )
+
+        assert second == first
+        fix = kb.get_task(conn, first["fix_task"])
+        assert fix is not None
+        assert fix.assignee == "coder"
+        assert fix.status == "ready"
+        assert kb.parent_ids(conn, fix.id) == []
+        assert "verdict: NEEDS_REVISION" in (fix.body or "")
+        assert "source remains blocked" in (fix.body or "")
+        assert kb.get_task(conn, source).status == "blocked"
+        events = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "needs_revision_fix_task_ensured"
+        ]
+        assert len(events) == 1
+        assert events[0].payload["source_task"] == source
+        assert events[0].payload["review_task"] == old_review
+        assert events[0].payload["fix_task"] == fix.id
+        assert events[0].payload["created"] is True
+
+
+
 def test_dispatch_iteration_budget_continuation_cap_blocks_loop(
     kanban_home, all_assignees_spawnable
 ):

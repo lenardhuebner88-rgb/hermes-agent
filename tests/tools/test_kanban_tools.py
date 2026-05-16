@@ -114,7 +114,8 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
         "kanban_show", "kanban_complete", "kanban_validate_created_cards",
         "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
-        "kanban_unblock",
+        "kanban_unblock", "kanban_update_profile_model",
+        "kanban_rewire_superseding_review", "kanban_ensure_needs_revision_fix",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -176,6 +177,101 @@ def test_show_explicit_task_id(worker_env):
     out = kt._handle_show({"task_id": other})
     d = json.loads(out)
     assert d["task"]["id"] == other
+
+
+def test_rewire_superseding_review_tool_returns_audit_payload(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = os.environ["HERMES_HOME"]
+    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("toolsets:\n  - kanban\n")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    conn = kb.connect()
+    try:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+        kb.link_tasks(conn, old_review, source)
+    finally:
+        conn.close()
+
+    out = kt._handle_rewire_superseding_review({
+        "source_task": source,
+        "old_review_task": old_review,
+        "new_review_task": new_review,
+        "reason": "new review supersedes NEEDS_REVISION",
+    })
+    data = json.loads(out)
+
+    assert data["source_task"] == source
+    assert data["old_parent_removed"] is True
+    assert data["new_parent_added"] is True
+
+
+def test_ensure_needs_revision_fix_tool_is_idempotent(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = os.environ["HERMES_HOME"]
+    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("toolsets:\n  - kanban\n")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    conn = kb.connect()
+    try:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        review = kb.create_task(conn, title="review", assignee="reviewer")
+    finally:
+        conn.close()
+    args = {
+        "source_task": source,
+        "review_task": review,
+        "reviewer_metadata": {
+            "verdict": "NEEDS_REVISION",
+            "blocking_findings": ["missing tests"],
+            "required_verification": ["pytest targeted -q"],
+        },
+        "reason": "Reviewer requested fix",
+    }
+
+    first = json.loads(kt._handle_ensure_needs_revision_fix(args))
+    second = json.loads(kt._handle_ensure_needs_revision_fix(args))
+
+    assert second == first
+    assert first["source_task"] == source
+    assert first["review_task"] == review
+    assert first["fix_task"].startswith("t_")
+
+
+
+def test_review_lane_tool_returns_fastlane_skip_and_standard_require_flags():
+    """kanban_review_lane exposes no-mutation review-skip/require behavior."""
+    from tools import kanban_tools as kt
+
+    fastlane = json.loads(kt._handle_review_lane({
+        "title": "Tweak kanban copy",
+        "body": "Small wording-only change.",
+    }))
+    assert fastlane["lane"] == "FASTLANE_KANBAN"
+    assert fastlane["hub_coordinator_evidence_check_required"] is True
+    assert fastlane["reviewer_a_required"] is False
+    assert fastlane["reviewer_b_required"] is False
+
+    standard = json.loads(kt._handle_review_lane({
+        "title": "Adjust dispatcher lifecycle",
+        "body": "Non-trivial lifecycle behavior change.",
+    }))
+    assert standard["lane"] == "STANDARD_REVIEW"
+    assert standard["hub_coordinator_evidence_check_required"] is False
+    assert standard["reviewer_a_required"] is False
+    assert standard["reviewer_b_required"] is True
+
+    critical = json.loads(kt._handle_review_lane({
+        "title": "Activate gateway runtime",
+        "body": "Add gateway-runtime activation.",
+    }))
+    assert critical["lane"] == "CRITICAL_REVIEW"
+    assert critical["hub_coordinator_evidence_check_required"] is False
+    assert critical["reviewer_a_required"] is True
+    assert critical["reviewer_b_required"] is True
 
 
 def test_list_filters_tasks(monkeypatch, worker_env):

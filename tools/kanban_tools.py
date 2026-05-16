@@ -764,6 +764,91 @@ def _handle_unblock(args: dict, **kw) -> str:
         return tool_error(f"kanban_unblock: {e}")
 
 
+def _handle_update_profile_model(args: dict, **kw) -> str:
+    """Transactionally switch a profile's model/provider config."""
+    guard = _require_orchestrator_tool("kanban_update_profile_model")
+    if guard:
+        return guard
+    profile = args.get("profile")
+    provider = args.get("provider")
+    model = args.get("model")
+    if not profile:
+        return tool_error("profile is required")
+    if not provider:
+        return tool_error("provider is required")
+    if not model:
+        return tool_error("model is required")
+    try:
+        from hermes_cli import kanban_db as kb
+
+        receipt = kb.kanban_update_profile_model(str(profile), str(provider), str(model))
+        return _ok(receipt=receipt)
+    except Exception as e:
+        logger.exception("kanban_update_profile_model failed")
+        return tool_error(f"kanban_update_profile_model: {e}")
+
+
+def _handle_rewire_superseding_review(args: dict, **kw) -> str:
+    """Explicitly replace a superseded review parent edge with a new review."""
+    guard = _require_orchestrator_tool("kanban_rewire_superseding_review")
+    if guard:
+        return guard
+    required = ["source_task", "old_review_task", "new_review_task", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.rewire_superseding_review_parent(
+                conn,
+                source_task=str(args["source_task"]),
+                old_review_task=str(args["old_review_task"]),
+                new_review_task=str(args["new_review_task"]),
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_rewire_superseding_review failed")
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+
+
+def _handle_ensure_needs_revision_fix(args: dict, **kw) -> str:
+    """Create/return the deterministic fix task for a NEEDS_REVISION verdict."""
+    guard = _require_orchestrator_tool("kanban_ensure_needs_revision_fix")
+    if guard:
+        return guard
+    required = ["source_task", "review_task", "reviewer_metadata", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    reviewer_metadata = args.get("reviewer_metadata")
+    if not isinstance(reviewer_metadata, dict):
+        return tool_error("reviewer_metadata must be an object")
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.ensure_needs_revision_fix_task(
+                conn,
+                source_task=str(args["source_task"]),
+                review_task=str(args["review_task"]),
+                reviewer_metadata=reviewer_metadata,
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+    except Exception as e:
+        logger.exception("kanban_ensure_needs_revision_fix failed")
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+
+
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
     parent_id = args.get("parent_id")
@@ -1196,6 +1281,75 @@ KANBAN_UNBLOCK_SCHEMA = {
     },
 }
 
+KANBAN_UPDATE_PROFILE_MODEL_SCHEMA = {
+    "name": "kanban_update_profile_model",
+    "description": (
+        "Transactionally update a Hermes profile's model.provider and "
+        "model.default config keys with backup-before-mutation, YAML "
+        "pre/post parse checks, semantic postcheck, atomic write, rollback "
+        "on failure, and a receipt-shaped return payload. Orchestrator-only "
+        "— dispatcher-spawned task workers never see this tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "description": "Target Hermes profile name (e.g. 'coder', 'reviewer').",
+            },
+            "provider": {
+                "type": "string",
+                "description": "New model.provider value to write.",
+            },
+            "model": {
+                "type": "string",
+                "description": "New model.default value to write.",
+            },
+        },
+        "required": ["profile", "provider", "model"],
+    },
+}
+
+KANBAN_REWIRE_SUPERSEDING_REVIEW_SCHEMA = {
+    "name": "kanban_rewire_superseding_review",
+    "description": (
+        "Orchestrator-only explicit helper for first-class superseding review "
+        "relations. Removes the old review parent edge from source_task, adds "
+        "new_review_task as the parent, and writes an audit event with "
+        "source_task, old_review_task, new_review_task, old_parent_removed, "
+        "new_parent_added, and reason. Does not unblock or complete the source."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source_task": {"type": "string", "description": "Task whose parent review edge is rewired."},
+            "old_review_task": {"type": "string", "description": "Superseded review task id."},
+            "new_review_task": {"type": "string", "description": "Superseding review task id."},
+            "reason": {"type": "string", "description": "Human-readable audit reason."},
+        },
+        "required": ["source_task", "old_review_task", "new_review_task", "reason"],
+    },
+}
+
+KANBAN_ENSURE_NEEDS_REVISION_FIX_SCHEMA = {
+    "name": "kanban_ensure_needs_revision_fix",
+    "description": (
+        "Orchestrator-only helper that deterministically creates or returns the "
+        "idempotent fix task for a Reviewer NEEDS_REVISION verdict. The source "
+        "task remains blocked/pending until a later explicit finalization gate."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source_task": {"type": "string", "description": "Original source task id."},
+            "review_task": {"type": "string", "description": "Reviewer task that returned NEEDS_REVISION."},
+            "reviewer_metadata": {"type": "object", "description": "Reviewer metadata with verdict=NEEDS_REVISION."},
+            "reason": {"type": "string", "description": "Audit reason for creating/returning the fix task."},
+        },
+        "required": ["source_task", "review_task", "reviewer_metadata", "reason"],
+    },
+}
+
 KANBAN_LINK_SCHEMA = {
     "name": "kanban_link",
     "description": (
@@ -1297,6 +1451,33 @@ registry.register(
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="▶",
+)
+
+registry.register(
+    name="kanban_update_profile_model",
+    toolset="kanban",
+    schema=KANBAN_UPDATE_PROFILE_MODEL_SCHEMA,
+    handler=_handle_update_profile_model,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🧭",
+)
+
+registry.register(
+    name="kanban_rewire_superseding_review",
+    toolset="kanban",
+    schema=KANBAN_REWIRE_SUPERSEDING_REVIEW_SCHEMA,
+    handler=_handle_rewire_superseding_review,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🔀",
+)
+
+registry.register(
+    name="kanban_ensure_needs_revision_fix",
+    toolset="kanban",
+    schema=KANBAN_ENSURE_NEEDS_REVISION_FIX_SCHEMA,
+    handler=_handle_ensure_needs_revision_fix,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🛠",
 )
 
 registry.register(
