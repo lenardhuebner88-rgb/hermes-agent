@@ -838,6 +838,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 # This replaces the older DISCORD_IGNORE_NO_MENTION logic
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
+                #
+                # Finding F-2026-05-17-01 (Reactor-Matrix v1 row 21): a sibling
+                # bot @-mention does NOT trigger this gateway; the canonical
+                # cross-bot pickup path is the C4 pickup queue (Hub-Watcher
+                # converts coord-authored signals into hub TASKs). This is
+                # by-design: rejecting cross-bot mentions keeps the LLM cost
+                # boundary tight and avoids accidental N-bot reply storms.
+                # See tests/gateway/test_discord_cross_bot_filter.py.
                 if not isinstance(message.channel, discord.DMChannel) and message.mentions:
                     _self_mentioned = (
                         self._client.user is not None

@@ -3089,6 +3089,158 @@ def _latest_dispatch_preflight_effective_toolsets(
     return [str(item) for item in effective]
 
 
+def _scope_contract_version(body: Optional[str]) -> Optional[int]:
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict):
+        return None
+    try:
+        return int(contract.get("version"))
+    except (TypeError, ValueError):
+        return None
+
+
+def kanban_completion_template(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """Return a deterministic no-mutation completion metadata skeleton.
+
+    The template is intentionally conservative: it includes the required
+    scope-attestation fields and the latest dispatcher effective tool list when
+    available, otherwise it falls back to the task body's
+    ``scope_contract.allowed_tools`` and emits a diagnostic. It never writes to
+    the board.
+    """
+    row = conn.execute(
+        "SELECT id, body, assignee FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "mutated": False,
+            "diagnostic": {
+                "code": "task_not_found",
+                "message": f"Task not found: {task_id}",
+            },
+            "metadata": None,
+            "effective_toolsets_source": "unavailable",
+        }
+
+    body = row["body"]
+    assignee = row["assignee"] if "assignee" in row.keys() else None
+    version = _scope_contract_version(body) or 2
+    scope_contract_read = _selected_scope_contract(body) is not None
+    preflight_effective = _latest_dispatch_preflight_effective_toolsets(conn, task_id)
+    contract_effective = _scope_contract_allowed_tools(body)
+    diagnostic: Optional[dict[str, str]] = None
+    effective_source = "unavailable"
+    effective_toolsets: Optional[list[str]] = None
+
+    if preflight_effective is not None:
+        # F-2026-05-17-02: the dispatch event records the unfiltered runtime
+        # tool list (worker has access via kanban-effective override). For the
+        # metadata-record path we apply the profile filter so the drift
+        # detector compares apples-to-apples with the profile's declared
+        # surface and does not re-surface dispatcher-overridden tools.
+        try:
+            filtered_preflight = _filter_tool_names_by_profile_disabled(
+                preflight_effective,
+                profile=assignee,
+            )
+        except Exception:
+            filtered_preflight = list(preflight_effective)
+        if filtered_preflight and filtered_preflight != preflight_effective:
+            effective_toolsets = filtered_preflight
+            effective_source = "filtered_preflight_by_profile"
+        elif filtered_preflight:
+            effective_toolsets = filtered_preflight
+            effective_source = "dispatch_preflight_passed"
+        else:
+            # All preflight tools were profile-disabled. Keep the raw preflight
+            # list so validation can still match the event payload, but stamp
+            # a marker so auditors know the filter produced an empty set.
+            effective_toolsets = list(preflight_effective)
+            effective_source = "fallback_preflight_all_profile_disabled"
+    elif contract_effective is not None:
+        raw_contract = [str(item) for item in contract_effective]
+        # Finding F-2026-05-17-02 fallback path: no dispatch_preflight_passed
+        # event found — run the contract through the profile filter directly.
+        try:
+            filtered_contract = _filter_tool_names_by_profile_disabled(
+                raw_contract,
+                profile=assignee,
+            )
+        except Exception:
+            filtered_contract = list(raw_contract)
+        if filtered_contract and filtered_contract != raw_contract:
+            effective_toolsets = filtered_contract
+            effective_source = "filtered_contract_by_profile"
+        else:
+            effective_toolsets = raw_contract
+            # Preserve backwards-compatible source label when the filter was a
+            # no-op (no profile, no overlap, or filter unavailable). Existing
+            # consumers compare against "scope_contract.allowed_tools".
+            effective_source = "scope_contract.allowed_tools"
+        diagnostic = {
+            "code": "dispatch_preflight_missing",
+            "message": (
+                "No dispatch_preflight_passed event found; effective_toolsets "
+                "fell back to scope_contract.allowed_tools."
+            ),
+        }
+    else:
+        diagnostic = {
+            "code": "effective_toolsets_unavailable",
+            "message": (
+                "No dispatch_preflight_passed event or "
+                "scope_contract.allowed_tools found; fill effective_toolsets "
+                "manually if this completion requires it."
+            ),
+        }
+
+    metadata: dict[str, Any] = {
+        "scope_contract_read": scope_contract_read,
+        "scope_contract_version": version,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    }
+    if effective_toolsets is not None:
+        metadata["effective_toolsets"] = effective_toolsets
+    # F-2026-05-17-02: stamp a source marker on metadata when the filter path
+    # was traversed, so auditors and the drift detector can tell whether the
+    # list is profile-aligned. Values added by F-02:
+    # ``filtered_preflight_by_profile`` (filtered runtime list — clean)
+    # ``filtered_contract_by_profile`` (no-preflight fallback, filtered)
+    # ``fallback_preflight_all_profile_disabled`` (profile disabled everything)
+    # Legacy values (``dispatch_preflight_passed`` / ``scope_contract.allowed_tools``)
+    # are left out of metadata to preserve the pre-patch on-disk shape.
+    if effective_source in {
+        "filtered_preflight_by_profile",
+        "filtered_contract_by_profile",
+        "fallback_preflight_all_profile_disabled",
+    }:
+        metadata["effective_toolsets_source"] = effective_source
+    metadata.update(
+        {
+            "changed_files": [],
+            "tests": [],
+            "commands": [],
+            "non_actions": [],
+            "residual_risk": "",
+            "commit_hash": "not_committed",
+        }
+    )
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "mutated": False,
+        "requires_scope_attestation": _body_requires_scope_attestation(body),
+        "diagnostic": diagnostic,
+        "metadata": metadata,
+        "effective_toolsets_source": effective_source,
+    }
+
+
 def _validate_required_scope_attestation(
     metadata: Optional[dict],
     body: Optional[str] = None,
@@ -3111,11 +3263,34 @@ def _validate_required_scope_attestation(
     if not _metadata_truthy(metadata, "scope_attestation"):
         missing.append("scope_attestation = true")
     expected_effective = _scope_contract_allowed_tools(body)
+    assignee_for_filter: Optional[str] = None
     if conn is not None and task_id:
         expected_effective = (
             _latest_dispatch_preflight_effective_toolsets(conn, task_id)
             or expected_effective
         )
+        try:
+            row = conn.execute(
+                "SELECT assignee FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is not None:
+                assignee_for_filter = row["assignee"] if "assignee" in row.keys() else None
+        except Exception:
+            assignee_for_filter = None
+    # F-2026-05-17-02: align expected with the kanban_completion_template path
+    # — both apply the profile filter so worker-submitted metadata that excludes
+    # profile-disabled tools is treated as valid (not a mismatch).
+    if expected_effective is not None and assignee_for_filter:
+        try:
+            filtered_expected = _filter_tool_names_by_profile_disabled(
+                [str(item) for item in expected_effective],
+                profile=assignee_for_filter,
+            )
+            if filtered_expected:
+                expected_effective = filtered_expected
+        except Exception:
+            pass
     if expected_effective is not None:
         effective = metadata.get("effective_toolsets")
         if not isinstance(effective, list) or not effective:
@@ -3733,6 +3908,47 @@ DEFAULT_FAILURE_LIMIT = 2
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
+# C2 Backoff-Sleep Enforcement (followup-2026-05-17 §2).
+# Must stay aligned with manifest:
+# ~/.hermes/policies/standing-approvals.yaml
+# approvals.coordinator.auto_retry_worker.caps.backoff_sec.
+_RETRY_AFTER_BACKOFF_SEC = (30, 120)
+_RETRY_AFTER_TAG = "; retry_after="
+
+
+def _retry_after_ts_from_error(err):
+    """Parse the ``; retry_after=<unix-ts>`` suffix from a
+    ``tasks.last_failure_error`` value. Returns the integer timestamp or
+    ``None`` when absent / malformed."""
+    if not err or _RETRY_AFTER_TAG not in err:
+        return None
+    suffix = err.rsplit(_RETRY_AFTER_TAG, 1)[1].strip()
+    try:
+        return int(suffix.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _stamp_retry_after(err, ts):
+    """Append (or replace) ``; retry_after=<ts>`` on a
+    ``last_failure_error`` string. Caps total length at 500 chars to
+    match column constraints."""
+    base = err or ""
+    if _RETRY_AFTER_TAG in base:
+        base = base.rsplit(_RETRY_AFTER_TAG, 1)[0]
+    stamped = base.rstrip() + _RETRY_AFTER_TAG + str(int(ts))
+    return stamped[:500]
+
+
+def _backoff_sec_for_failure(failures):
+    """Backoff seconds to wait before next claim, based on the new
+    ``consecutive_failures`` count (1-based). Falls through to the last
+    schedule entry once failures exceed the table length."""
+    if failures <= 0:
+        return 0
+    idx = min(int(failures) - 1, len(_RETRY_AFTER_BACKOFF_SEC) - 1)
+    return int(_RETRY_AFTER_BACKOFF_SEC[idx])
+
 # Max bytes to keep in a single worker log file. The dispatcher truncates
 # and rotates on spawn if the file is larger than this at spawn time.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
@@ -3768,6 +3984,8 @@ class DispatchResult:
     """Blocked task ids left parked because the iteration-budget continuation cap was reached."""
     preflight_blocked: list[str] = field(default_factory=list)
     """Task ids blocked before claim/spawn because they failed dispatcher preflight."""
+    retry_deferred: list[str] = field(default_factory=list)
+    """Task ids skipped this tick because their retry_after window is still in the future (C2 backoff)."""
 
 
 def _selected_scope_contract(body: Optional[str]) -> Optional[dict]:
@@ -3908,10 +4126,80 @@ def _temporary_env(updates: dict[str, Optional[str]]):
                 os.environ[key] = value  # type: ignore[assignment]
 
 
+def _filter_tool_names_by_profile_disabled(
+    tool_names: list[str],
+    profile: Optional[str],
+) -> list[str]:
+    """Drop tool names whose owning toolset is in ``profile.agent.disabled_toolsets``.
+
+    Finding F-2026-05-17-02: the dispatcher's kanban-effective filter (model_tools.py)
+    deliberately overrides profile-level disabled_toolsets so worker spawns can still
+    use dispatcher-approved coordination tools. The recorded ``effective_toolsets``,
+    however, is consumed by ``capability_drift_detector`` — recording dispatcher-
+    overridden but profile-disabled tools causes recurring false-positive drift
+    after every cron tick. This helper produces the metadata-recording subset that
+    aligns drift detection with the worker's profile-declared surface.
+    """
+    if not tool_names:
+        return []
+    requested = [str(n).strip() for n in tool_names if str(n).strip()]
+    if not profile or not requested:
+        return requested
+    disabled_toolset_names = _load_profile_disabled_toolsets(profile)
+    if not disabled_toolset_names:
+        return requested
+    try:
+        import tools.kanban_tools  # noqa: F401
+        from toolsets import resolve_toolset, validate_toolset
+    except Exception:
+        return requested
+    disabled_tool_names: set[str] = set()
+    for ts_name in disabled_toolset_names:
+        try:
+            if validate_toolset(ts_name):
+                disabled_tool_names.update(resolve_toolset(ts_name))
+        except Exception:
+            continue
+    return [name for name in requested if name not in disabled_tool_names]
+
+
+def _load_profile_disabled_toolsets(profile: Optional[str]) -> list[str]:
+    """Return ``agent.disabled_toolsets`` for a profile, or ``[]`` if unavailable.
+
+    Finding F-2026-05-17-02 (Reactor-Matrix v1): the resolver must honor the
+    profile's disabled_toolsets so the recorded ``effective_toolsets`` matches
+    what the worker can actually invoke at runtime, not the broader contract
+    declaration.
+    """
+    if not profile:
+        return []
+    try:
+        _canon, profile_cfg_path = _profile_config_path(profile)
+    except Exception:
+        return []
+    try:
+        if not profile_cfg_path.exists():
+            return []
+        cfg = _parse_yaml_mapping(
+            profile_cfg_path.read_text(encoding="utf-8"),
+            source=profile_cfg_path,
+        )
+    except Exception:
+        return []
+    agent_section = cfg.get("agent") if isinstance(cfg, dict) else None
+    if not isinstance(agent_section, dict):
+        return []
+    raw = agent_section.get("disabled_toolsets") or []
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def _resolve_scope_runtime_tool_schema_names(
     allowed_toolsets: list[str],
     *,
     task_id: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> list[str]:
     """Resolve the model-native worker schema for a scoped allowlist.
 
@@ -3920,10 +4208,16 @@ def _resolve_scope_runtime_tool_schema_names(
     build in a Kanban task context after registry ``check_fn`` filtering. Use
     that same runtime path here so dispatcher preflight blocks before spawn if
     a declared lifecycle tool is not present in the real worker schema.
+
+    When ``profile`` is provided, the profile's ``agent.disabled_toolsets`` is
+    threaded into ``get_tool_definitions`` so disabled toolsets are filtered
+    out of the resolved schema (matches the worker's actual runtime surface).
     """
     requested = [str(name).strip() for name in (allowed_toolsets or []) if str(name).strip()]
     if not requested:
         return []
+
+    profile_disabled = _load_profile_disabled_toolsets(profile)
 
     try:
         # Importing the tool module is idempotent and ensures module-level
@@ -3944,7 +4238,11 @@ def _resolve_scope_runtime_tool_schema_names(
         invalidate_check_fn_cache()
         _clear_tool_defs_cache()
         try:
-            schemas = get_tool_definitions(enabled_toolsets=[], disabled_toolsets=[], quiet_mode=True)
+            schemas = get_tool_definitions(
+                enabled_toolsets=[],
+                disabled_toolsets=profile_disabled,
+                quiet_mode=True,
+            )
         finally:
             _clear_tool_defs_cache()
             invalidate_check_fn_cache()
@@ -5218,7 +5516,11 @@ def _record_task_failure(
             )
             blocked = True
         else:
-            # Below threshold.
+            # Below threshold — task will retry. Stamp a backoff window
+            # via ``last_failure_error`` suffix (``; retry_after=<ts>``)
+            # so ``dispatch_once`` skips it until the window passes.
+            retry_after_ts = int(time.time()) + _backoff_sec_for_failure(failures)
+            stamped_error = _stamp_retry_after(error[:500], retry_after_ts)
             if release_claim:
                 # Spawn path: transition running → ready + clear claim.
                 conn.execute(
@@ -5226,7 +5528,7 @@ def _record_task_failure(
                     "claim_expires = NULL, worker_pid = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status = 'running'",
-                    (failures, error[:500], task_id),
+                    (failures, stamped_error, task_id),
                 )
             else:
                 # Timeout/crash path: task is already at ``ready`` via
@@ -5234,7 +5536,7 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET consecutive_failures = ?, "
                     "last_failure_error = ? WHERE id = ?",
-                    (failures, error[:500], task_id),
+                    (failures, stamped_error, task_id),
                 )
             if end_run:
                 # Spawn path: close the open run with outcome.
@@ -5464,6 +5766,22 @@ def dispatch_once(
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    # C2 Backoff: skip tasks whose last_failure_error carries a
+    # ``; retry_after=<ts>`` suffix that is still in the future. Tasks
+    # without a stamp (the common case) pass through unaffected. Filter
+    # in Python rather than SQL so the parsing stays in one place.
+    _retry_now_ts = int(time.time())
+    _retry_deferred = []
+    _ready_filtered = []
+    for _row in ready_rows:
+        _ts = _retry_after_ts_from_error(_row["last_failure_error"])
+        if _ts is not None and _ts > _retry_now_ts:
+            _retry_deferred.append(_row["id"])
+            continue
+        _ready_filtered.append(_row)
+    if _retry_deferred:
+        result.retry_deferred = list(_retry_deferred)
+    ready_rows = _ready_filtered
     spawned = 0
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
