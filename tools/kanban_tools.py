@@ -473,6 +473,24 @@ def _handle_validate_created_cards(args: dict, **kw) -> str:
         return tool_error(f"kanban_validate_created_cards: {e}")
 
 
+def _handle_completion_template(args: dict, **kw) -> str:
+    """Return the deterministic no-mutation completion metadata template."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    try:
+        kb, conn = _connect()
+        try:
+            return json.dumps(kb.kanban_completion_template(conn, tid))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("kanban_completion_template failed")
+        return tool_error(f"kanban_completion_template: {e}")
+
+
 def _handle_review_lane(args: dict, **kw) -> str:
     """Return the no-mutation review lane decision for a planned Kanban task."""
     try:
@@ -1118,6 +1136,27 @@ KANBAN_VALIDATE_CREATED_CARDS_SCHEMA = {
     },
 }
 
+KANBAN_COMPLETION_TEMPLATE_SCHEMA = {
+    "name": "kanban_completion_template",
+    "description": (
+        "Return the deterministic no-mutation metadata skeleton required for "
+        "kanban_complete on scope-attested tasks. Use this before completing "
+        "a task with completion_policy.require_scope_attestation=true so the "
+        "effective_toolsets value matches the dispatcher preflight or scope "
+        "contract fallback exactly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+        },
+        "required": [],
+    },
+}
+
 KANBAN_BLOCK_SCHEMA = {
     "name": "kanban_block",
     "description": (
@@ -1517,6 +1556,15 @@ registry.register(
     handler=_handle_validate_created_cards,
     check_fn=_check_kanban_mode,
     emoji="🔎",
+)
+
+registry.register(
+    name="kanban_completion_template",
+    toolset="kanban",
+    schema=KANBAN_COMPLETION_TEMPLATE_SCHEMA,
+    handler=_handle_completion_template,
+    check_fn=_check_kanban_mode,
+    emoji="🧩",
 )
 
 registry.register(

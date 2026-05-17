@@ -57,6 +57,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_completion_template", "kanban_review_lane",
         "kanban_block", "kanban_heartbeat", "kanban_comment",
         "kanban_create", "kanban_link", "kanban_run_workspace_command",
     }
@@ -113,6 +114,7 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     expected = {
         "kanban_list",
         "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_completion_template", "kanban_review_lane",
         "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
         "kanban_unblock", "kanban_update_profile_model",
@@ -164,6 +166,17 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert d["task"]["status"] == "running"
     assert "worker_context" in d
     assert "runs" in d
+
+
+def test_completion_template_defaults_to_env_task_id(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_completion_template({})
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["task_id"] == worker_env
+    assert d["mutated"] is False
+    assert d["metadata"]["scope_attestation"] is True
+    assert d["metadata"]["forbidden_actions_taken"] == 0
 
 
 def test_show_explicit_task_id(worker_env):
