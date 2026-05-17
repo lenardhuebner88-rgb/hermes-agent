@@ -26,22 +26,6 @@ from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import run_slash
 
 
-def _expire_retry_after(conn, task_id: str) -> None:
-    """Make a below-threshold retry immediately eligible for legacy dispatch tests.
-
-    The production dispatcher now stamps spawn/workspace failures with a
-    ``retry_after`` backoff window. Older circuit-breaker tests still exercise
-    consecutive failure accounting by running multiple dispatch ticks in a tight
-    loop, so they must explicitly advance the per-task retry gate instead of
-    relying on real time.
-    """
-    with kb.write_txn(conn):
-        conn.execute(
-            "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
-            (kb._stamp_retry_after("test retry window elapsed", int(time.time()) - 1), task_id),
-        )
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -54,6 +38,17 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
+
+
+def _expire_retry_after(conn, task_id: str) -> None:
+    """Make a backoff-held ready task eligible for the next test tick."""
+    task = kb.get_task(conn, task_id)
+    if task and task.last_failure_error:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+                (kb._stamp_retry_after(task.last_failure_error, int(time.time()) - 1), task_id),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +109,8 @@ def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawna
         assert task.status == "ready"
         assert task.consecutive_failures == 1
 
+        # Second default-limit failure trips the guard after the retry window.
         _expire_retry_after(conn, tid)
-        # Second default-limit failure trips the guard.
         res2 = kb.dispatch_once(conn, spawn_fn=_bad_spawn)
         assert tid in res2.auto_blocked
         task = kb.get_task(conn, tid)
@@ -144,7 +139,7 @@ def test_successful_spawn_does_not_reset_failure_counter(kanban_home, all_assign
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        # Two failures + one success.
+        # Two failures + one success, with retry-after windows elapsed.
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
         _expire_retry_after(conn, tid)
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
@@ -360,7 +355,7 @@ def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spa
         assert task.consecutive_failures == 1
         assert task.status == "ready"
         assert task.last_failure_error and "workspace" in task.last_failure_error
-        # Run twice more → auto-blocked.
+        # Run twice more after retry windows elapse → auto-blocked.
         _expire_retry_after(conn, tid)
         kb.dispatch_once(conn, failure_limit=3)
         _expire_retry_after(conn, tid)
@@ -1213,10 +1208,10 @@ def test_spawn_failure_circuit_breaker_emits_gave_up(kanban_home, all_assignees_
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(4):
+        for i in range(5):
+            if i:
+                _expire_retry_after(conn, tid)
             kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
-            _expire_retry_after(conn, tid)
-        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
         events = kb.list_events(conn, tid)
         kinds = [e.kind for e in events]
         assert "gave_up" in kinds
@@ -1731,10 +1726,10 @@ def test_run_on_spawn_failure_records_failed_runs(kanban_home, all_assignees_spa
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(4):
+        for i in range(5):
+            if i:
+                _expire_retry_after(conn, tid)
             kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
-            _expire_retry_after(conn, tid)
-        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
 
         runs = kb.list_runs(conn, tid)
         # 5 claim attempts → 5 runs. Final one is gave_up, earlier ones

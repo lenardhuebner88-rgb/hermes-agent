@@ -5697,7 +5697,7 @@ def _resolve_scope_runtime_tool_schema_names(
         _clear_tool_defs_cache()
         try:
             schemas = get_tool_definitions(
-                enabled_toolsets=[],
+                enabled_toolsets=None,
                 disabled_toolsets=profile_disabled,
                 quiet_mode=True,
             )
