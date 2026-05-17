@@ -25,16 +25,30 @@ from hermes_cli.main import cmd_update
 
 @pytest.fixture(autouse=True)
 def _no_restart_verify_sleep(monkeypatch):
-    """hermes_cli/main.py uses time.sleep(3) after systemctl restart to
-    verify the service survived. Tests mock subprocess.run — nothing
-    actually restarts — so the 3s wait is dead time.
+    """Make mocked restart-verification polls deterministic and fast.
 
-    main.py does ``import time as _time`` at both module level (line 167)
-    and inside functions (lines 3281, 4384, 4401). Patching the global
-    ``time.sleep`` affects only the duration of this test.
+    ``cmd_update`` polls ``systemctl is-active`` until ``time.monotonic()``
+    crosses the deadline, sleeping between checks. These tests mock
+    ``subprocess.run`` — no service can actually change state — so real
+    poll deadlines only burn the per-test timeout and can make the xdist
+    suite flaky. Advance a local fake monotonic clock whenever the code
+    sleeps so timeout branches are exercised immediately without changing
+    the production retry logic.
     """
-    import time as _real_time
-    monkeypatch.setattr(_real_time, "sleep", lambda *_a, **_k: None)
+    fake_clock = {"now": 0.0}
+
+    def fake_monotonic():
+        fake_clock["now"] += 0.5
+        return fake_clock["now"]
+
+    def fake_sleep(seconds=0, *_a, **_k):
+        try:
+            fake_clock["now"] += float(seconds)
+        except (TypeError, ValueError):
+            fake_clock["now"] += 0.5
+
+    monkeypatch.setattr(cli_main._time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(cli_main._time, "sleep", fake_sleep)
 
 
 # ---------------------------------------------------------------------------
