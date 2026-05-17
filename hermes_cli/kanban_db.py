@@ -2930,6 +2930,35 @@ def _normalized_review_lane(value: Any) -> Optional[str]:
     return lane if lane in KANBAN_REVIEW_LANES else None
 
 
+def _explicit_manual_review_pipeline(body: Optional[str]) -> bool:
+    """Return True when task policy opts out of dispatcher Reviewer-B auto-creation.
+
+    STANDARD_REVIEW supports exactly one review path: either Coordinator/Planner
+    creates an explicit/manual reviewer pipeline, or the dispatcher creates the
+    default Reviewer-B child. These structured policy keys make the manual path
+    explicit for taskgraphs that do not pre-create the reviewer child.
+    """
+    review_pipeline = _selected_policy_value(body, "review_pipeline")
+    if isinstance(review_pipeline, str) and review_pipeline.strip().casefold() in {
+        "manual",
+        "manual_review",
+        "manual-review",
+        "manual_reviewer",
+        "manual-reviewer",
+    }:
+        return True
+
+    auto_reviewer_b = _selected_policy_value(body, "auto_reviewer_b")
+    if isinstance(auto_reviewer_b, bool):
+        return not auto_reviewer_b
+    if isinstance(auto_reviewer_b, (int, float)):
+        return auto_reviewer_b == 0
+    if isinstance(auto_reviewer_b, str):
+        return auto_reviewer_b.strip().casefold() in {"false", "no", "0", "off", "disabled"}
+
+    return False
+
+
 def _without_scope_negative_declarations(text: str, contract: dict[str, Any]) -> str:
     """Remove negative scope declarations before free-text risk matching.
 
@@ -4361,6 +4390,7 @@ _REVIEW_REQUIRED_REVIEWER_ALLOWED_TOOLS = [
     "kanban_block",
 ]
 _AUTO_REVIEWER_CHILD_EVENT = "dispatch_auto_reviewer_child_created"
+_AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT = "dispatch_auto_reviewer_child_suppressed"
 _AUTO_REVIEWER_COMMENT_AUTHOR = "kanban-dispatcher"
 _AUTO_REVIEWER_MAX_RUNTIME_SECONDS = 12 * 60
 _AUTO_REVIEWER_MAX_RETRIES = 1
@@ -4661,6 +4691,8 @@ def _dispatch_standard_review_children(conn: sqlite3.Connection) -> list[str]:
             continue
         if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
             continue
+        if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT, run.id):
+            continue
 
         changed_paths: list[str] = []
         if isinstance(run.metadata, dict):
@@ -4675,6 +4707,35 @@ def _dispatch_standard_review_children(conn: sqlite3.Connection) -> list[str]:
         )
         lane = str(lane_result.get("lane") or "").strip().upper()
         if lane != "STANDARD_REVIEW":
+            continue
+
+        manual_reviewer_children = _legacy_parent_gated_reviewer_children(conn, source_task.id)
+        manual_pipeline = _explicit_manual_review_pipeline(source_task.body)
+        if manual_reviewer_children or manual_pipeline:
+            suppression_reason = (
+                "manual_reviewer_child_present"
+                if manual_reviewer_children
+                else "manual_review_pipeline_opt_out"
+            )
+            with write_txn(conn):
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+                    continue
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT, run.id):
+                    continue
+                _append_event(
+                    conn,
+                    source_task.id,
+                    _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT,
+                    {
+                        "source_task": source_task.id,
+                        "source_run_id": run.id,
+                        "reason": suppression_reason,
+                        "manual_reviewer_children": manual_reviewer_children,
+                        "review_lane": "STANDARD_REVIEW",
+                        "review_stage": "reviewer_b",
+                    },
+                    run_id=run.id,
+                )
             continue
 
         completion_summary = (run.summary or source_task.result or "").strip()

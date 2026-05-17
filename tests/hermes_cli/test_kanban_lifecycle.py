@@ -98,6 +98,89 @@ review_lane: STANDARD_REVIEW
         assert spawned == [reviewer.id]
 
 
+def test_standard_coder_completion_with_manual_reviewer_child_suppresses_auto_reviewer_b(
+    kanban_home, all_assignees_spawnable
+):
+    spawned: list[str] = []
+
+    def fake_spawn(task, _workspace):
+        spawned.append(task.id)
+        return 0
+
+    with kb.connect() as conn:
+        source, parent_run_id = _create_and_complete_coder_task(
+            conn,
+            title="Implement manual review pipeline",
+            body="review_lane: STANDARD_REVIEW\n",
+            summary="manual pipeline implementation done",
+            metadata={"changed_files": ["hermes_cli/kanban_db.py"]},
+        )
+        manual_reviewer = kb.create_task(
+            conn,
+            title="Manual Reviewer-B for implementation",
+            assignee="reviewer",
+            parents=[source],
+        )
+
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        reviewer_children = _reviewer_children_for_source(conn, source)
+        assert [child.id for child in reviewer_children] == [manual_reviewer]
+        assert spawned == [manual_reviewer]
+
+        suppression_events = [
+            event
+            for event in kb.list_events(conn, source)
+            if event.kind == "dispatch_auto_reviewer_child_suppressed"
+        ]
+        assert len(suppression_events) == 1
+        assert suppression_events[0].run_id == parent_run_id
+        suppression_payload = suppression_events[0].payload or {}
+        assert suppression_payload["reason"] == "manual_reviewer_child_present"
+        assert suppression_payload["manual_reviewer_children"] == [manual_reviewer]
+
+        auto_events = [
+            event
+            for event in kb.list_events(conn, source)
+            if event.kind == "dispatch_auto_reviewer_child_created"
+        ]
+        assert auto_events == []
+
+
+def test_standard_coder_completion_with_manual_review_opt_out_suppresses_auto_reviewer_b(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+review_lane: STANDARD_REVIEW
+review_pipeline: manual
+auto_reviewer_b: false
+"""
+
+    with kb.connect() as conn:
+        source, parent_run_id = _create_and_complete_coder_task(
+            conn,
+            title="Implement documented manual review pipeline",
+            body=body,
+            summary="manual opt-out implementation done",
+            metadata={"changed_files": ["hermes_cli/kanban_db.py"]},
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+
+        assert _reviewer_children_for_source(conn, source) == []
+        assert res.spawned == []
+        suppression_events = [
+            event
+            for event in kb.list_events(conn, source)
+            if event.kind == "dispatch_auto_reviewer_child_suppressed"
+        ]
+        assert len(suppression_events) == 1
+        assert suppression_events[0].run_id == parent_run_id
+        suppression_payload = suppression_events[0].payload or {}
+        assert suppression_payload["reason"] == "manual_review_pipeline_opt_out"
+        assert suppression_payload["manual_reviewer_children"] == []
+
+
 def test_fastlane_coder_completion_no_reviewer_spawn(
     kanban_home, all_assignees_spawnable
 ):
