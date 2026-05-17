@@ -361,6 +361,26 @@ def _home_thread_env_var(platform_name: str) -> str:
     return f"{_home_target_env_var(platform_name)}_THREAD_ID"
 
 
+_DEFAULT_KANBAN_DISCORD_NOTIFY_THREAD_ID = "1505596156405874909"
+
+
+def _kanban_discord_notify_thread_id() -> str:
+    """Return the dedicated Discord thread for Kanban terminal notifications.
+
+    Piet approved the current operator-visible target thread on 2026-05-17.
+    The env var keeps the local fix reversible without a code revert:
+    set ``HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID=off`` to fall back to the
+    original per-source channel/thread routing.
+    """
+    raw = os.environ.get(
+        "HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID",
+        _DEFAULT_KANBAN_DISCORD_NOTIFY_THREAD_ID,
+    ).strip()
+    if raw.lower() in {"", "0", "false", "no", "off", "none"}:
+        return ""
+    return raw
+
+
 def _restart_notification_pending() -> bool:
     """Return True when a /restart completion marker is waiting to be delivered."""
     return (_hermes_home / ".restart_notify.json").exists()
@@ -4559,19 +4579,25 @@ class GatewayRunner:
                         else:
                             continue
                         metadata: dict[str, Any] = {}
-                        if sub.get("thread_id"):
-                            metadata["thread_id"] = sub["thread_id"]
+                        notify_thread_id = ""
+                        if platform_str == "discord":
+                            notify_thread_id = _kanban_discord_notify_thread_id()
+                        target_thread_id = notify_thread_id or (sub.get("thread_id") or "")
+                        if target_thread_id:
+                            metadata["thread_id"] = target_thread_id
                         sub_key = (
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
+                            send_result = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
                             )
+                            if send_result is not None and getattr(send_result, "success", True) is False:
+                                raise RuntimeError(getattr(send_result, "error", "send returned success=False"))
                             logger.debug(
-                                "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                "kanban notifier: delivered %s event for %s to %s/%s thread=%s on board %s",
+                                kind, sub["task_id"], platform_str, sub["chat_id"], target_thread_id or "-", board_slug,
                             )
                             # Reset the failure counter on success.
                             sub_fail_counts.pop(sub_key, None)
@@ -8678,6 +8704,10 @@ class GatewayRunner:
                     thread_id = str(getattr(source, "thread_id", "") or "")
                     user_id = str(getattr(source, "user_id", "") or "") or None
                     if platform_str and chat_id:
+                        notify_thread_id = (
+                            _kanban_discord_notify_thread_id()
+                            if platform_str == "discord" else ""
+                        )
                         def _sub():
                             from hermes_cli import kanban_db as _kb
                             conn = _kb.connect(board=requested_board)
@@ -8685,7 +8715,7 @@ class GatewayRunner:
                                 _kb.add_notify_sub(
                                     conn, task_id=task_id,
                                     platform=platform_str, chat_id=chat_id,
-                                    thread_id=thread_id or None,
+                                    thread_id=notify_thread_id or thread_id or None,
                                     user_id=user_id,
                                     notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
                                 )
