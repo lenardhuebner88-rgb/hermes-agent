@@ -1006,6 +1006,38 @@ def skill_view(
                     _record(None, found_md)
 
         if len(candidates) > 1:
+            from agent.skill_utils import get_trusted_shared_root_skills_dir
+
+            shared_root = get_trusted_shared_root_skills_dir(SKILLS_DIR)
+
+            def _is_under(path: Path, root: Path | None) -> bool:
+                if root is None:
+                    return False
+                try:
+                    path.resolve().relative_to(root.resolve())
+                    return True
+                except (OSError, ValueError):
+                    return False
+
+            # Profile workers intentionally search profile-local skills first and
+            # shared-root skills last. A same-named shared-root skill is a fallback,
+            # not an ambiguity: the profile-local overlay wins deterministically.
+            if shared_root is not None:
+                local_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if _is_under(candidate[1], SKILLS_DIR)
+                ]
+                non_local_non_shared = [
+                    candidate
+                    for candidate in candidates
+                    if not _is_under(candidate[1], SKILLS_DIR)
+                    and not _is_under(candidate[1], shared_root)
+                ]
+                if local_candidates and not non_local_non_shared:
+                    candidates = [local_candidates[0]]
+
+        if len(candidates) > 1:
             paths = [str(smd) for _, smd in candidates]
             logging.getLogger(__name__).warning(
                 "Skill name collision for '%s': %d candidates — %s",
