@@ -1528,6 +1528,36 @@ def test_dispatch_does_not_auto_continue_substring_only_budget_mentions(
 
 
 
+def test_dispatch_does_not_auto_continue_substring_neighbor_even_with_budget_marker(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="substring-neighbor", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations; awaiting policy approval"
+            ),
+            block_type="iteration_budget_exhausted",
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
 def test_dispatch_does_not_auto_continue_canonical_budget_reason_with_non_budget_block_type(
     kanban_home, all_assignees_spawnable
 ):

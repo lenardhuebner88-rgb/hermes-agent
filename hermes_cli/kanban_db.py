@@ -4412,15 +4412,23 @@ def _normalize_block_type_marker(block_type: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _is_iteration_budget_block_type(block_type: Optional[str]) -> bool:
+    """Return True only for the exact dispatcher-owned budget marker."""
+    return _normalize_block_type_marker(block_type) == _ITERATION_BUDGET_BLOCK_TYPE
+
+
 def _is_iteration_budget_exhausted(
     summary: Optional[str], blocked_payload: Optional[dict[str, Any]]
 ) -> bool:
+    # Auto-resume must require both the canonical full reason and the exact
+    # machine marker.  This intentionally rejects substring neighbors such as
+    # "... allowed iterations; awaiting policy approval" even if they mention
+    # the budget-guard text.
     if not _is_iteration_budget_guard_reason(summary):
         return False
     if not isinstance(blocked_payload, dict):
         return False
-    block_type = str(blocked_payload.get("block_type") or "").strip().lower()
-    return block_type == _ITERATION_BUDGET_BLOCK_TYPE
+    return _is_iteration_budget_block_type(blocked_payload.get("block_type"))
 
 
 def _is_review_required_block(summary: Optional[str]) -> bool:
