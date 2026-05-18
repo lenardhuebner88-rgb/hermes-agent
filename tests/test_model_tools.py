@@ -412,6 +412,73 @@ class TestKanbanWorkerEffectiveToolSchema:
         assert "read_file" not in names
         assert "kanban_create" not in names
 
+    def test_runtime_schema_audit_plan_can_include_concrete_web_tools_without_broad_web_toolset(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Runtime-schema audit proof can allow concrete web tools without
+        permitting broad toolset names such as web/browser/all.
+        """
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        concrete_tools = [
+            "kanban_show",
+            "web_search",
+            "web_extract",
+            "kanban_complete",
+            "kanban_block",
+        ]
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_schema_webtools_secret_not_logged")
+        monkeypatch.setenv("HERMES_KANBAN_EFFECTIVE_TOOLSETS", json.dumps(concrete_tools))
+        monkeypatch.setenv("HERMES_KANBAN_SCHEMA_AUDIT", "1")
+
+        from model_tools import _clear_tool_defs_cache
+        from tools.registry import invalidate_check_fn_cache, registry
+
+        web_search_entry = registry.get_entry("web_search")
+        web_extract_entry = registry.get_entry("web_extract")
+        assert web_search_entry is not None
+        assert web_extract_entry is not None
+        original_search_check = web_search_entry.check_fn
+        original_extract_check = web_extract_entry.check_fn
+        web_search_entry.check_fn = lambda: True
+        web_extract_entry.check_fn = lambda: True
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+        try:
+            names = self._schema_names()
+            stderr = capsys.readouterr().err
+        finally:
+            web_search_entry.check_fn = original_search_check
+            web_extract_entry.check_fn = original_extract_check
+            invalidate_check_fn_cache()
+            _clear_tool_defs_cache()
+
+        assert names == set(concrete_tools)
+        audit_line = next(
+            line for line in stderr.splitlines()
+            if line.startswith("HERMES_KANBAN_SCHEMA_AUDIT ")
+        )
+        audit = json.loads(audit_line.split(" ", 1)[1])
+        assert audit == {
+            "event": "kanban_worker_tool_schema",
+            "kanban_task_context": True,
+            "effective_tool_filter_active": True,
+            "tool_count": 5,
+            "tool_names": [
+                "kanban_block",
+                "kanban_complete",
+                "kanban_show",
+                "web_extract",
+                "web_search",
+            ],
+        }
+        assert "browser" not in names
+        assert "terminal" not in names
+        assert "all" not in names
+        assert "web" not in names
+        assert "t_schema_webtools_secret_not_logged" not in stderr
+
     def test_worker_effective_toolsets_survive_profile_disabled_kanban_toolset(
         self,
         monkeypatch,

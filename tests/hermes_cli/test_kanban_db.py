@@ -2262,6 +2262,8 @@ def test_dispatch_preflight_blocks_toolset_like_allowed_tool_names(
         "code_execution",
         "memory",
         "clarify",
+        "web",
+        "browser",
         "tools",
         "all_tools",
         "all",
@@ -2352,6 +2354,65 @@ completion_policy:
             "kanban_block",
             "kanban_comment",
         ]
+
+
+def test_dispatch_preflight_accepts_web_search_and_extract_as_concrete_tool_names(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - web_search
+    - web_extract
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    from model_tools import _clear_tool_defs_cache
+    from tools.registry import invalidate_check_fn_cache, registry
+
+    web_search_entry = registry.get_entry("web_search")
+    web_extract_entry = registry.get_entry("web_extract")
+    assert web_search_entry is not None
+    assert web_extract_entry is not None
+    original_search_check = web_search_entry.check_fn
+    original_extract_check = web_extract_entry.check_fn
+    web_search_entry.check_fn = lambda: True
+    web_extract_entry.check_fn = lambda: True
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    try:
+        spawns = []
+        with kb.connect() as conn:
+            t = kb.create_task(conn, title="concrete web tools", assignee="alice", body=body)
+            res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+            assert t not in res.preflight_blocked
+            assert spawns == [t]
+            task = kb.get_task(conn, t)
+            assert task is not None
+            assert task.status == "running"
+            events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+            assert events
+            assert events[-1].payload["effective_toolsets"] == [
+                "kanban_show",
+                "web_search",
+                "web_extract",
+                "kanban_complete",
+                "kanban_block",
+            ]
+    finally:
+        web_search_entry.check_fn = original_search_check
+        web_extract_entry.check_fn = original_extract_check
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
 
 
 def test_dispatch_preflight_accepts_safe_workspace_runner_tool(

@@ -2716,6 +2716,8 @@ _KNOWN_SCOPE_ALLOWED_TOOLS = {
     "kanban_create",
     "kanban_link",
     "kanban_run_workspace_command",
+    "web_search",
+    "web_extract",
     "read_file",
     "search_files",
     "write_file",
@@ -2745,6 +2747,8 @@ _BROAD_SCOPE_ALLOWED_TOOL_MARKERS = {
     "code_execution",
     "memory",
     "clarify",
+    "web",
+    "browser",
 }
 _FORBIDDEN_SCOPE_ALLOWED_TOOL_MARKERS = {
     "openclaw",
