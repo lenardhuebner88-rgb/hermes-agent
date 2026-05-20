@@ -112,9 +112,13 @@ def test_show_banner_does_not_print_skills():
     cli_obj.preloaded_skills = ["hermes-agent-dev", "github-auth"]
     cli_obj.console = MagicMock()
 
-    with patch("cli.build_welcome_banner") as mock_banner, patch(
-        "shutil.get_terminal_size", return_value=os.terminal_size((120, 40))
-    ):
+    # _make_real_cli reloads cli.py in an isolated module namespace; patch the
+    # function as resolved by this instance instead of assuming sys.modules['cli']
+    # still points at the same globals dict.
+    with patch.dict(
+        cli_obj.show_banner.__globals__, {"build_welcome_banner": MagicMock()}
+    ), patch("shutil.get_terminal_size", return_value=os.terminal_size((120, 40))):
+        mock_banner = cli_obj.show_banner.__globals__["build_welcome_banner"]
         cli_obj.show_banner()
 
     print_calls = [

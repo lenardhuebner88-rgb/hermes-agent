@@ -964,6 +964,28 @@ def load_gateway_config() -> GatewayConfig:
                 hbl = discord_cfg.get("history_backfill_limit")
                 if hbl is not None and not os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT"):
                     os.environ["DISCORD_HISTORY_BACKFILL_LIMIT"] = str(hbl)
+                # mention_required_channels: channels where bot demands an @-mention even
+                # when the global require_mention is false (Sprint 2P, 2026-05-16). Used
+                # to keep shared lanes (e.g. #hermes-koordinator) addressable only via
+                # explicit mention so Hub doesn't double-answer on every Human ping.
+                mrc = discord_cfg.get("mention_required_channels")
+                if mrc is not None and not os.getenv("DISCORD_MENTION_REQUIRED_CHANNELS"):
+                    if isinstance(mrc, list):
+                        mrc = ",".join(str(v) for v in mrc)
+                    os.environ["DISCORD_MENTION_REQUIRED_CHANNELS"] = str(mrc)
+                # inbound_stop_codes_csv: profile-specific Stop-Code-Inbound-Gate code list
+                # (Sprint 2-Main / T1, 2026-05-16). Bridges to the same env-var the
+                # Hub-side discord.py:782 already reads (HERMES_DISCORD_INBOUND_STOP_CODES);
+                # different profiles (Hub vs Coordinator) have different config.yaml
+                # files, so each process sets its own env at boot.  Coordinator profile
+                # ships with the §6.1 Outbound-Code list so it accepts the codes Hub
+                # sends towards it; the bare Default-Liste in discord.py remains the
+                # §6.2 Inbound-Code list used by Hub.
+                isc = discord_cfg.get("inbound_stop_codes_csv")
+                if isc is not None and not os.getenv("HERMES_DISCORD_INBOUND_STOP_CODES"):
+                    if isinstance(isc, list):
+                        isc = ",".join(str(v) for v in isc)
+                    os.environ["HERMES_DISCORD_INBOUND_STOP_CODES"] = str(isc)
                 # allow_mentions: granular control over what the bot can ping.
                 # Safe defaults (no @everyone/roles) are applied in the adapter;
                 # these YAML keys only override when set and let users opt back

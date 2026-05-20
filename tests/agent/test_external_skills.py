@@ -103,6 +103,31 @@ class TestGetAllSkillsDirs:
         assert result[0] == hermes_home / "skills"
         assert result[1] == external_skills_dir.resolve()
 
+    def test_profile_home_adds_trusted_shared_root_after_external_dirs(
+        self, tmp_path, external_skills_dir
+    ):
+        root = tmp_path / ".hermes"
+        shared_skills = root / "skills"
+        profile_home = root / "profiles" / "reviewer"
+        profile_skills = profile_home / "skills"
+        shared_skills.mkdir(parents=True)
+        profile_skills.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            f"skills:\n  external_dirs:\n    - {external_skills_dir}\n"
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}):
+            from agent.skill_utils import _external_dirs_cache_clear, get_all_skills_dirs
+
+            _external_dirs_cache_clear()
+            result = get_all_skills_dirs(profile_skills)
+
+        assert result == [
+            profile_skills,
+            external_skills_dir.resolve(),
+            shared_skills,
+        ]
+
 
 class TestExternalSkillsInFindAll:
     def test_external_skills_found(self, hermes_home, external_skills_dir):
@@ -155,3 +180,57 @@ class TestExternalSkillView:
             result = json.loads(skill_view("my-external-skill"))
         assert result["success"] is True
         assert "external things" in result["content"]
+
+    def test_skill_view_profile_home_finds_trusted_shared_root_skill(self, tmp_path):
+        root = tmp_path / ".hermes"
+        profile_home = root / "profiles" / "reviewer"
+        profile_skills = profile_home / "skills"
+        shared_skill = root / "skills" / "devops" / "kanban-reviewer"
+        profile_skills.mkdir(parents=True)
+        shared_skill.mkdir(parents=True)
+        (shared_skill / "SKILL.md").write_text(
+            "---\nname: kanban-reviewer\ndescription: Shared root reviewer\n---\n\nShared reviewer body.\n"
+        )
+
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", profile_skills),
+        ):
+            from agent.skill_utils import _external_dirs_cache_clear
+            from tools.skills_tool import skill_view
+
+            _external_dirs_cache_clear()
+            result = json.loads(skill_view("kanban-reviewer"))
+
+        assert result["success"] is True
+        assert result["skill_dir"] == str(shared_skill)
+        assert "Shared reviewer body" in result["content"]
+
+    def test_skill_view_profile_local_skill_wins_over_shared_root(self, tmp_path):
+        root = tmp_path / ".hermes"
+        profile_home = root / "profiles" / "reviewer"
+        profile_skill = profile_home / "skills" / "kanban-reviewer"
+        shared_skill = root / "skills" / "kanban-reviewer"
+        profile_skill.mkdir(parents=True)
+        shared_skill.mkdir(parents=True)
+        (profile_skill / "SKILL.md").write_text(
+            "---\nname: kanban-reviewer\ndescription: Profile reviewer\n---\n\nProfile reviewer body.\n"
+        )
+        (shared_skill / "SKILL.md").write_text(
+            "---\nname: kanban-reviewer\ndescription: Shared reviewer\n---\n\nShared reviewer body.\n"
+        )
+
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", profile_home / "skills"),
+        ):
+            from agent.skill_utils import _external_dirs_cache_clear
+            from tools.skills_tool import skill_view
+
+            _external_dirs_cache_clear()
+            result = json.loads(skill_view("kanban-reviewer"))
+
+        assert result["success"] is True
+        assert result["skill_dir"] == str(profile_skill)
+        assert "Profile reviewer body" in result["content"]
+        assert "Shared reviewer body" not in result["content"]

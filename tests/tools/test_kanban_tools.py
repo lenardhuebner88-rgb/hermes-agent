@@ -47,6 +47,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     import tools.kanban_tools  # ensure registered
+    import tools.kanban_workspace_runner  # ensure registered
     from tools.registry import invalidate_check_fn_cache, registry
     from toolsets import resolve_toolset
 
@@ -55,8 +56,10 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     names = {s["function"].get("name") for s in schema if "function" in s}
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
-        "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_comment", "kanban_create", "kanban_link",
+        "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_completion_template", "kanban_review_lane",
+        "kanban_block", "kanban_heartbeat", "kanban_comment",
+        "kanban_create", "kanban_link", "kanban_run_workspace_command",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -111,9 +114,10 @@ def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_p
     assert {
         "kanban_list",
         "kanban_unblock",
+        "kanban_update_profile_model",
     }.isdisjoint(kanban), (
         f"Board-routing tools leaked into worker schema: "
-        f"{kanban & {'kanban_list', 'kanban_unblock'}}"
+        f"{kanban & {'kanban_list', 'kanban_unblock', 'kanban_update_profile_model'}}"
     )
 
 
@@ -135,9 +139,12 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_list",
-        "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
+        "kanban_show", "kanban_complete", "kanban_validate_created_cards",
+        "kanban_completion_template", "kanban_review_lane",
+        "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
-        "kanban_unblock",
+        "kanban_unblock", "kanban_update_profile_model",
+        "kanban_rewire_superseding_review", "kanban_ensure_needs_revision_fix",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -168,6 +175,12 @@ def worker_env(monkeypatch, tmp_path):
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    # Ensure nested worker-run tests are hermetic even when pytest itself is
+    # executed from an active dispatcher worker process. A stale outer
+    # HERMES_KANBAN_RUN_ID / CLAIM_LOCK would scope tool writes to the parent
+    # task run and make happy-path lifecycle calls fail with "unknown id".
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_CLAIM_LOCK", raising=False)
     return tid
 
 
@@ -182,6 +195,17 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "runs" in d
 
 
+def test_completion_template_defaults_to_env_task_id(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_completion_template({})
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["task_id"] == worker_env
+    assert d["mutated"] is False
+    assert d["metadata"]["scope_attestation"] is True
+    assert d["metadata"]["forbidden_actions_taken"] == 0
+
+
 def test_show_explicit_task_id(worker_env):
     """Peek at a different task than the one in env."""
     from hermes_cli import kanban_db as kb
@@ -194,6 +218,101 @@ def test_show_explicit_task_id(worker_env):
     out = kt._handle_show({"task_id": other})
     d = json.loads(out)
     assert d["task"]["id"] == other
+
+
+def test_rewire_superseding_review_tool_returns_audit_payload(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = os.environ["HERMES_HOME"]
+    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("toolsets:\n  - kanban\n")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    conn = kb.connect()
+    try:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+        kb.link_tasks(conn, old_review, source)
+    finally:
+        conn.close()
+
+    out = kt._handle_rewire_superseding_review({
+        "source_task": source,
+        "old_review_task": old_review,
+        "new_review_task": new_review,
+        "reason": "new review supersedes NEEDS_REVISION",
+    })
+    data = json.loads(out)
+
+    assert data["source_task"] == source
+    assert data["old_parent_removed"] is True
+    assert data["new_parent_added"] is True
+
+
+def test_ensure_needs_revision_fix_tool_is_idempotent(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = os.environ["HERMES_HOME"]
+    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("toolsets:\n  - kanban\n")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    conn = kb.connect()
+    try:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        review = kb.create_task(conn, title="review", assignee="reviewer")
+    finally:
+        conn.close()
+    args = {
+        "source_task": source,
+        "review_task": review,
+        "reviewer_metadata": {
+            "verdict": "NEEDS_REVISION",
+            "blocking_findings": ["missing tests"],
+            "required_verification": ["pytest targeted -q"],
+        },
+        "reason": "Reviewer requested fix",
+    }
+
+    first = json.loads(kt._handle_ensure_needs_revision_fix(args))
+    second = json.loads(kt._handle_ensure_needs_revision_fix(args))
+
+    assert second == first
+    assert first["source_task"] == source
+    assert first["review_task"] == review
+    assert first["fix_task"].startswith("t_")
+
+
+
+def test_review_lane_tool_returns_fastlane_skip_and_standard_require_flags():
+    """kanban_review_lane exposes no-mutation review-skip/require behavior."""
+    from tools import kanban_tools as kt
+
+    fastlane = json.loads(kt._handle_review_lane({
+        "title": "Tweak kanban copy",
+        "body": "Small wording-only change.",
+    }))
+    assert fastlane["lane"] == "FASTLANE_KANBAN"
+    assert fastlane["hub_coordinator_evidence_check_required"] is True
+    assert fastlane["reviewer_a_required"] is False
+    assert fastlane["reviewer_b_required"] is False
+
+    standard = json.loads(kt._handle_review_lane({
+        "title": "Adjust dispatcher lifecycle",
+        "body": "Non-trivial lifecycle behavior change.",
+    }))
+    assert standard["lane"] == "STANDARD_REVIEW"
+    assert standard["hub_coordinator_evidence_check_required"] is False
+    assert standard["reviewer_a_required"] is False
+    assert standard["reviewer_b_required"] is True
+
+    critical = json.loads(kt._handle_review_lane({
+        "title": "Activate gateway runtime",
+        "body": "Add gateway-runtime activation.",
+    }))
+    assert critical["lane"] == "CRITICAL_REVIEW"
+    assert critical["hub_coordinator_evidence_check_required"] is False
+    assert critical["reviewer_a_required"] is True
+    assert critical["reviewer_b_required"] is True
 
 
 def test_list_filters_tasks(monkeypatch, worker_env):
@@ -239,6 +358,45 @@ def test_list_rejects_bad_limit(monkeypatch, worker_env):
     from tools import kanban_tools as kt
     assert json.loads(kt._handle_list({"limit": "nope"})).get("error")
     assert json.loads(kt._handle_list({"limit": 0})).get("error")
+
+
+def test_update_profile_model_handler_returns_receipt(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("model:\n  default: old\n  provider: old\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from tools import kanban_tools as kt
+    out = kt._handle_update_profile_model({
+        "profile": "coder",
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+    })
+    data = json.loads(out)
+
+    assert data["ok"] is True
+    receipt = data["receipt"]
+    assert receipt["changed_file"] == str(cfg)
+    assert receipt["post_values"] == {
+        "model.default": "gpt-5.5",
+        "model.provider": "openai-codex",
+    }
+    assert receipt["rollback_status"] == "not_needed"
+    assert "no_dispatcher_activation" in receipt["non_actions"]
+
+
+def test_update_profile_model_hidden_from_worker_runtime_guard(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_update_profile_model({
+        "profile": "coder",
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+    })
+    assert "orchestrator-only" in json.loads(out).get("error", "")
 
 
 def test_list_parses_include_archived_string_false(monkeypatch, worker_env):
@@ -596,6 +754,145 @@ def test_complete_retry_with_corrected_created_cards_succeeds(worker_env):
         conn.close()
 
 
+def _hub_plan_spec(workflow_id="wf-target-handoff"):
+    return {
+        "workflow_id": workflow_id,
+        "source_role": "hub",
+        "goal": "wire target architecture coordinator handoff",
+        "risk_class": "low",
+        "scope_contract": {
+            "version": 2,
+            "allowed_systems": ["hermes-agent", "hermes-kanban"],
+            "forbidden_systems": ["OpenClaw", "Atlas", "Mission-Control", "Telegram"],
+        },
+    }
+
+
+def _approved_reviewer_metadata(workflow_id="wf-target-handoff"):
+    return {
+        "workflow_id": workflow_id,
+        "verdict": "APPROVED",
+        "evidence_audited": ["hub_plan_spec", "tests"],
+        "residual_risk": "none for hermes-only handoff test",
+        "scope_attestation": True,
+        "scope_contract_version": 2,
+        "forbidden_actions_taken": 0,
+    }
+
+
+def _control_plane_gate(**overrides):
+    hub_plan = _hub_plan_spec()
+    gate = {
+        "hub_plan_spec": hub_plan,
+        "reviewer_metadata": _approved_reviewer_metadata(),
+        "coordinator_plan_spec": {**hub_plan, "workflow_id": "wf-target-handoff-coordinator"},
+        "mechanical_fields": ["workflow_id"],
+    }
+    gate.update(overrides)
+    return gate
+
+
+def test_create_coordinator_handoff_blocks_without_approved_reviewer_metadata(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    rejected = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(
+            reviewer_metadata={**_approved_reviewer_metadata(), "verdict": "NEEDS_REVISION"},
+        ),
+    }))
+
+    assert rejected.get("ok") is not True
+    assert "reviewer_verdict_not_approved" in rejected.get("error", "")
+
+    conn = kb.connect()
+    try:
+        assert [t.id for t in kb.list_tasks(conn, assignee="coordinator")] == []
+    finally:
+        conn.close()
+
+
+def test_create_coordinator_handoff_blocks_substantive_plan_change(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    changed = {**_hub_plan_spec(), "risk_class": "medium"}
+    rejected = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(coordinator_plan_spec=changed),
+    }))
+
+    assert rejected.get("ok") is not True
+    assert "risk_class" in rejected.get("error", "")
+
+    conn = kb.connect()
+    try:
+        assert [t.id for t in kb.list_tasks(conn, assignee="coordinator")] == []
+    finally:
+        conn.close()
+
+
+def test_create_coordinator_handoff_accepts_mechanical_normalization_and_records_diffs(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    created = json.loads(kt._handle_create({
+        "title": "coordinator handoff",
+        "assignee": "coordinator",
+        "body": "target architecture coordinator handoff",
+        "control_plane_gate": _control_plane_gate(),
+    }))
+
+    assert created["ok"] is True
+    assert created["control_plane_gate"]["reason"] == "reviewer_approved_and_only_mechanical_changes"
+    assert created["control_plane_gate"]["mechanical_diffs"] == {
+        "workflow_id": {"from": "wf-target-handoff", "to": "wf-target-handoff-coordinator"}
+    }
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, created["task_id"])
+    finally:
+        conn.close()
+    assert len(comments) == 1
+    assert comments[0].author == "control-plane-gate"
+    assert "mechanical_diffs" in comments[0].body
+    assert "wf-target-handoff-coordinator" in comments[0].body
+
+
+def test_validate_created_cards_reports_phantoms_without_completing(worker_env):
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        owned = kb.create_task(conn, title="owned child", assignee="peer", created_by="test-worker")
+        foreign = kb.create_task(conn, title="foreign child", assignee="peer", created_by="other-worker")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_validate_created_cards({"created_cards": [owned, foreign, "t_deadbeef"]})
+    d = json.loads(out)
+    assert d["ok"] is False
+    assert d["task_id"] == worker_env
+    assert d["verified_cards"] == [owned]
+    assert d["phantom_cards"] == [foreign, "t_deadbeef"]
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        events = [e.kind for e in kb.list_events(conn, worker_env)]
+    finally:
+        conn.close()
+    assert task.status == "running"
+    assert "completed" not in events
+    assert "completion_blocked_hallucination" not in events
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
@@ -607,6 +904,35 @@ def test_block_happy_path(worker_env):
         assert kb.get_task(conn, worker_env).status == "blocked"
     finally:
         conn.close()
+
+
+def test_block_accepts_context_comment_id(worker_env):
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        comment_id = kb.add_comment(
+            conn,
+            worker_env,
+            "test-worker",
+            "Detailed context for the human before the short block reason.",
+        )
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_block({
+        "reason": "Need human choice; see linked context.",
+        "context_comment_id": comment_id,
+    })
+    assert json.loads(out)["ok"] is True
+
+    conn = kb.connect()
+    try:
+        event = [e for e in kb.list_events(conn, worker_env) if e.kind == "blocked"][-1]
+    finally:
+        conn.close()
+    assert event.payload["context_comment_id"] == comment_id
+    assert event.payload["context_snippet"].startswith("Detailed context")
 
 
 def test_block_rejects_empty_reason(worker_env):
@@ -1079,6 +1405,54 @@ def test_worker_lifecycle_through_tools(worker_env):
         conn.close()
 
 
+def test_blocked_event_marks_only_canonical_iteration_budget_guard(worker_env):
+    from hermes_cli import kanban_db as kb
+
+    canonical_reason = (
+        "Iteration budget exhausted (60/60) — task could not complete "
+        "within the allowed iterations"
+    )
+
+    conn = kb.connect()
+    try:
+        canonical = kb.create_task(conn, title="canonical", assignee="worker")
+        kb.claim_task(conn, canonical)
+        canonical_run = kb.active_run(conn, canonical)
+        assert canonical_run is not None
+        assert kb.block_task(
+            conn,
+            canonical,
+            reason=canonical_reason,
+            expected_run_id=canonical_run.id,
+        )
+
+        canonical_blocked = [
+            e for e in kb.list_events(conn, canonical) if e.kind == "blocked"
+        ][-1]
+        assert canonical_blocked.payload.get("block_type") == "iteration_budget_exhausted"
+
+        review_required = kb.create_task(conn, title="review", assignee="worker")
+        kb.claim_task(conn, review_required)
+        review_run = kb.active_run(conn, review_required)
+        assert review_run is not None
+        assert kb.block_task(
+            conn,
+            review_required,
+            reason=(
+                "review-required: Iteration budget exhausted (60/60) — "
+                "task could not complete within the allowed iterations"
+            ),
+            expected_run_id=review_run.id,
+        )
+
+        review_blocked = [
+            e for e in kb.list_events(conn, review_required) if e.kind == "blocked"
+        ][-1]
+        assert "block_type" not in review_blocked.payload
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # System-prompt guidance injection
 # ---------------------------------------------------------------------------
@@ -1134,6 +1508,13 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "kanban_create" in prompt
     # Anti-shell guidance
     assert "Do not shell out" in prompt or "tools — they work" in prompt
+
+
+def test_kanban_guidance_tells_orchestrators_to_poll_child_review_tasks():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "Do not block merely because a child task is `ready` or `running`" in KANBAN_GUIDANCE
+    assert "poll it with `kanban_show(task_id=...)`" in KANBAN_GUIDANCE
 
 
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):

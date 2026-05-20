@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -80,14 +81,19 @@ import subprocess
 import sys
 import threading
 import logging
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
+try:
+    import yaml
+except Exception:  # pragma: no cover - PyYAML is part of Hermes runtime deps
+    yaml = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +104,8 @@ VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", 
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
+KANBAN_REVIEW_LANES = ("FASTLANE_KANBAN", "STANDARD_REVIEW", "CRITICAL_REVIEW")
+KANBAN_FASTLANE_DEFAULT = "FASTLANE_KANBAN"
 _IS_WINDOWS = sys.platform == "win32"
 
 # A running task's claim is valid for 15 minutes by default; after that the
@@ -636,10 +644,9 @@ class Task:
     current_run_id: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
-    # Force-loaded skills for the worker on this task (appended to the
-    # dispatcher's built-in `kanban-worker` via --skills). Stored as a
-    # JSON array of skill names. None = use only the defaults; empty
-    # list = explicitly no extra skills.
+    # Force-loaded skills for the worker on this task. Stored as a JSON
+    # array of skill names. None/empty = no per-task preloaded skills;
+    # dispatcher guidance is injected separately via KANBAN_GUIDANCE.
     skills: Optional[list] = None
     model_override: Optional[str] = None
     # Per-task override for the consecutive-failure circuit breaker.
@@ -843,9 +850,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- them; the dispatcher doesn't consult them for routing yet.
     workflow_template_id TEXT,
     current_step_key     TEXT,
-    -- Force-loaded skills for the worker on this task, stored as JSON.
-    -- Appended to the dispatcher's built-in `--skills kanban-worker`.
-    -- NULL or empty array = no extras.
+    -- Force-loaded per-task skills, stored as JSON.
+    -- NULL or empty array = no per-task preloaded skills.
     skills               TEXT,
     -- Per-task model override. When set, the dispatcher passes -m <model>
     -- to the worker, overriding the profile's default model. NULL = use
@@ -1143,9 +1149,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "current_step_key", "current_step_key TEXT"
         )
     if "skills" not in cols:
-        # JSON array of skill names the dispatcher force-loads into the
-        # worker (additive to the built-in `kanban-worker`). NULL is fine
-        # for existing rows.
+        # JSON array of optional specialist skill names the dispatcher
+        # force-loads into the worker. Kanban lifecycle guidance is injected
+        # separately via KANBAN_GUIDANCE, so NULL is fine for existing rows.
         _add_column_if_missing(conn, "tasks", "skills", "skills TEXT")
 
     if "max_retries" not in cols:
@@ -1338,6 +1344,70 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _coordinator_control_plane_gate_audit(
+    *,
+    assignee: Optional[str],
+    control_plane_gate: Optional[Mapping[str, Any]],
+    internal_test_bypass_control_plane_gate: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Validate Coordinator task creation at the DB/kernel boundary.
+
+    Model-native tools and the CLI both end here. Keeping the target
+    Hub->Reviewer->Coordinator guard in this kernel path prevents direct DB
+    callers from bypassing the Reviewer verdict gate.
+    """
+    if str(assignee or "").strip().lower() != "coordinator":
+        return None
+    if internal_test_bypass_control_plane_gate:
+        return None
+    if not isinstance(control_plane_gate, Mapping):
+        raise ValueError(
+            "coordinator handoff requires control_plane_gate with "
+            "hub_plan_spec, reviewer_metadata, coordinator_plan_spec, "
+            "and mechanical_fields"
+        )
+
+    hub_plan_spec = control_plane_gate.get("hub_plan_spec")
+    reviewer_metadata = control_plane_gate.get("reviewer_metadata")
+    coordinator_plan_spec = control_plane_gate.get("coordinator_plan_spec")
+    mechanical_fields = control_plane_gate.get("mechanical_fields") or []
+    if not isinstance(hub_plan_spec, Mapping):
+        raise ValueError("coordinator handoff blocked: hub_plan_spec must be an object")
+    if reviewer_metadata is not None and not isinstance(reviewer_metadata, Mapping):
+        raise ValueError("coordinator handoff blocked: reviewer_metadata must be an object")
+    if not isinstance(coordinator_plan_spec, Mapping):
+        raise ValueError("coordinator handoff blocked: coordinator_plan_spec must be an object")
+    if isinstance(mechanical_fields, str):
+        mechanical_fields = [mechanical_fields]
+    if not isinstance(mechanical_fields, (list, tuple, set)):
+        raise ValueError("coordinator handoff blocked: mechanical_fields must be a list")
+
+    from hermes_cli.control_plane_gate import (
+        SubstantiveCoordinatorChangeError,
+        coordinator_gate_decision,
+    )
+
+    try:
+        decision = coordinator_gate_decision(
+            hub_plan_spec=hub_plan_spec,
+            reviewer_metadata=reviewer_metadata,
+            coordinator_plan_spec=coordinator_plan_spec,
+            mechanical_fields=[str(item) for item in mechanical_fields],
+        )
+    except SubstantiveCoordinatorChangeError as exc:
+        raise ValueError(f"coordinator handoff blocked: substantive_plan_change: {exc}") from exc
+
+    if not decision.allowed:
+        findings = "; ".join(decision.blocking_findings)
+        raise ValueError(f"coordinator handoff blocked: {decision.reason}: {findings}")
+
+    return {
+        "reason": decision.reason,
+        "blocking_findings": decision.blocking_findings,
+        "mechanical_diffs": decision.mechanical_diffs,
+    }
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -1359,6 +1429,8 @@ def create_task(
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
+    control_plane_gate: Optional[Mapping[str, Any]] = None,
+    internal_test_bypass_control_plane_gate: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1379,12 +1451,17 @@ def create_task(
 
     ``skills`` is an optional list of skill names to force-load into
     the worker when dispatched. Stored as JSON; the dispatcher passes
-    each name to ``hermes --skills ...`` alongside the built-in
-    ``kanban-worker``. Use this to pin a task to a specialist skill
-    (e.g. ``skills=["translation"]`` so the worker loads the
-    translation skill regardless of the profile's default config).
+    each name to ``hermes --skills ...``. Use this to pin a task to a
+    specialist skill (e.g. ``skills=["translation"]`` so the worker
+    loads the translation skill regardless of the profile's default
+    config).
     """
     assignee = _canonical_assignee(assignee)
+    gate_audit = _coordinator_control_plane_gate_audit(
+        assignee=assignee,
+        control_plane_gate=control_plane_gate,
+        internal_test_bypass_control_plane_gate=internal_test_bypass_control_plane_gate,
+    )
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -1557,6 +1634,19 @@ def create_task(
                         "skills": list(skills_list) if skills_list else None,
                     },
                 )
+                if gate_audit is not None:
+                    gate_body = json.dumps({"control_plane_gate": gate_audit}, sort_keys=True)
+                    conn.execute(
+                        "INSERT INTO task_comments (task_id, author, body, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (task_id, "control-plane-gate", gate_body, now),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "control_plane_gate_passed",
+                        gate_audit,
+                    )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -1777,6 +1867,178 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return [r["child_id"] for r in rows]
 
 
+_SUPERSEDING_REVIEW_REWIRED_EVENT = "superseding_review_rewired"
+_NEEDS_REVISION_FIX_EVENT = "needs_revision_fix_task_ensured"
+
+
+def rewire_superseding_review_parent(
+    conn: sqlite3.Connection,
+    *,
+    source_task: str,
+    old_review_task: str,
+    new_review_task: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Replace a superseded review parent edge with the superseding review.
+
+    This is deliberately explicit and auditable: no reviewer completion or
+    dispatcher pass calls it automatically. The helper only rewires the
+    dependency edge; it does not complete, unblock, or otherwise finalize the
+    source task.
+    """
+    source_task = str(source_task).strip()
+    old_review_task = str(old_review_task).strip()
+    new_review_task = str(new_review_task).strip()
+    reason = str(reason or "").strip()
+    if not source_task or not old_review_task or not new_review_task:
+        raise ValueError("source_task, old_review_task, and new_review_task are required")
+    if old_review_task == new_review_task:
+        raise ValueError("old_review_task and new_review_task must differ")
+    if source_task in {old_review_task, new_review_task}:
+        raise ValueError("review task cannot be the source task")
+    missing = _find_missing_parents(conn, [source_task, old_review_task, new_review_task])
+    if missing:
+        raise ValueError(f"unknown task(s): {', '.join(missing)}")
+    if _would_cycle(conn, new_review_task, source_task):
+        raise ValueError(
+            f"linking {new_review_task} -> {source_task} would create a cycle"
+        )
+
+    with write_txn(conn):
+        old_cur = conn.execute(
+            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+            (old_review_task, source_task),
+        )
+        old_parent_removed = old_cur.rowcount > 0
+        already_new = conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ? LIMIT 1",
+            (new_review_task, source_task),
+        ).fetchone()
+        conn.execute(
+            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (new_review_task, source_task),
+        )
+        new_parent_added = already_new is None
+        parent_status = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (new_review_task,)
+        ).fetchone()["status"]
+        if parent_status != "done":
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (source_task,),
+            )
+        payload = {
+            "source_task": source_task,
+            "old_review_task": old_review_task,
+            "new_review_task": new_review_task,
+            "old_parent_removed": old_parent_removed,
+            "new_parent_added": new_parent_added,
+            "reason": reason,
+        }
+        _append_event(conn, source_task, _SUPERSEDING_REVIEW_REWIRED_EVENT, payload)
+    recompute_ready(conn)
+    return payload
+
+
+def _needs_revision_fix_body(
+    source: Task,
+    review_task: str,
+    reviewer_metadata: dict[str, Any],
+    reason: str,
+) -> str:
+    findings = reviewer_metadata.get("blocking_findings") or []
+    required = reviewer_metadata.get("required_verification") or []
+    lines = [
+        f"# Fix task for NEEDS_REVISION on {source.id}",
+        "",
+        "revision_chain:",
+        f"  source_task: {source.id}",
+        f"  review_task: {review_task}",
+        "  verdict: NEEDS_REVISION",
+        "  finalization_gate: explicit Coordinator/Admin finalization required",
+        "",
+        "Instruction:",
+        "- Fix only the reviewer findings below.",
+        "- After completion, request/create a new Reviewer task that supersedes the old review.",
+        "- The original source remains blocked until an explicit finalization gate rewires/supersedes and finalizes it.",
+        f"- Reason: {reason}",
+        "",
+        "blocking_findings:",
+    ]
+    lines.extend([f"  - {item}" for item in findings] or ["  - none provided"])
+    lines.append("required_verification:")
+    lines.extend([f"  - {item}" for item in required] or ["  - none provided"])
+    lines.extend([
+        "",
+        "reviewer_metadata_json:",
+        json.dumps(reviewer_metadata, indent=2, sort_keys=True, ensure_ascii=False),
+    ])
+    return "\n".join(lines)
+
+
+def ensure_needs_revision_fix_task(
+    conn: sqlite3.Connection,
+    *,
+    source_task: str,
+    review_task: str,
+    reviewer_metadata: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Create or return the deterministic fix task for a NEEDS_REVISION verdict.
+
+    Idempotency is keyed by source+review. The source task is not unblocked or
+    completed; the returned fix task is an independent follow-up that can later
+    produce a new review and explicit superseding/finalization gate.
+    """
+    source_task = str(source_task).strip()
+    review_task = str(review_task).strip()
+    reason = str(reason or "").strip()
+    if not isinstance(reviewer_metadata, dict):
+        raise ValueError("reviewer_metadata must be an object")
+    verdict = str(reviewer_metadata.get("verdict") or "").strip().upper()
+    if verdict != "NEEDS_REVISION":
+        raise ValueError("reviewer_metadata.verdict must be NEEDS_REVISION")
+    missing = _find_missing_parents(conn, [source_task, review_task])
+    if missing:
+        raise ValueError(f"unknown task(s): {', '.join(missing)}")
+    source = get_task(conn, source_task)
+    if source is None:
+        raise ValueError(f"unknown task(s): {source_task}")
+
+    key = f"needs-revision-fix:{source_task}:{review_task}"
+    existed = conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (key,),
+    ).fetchone()
+    fix_task = create_task(
+        conn,
+        title=f"Fix NEEDS_REVISION for {source_task}: {source.title}",
+        body=_needs_revision_fix_body(source, review_task, reviewer_metadata, reason),
+        assignee=source.assignee,
+        created_by="kanban-review-chain",
+        workspace_kind=source.workspace_kind,
+        workspace_path=source.workspace_path,
+        priority=source.priority,
+        idempotency_key=key,
+    )
+    payload = {
+        "source_task": source_task,
+        "review_task": review_task,
+        "fix_task": fix_task,
+        "reason": reason,
+    }
+    if existed is None:
+        with write_txn(conn):
+            _append_event(
+                conn,
+                source_task,
+                _NEEDS_REVISION_FIX_EVENT,
+                {**payload, "created": True},
+            )
+    return payload
+
+
 def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
     """Return ``(parent_id, result)`` for every done parent of ``task_id``."""
     rows = conn.execute(
@@ -1945,6 +2207,58 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
         "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
+
+
+def _terminal_event_payload(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+    *,
+    outcome: str,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> dict:
+    """Build a self-contained terminal event payload.
+
+    Terminal state is also persisted on ``task_runs``; duplicating the
+    small operator-facing subset here lets dashboards/notifiers reconstruct
+    lifecycle state from ``task_events`` without a second table join.
+    """
+    payload: dict[str, Any] = {"outcome": outcome}
+    if run_id is not None:
+        payload["run_id"] = int(run_id)
+        run = conn.execute(
+            "SELECT profile, status, outcome, summary, error, ended_at "
+            "FROM task_runs WHERE id = ?",
+            (int(run_id),),
+        ).fetchone()
+        if run:
+            payload.update(
+                {
+                    "profile": run["profile"],
+                    "status": run["status"],
+                    "outcome": run["outcome"] or outcome,
+                    "ended_at": run["ended_at"],
+                }
+            )
+            if summary is None:
+                summary = run["summary"]
+            if error is None:
+                error = run["error"]
+    else:
+        row = conn.execute(
+            "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row:
+            payload["profile"] = row["assignee"]
+    if summary:
+        payload["summary"] = str(summary).strip().splitlines()[0][:400]
+    if error:
+        payload["error"] = str(error)[:500]
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def _synthesize_ended_run(
@@ -2533,6 +2847,18 @@ def reassign_task(
         return False
 
 
+def _normalize_created_card_claims(claimed_ids: Iterable[str]) -> list[str]:
+    """Return non-empty claimed card ids, deduped while preserving order."""
+    claimed = [str(x).strip() for x in (claimed_ids or []) if str(x).strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for cid in claimed:
+        if cid not in seen:
+            seen.add(cid)
+            ordered.append(cid)
+    return ordered
+
+
 def _verify_created_cards(
     conn: sqlite3.Connection,
     completing_task_id: str,
@@ -2558,16 +2884,9 @@ def _verify_created_cards(
     but don't satisfy any of the three trust conditions. The caller
     decides what to do with each bucket; this helper never mutates.
     """
-    claimed = [str(x).strip() for x in (claimed_ids or []) if str(x).strip()]
-    if not claimed:
+    ordered = _normalize_created_card_claims(claimed_ids)
+    if not ordered:
         return [], []
-    # Dedupe while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for cid in claimed:
-        if cid not in seen:
-            seen.add(cid)
-            ordered.append(cid)
 
     row = conn.execute(
         "SELECT assignee FROM tasks WHERE id = ?", (completing_task_id,),
@@ -2606,6 +2925,29 @@ def _verify_created_cards(
         else:
             phantom.append(cid)
     return verified, phantom
+
+
+def validate_created_cards(
+    conn: sqlite3.Connection,
+    completing_task_id: str,
+    claimed_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Dry-run the ``created_cards`` completion gate without mutating state.
+
+    This is the public, side-effect-free preflight counterpart to the
+    ``complete_task(..., created_cards=...)`` gate. Keep completion wired
+    through this helper so workers can validate claims before risking a
+    terminal handoff and both paths cannot drift.
+    """
+    claimed = _normalize_created_card_claims(claimed_ids)
+    verified, phantom = _verify_created_cards(conn, completing_task_id, claimed)
+    return {
+        "ok": not phantom,
+        "task_id": completing_task_id,
+        "claimed_cards": claimed,
+        "verified_cards": verified,
+        "phantom_cards": phantom,
+    }
 
 
 # Task-id pattern used both by ``kanban_create`` (``t_<12 hex>``) and
@@ -2665,6 +3007,647 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class ScopeAttestationError(ValueError):
+    """Raised when a task that requires scope attestation is completed
+    without the structured safety metadata downstream verifiers rely on.
+    """
+
+    def __init__(self, missing: list[str], task_id: str):
+        self.missing = list(missing)
+        self.task_id = task_id
+        super().__init__(
+            "completion blocked: scope attestation metadata is incomplete "
+            f"for {task_id}: {', '.join(missing)}"
+        )
+
+
+_KANBAN_POLICY_KEYS = {"completion_policy", "scope_contract", "review_lane"}
+_KNOWN_SCOPE_ALLOWED_TOOLS = {
+    "kanban_show",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_comment",
+    "kanban_heartbeat",
+    "kanban_create",
+    "kanban_link",
+    "kanban_run_workspace_command",
+    "web_search",
+    "web_extract",
+    "read_file",
+    "search_files",
+    "write_file",
+    "patch",
+    "terminal",
+    "process",
+    "skill_view",
+    "skills_list",
+    "todo",
+    "memory",
+    "session_search",
+}
+_BROAD_SCOPE_ALLOWED_TOOL_MARKERS = {
+    "*",
+    "all",
+    "any",
+    "tools",
+    "all_tools",
+    # Toolset/category names are not valid scope-contract tool names.  The
+    # contract must name model-native tools exactly; otherwise the dispatcher
+    # cannot distinguish a narrow tool allowlist from a broad toolset request.
+    "terminal",
+    "file",
+    "kanban",
+    "mcp",
+    "delegation",
+    "code_execution",
+    "memory",
+    "clarify",
+    "web",
+    "browser",
+}
+_FORBIDDEN_SCOPE_ALLOWED_TOOL_MARKERS = {
+    "openclaw",
+    "mission_control",
+    "telegram",
+    "discord_admin",
+    "config_write",
+    "auth",
+    "secrets",
+    "cron_write",
+}
+_REQUIRED_SCOPE_FORBIDDEN_SYSTEMS = {
+    "openclaw": "OpenClaw",
+    "atlas": "Atlas",
+    "mission-control": "Mission-Control",
+    "telegram": "Telegram",
+}
+_REQUIRED_SCOPE_LIFECYCLE_TOOLS = [
+    "kanban_show",
+    "kanban_complete",
+    "kanban_block",
+]
+
+
+def _truthy_policy_value(value: Any) -> bool:
+    """Return True for explicit YAML truthy policy values only."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "ok", "pass", "passed"}
+    return bool(value)
+
+
+def _safe_yaml_mapping(text: str) -> Optional[dict[str, Any]]:
+    """Parse ``text`` as YAML and return a mapping, or ``None``.
+
+    Kanban task bodies are Markdown with optional YAML snippets. Parser errors
+    are treated as "no structured policy found" so malformed prose cannot crash
+    dispatcher/completion paths or accidentally satisfy a policy gate.
+    """
+    if yaml is None:
+        return None
+    try:
+        loaded = yaml.safe_load(text)
+    except Exception:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _extract_frontmatter_block(text: str) -> Optional[str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() in {"---", "..."}:
+            return "\n".join(lines[1:idx])
+    return None
+
+
+def _extract_fenced_yaml_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    in_yaml = False
+    buf: list[str] = []
+    fence_re = re.compile(r"^\s*```\s*(yaml|yml)?\s*$", re.IGNORECASE)
+    for line in text.splitlines():
+        match = fence_re.match(line)
+        if match:
+            if in_yaml:
+                blocks.append("\n".join(buf))
+                buf = []
+                in_yaml = False
+            elif (match.group(1) or "").lower() in {"yaml", "yml"}:
+                in_yaml = True
+                buf = []
+            continue
+        if in_yaml:
+            buf.append(line)
+    return blocks
+
+
+def _extract_top_level_yaml_snippets(text: str) -> list[str]:
+    """Extract compact top-level policy snippets from Markdown task bodies.
+
+    This is a controlled compatibility path for existing unfenced task specs:
+    it only considers lines where ``completion_policy:`` or ``scope_contract:``
+    starts at column 0, then keeps the following indented/blank/comment lines.
+    Inline prose such as "mention completion_policy: require..." is ignored.
+    """
+    snippets: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if any(line.startswith(f"{key}:") for key in _KANBAN_POLICY_KEYS):
+            buf = [line]
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt and not nxt.startswith((" ", "\t", "#")):
+                    break
+                buf.append(nxt)
+                i += 1
+            snippets.append("\n".join(buf))
+            continue
+        i += 1
+    return snippets
+
+
+def _iter_task_policy_mappings(body: Optional[str]) -> list[dict[str, Any]]:
+    """Return parser-backed policy mappings found in a Markdown task body."""
+    text = body or ""
+    candidates: list[str] = []
+    frontmatter = _extract_frontmatter_block(text)
+    if frontmatter:
+        candidates.append(frontmatter)
+    candidates.extend(_extract_fenced_yaml_blocks(text))
+    whole = _safe_yaml_mapping(text)
+    if whole is not None:
+        candidates.append(text)
+    candidates.extend(_extract_top_level_yaml_snippets(text))
+
+    mappings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        stripped = candidate.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        mapping = _safe_yaml_mapping(stripped)
+        if not isinstance(mapping, dict):
+            continue
+        if _KANBAN_POLICY_KEYS.intersection(mapping):
+            mappings.append(mapping)
+    return mappings
+
+
+def _body_requires_scope_attestation(body: Optional[str]) -> bool:
+    """Return True for structured ``completion_policy.require_scope_attestation``.
+
+    Supported forms are YAML frontmatter, fenced YAML blocks, pure YAML bodies,
+    and top-level unfenced YAML snippets. Arbitrary prose/inline strings are not
+    treated as policy declarations.
+    """
+    for mapping in _iter_task_policy_mappings(body):
+        policy = mapping.get("completion_policy")
+        if isinstance(policy, dict) and _truthy_policy_value(policy.get("require_scope_attestation")):
+            return True
+    return False
+
+
+def _selected_policy_value(body: Optional[str], key: str) -> Any:
+    """Return the last parser-backed policy value for ``key`` in a task body."""
+    selected = None
+    for mapping in _iter_task_policy_mappings(body):
+        if key in mapping:
+            selected = mapping.get(key)
+    return selected
+
+
+def _review_lane_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _normalized_review_lane(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    lane = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "FASTLANE": "FASTLANE_KANBAN",
+        "KANBAN_FASTLANE": "FASTLANE_KANBAN",
+        "STANDARD": "STANDARD_REVIEW",
+        "CRITICAL": "CRITICAL_REVIEW",
+    }
+    lane = aliases.get(lane, lane)
+    return lane if lane in KANBAN_REVIEW_LANES else None
+
+
+def _explicit_manual_review_pipeline(body: Optional[str]) -> bool:
+    """Return True when task policy opts out of dispatcher Reviewer-B auto-creation.
+
+    STANDARD_REVIEW supports exactly one review path: either Coordinator/Planner
+    creates an explicit/manual reviewer pipeline, or the dispatcher creates the
+    default Reviewer-B child. These structured policy keys make the manual path
+    explicit for taskgraphs that do not pre-create the reviewer child.
+    """
+    review_pipeline = _selected_policy_value(body, "review_pipeline")
+    if isinstance(review_pipeline, str) and review_pipeline.strip().casefold() in {
+        "manual",
+        "manual_review",
+        "manual-review",
+        "manual_reviewer",
+        "manual-reviewer",
+    }:
+        return True
+
+    auto_reviewer_b = _selected_policy_value(body, "auto_reviewer_b")
+    if isinstance(auto_reviewer_b, bool):
+        return not auto_reviewer_b
+    if isinstance(auto_reviewer_b, (int, float)):
+        return auto_reviewer_b == 0
+    if isinstance(auto_reviewer_b, str):
+        return auto_reviewer_b.strip().casefold() in {"false", "no", "0", "off", "disabled"}
+
+    return False
+
+
+def _without_scope_negative_declarations(text: str, contract: dict[str, Any]) -> str:
+    """Remove negative scope declarations before free-text risk matching.
+
+    The lane classifier should not escalate a low-risk task merely because its
+    scope contract lists critical systems under forbidden/anti-scope fields.
+    Positive declarations such as allowed_systems are handled separately.
+    """
+    sanitized = text
+    for key in ("forbidden_systems", "forbidden_paths", "anti_scope"):
+        for item in _review_lane_string_list(contract.get(key)):
+            value = str(item).strip().casefold()
+            if value:
+                sanitized = sanitized.replace(value, "")
+                sanitized = sanitized.replace(_normalize_forbidden_system_name(value), "")
+    return sanitized
+
+
+def classify_kanban_review_lane(
+    *,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    changed_paths: Optional[Iterable[str]] = None,
+    requested_lane: Optional[str] = None,
+) -> dict[str, Any]:
+    """Classify the cheapest safe Kanban review lane for a task."""
+    text_parts = [title or "", body or ""]
+    paths = [str(p) for p in (changed_paths or []) if str(p).strip()]
+    text_haystack = "\n".join(text_parts).casefold()
+    contract = _selected_scope_contract(body) or {}
+    lane_value = _selected_policy_value(body, "review_lane")
+    explicit_lane = _normalized_review_lane(requested_lane) or _normalized_review_lane(lane_value)
+    allowed_systems = {
+        _normalize_forbidden_system_name(item)
+        for item in _review_lane_string_list(contract.get("allowed_systems"))
+    }
+
+    critical_terms = {
+        "gateway-runtime", "dispatcher-runtime-activation", "live-profile-config-mutation",
+        "openclaw", "mission-control", "atlas", "telegram", "systemd",
+        "cron-runtime", "secrets-credentials", "restart", "deploy", "runtime-activation",
+        "profile-config", "config-mutation", "broad-db", "state-operation",
+    }
+    critical_text_markers = {
+        "gateway-runtime", "dispatcher-runtime-activation", "live-profile-config-mutation",
+        "runtime-activation", "profile-config", "config-mutation", "broad-db",
+        "state-operation", "secrets-credentials", "systemd", "cron-runtime",
+        "openclaw-gateway", "mission-control", "atlas executor", "atlas call",
+        "restart atlas", "telegram bot", "telegram notification", "systemctl restart",
+        "restart service", "restart .service", ".service restart", "deploy runtime",
+    }
+    critical_path_markers = (
+        "/.hermes/auth.json", "/.hermes/.env", "/.hermes/profiles/", "/.openclaw/",
+        "systemd/", "cron/", "gateway/", "plugins/kanban/systemd/",
+    )
+    standard_terms = {
+        "dispatcher", "lifecycle", "task-lifecycle", "completion-semantics",
+        "review-required", "recompute-ready", "task-links", "claim-task",
+        "block-task", "complete-task", "kanban-db-semantics",
+    }
+
+    reasons: list[str] = []
+    triggers: list[str] = []
+    critical_text_haystack = _without_scope_negative_declarations(text_haystack, contract)
+    critical_text_hit = any(marker in critical_text_haystack for marker in critical_text_markers)
+    if allowed_systems.intersection(critical_terms) or critical_text_hit:
+        triggers.append("critical_allowed_system_or_text")
+    if any(marker in p.casefold() for p in paths for marker in critical_path_markers):
+        triggers.append("critical_changed_path")
+    if explicit_lane == "CRITICAL_REVIEW":
+        triggers.append("explicit_critical_review")
+
+    if triggers:
+        lane = "CRITICAL_REVIEW"
+        reasons.append("critical trigger requires Reviewer-A + Reviewer-B and explicit activation Go")
+    else:
+        standard_hit = any(term in text_haystack for term in standard_terms) or explicit_lane == "STANDARD_REVIEW"
+        if standard_hit:
+            lane = "STANDARD_REVIEW"
+            if explicit_lane == "STANDARD_REVIEW":
+                triggers.append("explicit_standard_review")
+                reasons.append("explicit/policy STANDARD_REVIEW request requires one Reviewer-B")
+            else:
+                reasons.append("lifecycle/dispatcher/non-trivial Kanban semantics require one Reviewer-B")
+        else:
+            lane = KANBAN_FASTLANE_DEFAULT
+            reasons.append("low-risk Kanban-only/default path: Hub plan check + Coder + Hub/Coordinator evidence check")
+
+    if explicit_lane and KANBAN_REVIEW_LANES.index(explicit_lane) > KANBAN_REVIEW_LANES.index(lane):
+        lane = explicit_lane
+        triggers.append(f"explicit_{explicit_lane.lower()}")
+
+    risk_map = {"FASTLANE_KANBAN": "low", "STANDARD_REVIEW": "medium", "CRITICAL_REVIEW": "high"}
+    risk = risk_map.get(lane, "low")
+    return {
+        "lane": lane,
+        "risk": risk,
+        "reviewer_a_required": lane == "CRITICAL_REVIEW",
+        "reviewer_b_required": lane in {"STANDARD_REVIEW", "CRITICAL_REVIEW"},
+        "hub_coordinator_evidence_check_required": lane == "FASTLANE_KANBAN",
+        "fastlane_default": lane == "FASTLANE_KANBAN",
+        "reasons": reasons,
+        "escalation_triggers": triggers,
+    }
+
+
+def _metadata_truthy(metadata: Optional[dict], key: str) -> bool:
+    if not isinstance(metadata, dict) or key not in metadata:
+        return False
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "ok", "pass", "passed"}
+    return bool(value)
+
+
+def _metadata_int(metadata: Optional[dict], key: str) -> Optional[int]:
+    if not isinstance(metadata, dict) or key not in metadata:
+        return None
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _latest_dispatch_preflight_effective_toolsets(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> Optional[list[str]]:
+    """Return the latest dispatcher-recorded effective tool schema for a task."""
+    row = conn.execute(
+        """
+        SELECT payload FROM task_events
+         WHERE task_id = ? AND kind = 'dispatch_preflight_passed'
+         ORDER BY id DESC LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        return None
+    effective = payload.get("effective_toolsets") if isinstance(payload, dict) else None
+    if not isinstance(effective, list):
+        return None
+    return [str(item) for item in effective]
+
+
+def _scope_contract_version(body: Optional[str]) -> Optional[int]:
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict):
+        return None
+    try:
+        return int(contract.get("version"))
+    except (TypeError, ValueError):
+        return None
+
+
+def kanban_completion_template(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """Return a deterministic no-mutation completion metadata skeleton.
+
+    The template is intentionally conservative: it includes the required
+    scope-attestation fields and the latest dispatcher effective tool list when
+    available, otherwise it falls back to the task body's
+    ``scope_contract.allowed_tools`` and emits a diagnostic. It never writes to
+    the board.
+    """
+    row = conn.execute(
+        "SELECT id, body, assignee FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "mutated": False,
+            "diagnostic": {
+                "code": "task_not_found",
+                "message": f"Task not found: {task_id}",
+            },
+            "metadata": None,
+            "effective_toolsets_source": "unavailable",
+        }
+
+    body = row["body"]
+    assignee = row["assignee"] if "assignee" in row.keys() else None
+    version = _scope_contract_version(body) or 2
+    scope_contract_read = _selected_scope_contract(body) is not None
+    preflight_effective = _latest_dispatch_preflight_effective_toolsets(conn, task_id)
+    contract_effective = _scope_contract_allowed_tools(body)
+    diagnostic: Optional[dict[str, str]] = None
+    effective_source = "unavailable"
+    effective_toolsets: Optional[list[str]] = None
+
+    if preflight_effective is not None:
+        # F-2026-05-17-02: the dispatch event records the unfiltered runtime
+        # tool list (worker has access via kanban-effective override). For the
+        # metadata-record path we apply the profile filter so the drift
+        # detector compares apples-to-apples with the profile's declared
+        # surface and does not re-surface dispatcher-overridden tools.
+        try:
+            filtered_preflight = _filter_tool_names_by_profile_disabled(
+                preflight_effective,
+                profile=assignee,
+            )
+        except Exception:
+            filtered_preflight = list(preflight_effective)
+        if filtered_preflight and filtered_preflight != preflight_effective:
+            effective_toolsets = filtered_preflight
+            effective_source = "filtered_preflight_by_profile"
+        elif filtered_preflight:
+            effective_toolsets = filtered_preflight
+            effective_source = "dispatch_preflight_passed"
+        else:
+            # All preflight tools were profile-disabled. Keep the raw preflight
+            # list so validation can still match the event payload, but stamp
+            # a marker so auditors know the filter produced an empty set.
+            effective_toolsets = list(preflight_effective)
+            effective_source = "fallback_preflight_all_profile_disabled"
+    elif contract_effective is not None:
+        raw_contract = [str(item) for item in contract_effective]
+        # Finding F-2026-05-17-02 fallback path: no dispatch_preflight_passed
+        # event found — run the contract through the profile filter directly.
+        try:
+            filtered_contract = _filter_tool_names_by_profile_disabled(
+                raw_contract,
+                profile=assignee,
+            )
+        except Exception:
+            filtered_contract = list(raw_contract)
+        if filtered_contract and filtered_contract != raw_contract:
+            effective_toolsets = filtered_contract
+            effective_source = "filtered_contract_by_profile"
+        else:
+            effective_toolsets = raw_contract
+            # Preserve backwards-compatible source label when the filter was a
+            # no-op (no profile, no overlap, or filter unavailable). Existing
+            # consumers compare against "scope_contract.allowed_tools".
+            effective_source = "scope_contract.allowed_tools"
+        diagnostic = {
+            "code": "dispatch_preflight_missing",
+            "message": (
+                "No dispatch_preflight_passed event found; effective_toolsets "
+                "fell back to scope_contract.allowed_tools."
+            ),
+        }
+    else:
+        diagnostic = {
+            "code": "effective_toolsets_unavailable",
+            "message": (
+                "No dispatch_preflight_passed event or "
+                "scope_contract.allowed_tools found; fill effective_toolsets "
+                "manually if this completion requires it."
+            ),
+        }
+
+    metadata: dict[str, Any] = {
+        "scope_contract_read": scope_contract_read,
+        "scope_contract_version": version,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    }
+    if effective_toolsets is not None:
+        metadata["effective_toolsets"] = effective_toolsets
+    # F-2026-05-17-02: stamp a source marker on metadata when the filter path
+    # was traversed, so auditors and the drift detector can tell whether the
+    # list is profile-aligned. Values added by F-02:
+    # ``filtered_preflight_by_profile`` (filtered runtime list — clean)
+    # ``filtered_contract_by_profile`` (no-preflight fallback, filtered)
+    # ``fallback_preflight_all_profile_disabled`` (profile disabled everything)
+    # Legacy values (``dispatch_preflight_passed`` / ``scope_contract.allowed_tools``)
+    # are left out of metadata to preserve the pre-patch on-disk shape.
+    if effective_source in {
+        "filtered_preflight_by_profile",
+        "filtered_contract_by_profile",
+        "fallback_preflight_all_profile_disabled",
+    }:
+        metadata["effective_toolsets_source"] = effective_source
+    metadata.update(
+        {
+            "changed_files": [],
+            "tests": [],
+            "commands": [],
+            "non_actions": [],
+            "residual_risk": "",
+            "commit_hash": "not_committed",
+        }
+    )
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "mutated": False,
+        "requires_scope_attestation": _body_requires_scope_attestation(body),
+        "diagnostic": diagnostic,
+        "metadata": metadata,
+        "effective_toolsets_source": effective_source,
+    }
+
+
+def _validate_required_scope_attestation(
+    metadata: Optional[dict],
+    body: Optional[str] = None,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    task_id: Optional[str] = None,
+) -> list[str]:
+    """Return missing/invalid fields for a scope-gated completion."""
+    missing: list[str] = []
+    if not isinstance(metadata, dict):
+        return ["metadata object is required"]
+    version = _metadata_int(metadata, "scope_contract_version")
+    if version is None or version < 2:
+        missing.append("scope_contract_version >= 2")
+    forbidden = _metadata_int(metadata, "forbidden_actions_taken")
+    if forbidden is None:
+        missing.append("forbidden_actions_taken = 0")
+    elif forbidden != 0:
+        missing.append("forbidden_actions_taken must be 0")
+    if not _metadata_truthy(metadata, "scope_attestation"):
+        missing.append("scope_attestation = true")
+    expected_effective = _scope_contract_allowed_tools(body)
+    assignee_for_filter: Optional[str] = None
+    if conn is not None and task_id:
+        expected_effective = (
+            _latest_dispatch_preflight_effective_toolsets(conn, task_id)
+            or expected_effective
+        )
+        try:
+            row = conn.execute(
+                "SELECT assignee FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is not None:
+                assignee_for_filter = row["assignee"] if "assignee" in row.keys() else None
+        except Exception:
+            assignee_for_filter = None
+    # F-2026-05-17-02: align expected with the kanban_completion_template path
+    # — both apply the profile filter so worker-submitted metadata that excludes
+    # profile-disabled tools is treated as valid (not a mismatch).
+    if expected_effective is not None and assignee_for_filter:
+        try:
+            filtered_expected = _filter_tool_names_by_profile_disabled(
+                [str(item) for item in expected_effective],
+                profile=assignee_for_filter,
+            )
+            if filtered_expected:
+                expected_effective = filtered_expected
+        except Exception:
+            pass
+    if expected_effective is not None:
+        effective = metadata.get("effective_toolsets")
+        if not isinstance(effective, list) or not effective:
+            missing.append("effective_toolsets list")
+        elif [str(item) for item in effective] != [str(item) for item in expected_effective]:
+            missing.append("effective_toolsets mismatch")
+    return missing
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2705,15 +3688,47 @@ def complete_task(
     """
     now = int(time.time())
 
+    task_row = conn.execute(
+        "SELECT body FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    requires_scope_attestation = bool(
+        task_row and _body_requires_scope_attestation(task_row["body"])
+    )
+    task_body = task_row["body"] if task_row else None
+    if requires_scope_attestation:
+        missing_scope = _validate_required_scope_attestation(
+            metadata,
+            task_body,
+            conn=conn,
+            task_id=task_id,
+        )
+        if missing_scope:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_blocked_scope_attestation",
+                    {
+                        "missing": missing_scope,
+                        "summary_preview": (
+                            (summary or result or "").strip().splitlines()[0][:200]
+                            if (summary or result)
+                            else None
+                        ),
+                    },
+                )
+            raise ScopeAttestationError(missing_scope, task_id)
+
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
     # surfacing HallucinatedCardsError to the worker; this function
     # never mutates task state on a phantom-card rejection.
     if created_cards:
-        verified_cards, phantom_cards = _verify_created_cards(
-            conn, task_id, created_cards
-        )
+        card_validation = validate_created_cards(conn, task_id, created_cards)
+        verified_cards = card_validation["verified_cards"]
+        phantom_cards = card_validation["phantom_cards"]
         if phantom_cards:
             with write_txn(conn):
                 _append_event(
@@ -2789,10 +3804,14 @@ def complete_task(
         # full summary stays on the run row.
         ev_summary = (summary if summary is not None else result) or ""
         ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
-        completed_payload: dict = {
-            "result_len": len(result) if result else 0,
-            "summary": ev_summary or None,
-        }
+        completed_payload = _terminal_event_payload(
+            conn,
+            task_id,
+            run_id,
+            outcome="completed",
+            summary=ev_summary or None,
+            extra={"result_len": len(result) if result else 0},
+        )
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
         # Carry artifact paths in the event payload so the gateway
@@ -2840,6 +3859,7 @@ def complete_task(
     # just tracks "is there a current pathology the breaker should
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
+    _terminalize_legacy_reviewer_children_for_finalization(conn, task_id, metadata)
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
@@ -2980,9 +4000,17 @@ def block_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    block_type: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    context_comment_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running -> blocked``."""
+    """Transition an active or queued task to ``blocked``.
+
+    Worker-owned blocks pass ``expected_run_id`` and are restricted to the
+    live ``running|ready`` task/run pair. Administrative/manual blocks without
+    an expected run may also block ``triage`` and ``todo`` tasks so superseded
+    fixtures can be parked without direct SQLite surgery.
+    """
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -2993,7 +4021,7 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'todo', 'triage')
                 """,
                 (task_id,),
             )
@@ -3026,7 +4054,31 @@ def block_task(
                 outcome="blocked",
                 summary=reason,
             )
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        normalized_block_type = _normalize_block_type_marker(block_type)
+        if normalized_block_type is None and _is_iteration_budget_guard_reason(reason):
+            normalized_block_type = _ITERATION_BUDGET_BLOCK_TYPE
+        block_payload_extra: dict[str, Any] = {"reason": reason}
+        if normalized_block_type:
+            block_payload_extra["block_type"] = normalized_block_type
+        if context_comment_id is not None:
+            comment = conn.execute(
+                "SELECT body FROM task_comments WHERE id = ? AND task_id = ?",
+                (int(context_comment_id), task_id),
+            ).fetchone()
+            if comment:
+                block_payload_extra["context_comment_id"] = int(context_comment_id)
+                snippet = (comment["body"] or "").strip().replace("\n", " ")[:200]
+                if snippet:
+                    block_payload_extra["context_snippet"] = snippet
+        block_payload = _terminal_event_payload(
+            conn,
+            task_id,
+            run_id,
+            outcome="blocked",
+            summary=reason,
+            extra=block_payload_extra,
+        )
+        _append_event(conn, task_id, "blocked", block_payload, run_id=run_id)
         return True
 
 
@@ -3588,6 +4640,47 @@ DEFAULT_FAILURE_LIMIT = 2
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
+# C2 Backoff-Sleep Enforcement (followup-2026-05-17 §2).
+# Must stay aligned with manifest:
+# ~/.hermes/policies/standing-approvals.yaml
+# approvals.coordinator.auto_retry_worker.caps.backoff_sec.
+_RETRY_AFTER_BACKOFF_SEC = (30, 120)
+_RETRY_AFTER_TAG = "; retry_after="
+
+
+def _retry_after_ts_from_error(err):
+    """Parse the ``; retry_after=<unix-ts>`` suffix from a
+    ``tasks.last_failure_error`` value. Returns the integer timestamp or
+    ``None`` when absent / malformed."""
+    if not err or _RETRY_AFTER_TAG not in err:
+        return None
+    suffix = err.rsplit(_RETRY_AFTER_TAG, 1)[1].strip()
+    try:
+        return int(suffix.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _stamp_retry_after(err, ts):
+    """Append (or replace) ``; retry_after=<ts>`` on a
+    ``last_failure_error`` string. Caps total length at 500 chars to
+    match column constraints."""
+    base = err or ""
+    if _RETRY_AFTER_TAG in base:
+        base = base.rsplit(_RETRY_AFTER_TAG, 1)[0]
+    stamped = base.rstrip() + _RETRY_AFTER_TAG + str(int(ts))
+    return stamped[:500]
+
+
+def _backoff_sec_for_failure(failures):
+    """Backoff seconds to wait before next claim, based on the new
+    ``consecutive_failures`` count (1-based). Falls through to the last
+    schedule entry once failures exceed the table length."""
+    if failures <= 0:
+        return 0
+    idx = min(int(failures) - 1, len(_RETRY_AFTER_BACKOFF_SEC) - 1)
+    return int(_RETRY_AFTER_BACKOFF_SEC[idx])
+
 # Max bytes to keep in a single worker log file. The dispatcher truncates
 # and rotates on spawn if the file is larger than this at spawn time.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
@@ -3657,6 +4750,1135 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    auto_continued: list[str] = field(default_factory=list)
+    """Blocked task ids the dispatcher autonomously reopened after iteration-budget exhaustion."""
+    continuation_capped: list[str] = field(default_factory=list)
+    """Blocked task ids left parked because the iteration-budget continuation cap was reached."""
+    preflight_blocked: list[str] = field(default_factory=list)
+    """Task ids blocked before claim/spawn because they failed dispatcher preflight."""
+    retry_deferred: list[str] = field(default_factory=list)
+    """Task ids skipped this tick because their retry_after window is still in the future (C2 backoff)."""
+
+
+def _selected_scope_contract(body: Optional[str]) -> Optional[dict]:
+    """Return the policy contract for the current task body.
+
+    Coordinator tasks may embed child/reviewer task templates before their own
+    top-level ``scope_contract``. In that shape, the final structured contract
+    is the current task's contract; earlier contracts belong to embedded child
+    templates and must not narrow the spawned worker schema or completion
+    attestation for the parent task.
+    """
+    selected: Optional[dict] = None
+    for mapping in _iter_task_policy_mappings(body):
+        contract = mapping.get("scope_contract")
+        if isinstance(contract, dict):
+            selected = contract
+    return selected
+
+
+def _task_has_scope_contract_v2(body: Optional[str]) -> bool:
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict):
+        return False
+    version = contract.get("version")
+    try:
+        return int(version) >= 2
+    except (TypeError, ValueError):
+        return False
+
+
+def _scope_contract_allowed_tools(body: Optional[str]) -> Optional[list[str]]:
+    """Return structured ``scope_contract.allowed_tools`` when present.
+
+    The values are task-author declarations, not a replacement for profile or
+    model-native tool isolation. Dispatcher preflight uses them as the narrow
+    allowed surface and records the effective list for worker attestation.
+    """
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict) or "allowed_tools" not in contract:
+        return None
+    allowed = contract.get("allowed_tools")
+    if isinstance(allowed, str):
+        return [allowed]
+    if isinstance(allowed, (list, tuple)):
+        return [str(item).strip() for item in allowed if str(item).strip()]
+    return []
+
+
+def _scope_contract_forbidden_systems(body: Optional[str]) -> Optional[list[str]]:
+    """Return structured ``scope_contract.forbidden_systems`` when present."""
+    contract = _selected_scope_contract(body)
+    if not isinstance(contract, dict) or "forbidden_systems" not in contract:
+        return None
+    forbidden = contract.get("forbidden_systems")
+    if isinstance(forbidden, str):
+        return [forbidden]
+    if isinstance(forbidden, (list, tuple)):
+        return [str(item).strip() for item in forbidden if str(item).strip()]
+    return []
+
+
+def _normalize_forbidden_system_name(name: str) -> str:
+    return re.sub(r"[\s_]+", "-", str(name).strip().lower())
+
+
+def _validate_scope_forbidden_systems(body: Optional[str]) -> list[str]:
+    """Validate core Hermes-only forbidden-system declarations."""
+    declared = _scope_contract_forbidden_systems(body)
+    if declared is None:
+        declared_keys: set[str] = set()
+    else:
+        declared_keys = {_normalize_forbidden_system_name(item) for item in declared}
+    missing = [
+        canonical
+        for key, canonical in _REQUIRED_SCOPE_FORBIDDEN_SYSTEMS.items()
+        if key not in declared_keys
+    ]
+    if not missing:
+        return []
+    return [
+        "scope_contract.forbidden_systems is missing required entries: "
+        + ", ".join(missing)
+    ]
+
+
+def _validate_scope_allowed_tools(body: Optional[str]) -> tuple[list[str], list[str]]:
+    """Validate ``scope_contract.allowed_tools`` for dispatcher preflight.
+
+    Returns ``(effective_toolsets, problems)``. Missing, unknown, and obviously
+    broad/forbidden declarations fail closed before spawn.
+    """
+    allowed = _scope_contract_allowed_tools(body)
+    if allowed is None:
+        return [], ["scope_contract.allowed_tools is required"]
+    normalized: list[str] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    for item in allowed:
+        name = str(item).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if key in _BROAD_SCOPE_ALLOWED_TOOL_MARKERS:
+            problems.append(f"allowed_tool is too broad: {name}")
+            continue
+        if key in _FORBIDDEN_SCOPE_ALLOWED_TOOL_MARKERS:
+            problems.append(f"allowed_tool is forbidden for Hermes-only dispatch: {name}")
+            continue
+        if name not in _KNOWN_SCOPE_ALLOWED_TOOLS:
+            problems.append(f"unknown allowed_tool: {name}")
+            continue
+        normalized.append(name)
+    if not normalized and not problems:
+        problems.append("scope_contract.allowed_tools must not be empty")
+    return normalized, problems
+
+
+@contextlib.contextmanager
+def _temporary_env(updates: dict[str, Optional[str]]):
+    """Temporarily patch ``os.environ`` and restore it exactly afterwards."""
+    sentinel = object()
+    previous = {key: os.environ.get(key, sentinel) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value  # type: ignore[assignment]
+
+
+def _filter_tool_names_by_profile_disabled(
+    tool_names: list[str],
+    profile: Optional[str],
+) -> list[str]:
+    """Drop tool names whose owning toolset is in ``profile.agent.disabled_toolsets``.
+
+    Finding F-2026-05-17-02: the dispatcher's kanban-effective filter (model_tools.py)
+    deliberately overrides profile-level disabled_toolsets so worker spawns can still
+    use dispatcher-approved coordination tools. The recorded ``effective_toolsets``,
+    however, is consumed by ``capability_drift_detector`` — recording dispatcher-
+    overridden but profile-disabled tools causes recurring false-positive drift
+    after every cron tick. This helper produces the metadata-recording subset that
+    aligns drift detection with the worker's profile-declared surface.
+    """
+    if not tool_names:
+        return []
+    requested = [str(n).strip() for n in tool_names if str(n).strip()]
+    if not profile or not requested:
+        return requested
+    disabled_toolset_names = _load_profile_disabled_toolsets(profile)
+    if not disabled_toolset_names:
+        return requested
+    try:
+        import tools.kanban_tools  # noqa: F401
+        from toolsets import resolve_toolset, validate_toolset
+    except Exception:
+        return requested
+    disabled_tool_names: set[str] = set()
+    for ts_name in disabled_toolset_names:
+        try:
+            if validate_toolset(ts_name):
+                disabled_tool_names.update(resolve_toolset(ts_name))
+        except Exception:
+            continue
+    return [name for name in requested if name not in disabled_tool_names]
+
+
+def _load_profile_disabled_toolsets(profile: Optional[str]) -> list[str]:
+    """Return ``agent.disabled_toolsets`` for a profile, or ``[]`` if unavailable.
+
+    Finding F-2026-05-17-02 (Reactor-Matrix v1): the resolver must honor the
+    profile's disabled_toolsets so the recorded ``effective_toolsets`` matches
+    what the worker can actually invoke at runtime, not the broader contract
+    declaration.
+    """
+    if not profile:
+        return []
+    try:
+        _canon, profile_cfg_path = _profile_config_path(profile)
+    except Exception:
+        return []
+    try:
+        if not profile_cfg_path.exists():
+            return []
+        cfg = _parse_yaml_mapping(
+            profile_cfg_path.read_text(encoding="utf-8"),
+            source=profile_cfg_path,
+        )
+    except Exception:
+        return []
+    agent_section = cfg.get("agent") if isinstance(cfg, dict) else None
+    if not isinstance(agent_section, dict):
+        return []
+    raw = agent_section.get("disabled_toolsets") or []
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _resolve_scope_runtime_tool_schema_names(
+    allowed_toolsets: list[str],
+    *,
+    task_id: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> list[str]:
+    """Resolve the model-native worker schema for a scoped allowlist.
+
+    ``scope_contract.allowed_tools`` is only the declared policy. The worker's
+    usable lifecycle surface is the schema that ``model_tools`` can actually
+    build in a Kanban task context after registry ``check_fn`` filtering. Use
+    that same runtime path here so dispatcher preflight blocks before spawn if
+    a declared lifecycle tool is not present in the real worker schema.
+
+    When ``profile`` is provided, the profile's ``agent.disabled_toolsets`` is
+    threaded into ``get_tool_definitions`` so disabled toolsets are filtered
+    out of the resolved schema (matches the worker's actual runtime surface).
+    """
+    requested = [str(name).strip() for name in (allowed_toolsets or []) if str(name).strip()]
+    if not requested:
+        return []
+
+    profile_disabled = _load_profile_disabled_toolsets(profile)
+
+    try:
+        # Importing the tool module is idempotent and ensures module-level
+        # registry.register(...) calls have happened in import-order-sensitive
+        # test and CLI contexts.
+        import tools.kanban_tools  # noqa: F401
+        from model_tools import _clear_tool_defs_cache, get_tool_definitions
+        from tools.registry import invalidate_check_fn_cache
+    except Exception:
+        return []
+
+    env_updates = {
+        "HERMES_KANBAN_TASK": task_id or "__dispatch_preflight__",
+        "HERMES_KANBAN_EFFECTIVE_TOOLSETS": json.dumps(requested),
+    }
+    schemas = []
+    with _temporary_env(env_updates):
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+        try:
+            schemas = get_tool_definitions(
+                enabled_toolsets=[],
+                disabled_toolsets=profile_disabled,
+                quiet_mode=True,
+            )
+        finally:
+            _clear_tool_defs_cache()
+            invalidate_check_fn_cache()
+
+    available = {
+        str(schema.get("function", {}).get("name"))
+        for schema in (schemas or [])
+        if isinstance(schema, dict) and schema.get("function", {}).get("name")
+    }
+    return [name for name in requested if name in available]
+
+
+def _validate_effective_scope_runtime_tools(
+    effective_toolsets: list[str],
+    *,
+    declared_allowed_tools: Optional[list[str]] = None,
+) -> list[str]:
+    """Fail closed when a scoped worker would lack lifecycle Kanban tools."""
+    resolved = [str(name).strip() for name in (effective_toolsets or []) if str(name).strip()]
+    if not resolved:
+        return ["runtime tool schema resolved empty after scope_contract.allowed_tools validation"]
+
+    resolved_set = set(resolved)
+    declared = [str(name).strip() for name in (declared_allowed_tools or []) if str(name).strip()]
+    missing_declared = [name for name in declared if name not in resolved_set]
+    if missing_declared:
+        return [
+            "runtime tool schema missing declared allowed tools: "
+            + ", ".join(missing_declared)
+        ]
+
+    missing = [name for name in _REQUIRED_SCOPE_LIFECYCLE_TOOLS if name not in resolved_set]
+    if missing:
+        return [
+            "runtime tool schema missing required terminal Kanban lifecycle tools: "
+            + ", ".join(missing)
+        ]
+    return []
+
+
+def _task_requires_dispatcher_scope_preflight(body: Optional[str]) -> bool:
+    if _body_requires_scope_attestation(body):
+        return True
+    return any("scope_contract" in mapping for mapping in _iter_task_policy_mappings(body))
+
+
+def _validate_task_extra_skills(skills: Optional[list]) -> list[str]:
+    """Return force-loaded skills that the current CLI cannot resolve.
+
+    This preflight prevents crash loops where the spawned process exits with
+    ``Unknown skill(s): ...`` before it can block its own task.
+    """
+    requested = [str(s).strip() for s in (skills or []) if str(s).strip()]
+    requested = [s for s in requested if s != "kanban-worker"]
+    if not requested:
+        return []
+    try:
+        from agent.skill_commands import build_preloaded_skills_prompt
+        _prompt, _loaded, missing = build_preloaded_skills_prompt(requested)
+        return [str(s) for s in (missing or [])]
+    except Exception as exc:
+        return [f"skill preflight failed: {exc}"]
+
+
+def _block_dispatch_preflight(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+    *,
+    kind: str = "dispatch_preflight_blocked",
+    evidence: Optional[dict[str, Any]] = None,
+) -> bool:
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'blocked', result = ?, completed_at = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+            "last_failure_error = ? WHERE id = ? AND status = 'ready'",
+            (reason[:500], reason[:500], task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        payload = {"reason": reason[:500], "blocked_at": now, "task_id": task_id}
+        if isinstance(evidence, dict):
+            payload.update(evidence)
+        _append_event(
+            conn,
+            task_id,
+            kind,
+            payload,
+        )
+        return True
+
+
+DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 1
+_ITERATION_BUDGET_BLOCK_TYPE = "iteration_budget_exhausted"
+_ITERATION_BUDGET_GUARD_REASON_RE = re.compile(
+    r"^\s*iteration budget exhausted\s*\(\d+\s*/\s*\d+\)\s*[—-]\s*"
+    r"task could not complete within the allowed iterations\s*$",
+    re.IGNORECASE,
+)
+_ITERATION_BUDGET_AUTO_CONTINUE_EVENT = "dispatch_auto_continued_iteration_budget"
+_ITERATION_BUDGET_CONTINUATION_CAPPED_EVENT = "dispatch_iteration_budget_continuation_capped"
+_ITERATION_BUDGET_COMMENT_AUTHOR = "kanban-dispatcher"
+_REVIEW_REQUIRED_BLOCK_RE = re.compile(r"^\s*review-required:\s*", re.IGNORECASE)
+_REVIEW_REQUIRED_HANDOFF_EVENT = "dispatch_review_required_handoff_created"
+_REVIEW_REQUIRED_COMMENT_AUTHOR = "kanban-dispatcher"
+_REVIEW_REQUIRED_REVIEWER_ALLOWED_TOOLS = [
+    "skill_view",
+    "kanban_show",
+    "read_file",
+    "search_files",
+    "kanban_run_workspace_command",
+    "kanban_comment",
+    "kanban_complete",
+    "kanban_block",
+]
+_AUTO_REVIEWER_CHILD_EVENT = "dispatch_auto_reviewer_child_created"
+_AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT = "dispatch_auto_reviewer_child_suppressed"
+_AUTO_REVIEWER_COMMENT_AUTHOR = "kanban-dispatcher"
+_AUTO_REVIEWER_MAX_RUNTIME_SECONDS = 12 * 60
+_AUTO_REVIEWER_MAX_RETRIES = 1
+_SUPERSEDED_NOOP_OUTCOME = "superseded_noop"
+_SUPERSEDED_NOOP_EVENT = "superseded_noop_terminalized"
+_COORDINATOR_FINALIZATION_REASON = "coordinator_finalization_existing_approved_reviewer"
+
+
+def _is_iteration_budget_guard_reason(summary: Optional[str]) -> bool:
+    if not summary:
+        return False
+    return bool(_ITERATION_BUDGET_GUARD_REASON_RE.fullmatch(str(summary)))
+
+
+def _normalize_block_type_marker(block_type: Optional[str]) -> Optional[str]:
+    """Normalize optional machine guard markers for blocked payloads."""
+    if block_type is None:
+        return None
+    normalized = str(block_type).strip().lower()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _is_iteration_budget_block_type(block_type: Optional[str]) -> bool:
+    """Return True only for the exact dispatcher-owned budget marker."""
+    return _normalize_block_type_marker(block_type) == _ITERATION_BUDGET_BLOCK_TYPE
+
+
+def _is_iteration_budget_exhausted(
+    summary: Optional[str], blocked_payload: Optional[dict[str, Any]]
+) -> bool:
+    # Auto-resume must require both the canonical full reason and the exact
+    # machine marker.  This intentionally rejects substring neighbors such as
+    # "... allowed iterations; awaiting policy approval" even if they mention
+    # the budget-guard text.
+    if not _is_iteration_budget_guard_reason(summary):
+        return False
+    if not isinstance(blocked_payload, dict):
+        return False
+    return _is_iteration_budget_block_type(blocked_payload.get("block_type"))
+
+
+def _is_review_required_block(summary: Optional[str]) -> bool:
+    if not summary:
+        return False
+    return bool(_REVIEW_REQUIRED_BLOCK_RE.match(str(summary)))
+
+
+def _blocked_event_payload_for_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: int,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT payload FROM task_events
+         WHERE task_id = ? AND kind = 'blocked' AND run_id = ?
+         ORDER BY id DESC LIMIT 1
+        """,
+        (task_id, int(run_id)),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return {}
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _legacy_parent_gated_reviewer_children(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT t.id
+          FROM task_links l
+          JOIN tasks t ON t.id = l.child_id
+         WHERE l.parent_id = ? AND LOWER(COALESCE(t.assignee, '')) = 'reviewer'
+         ORDER BY t.created_at ASC, t.id ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    return [str(r["id"]) for r in rows]
+
+
+def _completion_metadata_suppresses_auto_review(
+    metadata: Optional[dict],
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Return whether structured Coordinator/Admin metadata suppresses Reviewer-B.
+
+    Suppression is intentionally metadata-only. Prose in summaries/results is
+    ignored so a worker cannot accidentally suppress required review by wording
+    its handoff like an approval.
+    """
+    if not isinstance(metadata, dict):
+        return False, None, None
+    approved_reviewer = str(metadata.get("approved_reviewer_task") or "").strip()
+    if not approved_reviewer:
+        return False, None, None
+    required_markers = (
+        metadata.get("review_finalized_by_coordinator") is True,
+        metadata.get("suppress_auto_reviewer_b") is True,
+        metadata.get("reviewer_redispatch_forbidden") is True,
+        str(metadata.get("lifecycle_finalization") or "").strip()
+        == "coordinator_admin_finalization",
+    )
+    if not all(required_markers):
+        return False, None, approved_reviewer
+    return True, _COORDINATOR_FINALIZATION_REASON, approved_reviewer
+
+
+def _is_superseded_noop_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    run = latest_run(conn, task_id)
+    return bool(
+        run
+        and run.outcome == "completed"
+        and isinstance(run.metadata, dict)
+        and run.metadata.get("lifecycle_outcome") == _SUPERSEDED_NOOP_OUTCOME
+    )
+
+
+def terminalize_superseded_noop(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    superseded_by: Optional[str] = None,
+    expected_assignee: Optional[str] = "reviewer",
+) -> dict[str, Any]:
+    """Mark an inert artifact as terminal ``done`` with superseded/noop metadata.
+
+    This is deliberately narrower than a new task status: it only terminalizes
+    non-running artifact rows and records the semantic outcome in run metadata.
+    """
+    safe_reason = str(reason or "superseded noop").strip() or "superseded noop"
+    superseding_task = str(superseded_by).strip() if superseded_by else None
+    if _is_superseded_noop_task(conn, task_id):
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "idempotent": True,
+            "lifecycle_outcome": _SUPERSEDED_NOOP_OUTCOME,
+            "superseded_by": superseding_task,
+        }
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, assignee FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "task_id": task_id, "error": "task_not_found"}
+        previous_status = str(row["status"] or "")
+        assignee = str(row["assignee"] or "").strip().lower()
+        if expected_assignee is not None and assignee != expected_assignee.lower():
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "error": "unexpected_assignee",
+                "assignee": assignee,
+            }
+        if previous_status not in {"triage", "todo", "ready", "blocked"}:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "error": "unsupported_status",
+                "previous_status": previous_status,
+            }
+
+        now = int(time.time())
+        result = f"superseded/noop: {safe_reason}"
+        metadata = {
+            "lifecycle_outcome": _SUPERSEDED_NOOP_OUTCOME,
+            "noop_reason": safe_reason,
+        }
+        if superseding_task:
+            metadata["superseded_by"] = superseding_task
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'done',
+                   result       = ?,
+                   completed_at = ?,
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ?
+               AND status IN ('triage', 'todo', 'ready', 'blocked')
+            """,
+            (result, now, task_id),
+        )
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="completed",
+            status="done",
+            summary=result,
+            metadata=metadata,
+        )
+        if run_id is None:
+            run_id = _synthesize_ended_run(
+                conn,
+                task_id,
+                outcome="completed",
+                summary=result,
+                metadata=metadata,
+            )
+        _append_event(
+            conn,
+            task_id,
+            _SUPERSEDED_NOOP_EVENT,
+            {
+                "reason": safe_reason,
+                "superseded_by": superseding_task,
+                "previous_status": previous_status,
+                "lifecycle_outcome": _SUPERSEDED_NOOP_OUTCOME,
+            },
+            run_id=run_id,
+        )
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "idempotent": False,
+        "lifecycle_outcome": _SUPERSEDED_NOOP_OUTCOME,
+        "superseded_by": superseding_task,
+    }
+
+
+def _terminalize_legacy_reviewer_children_for_finalization(
+    conn: sqlite3.Connection,
+    source_task_id: str,
+    metadata: Optional[dict],
+) -> list[str]:
+    suppresses, reason, approved_reviewer = _completion_metadata_suppresses_auto_review(metadata)
+    if not suppresses:
+        return []
+    terminalized: list[str] = []
+    for child_id in _legacy_parent_gated_reviewer_children(conn, source_task_id):
+        result = terminalize_superseded_noop(
+            conn,
+            child_id,
+            reason=reason or _COORDINATOR_FINALIZATION_REASON,
+            superseded_by=approved_reviewer,
+            expected_assignee="reviewer",
+        )
+        if result.get("ok"):
+            terminalized.append(child_id)
+    return terminalized
+
+
+def _review_required_reviewer_body(
+    source_task: Task,
+    *,
+    source_run_id: int,
+    reason: str,
+    context_comment_id: Optional[int],
+    legacy_reviewer_children: list[str],
+) -> str:
+    allowed_paths: list[str] = []
+    if source_task.workspace_path:
+        allowed_paths.append(f"{source_task.workspace_path.rstrip('/')}/**")
+    lines = [
+        f"# Review blocked handoff for {source_task.id}",
+        "",
+        "Independent verdict-only Reviewer task created by the dispatcher because the source worker blocked with `review-required:`.",
+        "This task intentionally has NO parent edge to the blocked source so review can proceed without a deadlock.",
+        "",
+        "review_handoff:",
+        f"  source_task: {source_task.id}",
+        f"  source_run_id: {int(source_run_id)}",
+        f"  source_assignee: {source_task.assignee or ''}",
+        f"  source_workspace_kind: {source_task.workspace_kind}",
+    ]
+    if source_task.workspace_path:
+        lines.append(f"  source_workspace_path: {source_task.workspace_path}")
+    if context_comment_id is not None:
+        lines.append(f"  context_comment_id: {int(context_comment_id)}")
+    if legacy_reviewer_children:
+        lines.append("  legacy_parent_gated_reviewer_children:")
+        lines.extend([f"    - {child_id}" for child_id in legacy_reviewer_children])
+    lines.extend([
+        "",
+        "Review instructions:",
+        f"- blocked reason: {reason}",
+        "- Read the source task body, runs, comments, and the referenced context comment before deciding.",
+        "- Produce a verdict-only terminal result: APPROVED or NEEDS_REVISION.",
+        "- Required metadata keys: scope_contract_read=true, scope_contract_version=2, scope_attestation=true, forbidden_actions_taken=0, verdict, blocking_findings, required_verification, evidence_audited, residual_risk, effective_toolsets.",
+        "- source remains blocked pending explicit Coordinator/Admin finalization; there is no auto-completion of the source task from this reviewer verdict.",
+        "",
+        "scope_contract:",
+        "  version: 2",
+        "  assignee: reviewer",
+        "  allowed_systems:",
+        "    - hermes-agent",
+        "    - hermes-kanban",
+        "  allowed_tools:",
+    ])
+    lines.extend([f"    - {tool}" for tool in _REVIEW_REQUIRED_REVIEWER_ALLOWED_TOOLS])
+    if allowed_paths:
+        lines.append("  allowed_paths:")
+        lines.extend([f"    - {path}" for path in allowed_paths])
+    lines.extend([
+        "  forbidden_systems:",
+        "    - OpenClaw",
+        "    - Atlas",
+        "    - Mission-Control",
+        "    - Telegram",
+        "completion_policy:",
+        "  require_scope_attestation: true",
+    ])
+    return "\n".join(lines)
+
+
+def _review_required_source_comment(
+    *,
+    reviewer_task_id: str,
+    source_run_id: int,
+    legacy_reviewer_children: list[str],
+) -> str:
+    lines = [
+        "dispatcher review-required handoff created",
+        "",
+        f"- reviewer_task_id: {reviewer_task_id}",
+        f"- source_run_id: {int(source_run_id)}",
+        "- source remains blocked pending explicit Coordinator/Admin finalization after reviewer verdict",
+        "- no auto-completion of the blocked source task",
+    ]
+    if legacy_reviewer_children:
+        lines.append(
+            "- legacy parent-gated reviewer children left inert: "
+            + ", ".join(legacy_reviewer_children)
+        )
+    return "\n".join(lines)
+
+
+def _ensure_comment_once(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    author: str,
+    body: str,
+) -> int:
+    existing = conn.execute(
+        """
+        SELECT id FROM task_comments
+         WHERE task_id = ? AND author = ? AND body = ?
+         ORDER BY id DESC LIMIT 1
+        """,
+        (task_id, author, body.strip()),
+    ).fetchone()
+    if existing:
+        return int(existing["id"])
+    return add_comment(conn, task_id, author, body)
+
+
+def _dispatch_review_required_handoffs(conn: sqlite3.Connection) -> list[str]:
+    blocked_rows = conn.execute(
+        "SELECT id FROM tasks WHERE status = 'blocked' ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+    created_or_promoted: list[str] = []
+    for row in blocked_rows:
+        source_task = get_task(conn, row["id"])
+        if source_task is None:
+            continue
+        if str(source_task.assignee or "").strip().lower() == "reviewer":
+            continue
+        run = latest_run(conn, source_task.id)
+        if run is None or run.outcome != "blocked" or run.ended_at is None:
+            continue
+        if not _is_review_required_block(run.summary):
+            continue
+        if _has_task_event_for_run(conn, source_task.id, _REVIEW_REQUIRED_HANDOFF_EVENT, run.id):
+            continue
+
+        blocked_payload = _blocked_event_payload_for_run(conn, source_task.id, run.id)
+        context_comment_id = _metadata_int(blocked_payload, "context_comment_id")
+        legacy_reviewer_children = _legacy_parent_gated_reviewer_children(conn, source_task.id)
+        reviewer_body = _review_required_reviewer_body(
+            source_task,
+            source_run_id=run.id,
+            reason=(run.summary or "review-required").strip(),
+            context_comment_id=context_comment_id,
+            legacy_reviewer_children=legacy_reviewer_children,
+        )
+        reviewer_task_id = create_task(
+            conn,
+            title=f"Review blocked handoff for {source_task.id}: {source_task.title}",
+            body=reviewer_body,
+            assignee="reviewer",
+            created_by="dispatcher",
+            workspace_kind=source_task.workspace_kind,
+            workspace_path=source_task.workspace_path,
+            priority=source_task.priority,
+            idempotency_key=f"review-required:{source_task.id}:{run.id}",
+        )
+        comment_body = _review_required_source_comment(
+            reviewer_task_id=reviewer_task_id,
+            source_run_id=run.id,
+            legacy_reviewer_children=legacy_reviewer_children,
+        )
+        _ensure_comment_once(
+            conn,
+            source_task.id,
+            author=_REVIEW_REQUIRED_COMMENT_AUTHOR,
+            body=comment_body,
+        )
+        with write_txn(conn):
+            if _has_task_event_for_run(conn, source_task.id, _REVIEW_REQUIRED_HANDOFF_EVENT, run.id):
+                continue
+            _append_event(
+                conn,
+                source_task.id,
+                _REVIEW_REQUIRED_HANDOFF_EVENT,
+                {
+                    "source_task": source_task.id,
+                    "source_run_id": run.id,
+                    "reviewer_task_id": reviewer_task_id,
+                    "context_comment_id": context_comment_id,
+                    "blocked_source_parent_edge": False,
+                    "legacy_reviewer_children": legacy_reviewer_children,
+                },
+                run_id=run.id,
+            )
+        created_or_promoted.append(reviewer_task_id)
+    return created_or_promoted
+
+
+def _auto_reviewer_child_body(
+    source_task: Task,
+    *,
+    source_run_id: int,
+    lane: str,
+    stage: str,
+    completion_summary: str,
+) -> str:
+    lines = [
+        f"# Review {source_task.id}: {source_task.title}",
+        "",
+        "Auto-created reviewer child after coder completion.",
+        "",
+        f"parent_task: {source_task.id}",
+        f"parent_run: {int(source_run_id)}",
+        f"review_lane: {lane}",
+        f"review_stage: {stage}",
+        f"completion_summary: {completion_summary}",
+        "",
+        "Scope:",
+        "- Deliver verdict-only review feedback for the parent task output.",
+        "- Do not mutate forbidden systems.",
+    ]
+    return "\n".join(lines)
+
+
+def _dispatch_standard_review_children(conn: sqlite3.Connection) -> list[str]:
+    """Create STANDARD_REVIEW reviewer-b children after coder completion.
+
+    Scope intentionally excludes CRITICAL_REVIEW pre-coder Reviewer-A flow.
+    """
+    done_coder_rows = conn.execute(
+        """
+        SELECT id FROM tasks
+         WHERE status = 'done' AND LOWER(COALESCE(assignee, '')) = 'coder'
+         ORDER BY completed_at ASC, id ASC
+        """
+    ).fetchall()
+
+    created_children: list[str] = []
+    for row in done_coder_rows:
+        source_task = get_task(conn, row["id"])
+        if source_task is None:
+            continue
+        run = latest_run(conn, source_task.id)
+        if run is None or run.outcome != "completed" or run.ended_at is None:
+            continue
+        if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+            continue
+        if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT, run.id):
+            continue
+
+        suppresses_review, suppression_reason, approved_reviewer_task = (
+            _completion_metadata_suppresses_auto_review(run.metadata)
+        )
+        if suppresses_review:
+            with write_txn(conn):
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+                    continue
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT, run.id):
+                    continue
+                _append_event(
+                    conn,
+                    source_task.id,
+                    _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT,
+                    {
+                        "source_task": source_task.id,
+                        "source_run_id": run.id,
+                        "reason": suppression_reason,
+                        "approved_reviewer_task": approved_reviewer_task,
+                        "review_lane": "STANDARD_REVIEW",
+                        "review_stage": "reviewer_b",
+                    },
+                    run_id=run.id,
+                )
+            continue
+
+        changed_paths: list[str] = []
+        if isinstance(run.metadata, dict):
+            raw_changed = run.metadata.get("changed_files")
+            if isinstance(raw_changed, list):
+                changed_paths = [str(p) for p in raw_changed if str(p).strip()]
+
+        lane_result = classify_kanban_review_lane(
+            title=source_task.title,
+            body=source_task.body,
+            changed_paths=changed_paths,
+        )
+        lane = str(lane_result.get("lane") or "").strip().upper()
+        if lane != "STANDARD_REVIEW":
+            continue
+
+        manual_reviewer_children = _legacy_parent_gated_reviewer_children(conn, source_task.id)
+        manual_pipeline = _explicit_manual_review_pipeline(source_task.body)
+        if manual_reviewer_children or manual_pipeline:
+            suppression_reason = (
+                "manual_reviewer_child_present"
+                if manual_reviewer_children
+                else "manual_review_pipeline_opt_out"
+            )
+            with write_txn(conn):
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+                    continue
+                if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT, run.id):
+                    continue
+                _append_event(
+                    conn,
+                    source_task.id,
+                    _AUTO_REVIEWER_CHILD_SUPPRESSED_EVENT,
+                    {
+                        "source_task": source_task.id,
+                        "source_run_id": run.id,
+                        "reason": suppression_reason,
+                        "manual_reviewer_children": manual_reviewer_children,
+                        "review_lane": "STANDARD_REVIEW",
+                        "review_stage": "reviewer_b",
+                    },
+                    run_id=run.id,
+                )
+            continue
+
+        completion_summary = (run.summary or source_task.result or "").strip()
+        if not completion_summary:
+            completion_summary = "(no completion summary provided)"
+        completion_summary = completion_summary.splitlines()[0][:300]
+
+        reviewer_title = f"Review {source_task.id}: {source_task.title}".strip()
+        if len(reviewer_title) > 80:
+            reviewer_title = reviewer_title[:80]
+
+        reviewer_task_id = create_task(
+            conn,
+            title=reviewer_title,
+            body=_auto_reviewer_child_body(
+                source_task,
+                source_run_id=run.id,
+                lane="STANDARD_REVIEW",
+                stage="reviewer_b",
+                completion_summary=completion_summary,
+            ),
+            assignee="reviewer",
+            created_by="dispatcher",
+            workspace_kind=source_task.workspace_kind,
+            workspace_path=source_task.workspace_path,
+            priority=source_task.priority,
+            parents=[source_task.id],
+            idempotency_key=f"auto-reviewer:{source_task.id}:{run.id}",
+            skills=["kanban-reviewer"],
+            max_runtime_seconds=_AUTO_REVIEWER_MAX_RUNTIME_SECONDS,
+            max_retries=_AUTO_REVIEWER_MAX_RETRIES,
+        )
+
+        with write_txn(conn):
+            if _has_task_event_for_run(conn, source_task.id, _AUTO_REVIEWER_CHILD_EVENT, run.id):
+                continue
+            _append_event(
+                conn,
+                source_task.id,
+                _AUTO_REVIEWER_CHILD_EVENT,
+                {
+                    "source_task": source_task.id,
+                    "source_run_id": run.id,
+                    "reviewer_task_id": reviewer_task_id,
+                    "review_lane": "STANDARD_REVIEW",
+                    "review_stage": "reviewer_b",
+                },
+                run_id=run.id,
+            )
+        created_children.append(reviewer_task_id)
+    return created_children
+
+
+def _task_has_undone_parents(conn: sqlite3.Connection, task_id: str) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM task_links l "
+            "JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    )
+
+
+def _has_task_event_for_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+    run_id: Optional[int],
+) -> bool:
+    if run_id is None:
+        return False
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? AND run_id = ? LIMIT 1",
+            (task_id, kind, int(run_id)),
+        ).fetchone()
+    )
+
+
+def _count_task_events(conn: sqlite3.Connection, task_id: str, kind: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, kind),
+    ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
+def _iteration_budget_continue_comment(run: Run, *, continuation_index: int, continuation_limit: int) -> str:
+    summary = (run.summary or "Iteration budget exhausted").strip()
+    return (
+        "dispatcher auto-continuation checkpoint\n\n"
+        f"- prior run id: {run.id}\n"
+        f"- worker summary: {summary}\n"
+        f"- continuation attempt: {continuation_index}/{continuation_limit}\n"
+        "- next worker instruction: Resume from the previous worker checkpoint, read prior comments/runs before acting, and continue only the remaining work. If the iteration budget exhausts again, block with a concise Coordinator/Human handoff instead of restarting from scratch."
+    )
+
+
+def _iteration_budget_cap_comment(run: Run, *, continuation_limit: int) -> str:
+    summary = (run.summary or "Iteration budget exhausted").strip()
+    return (
+        "dispatcher continuation cap reached\n\n"
+        f"- prior run id: {run.id}\n"
+        f"- worker summary: {summary}\n"
+        f"- continuation limit: {continuation_limit}\n"
+        "- next action: Coordinator/Human review required. Decide whether to raise the worker's iteration budget, split the task into smaller cards, or provide a tighter handoff before another retry."
+    )
+
+
+def _auto_continue_iteration_budget_blocks(
+    conn: sqlite3.Connection,
+    *,
+    continuation_limit: int = DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT,
+) -> tuple[list[str], list[str]]:
+    """Reopen eligible iteration-budget blocks exactly once by default."""
+    if continuation_limit <= 0:
+        return ([], [])
+
+    blocked_rows = conn.execute(
+        "SELECT id FROM tasks WHERE status = 'blocked' ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+    continued: list[str] = []
+    capped: list[str] = []
+    for row in blocked_rows:
+        task_id = row["id"]
+        run = latest_run(conn, task_id)
+        if run is None or run.outcome != "blocked" or run.ended_at is None:
+            continue
+        blocked_payload = _blocked_event_payload_for_run(conn, task_id, run.id)
+        if not _is_iteration_budget_exhausted(run.summary, blocked_payload):
+            continue
+        if _task_has_undone_parents(conn, task_id):
+            continue
+
+        prior_continuations = _count_task_events(
+            conn, task_id, _ITERATION_BUDGET_AUTO_CONTINUE_EVENT
+        )
+        if prior_continuations >= continuation_limit:
+            if _has_task_event_for_run(
+                conn,
+                task_id,
+                _ITERATION_BUDGET_CONTINUATION_CAPPED_EVENT,
+                run.id,
+            ):
+                continue
+            comment_id = add_comment(
+                conn,
+                task_id,
+                _ITERATION_BUDGET_COMMENT_AUTHOR,
+                _iteration_budget_cap_comment(
+                    run,
+                    continuation_limit=continuation_limit,
+                ),
+            )
+            _append_event(
+                conn,
+                task_id,
+                _ITERATION_BUDGET_CONTINUATION_CAPPED_EVENT,
+                {
+                    "previous_run_id": run.id,
+                    "continuation_limit": continuation_limit,
+                    "checkpoint_comment_id": int(comment_id),
+                    "summary": (run.summary or "")[:400] or None,
+                    "gate_reason": "Coordinator/Human review required",
+                },
+                run_id=run.id,
+            )
+            capped.append(task_id)
+            continue
+
+        if _has_task_event_for_run(conn, task_id, _ITERATION_BUDGET_AUTO_CONTINUE_EVENT, run.id):
+            continue
+        comment_id = add_comment(
+            conn,
+            task_id,
+            _ITERATION_BUDGET_COMMENT_AUTHOR,
+            _iteration_budget_continue_comment(
+                run,
+                continuation_index=prior_continuations + 1,
+                continuation_limit=continuation_limit,
+            ),
+        )
+        _append_event(
+            conn,
+            task_id,
+            _ITERATION_BUDGET_AUTO_CONTINUE_EVENT,
+            {
+                "previous_run_id": run.id,
+                "continuation_index": prior_continuations + 1,
+                "continuation_limit": continuation_limit,
+                "checkpoint_comment_id": int(comment_id),
+                "summary": (run.summary or "")[:400] or None,
+            },
+            run_id=run.id,
+        )
+        if unblock_task(conn, task_id):
+            continued.append(task_id)
+    return (continued, capped)
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -3993,8 +6215,16 @@ def enforce_max_runtime(
                     error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
                     metadata=payload,
                 )
+                timeout_payload = _terminal_event_payload(
+                    conn,
+                    tid,
+                    run_id,
+                    outcome="timed_out",
+                    error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
+                    extra=payload,
+                )
                 _append_event(
-                    conn, tid, "timed_out", payload, run_id=run_id,
+                    conn, tid, "timed_out", timeout_payload, run_id=run_id,
                 )
                 timed_out.append(tid)
         # Increment the unified failure counter. Outside the write_txn
@@ -4253,9 +6483,17 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     error=error_text,
                     metadata=dict(event_payload),
                 )
+                crash_payload = _terminal_event_payload(
+                    conn,
+                    row["id"],
+                    run_id,
+                    outcome="crashed",
+                    error=error_text,
+                    extra=event_payload,
+                )
                 _append_event(
                     conn, row["id"], event_kind,
-                    event_payload,
+                    crash_payload,
                     run_id=run_id,
                 )
                 crashed.append(row["id"])
@@ -4419,12 +6657,24 @@ def _record_task_failure(
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
+            gave_up_payload = _terminal_event_payload(
+                conn,
+                task_id,
+                run_id,
+                outcome="gave_up",
+                error=error[:500],
+                extra=payload,
+            )
             _append_event(
-                conn, task_id, "gave_up", payload, run_id=run_id,
+                conn, task_id, "gave_up", gave_up_payload, run_id=run_id,
             )
             blocked = True
         else:
-            # Below threshold.
+            # Below threshold — task will retry. Stamp a backoff window
+            # via ``last_failure_error`` suffix (``; retry_after=<ts>``)
+            # so ``dispatch_once`` skips it until the window passes.
+            retry_after_ts = int(time.time()) + _backoff_sec_for_failure(failures)
+            stamped_error = _stamp_retry_after(error[:500], retry_after_ts)
             if release_claim:
                 # Spawn path: transition running → ready + clear claim.
                 conn.execute(
@@ -4432,7 +6682,7 @@ def _record_task_failure(
                     "claim_expires = NULL, worker_pid = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status = 'running'",
-                    (failures, error[:500], task_id),
+                    (failures, stamped_error, task_id),
                 )
             else:
                 # Timeout/crash path: task is already at ``ready`` via
@@ -4440,7 +6690,7 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET consecutive_failures = ?, "
                     "last_failure_error = ? WHERE id = ?",
-                    (failures, error[:500], task_id),
+                    (failures, stamped_error, task_id),
                 )
             if end_run:
                 # Spawn path: close the open run with outcome.
@@ -4450,9 +6700,17 @@ def _record_task_failure(
                     error=error[:500],
                     metadata={"failures": failures},
                 )
+                failure_payload = _terminal_event_payload(
+                    conn,
+                    task_id,
+                    run_id,
+                    outcome=outcome,
+                    error=error[:500],
+                    extra={"failures": failures},
+                )
                 _append_event(
                     conn, task_id, outcome,
-                    {"error": error[:500], "failures": failures},
+                    failure_payload,
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
@@ -4734,6 +6992,12 @@ def dispatch_once(
     if _crash_auto_blocked:
         result.auto_blocked.extend(_crash_auto_blocked)
     result.timed_out = enforce_max_runtime(conn)
+    if not dry_run:
+        auto_continued, continuation_capped = _auto_continue_iteration_budget_blocks(conn)
+        result.auto_continued.extend(auto_continued)
+        result.continuation_capped.extend(continuation_capped)
+        _dispatch_review_required_handoffs(conn)
+        _dispatch_standard_review_children(conn)
     result.promoted = recompute_ready(conn)
 
     # Count tasks already running so max_spawn enforces concurrency rather
@@ -4752,7 +7016,7 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT * FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -4770,6 +7034,22 @@ def dispatch_once(
         remaining = max_in_progress - in_progress
         if max_spawn is None or max_spawn > remaining:
             max_spawn = remaining
+    # C2 Backoff: skip tasks whose last_failure_error carries a
+    # ``; retry_after=<ts>`` suffix that is still in the future. Tasks
+    # without a stamp (the common case) pass through unaffected. Filter
+    # in Python rather than SQL so the parsing stays in one place.
+    _retry_now_ts = int(time.time())
+    _retry_deferred = []
+    _ready_filtered = []
+    for _row in ready_rows:
+        _ts = _retry_after_ts_from_error(_row["last_failure_error"])
+        if _ts is not None and _ts > _retry_now_ts:
+            _retry_deferred.append(_row["id"])
+            continue
+        _ready_filtered.append(_row)
+    if _retry_deferred:
+        result.retry_deferred = list(_retry_deferred)
+    ready_rows = _ready_filtered
     spawned = 0
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
@@ -4792,6 +7072,27 @@ def dispatch_once(
         except Exception:
             profile_exists = None  # type: ignore[assignment]
         if profile_exists is not None and not profile_exists(row["assignee"]):
+            # Distinguish autonomous-task-mistake from human-pulled lane:
+            # tasks that carry a scope_contract are autonomous-spawned
+            # workloads (planner output etc.). If the planner produced an
+            # unknown assignee, the task must fail closed instead of
+            # looping forever in the ready queue. Tasks WITHOUT a scope
+            # contract are typically human-pulled lanes (e.g. orion-cc
+            # Claude Code terminals) where skipping is intentional.
+            if _task_requires_dispatcher_scope_preflight(row["body"]):
+                reason = (
+                    "dispatch preflight blocked task: assignee "
+                    f"'{row['assignee']}' is not a known Hermes "
+                    "profile (scope_contract v2 task)"
+                )
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_invalid_assignee",
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -4821,6 +7122,95 @@ def dispatch_once(
                         {"reason": guard_reason},
                     )
             continue
+        task_for_preflight = Task.from_row(row)
+        missing_skills = _validate_task_extra_skills(task_for_preflight.skills) if not dry_run else []
+        if missing_skills:
+            reason = (
+                "dispatch preflight blocked task: unknown force-loaded skill(s): "
+                + ", ".join(missing_skills)
+            )
+            if _block_dispatch_preflight(
+                conn, row["id"], reason, kind="dispatch_preflight_unknown_skills"
+            ):
+                result.preflight_blocked.append(row["id"])
+            continue
+        if not dry_run and _task_requires_dispatcher_scope_preflight(row["body"]):
+            if not _task_has_scope_contract_v2(row["body"]):
+                reason = (
+                    "dispatch preflight blocked task: scope_contract version 2 "
+                    "is required for worker tasks with scope/completion policy"
+                )
+                if _block_dispatch_preflight(
+                    conn, row["id"], reason, kind="dispatch_preflight_missing_scope_contract"
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
+            effective_toolsets, allowed_tool_errors = _validate_scope_allowed_tools(row["body"])
+            if allowed_tool_errors:
+                reason = (
+                    "dispatch preflight blocked task: invalid scope_contract.allowed_tools: "
+                    + "; ".join(allowed_tool_errors)
+                )
+                if _block_dispatch_preflight(
+                    conn, row["id"], reason, kind="dispatch_preflight_invalid_allowed_tools"
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
+            forbidden_system_errors = _validate_scope_forbidden_systems(row["body"])
+            if forbidden_system_errors:
+                reason = (
+                    "dispatch preflight blocked task: invalid scope_contract.forbidden_systems: "
+                    + "; ".join(forbidden_system_errors)
+                )
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_missing_forbidden_systems",
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
+            runtime_effective_toolsets = _resolve_scope_runtime_tool_schema_names(
+                effective_toolsets,
+                task_id=row["id"],
+            )
+            runtime_tool_errors = _validate_effective_scope_runtime_tools(
+                runtime_effective_toolsets,
+                declared_allowed_tools=effective_toolsets,
+            )
+            if runtime_tool_errors:
+                reason = (
+                    "dispatch preflight blocked task: empty/incomplete effective runtime tools: "
+                    + "; ".join(runtime_tool_errors)
+                )
+                evidence = {
+                    "failure_reason": reason[:500],
+                    "declared_allowed_tools": effective_toolsets,
+                    "effective_toolsets": runtime_effective_toolsets,
+                    "required_lifecycle_tools": list(_REQUIRED_SCOPE_LIFECYCLE_TOOLS),
+                    "skills_requested": [
+                        str(s).strip() for s in (task_for_preflight.skills or []) if str(s).strip()
+                    ],
+                    "skill_resolution": {
+                        "status": "ok" if not missing_skills else "missing",
+                        "missing": list(missing_skills),
+                    },
+                }
+                if _block_dispatch_preflight(
+                    conn,
+                    row["id"],
+                    reason,
+                    kind="dispatch_preflight_empty_toolset",
+                    evidence=evidence,
+                ):
+                    result.preflight_blocked.append(row["id"])
+                continue
+            _append_event(
+                conn,
+                row["id"],
+                "dispatch_preflight_passed",
+                {"effective_toolsets": runtime_effective_toolsets},
+            )
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
@@ -5264,6 +7654,7 @@ def _default_spawn(
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
+    env["HERMES_KANBAN_WORKSPACE_KIND"] = task.workspace_kind or "scratch"
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
@@ -5298,6 +7689,14 @@ def _default_spawn(
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
+    declared_toolsets, allowed_tool_errors = _validate_scope_allowed_tools(task.body)
+    if not allowed_tool_errors and declared_toolsets:
+        effective_toolsets = _resolve_scope_runtime_tool_schema_names(
+            declared_toolsets,
+            task_id=task.id,
+        )
+        if effective_toolsets:
+            env["HERMES_KANBAN_EFFECTIVE_TOOLSETS"] = json.dumps(effective_toolsets)
 
     cmd = [
         *_resolve_hermes_argv(),
@@ -5308,29 +7707,15 @@ def _default_spawn(
         # profile-local worker sessions still register configured hooks.
         "--accept-hooks",
     ]
-    # Auto-load the kanban-worker skill so every dispatched worker
-    # has the pattern library (good summary/metadata shapes, retry
-    # diagnostics, block-reason examples) in its context, even if
-    # the profile hasn't wired it into skills config. The MANDATORY
-    # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
-    # this skill is the deeper reference. Users can point a profile
-    # at a different/additional skill via config if they want —
-    # --skills is additive to the profile's default skill set.
-    #
-    # Only add the flag when the skill actually resolves for the home
-    # the worker runs under: the bundled skill is absent from many
-    # profile-scoped skills dirs, and preloading a missing skill is
-    # fatal at CLI startup. Omitting it is safe — the lifecycle
-    # contract still ships via KANBAN_GUIDANCE.
-    if _kanban_worker_skill_available(env.get("HERMES_HOME")):
-        cmd.extend(["--skills", "kanban-worker"])
     # Per-task force-loaded skills. Each name goes in its own
     # `--skills X` pair rather than a single comma-joined arg: the CLI
     # accepts both forms (action='append' + comma-split), but
     # per-name pairs are easier to read in `ps` output and avoid any
     # quoting ambiguity if a skill name ever contains unusual chars.
-    # Dedupe against the built-in so we don't double-load kanban-worker
-    # if a task author asks for it explicitly.
+    # Do not force-load the old built-in `kanban-worker` skill here:
+    # profile-scoped + global skill bundles can collide and make the
+    # child exit before it can block its task. Mandatory Kanban lifecycle
+    # guidance is injected through KANBAN_GUIDANCE instead.
     if task.skills:
         for sk in task.skills:
             if sk and sk != "kanban-worker":
@@ -6072,6 +8457,267 @@ def list_profiles_on_disk() -> list[str]:
             pass
 
     return sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# Transactional profile config mutation (review-required deadlock recovery)
+# ---------------------------------------------------------------------------
+
+PROFILE_MODEL_CONFIG_KEYS = frozenset({"model.default", "model.provider"})
+
+
+def _nested_get(data: Mapping[str, Any], dotted_key: str) -> Any:
+    cur: Any = data
+    for part in dotted_key.split("."):
+        if not isinstance(cur, Mapping) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _nested_set(data: dict[str, Any], dotted_key: str, value: Any) -> None:
+    cur: dict[str, Any] = data
+    parts = dotted_key.split(".")
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if nxt is None:
+            nxt = {}
+            cur[part] = nxt
+        if not isinstance(nxt, dict):
+            raise ValueError(
+                f"cannot set {dotted_key!r}: {part!r} exists but is not a mapping"
+            )
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _flatten_config(data: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        dotted = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            out.update(_flatten_config(value, dotted))
+        else:
+            out[dotted] = value
+    return out
+
+
+def _changed_config_keys(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    b = _flatten_config(before)
+    a = _flatten_config(after)
+    keys = set(b) | set(a)
+    return sorted(k for k in keys if b.get(k) != a.get(k))
+
+
+def _parse_yaml_mapping(text: str, *, source: Path) -> dict[str, Any]:
+    if yaml is None:  # pragma: no cover - PyYAML is a runtime dependency
+        raise RuntimeError("PyYAML is required to update profile config")
+    try:
+        loaded = yaml.safe_load(text) if text.strip() else {}
+    except Exception as exc:
+        raise ValueError(f"failed to parse YAML in {source}: {exc}") from exc
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{source} must contain a YAML mapping at the top level")
+    return loaded
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via temp-file + fsync + atomic replace in the same directory."""
+    from utils import atomic_replace
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp = Path(tmp_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        atomic_replace(tmp, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _profile_config_path(profile: str) -> tuple[str, Path]:
+    """Resolve and validate the config path for a named Hermes profile."""
+    from hermes_cli.profiles import (
+        get_profile_dir,
+        normalize_profile_name,
+        validate_profile_name,
+    )
+
+    canon = normalize_profile_name(profile)
+    validate_profile_name(canon)
+    profile_dir = get_profile_dir(canon)
+    if canon != "default" and not profile_dir.is_dir():
+        raise ValueError(
+            f"profile {canon!r} does not exist; create it before updating model config"
+        )
+
+    config_path = profile_dir / "config.yaml"
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        root = get_default_hermes_root()
+    except Exception as exc:  # pragma: no cover - defensive startup fallback
+        raise ValueError(f"could not resolve Hermes profile root: {exc}") from exc
+    expected = (
+        root / "config.yaml"
+        if canon == "default"
+        else root / "profiles" / canon / "config.yaml"
+    )
+    if config_path != expected:
+        raise ValueError(
+            f"refusing to update unexpected profile config path {config_path}; "
+            f"expected {expected}"
+        )
+    if config_path.is_symlink():
+        raise ValueError(
+            f"refusing to update symlinked profile config {config_path}; "
+            "Kanban profile-model updates require an in-profile config.yaml"
+        )
+    return canon, config_path
+
+
+def _transactional_update_profile_config(
+    profile: str,
+    updates: Mapping[str, Any],
+    *,
+    allowed_keys: frozenset[str],
+    postcheck=None,
+) -> dict[str, Any]:
+    """Backup, parse, atomically rewrite, postcheck, and rollback on failure.
+
+    This is intentionally kept narrow and private. Public Kanban callers use
+    :func:`kanban_update_profile_model`, which can only touch
+    ``model.default`` and ``model.provider``.
+    """
+    requested = {str(k): v for k, v in updates.items()}
+    unknown = sorted(set(requested) - set(allowed_keys))
+    if unknown:
+        raise ValueError(
+            "profile config update contains unsupported key(s): "
+            + ", ".join(unknown)
+            + f"; allowed keys: {', '.join(sorted(allowed_keys))}"
+        )
+
+    canon, config_path = _profile_config_path(profile)
+    original_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    backup_path = config_path.with_name(
+        f"{config_path.name}.bak.{int(time.time())}.{os.getpid()}.{secrets.token_hex(4)}"
+    )
+    _atomic_write_text(backup_path, original_text)
+
+    pre_cfg = _parse_yaml_mapping(original_text, source=config_path)
+    pre_values = {key: _nested_get(pre_cfg, key) for key in sorted(allowed_keys)}
+
+    next_cfg = copy.deepcopy(pre_cfg)
+    for key, value in requested.items():
+        _nested_set(next_cfg, key, value)
+
+    if yaml is None:  # pragma: no cover - guarded above, here for type checkers
+        raise RuntimeError("PyYAML is required to update profile config")
+    next_text = yaml.safe_dump(next_cfg, sort_keys=False, allow_unicode=True)
+
+    rollback_status = "not_needed"
+    wrote_candidate = False
+    try:
+        _atomic_write_text(config_path, next_text)
+        wrote_candidate = True
+        post_text = config_path.read_text(encoding="utf-8")
+        post_cfg = _parse_yaml_mapping(post_text, source=config_path)
+        for key, value in requested.items():
+            actual = _nested_get(post_cfg, key)
+            if actual != value:
+                raise ValueError(
+                    f"postcheck failed for {key}: expected {value!r}, got {actual!r}"
+                )
+        changed_keys = _changed_config_keys(pre_cfg, post_cfg)
+        forbidden_changes = sorted(set(changed_keys) - set(allowed_keys))
+        if forbidden_changes:
+            raise ValueError(
+                "postcheck detected forbidden config key change(s): "
+                + ", ".join(forbidden_changes)
+            )
+        if postcheck is not None:
+            postcheck(post_cfg)
+    except Exception as exc:
+        if wrote_candidate:
+            try:
+                _atomic_write_text(config_path, original_text)
+                rollback_status = "rolled_back"
+            except Exception as rollback_exc:  # pragma: no cover - catastrophic FS failure
+                rollback_status = f"rollback_failed: {rollback_exc}"
+        raise RuntimeError(
+            f"profile config update failed for {canon}; {rollback_status}: {exc}"
+        ) from exc
+
+    post_values = {key: _nested_get(post_cfg, key) for key in sorted(allowed_keys)}
+    return {
+        "profile": canon,
+        "changed_file": str(config_path),
+        "backup_path": str(backup_path),
+        "requested": requested,
+        "allowed_keys": sorted(allowed_keys),
+        "changed_keys": changed_keys,
+        "pre_values": pre_values,
+        "post_values": post_values,
+        "parse_status": {"pre": "ok", "post": "ok"},
+        "rollback_status": rollback_status,
+        "atomic_write": "tempfile_fsync_replace",
+        "non_actions": [
+            "no_gateway_restart",
+            "no_dispatcher_activation",
+            "no_secret_or_env_file_read",
+            "no_profile_other_than_target_mutated",
+        ],
+    }
+
+
+def kanban_update_profile_model(
+    profile: str,
+    provider: str,
+    model: str,
+    *,
+    _postcheck=None,
+) -> dict[str, Any]:
+    """Transactionally update ``model.provider`` and ``model.default``.
+
+    The primitive is deliberately narrower than a generic YAML patcher: Kanban
+    control-plane recovery only needs to switch the assignee profile's routing
+    model/provider, and the narrow shape lets us prove only those two semantic
+    keys changed before returning a receipt.
+    """
+    if not str(provider or "").strip():
+        raise ValueError("provider is required")
+    if not str(model or "").strip():
+        raise ValueError("model is required")
+    return _transactional_update_profile_config(
+        profile,
+        {
+            "model.provider": str(provider).strip(),
+            "model.default": str(model).strip(),
+        },
+        allowed_keys=PROFILE_MODEL_CONFIG_KEYS,
+        postcheck=_postcheck,
+    )
 
 
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
