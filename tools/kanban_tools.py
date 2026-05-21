@@ -496,6 +496,14 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.ScopeAttestationError as scope_err:
+                return tool_error(
+                    "kanban_complete blocked: this task requires "
+                    "completion_policy.require_scope_attestation=true metadata. "
+                    "Provide metadata with scope_contract_version >= 2, "
+                    "scope_attestation=true, and forbidden_actions_taken=0. "
+                    f"Missing/invalid: {', '.join(scope_err.missing)}."
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
@@ -511,6 +519,71 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(f"kanban_complete: {e}")
 
 
+def _handle_validate_created_cards(args: dict, **kw) -> str:
+    """Dry-run created_cards validation without completing the task."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    created_cards = args.get("created_cards")
+    if created_cards is None:
+        created_cards = []
+    if isinstance(created_cards, str):
+        created_cards = [created_cards]
+    if not isinstance(created_cards, (list, tuple)):
+        return tool_error(
+            f"created_cards must be a list of task ids, got "
+            f"{type(created_cards).__name__}"
+        )
+    created_cards = [str(c).strip() for c in created_cards if str(c).strip()]
+    try:
+        kb, conn = _connect()
+        try:
+            result = kb.validate_created_cards(conn, tid, created_cards)
+            return json.dumps(result)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("kanban_validate_created_cards failed")
+        return tool_error(f"kanban_validate_created_cards: {e}")
+
+
+def _handle_completion_template(args: dict, **kw) -> str:
+    """Return the deterministic no-mutation completion metadata template."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    try:
+        kb, conn = _connect()
+        try:
+            return json.dumps(kb.kanban_completion_template(conn, tid))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("kanban_completion_template failed")
+        return tool_error(f"kanban_completion_template: {e}")
+
+
+def _handle_review_lane(args: dict, **kw) -> str:
+    """Return the no-mutation review lane decision for a planned Kanban task."""
+    try:
+        from hermes_cli import kanban_db as kb
+
+        decision = kb.classify_kanban_review_lane(
+            title=args.get("title"),
+            body=args.get("body"),
+            changed_paths=args.get("changed_paths") or [],
+            requested_lane=args.get("requested_lane"),
+        )
+        return _ok(**decision)
+    except Exception as e:
+        logger.exception("kanban_review_lane failed")
+        return tool_error(f"kanban_review_lane: {e}")
+
+
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
     tid = _default_task_id(args.get("task_id"))
@@ -522,9 +595,15 @@ def _handle_block(args: dict, **kw) -> str:
     if ownership_err:
         return ownership_err
     reason = args.get("reason")
+    context_comment_id = args.get("context_comment_id")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
     board = args.get("board")
+    if context_comment_id is not None:
+        try:
+            context_comment_id = int(context_comment_id)
+        except (TypeError, ValueError):
+            return tool_error("context_comment_id must be an integer comment id")
     try:
         kb, conn = _connect(board=board)
         try:
@@ -532,11 +611,12 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 expected_run_id=_worker_run_id(tid),
+                context_comment_id=context_comment_id,
             )
             if not ok:
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
-                    f"running/ready)"
+                    f"running/ready/todo/triage)"
                 )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
@@ -636,6 +716,66 @@ def _handle_comment(args: dict, **kw) -> str:
         return tool_error(f"kanban_comment: {e}")
 
 
+def _coordinator_handoff_gate(args: dict, assignee: Any) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """Validate target-architecture Hub->Reviewer->Coordinator handoffs.
+
+    The model-native ``kanban_create`` tool is the real handoff path into a
+    spawned Coordinator task. For Coordinator assignments, require the Hub
+    PlanSpec and Reviewer verdict metadata to pass the target-architecture gate
+    before the task row is created.
+    """
+    if str(assignee).strip().lower() != "coordinator":
+        return None, None
+
+    gate = args.get("control_plane_gate")
+    if not isinstance(gate, dict):
+        return tool_error(
+            "coordinator handoff requires control_plane_gate with "
+            "hub_plan_spec, reviewer_metadata, coordinator_plan_spec, "
+            "and mechanical_fields"
+        ), None
+
+    hub_plan_spec = gate.get("hub_plan_spec")
+    reviewer_metadata = gate.get("reviewer_metadata")
+    coordinator_plan_spec = gate.get("coordinator_plan_spec")
+    mechanical_fields = gate.get("mechanical_fields") or []
+    if not isinstance(hub_plan_spec, dict):
+        return tool_error("coordinator handoff blocked: hub_plan_spec must be an object"), None
+    if reviewer_metadata is not None and not isinstance(reviewer_metadata, dict):
+        return tool_error("coordinator handoff blocked: reviewer_metadata must be an object"), None
+    if not isinstance(coordinator_plan_spec, dict):
+        return tool_error("coordinator handoff blocked: coordinator_plan_spec must be an object"), None
+    if isinstance(mechanical_fields, str):
+        mechanical_fields = [mechanical_fields]
+    if not isinstance(mechanical_fields, (list, tuple, set)):
+        return tool_error("coordinator handoff blocked: mechanical_fields must be a list"), None
+
+    try:
+        from hermes_cli.control_plane_gate import (
+            SubstantiveCoordinatorChangeError,
+            coordinator_gate_decision,
+        )
+
+        decision = coordinator_gate_decision(
+            hub_plan_spec=hub_plan_spec,
+            reviewer_metadata=reviewer_metadata,
+            coordinator_plan_spec=coordinator_plan_spec,
+            mechanical_fields=[str(item) for item in mechanical_fields],
+        )
+    except SubstantiveCoordinatorChangeError as exc:
+        return tool_error(f"coordinator handoff blocked: substantive_plan_change: {exc}"), None
+
+    if not decision.allowed:
+        findings = "; ".join(decision.blocking_findings)
+        return tool_error(f"coordinator handoff blocked: {decision.reason}: {findings}"), None
+
+    return None, {
+        "reason": decision.reason,
+        "blocking_findings": decision.blocking_findings,
+        "mechanical_diffs": decision.mechanical_diffs,
+    }
+
+
 def _handle_create(args: dict, **kw) -> str:
     """Create a child task. Orchestrator workers use this to fan out.
 
@@ -682,6 +822,9 @@ def _handle_create(args: dict, **kw) -> str:
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
     board = args.get("board")
+    gate_error, gate_audit = _coordinator_handoff_gate(args, assignee)
+    if gate_error:
+        return gate_error
     try:
         kb, conn = _connect(board=board)
         try:
@@ -705,12 +848,16 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                control_plane_gate=args.get("control_plane_gate"),
             )
             new_task = kb.get_task(conn, new_tid)
-            return _ok(
-                task_id=new_tid,
-                status=new_task.status if new_task else None,
-            )
+            response = {
+                "task_id": new_tid,
+                "status": new_task.status if new_task else None,
+            }
+            if gate_audit is not None:
+                response["control_plane_gate"] = gate_audit
+            return _ok(**response)
         finally:
             conn.close()
     except ValueError as e:
@@ -746,6 +893,150 @@ def _handle_unblock(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_unblock failed")
         return tool_error(f"kanban_unblock: {e}")
+
+
+def _handle_update_profile_model(args: dict, **kw) -> str:
+    """Transactionally switch a profile's model/provider config."""
+    guard = _require_orchestrator_tool("kanban_update_profile_model")
+    if guard:
+        return guard
+    profile = args.get("profile")
+    provider = args.get("provider")
+    model = args.get("model")
+    if not profile:
+        return tool_error("profile is required")
+    if not provider:
+        return tool_error("provider is required")
+    if not model:
+        return tool_error("model is required")
+    try:
+        from hermes_cli import kanban_db as kb
+
+        receipt = kb.kanban_update_profile_model(str(profile), str(provider), str(model))
+        return _ok(receipt=receipt)
+    except Exception as e:
+        logger.exception("kanban_update_profile_model failed")
+        return tool_error(f"kanban_update_profile_model: {e}")
+
+def _handle_rewire_superseding_review(args: dict, **kw) -> str:
+    """Explicitly replace a superseded review parent edge with a new review."""
+    guard = _require_orchestrator_tool("kanban_rewire_superseding_review")
+    if guard:
+        return guard
+    required = ["source_task", "old_review_task", "new_review_task", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.rewire_superseding_review_parent(
+                conn,
+                source_task=str(args["source_task"]),
+                old_review_task=str(args["old_review_task"]),
+                new_review_task=str(args["new_review_task"]),
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_rewire_superseding_review failed")
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+
+
+def _handle_ensure_needs_revision_fix(args: dict, **kw) -> str:
+    """Create/return the deterministic fix task for a NEEDS_REVISION verdict."""
+    guard = _require_orchestrator_tool("kanban_ensure_needs_revision_fix")
+    if guard:
+        return guard
+    required = ["source_task", "review_task", "reviewer_metadata", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    reviewer_metadata = args.get("reviewer_metadata")
+    if not isinstance(reviewer_metadata, dict):
+        return tool_error("reviewer_metadata must be an object")
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.ensure_needs_revision_fix_task(
+                conn,
+                source_task=str(args["source_task"]),
+                review_task=str(args["review_task"]),
+                reviewer_metadata=reviewer_metadata,
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+    except Exception as e:
+        logger.exception("kanban_ensure_needs_revision_fix failed")
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+
+def _handle_rewire_superseding_review(args: dict, **kw) -> str:
+    """Explicitly replace a superseded review parent edge with a new review."""
+    guard = _require_orchestrator_tool("kanban_rewire_superseding_review")
+    if guard:
+        return guard
+    required = ["source_task", "old_review_task", "new_review_task", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.rewire_superseding_review_parent(
+                conn,
+                source_task=str(args["source_task"]),
+                old_review_task=str(args["old_review_task"]),
+                new_review_task=str(args["new_review_task"]),
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_rewire_superseding_review failed")
+        return tool_error(f"kanban_rewire_superseding_review: {e}")
+
+
+def _handle_ensure_needs_revision_fix(args: dict, **kw) -> str:
+    """Create/return the deterministic fix task for a NEEDS_REVISION verdict."""
+    guard = _require_orchestrator_tool("kanban_ensure_needs_revision_fix")
+    if guard:
+        return guard
+    required = ["source_task", "review_task", "reviewer_metadata", "reason"]
+    missing = [name for name in required if not args.get(name)]
+    if missing:
+        return tool_error("missing required args: " + ", ".join(missing))
+    reviewer_metadata = args.get("reviewer_metadata")
+    if not isinstance(reviewer_metadata, dict):
+        return tool_error("reviewer_metadata must be an object")
+    try:
+        kb, conn = _connect()
+        try:
+            payload = kb.ensure_needs_revision_fix_task(
+                conn,
+                source_task=str(args["source_task"]),
+                review_task=str(args["review_task"]),
+                reviewer_metadata=reviewer_metadata,
+                reason=str(args["reason"]),
+            )
+            return _ok(**payload)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
+    except Exception as e:
+        logger.exception("kanban_ensure_needs_revision_fix failed")
+        return tool_error(f"kanban_ensure_needs_revision_fix: {e}")
 
 
 def _handle_link(args: dict, **kw) -> str:
@@ -958,6 +1249,56 @@ KANBAN_COMPLETE_SCHEMA = {
     },
 }
 
+KANBAN_VALIDATE_CREATED_CARDS_SCHEMA = {
+    "name": "kanban_validate_created_cards",
+    "description": (
+        "Dry-run validation for the created_cards manifest you plan to "
+        "pass to kanban_complete. This checks whether each claimed task id "
+        "exists and belongs to this worker/task without completing or "
+        "otherwise mutating the task. Use when you created follow-up cards "
+        "and want to catch phantom or foreign ids before final handoff."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "created_cards": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Task ids you intend to pass to "
+                    "kanban_complete(created_cards=[...])."
+                ),
+            },
+        },
+        "required": ["created_cards"],
+    },
+}
+
+KANBAN_COMPLETION_TEMPLATE_SCHEMA = {
+    "name": "kanban_completion_template",
+    "description": (
+        "Return the deterministic no-mutation metadata skeleton required for "
+        "kanban_complete on scope-attested tasks. Use this before completing "
+        "a task with completion_policy.require_scope_attestation=true so the "
+        "effective_toolsets value matches the dispatcher preflight or scope "
+        "contract fallback exactly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+        },
+        "required": [],
+    },
+}
+
 KANBAN_BLOCK_SCHEMA = {
     "name": "kanban_block",
     "description": (
@@ -983,6 +1324,15 @@ KANBAN_BLOCK_SCHEMA = {
                 ),
             },
             "board": _board_schema_prop(),
+            "context_comment_id": {
+                "type": "integer",
+                "description": (
+                    "Optional id returned by kanban_comment when a longer "
+                    "blocker explanation was posted first. The blocked "
+                    "event stores this id and a short snippet so dashboards "
+                    "can show context without another lookup."
+                ),
+            },
         },
         "required": ["reason"],
     },
@@ -1158,12 +1508,24 @@ KANBAN_CREATE_SCHEMA = {
                 "items": {"type": "string"},
                 "description": (
                     "Skill names to force-load into the dispatched "
-                    "worker (in addition to the built-in kanban-worker "
-                    "skill). Use this to pin a task to a specialist "
-                    "context — e.g. ['translation'] for a translation "
-                    "task, ['github-code-review'] for a reviewer task. "
-                    "The names must match skills installed on the "
-                    "assignee's profile."
+                    "worker. Kanban lifecycle guidance is injected "
+                    "separately by the dispatcher; do not pass "
+                    "'kanban-worker' here. Use this to pin a task to "
+                    "a specialist context — e.g. ['translation'] for "
+                    "a translation task, ['github-code-review'] for "
+                    "a reviewer task. The names must match skills "
+                    "installed on the assignee's profile."
+                ),
+            },
+            "control_plane_gate": {
+                "type": "object",
+                "description": (
+                    "Required when assignee='coordinator' for the target "
+                    "architecture handoff. Object with hub_plan_spec, "
+                    "reviewer_metadata, coordinator_plan_spec, and "
+                    "mechanical_fields. The gate blocks unless Reviewer "
+                    "metadata has APPROVED verdict and Coordinator changes "
+                    "only declared mechanical fields."
                 ),
             },
             "board": _board_schema_prop(),
@@ -1192,6 +1554,73 @@ KANBAN_UNBLOCK_SCHEMA = {
     },
 }
 
+KANBAN_UPDATE_PROFILE_MODEL_SCHEMA = {
+    "name": "kanban_update_profile_model",
+    "description": (
+        "Transactionally update a Hermes profile's model.provider and "
+        "model.default config keys with backup-before-mutation, YAML "
+        "pre/post parse checks, semantic postcheck, atomic write, rollback "
+        "on failure, and a receipt-shaped return payload. Orchestrator-only "
+        "— dispatcher-spawned task workers never see this tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "description": "Target Hermes profile name (e.g. 'coder', 'reviewer').",
+            },
+            "provider": {
+                "type": "string",
+                "description": "New model.provider value to write.",
+            },
+            "model": {
+                "type": "string",
+                "description": "New model.default value to write.",
+            },
+        },
+        "required": ["profile", "provider", "model"],
+    },
+}
+KANBAN_REWIRE_SUPERSEDING_REVIEW_SCHEMA = {
+    "name": "kanban_rewire_superseding_review",
+    "description": (
+        "Orchestrator-only explicit helper for first-class superseding review "
+        "relations. Removes the old review parent edge from source_task, adds "
+        "new_review_task as the parent, and writes an audit event with "
+        "source_task, old_review_task, new_review_task, old_parent_removed, "
+        "new_parent_added, and reason. Does not unblock or complete the source."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source_task": {"type": "string", "description": "Task whose parent review edge is rewired."},
+            "old_review_task": {"type": "string", "description": "Superseded review task id."},
+            "new_review_task": {"type": "string", "description": "Superseding review task id."},
+            "reason": {"type": "string", "description": "Human-readable audit reason."},
+        },
+        "required": ["source_task", "old_review_task", "new_review_task", "reason"],
+    },
+}
+
+KANBAN_ENSURE_NEEDS_REVISION_FIX_SCHEMA = {
+    "name": "kanban_ensure_needs_revision_fix",
+    "description": (
+        "Orchestrator-only helper that deterministically creates or returns the "
+        "idempotent fix task for a Reviewer NEEDS_REVISION verdict. The source "
+        "task remains blocked/pending until a later explicit finalization gate."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source_task": {"type": "string", "description": "Original source task id."},
+            "review_task": {"type": "string", "description": "Reviewer task that returned NEEDS_REVISION."},
+            "reviewer_metadata": {"type": "object", "description": "Reviewer metadata with verdict=NEEDS_REVISION."},
+            "reason": {"type": "string", "description": "Audit reason for creating/returning the fix task."},
+        },
+        "required": ["source_task", "review_task", "reviewer_metadata", "reason"],
+    },
+}
 KANBAN_LINK_SCHEMA = {
     "name": "kanban_link",
     "description": (
@@ -1207,6 +1636,42 @@ KANBAN_LINK_SCHEMA = {
             "board": _board_schema_prop(),
         },
         "required": ["parent_id", "child_id"],
+    },
+}
+
+
+KANBAN_REVIEW_LANE_SCHEMA = {
+    "name": "kanban_review_lane",
+    "description": (
+        "Classify a Kanban task into FASTLANE_KANBAN, STANDARD_REVIEW, or "
+        "CRITICAL_REVIEW without mutating the board. Use before creating "
+        "reviewer tasks: Fastlane requires Hub/Coordinator evidence check "
+        "only, Standard requires one Reviewer-B, Critical requires "
+        "Reviewer-A + Reviewer-B plus explicit operator Go."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Task title or goal."},
+            "body": {
+                "type": "string",
+                "description": "Task body / scope_contract / policy text.",
+            },
+            "changed_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Planned or actual changed file paths for escalation checks.",
+            },
+            "requested_lane": {
+                "type": "string",
+                "description": (
+                    "Optional explicit lane request (FASTLANE_KANBAN / "
+                    "STANDARD_REVIEW / CRITICAL_REVIEW). Can raise but not "
+                    "lower the computed risk-based lane."
+                ),
+            },
+        },
+        "required": [],
     },
 }
 
@@ -1240,6 +1705,24 @@ registry.register(
     handler=_handle_complete,
     check_fn=_check_kanban_mode,
     emoji="✔",
+)
+
+registry.register(
+    name="kanban_validate_created_cards",
+    toolset="kanban",
+    schema=KANBAN_VALIDATE_CREATED_CARDS_SCHEMA,
+    handler=_handle_validate_created_cards,
+    check_fn=_check_kanban_mode,
+    emoji="🔎",
+)
+
+registry.register(
+    name="kanban_completion_template",
+    toolset="kanban",
+    schema=KANBAN_COMPLETION_TEMPLATE_SCHEMA,
+    handler=_handle_completion_template,
+    check_fn=_check_kanban_mode,
+    emoji="🧩",
 )
 
 registry.register(
@@ -1288,10 +1771,45 @@ registry.register(
 )
 
 registry.register(
+    name="kanban_update_profile_model",
+    toolset="kanban",
+    schema=KANBAN_UPDATE_PROFILE_MODEL_SCHEMA,
+    handler=_handle_update_profile_model,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🧭",
+)
+
+registry.register(
+    name="kanban_rewire_superseding_review",
+    toolset="kanban",
+    schema=KANBAN_REWIRE_SUPERSEDING_REVIEW_SCHEMA,
+    handler=_handle_rewire_superseding_review,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🔀",
+)
+
+registry.register(
+    name="kanban_ensure_needs_revision_fix",
+    toolset="kanban",
+    schema=KANBAN_ENSURE_NEEDS_REVISION_FIX_SCHEMA,
+    handler=_handle_ensure_needs_revision_fix,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🛠",
+)
+registry.register(
     name="kanban_link",
     toolset="kanban",
     schema=KANBAN_LINK_SCHEMA,
     handler=_handle_link,
     check_fn=_check_kanban_mode,
     emoji="🔗",
+)
+
+registry.register(
+    name="kanban_review_lane",
+    toolset="kanban",
+    schema=KANBAN_REVIEW_LANE_SCHEMA,
+    handler=_handle_review_lane,
+    check_fn=_check_kanban_mode,
+    emoji="🚦",
 )

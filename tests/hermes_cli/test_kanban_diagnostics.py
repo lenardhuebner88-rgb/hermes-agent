@@ -304,6 +304,213 @@ def test_stuck_in_blocked_silent_when_not_blocked():
     assert kd.compute_task_diagnostics(task, events, [], now=9999999) == []
 
 
+def test_running_task_with_stale_heartbeat_emits_diagnostic():
+    now = 10_000
+    task = _task(
+        id="t_hb_stale",
+        status="running",
+        last_heartbeat_at=now - 601,
+        claim_expires=now + 600,
+        assignee="coder",
+    )
+
+    diags = kd.compute_task_diagnostics(
+        task,
+        [],
+        [],
+        now=now,
+        config={"heartbeat_stale_after_seconds": 300},
+    )
+
+    hb = [d for d in diags if d.kind == "stale_heartbeat"]
+    assert len(hb) == 1
+    assert hb[0].severity == "warning"
+    assert hb[0].data["heartbeat_age_seconds"] == 601
+    assert hb[0].data["threshold_seconds"] == 300
+    assert any(a.kind == "reclaim" for a in hb[0].actions)
+
+
+def test_running_task_with_recent_heartbeat_has_no_stale_heartbeat():
+    now = 10_000
+    task = _task(status="running", last_heartbeat_at=now - 60)
+    diags = kd.compute_task_diagnostics(task, [], [], now=now)
+    assert [d for d in diags if d.kind == "stale_heartbeat"] == []
+
+
+def test_non_running_task_with_old_heartbeat_has_no_stale_heartbeat():
+    now = 10_000
+    for status in ["ready", "blocked", "done", "archived"]:
+        task = _task(
+            id=f"t_{status}",
+            status=status,
+            last_heartbeat_at=now - 9999,
+        )
+        diags = kd.compute_task_diagnostics(task, [], [], now=now)
+        assert [d for d in diags if d.kind == "stale_heartbeat"] == []
+
+
+def test_running_task_without_heartbeat_has_no_stale_heartbeat_phase4a():
+    now = 10_000
+    task = _task(status="running", last_heartbeat_at=None)
+    diags = kd.compute_task_diagnostics(task, [], [], now=now)
+    assert [d for d in diags if d.kind == "stale_heartbeat"] == []
+
+
+def test_running_task_with_missing_workspace_emits_diagnostic(tmp_path):
+    missing = tmp_path / "gone"
+    task = _task(
+        id="t_ws_missing",
+        status="running",
+        workspace_kind="scratch",
+        workspace_path=str(missing),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=10_000)
+
+    ws = [d for d in diags if d.kind == "workspace_missing"]
+    assert len(ws) == 1
+    assert ws[0].severity == "error"
+    assert ws[0].data["workspace_path"] == str(missing)
+    assert ws[0].data["workspace_kind"] == "scratch"
+    assert any(a.kind == "reclaim" for a in ws[0].actions)
+
+
+def test_ready_task_with_missing_workspace_has_no_workspace_missing(tmp_path):
+    missing = tmp_path / "not-yet-created"
+    task = _task(status="ready", workspace_kind="scratch", workspace_path=str(missing))
+    diags = kd.compute_task_diagnostics(task, [], [], now=10_000)
+    assert [d for d in diags if d.kind == "workspace_missing"] == []
+
+
+def test_running_task_with_existing_workspace_has_no_workspace_missing(tmp_path):
+    existing = tmp_path / "workspace"
+    existing.mkdir()
+    task = _task(status="running", workspace_kind="scratch", workspace_path=str(existing))
+    diags = kd.compute_task_diagnostics(task, [], [], now=10_000)
+    assert [d for d in diags if d.kind == "workspace_missing"] == []
+
+
+def test_running_task_with_relative_workspace_path_has_no_workspace_missing():
+    task = _task(status="running", workspace_kind="scratch", workspace_path="relative/ws")
+    diags = kd.compute_task_diagnostics(task, [], [], now=10_000)
+    assert [d for d in diags if d.kind == "workspace_missing"] == []
+
+
+def test_running_task_without_workspace_path_has_no_workspace_missing_phase5a():
+    task = _task(status="running", workspace_kind="scratch", workspace_path=None)
+    diags = kd.compute_task_diagnostics(task, [], [], now=10_000)
+    assert [d for d in diags if d.kind == "workspace_missing"] == []
+
+
+def test_archived_scratch_task_with_old_workspace_emits_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    ws = root / "t_ws_old"
+    ws.mkdir(parents=True)
+    task = _task(
+        id="t_ws_old",
+        status="archived",
+        workspace_kind="scratch",
+        workspace_path=str(ws),
+    )
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+
+    diags = kd.compute_task_diagnostics(
+        task,
+        events,
+        [],
+        now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+
+    stale = [d for d in diags if d.kind == "stale_workspace"]
+    assert len(stale) == 1
+    assert stale[0].severity == "warning"
+    assert stale[0].data["workspace_path"] == str(ws)
+    assert stale[0].data["workspace_kind"] == "scratch"
+    assert stale[0].data["threshold_hours"] == 24
+    assert any("kanban gc" in a.payload.get("command", "") for a in stale[0].actions)
+
+
+def test_archived_scratch_missing_workspace_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    task = _task(
+        status="archived",
+        workspace_kind="scratch",
+        workspace_path=str(root / "already-gone"),
+    )
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
+def test_archived_scratch_recent_archive_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    ws = root / "recent"
+    ws.mkdir(parents=True)
+    task = _task(status="archived", workspace_kind="scratch", workspace_path=str(ws))
+    events = [_event("archived", ts=100_000 - 2 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
+def test_archived_dir_workspace_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    ws = root / "external-dir"
+    ws.mkdir(parents=True)
+    task = _task(status="archived", workspace_kind="dir", workspace_path=str(ws))
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
+def test_archived_worktree_workspace_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    ws = root / "external-worktree"
+    ws.mkdir(parents=True)
+    task = _task(status="archived", workspace_kind="worktree", workspace_path=str(ws))
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
+def test_archived_scratch_workspace_outside_root_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    outside = tmp_path / "outside" / "t_ws_old"
+    outside.mkdir(parents=True)
+    task = _task(status="archived", workspace_kind="scratch", workspace_path=str(outside))
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
+def test_non_archived_scratch_workspace_has_no_stale_workspace(tmp_path):
+    root = tmp_path / "workspaces"
+    ws = root / "active"
+    ws.mkdir(parents=True)
+    task = _task(status="done", workspace_kind="scratch", workspace_path=str(ws))
+    events = [_event("archived", ts=100_000 - 25 * 3600)]
+    diags = kd.compute_task_diagnostics(
+        task, events, [], now=100_000,
+        config={"workspace_stale_after_hours": 24, "workspace_root": str(root)},
+    )
+    assert [d for d in diags if d.kind == "stale_workspace"] == []
+
+
 def test_repeated_crashes_surfaces_actual_error_in_title():
     """The title should lead with the actual error text so operators
     see WHAT broke (e.g. rate-limit, auth, OOM) without opening logs.

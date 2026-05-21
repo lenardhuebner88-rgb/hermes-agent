@@ -641,6 +641,32 @@ class TestCheckWebApiKey:
                     from tools.web_tools import check_web_api_key
                     assert check_web_api_key() is True
 
+    def test_configured_duckduckgo_backend_is_keyless_fallback(self):
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "duckduckgo"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+
+class TestDuckDuckGoFallback:
+    """Test no-key DuckDuckGo fallback backend."""
+
+    def test_duckduckgo_search_normalizes_html_results(self):
+        import tools.web_tools
+        html = '''
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdoc">Example <b>Doc</b></a>
+        <a class="result__snippet">Example snippet text</a>
+        '''
+        mock_response = MagicMock()
+        mock_response.text = html
+        mock_response.raise_for_status = MagicMock()
+        with patch("tools.web_tools.httpx.post", return_value=mock_response), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = tools.web_tools._duckduckgo_search("example", limit=1)
+        assert result["success"] is True
+        assert result["data"]["web"][0]["url"] == "https://example.com/doc"
+        assert result["data"]["web"][0]["title"] == "Example Doc"
+        assert result["data"]["web"][0]["description"] == "Example snippet text"
+
 
 def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env

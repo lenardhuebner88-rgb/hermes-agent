@@ -2612,8 +2612,8 @@
       };
       if (parent) body.parents = [parent];
       // Parse comma-separated skills into a clean list. Blank = no
-      // extras (omit key so backend leaves it null). The dispatcher
-      // always auto-loads kanban-worker; these are extras on top.
+      // optional specialist skills (omit key so backend leaves it null).
+      // Kanban lifecycle guidance is injected separately by the worker prompt.
       const skillList = skills
         .split(",")
         .map(function (s) { return s.trim(); })
@@ -2682,7 +2682,7 @@
         onChange: function (e) { setSkills(e.target.value); },
         placeholder: tx(t, "skillsPlaceholder",
           "skills (optional, comma-separated): translation, github-code-review"),
-        title: "Force-load these skills into the worker (in addition to the built-in kanban-worker).",
+        title: "Force-load optional specialist skills into the worker. Kanban lifecycle guidance is injected separately.",
         className: "h-7 text-xs",
       }),
       h("div", { className: "flex gap-2" },

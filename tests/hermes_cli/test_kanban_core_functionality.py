@@ -26,6 +26,22 @@ from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import run_slash
 
 
+def _expire_retry_after(conn, task_id: str) -> None:
+    """Make a below-threshold retry immediately eligible for legacy dispatch tests.
+
+    The production dispatcher now stamps spawn/workspace failures with a
+    ``retry_after`` backoff window. Older circuit-breaker tests still exercise
+    consecutive failure accounting by running multiple dispatch ticks in a tight
+    loop, so they must explicitly advance the per-task retry gate instead of
+    relying on real time.
+    """
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+            (kb._stamp_retry_after("test retry window elapsed", int(time.time()) - 1), task_id),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -98,6 +114,7 @@ def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawna
         assert task.status == "ready"
         assert task.consecutive_failures == 1
 
+        _expire_retry_after(conn, tid)
         # Second default-limit failure trips the guard.
         res2 = kb.dispatch_once(conn, spawn_fn=_bad_spawn)
         assert tid in res2.auto_blocked
@@ -129,9 +146,11 @@ def test_successful_spawn_does_not_reset_failure_counter(kanban_home, all_assign
         tid = kb.create_task(conn, title="x", assignee="worker")
         # Two failures + one success.
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
+        _expire_retry_after(conn, tid)
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
         task = kb.get_task(conn, tid)
         assert task.consecutive_failures == 2
+        _expire_retry_after(conn, tid)
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
         task = kb.get_task(conn, tid)
         # Counter STAYS at 2 — spawn succeeded but run isn't complete yet.
@@ -342,7 +361,9 @@ def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spa
         assert task.status == "ready"
         assert task.last_failure_error and "workspace" in task.last_failure_error
         # Run twice more → auto-blocked.
+        _expire_retry_after(conn, tid)
         kb.dispatch_once(conn, failure_limit=3)
+        _expire_retry_after(conn, tid)
         res = kb.dispatch_once(conn, failure_limit=3)
         assert tid in res.auto_blocked
         task = kb.get_task(conn, tid)
@@ -1192,8 +1213,10 @@ def test_spawn_failure_circuit_breaker_emits_gave_up(kanban_home, all_assignees_
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(5):
+        for _ in range(4):
             kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
+            _expire_retry_after(conn, tid)
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
         events = kb.list_events(conn, tid)
         kinds = [e.kind for e in events]
         assert "gave_up" in kinds
@@ -1375,6 +1398,114 @@ def test_cli_create_max_runtime_via_duration(kanban_home):
         assert task.max_runtime_seconds == 7200
     finally:
         conn.close()
+
+
+def test_cli_create_max_runtime_defaults_to_720_for_non_triage(kanban_home):
+    """Without --max-runtime, non-triage creates should default to 12 minutes."""
+    out = run_slash("create 'default runtime task' --json")
+    data = json.loads(out)
+    tid = data["id"]
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.max_runtime_seconds == 12 * 60
+    finally:
+        conn.close()
+
+
+def test_cli_create_max_runtime_stays_none_for_triage_without_flag(kanban_home):
+    """Triage creates keep max_runtime unset unless explicitly provided."""
+    out = run_slash("create 'triage runtime task' --triage --json")
+    data = json.loads(out)
+    tid = data["id"]
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.max_runtime_seconds is None
+    finally:
+        conn.close()
+
+
+def test_cli_show_json_includes_max_runtime_seconds(kanban_home):
+    """`kanban show --json` should expose max_runtime_seconds for DoD verification."""
+    out = run_slash("create 'show runtime task' --json")
+    tid = json.loads(out)["id"]
+
+    shown = json.loads(run_slash(f"show {tid} --json"))
+
+    assert shown["task"]["max_runtime_seconds"] == 12 * 60
+
+
+def test_fmt_runtime_humanizes_operator_friendly_values():
+    from hermes_cli.kanban import _fmt_runtime
+
+    assert _fmt_runtime(None) == "unset"
+    assert _fmt_runtime(95) == "95s"
+    assert _fmt_runtime(720) == "720s (12m)"
+    assert _fmt_runtime(7200) == "7200s (2h)"
+
+
+def test_cli_create_text_prints_default_max_runtime(kanban_home):
+    """Human create output should surface the runtime cap without requiring JSON."""
+    out = run_slash("create 'text runtime task'")
+
+    assert "max-runtime: 720s (12m)" in out
+
+
+def test_cli_show_text_prints_max_runtime(kanban_home):
+    """Human show output should make max-runtime directly visible to operators."""
+    out = run_slash("create 'show text runtime task' --json")
+    tid = json.loads(out)["id"]
+
+    shown = run_slash(f"show {tid}")
+
+    assert "max-runtime: 720s (12m)" in shown
+
+
+def test_cli_show_text_prints_remaining_when_running(kanban_home, monkeypatch):
+    """Running tasks should show their remaining runtime budget in text show."""
+    out = run_slash("create 'running runtime task' --json")
+    tid = json.loads(out)["id"]
+    conn = kb.connect()
+    try:
+        kb.assign_task(conn, tid, "worker")
+        kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setattr("hermes_cli.kanban.time.time", lambda: task.started_at + 60)
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining: 660s (11m)" in shown
+
+
+def test_cli_show_text_flags_expired_runtime_when_running(kanban_home, monkeypatch):
+    """Expired running tasks should show an explicit expired runtime budget."""
+    out = run_slash("create 'expired runtime task' --max-runtime 1s --json")
+    tid = json.loads(out)["id"]
+    conn = kb.connect()
+    try:
+        kb.assign_task(conn, tid, "worker")
+        kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setattr("hermes_cli.kanban.time.time", lambda: task.started_at + 10)
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining: 0s (expired by 9s)" in shown
+
+
+def test_cli_show_text_omits_remaining_when_not_running(kanban_home):
+    """Only running tasks should show a remaining runtime line."""
+    out = run_slash("create 'idle runtime task' --json")
+    tid = json.loads(out)["id"]
+
+    shown = run_slash(f"show {tid}")
+
+    assert "remaining:" not in shown
 
 
 def test_cli_create_max_runtime_bad_format_exits_nonzero(kanban_home):
@@ -1600,8 +1731,10 @@ def test_run_on_spawn_failure_records_failed_runs(kanban_home, all_assignees_spa
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(5):
+        for _ in range(4):
             kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
+            _expire_retry_after(conn, tid)
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
 
         runs = kb.list_runs(conn, tid)
         # 5 claim attempts → 5 runs. Final one is gave_up, earlier ones
@@ -2692,13 +2825,13 @@ def test_build_worker_context_caps_huge_summary(kanban_home):
         conn.close()
 
 
-def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
-    """The dispatcher's _default_spawn must include --skills kanban-worker
-    in its argv so every worker loads the skill automatically, even if
-    the profile hasn't wired it into its default skills config.
+def test_default_spawn_does_not_force_load_kanban_worker_skill(kanban_home, monkeypatch):
+    """Dispatcher must not inject `--skills kanban-worker` unconditionally.
 
-    We intercept Popen to capture the argv without actually spawning a
-    hermes subprocess (which would hang trying to call an LLM).
+    Reviewer profiles can have profile-local and global `kanban-worker` skill
+    bundles at the same time. Force-loading that skill makes the child CLI exit
+    on skill-name collision before it can produce a verdict or block the task.
+    Kanban lifecycle instructions are delivered through worker context instead.
     """
     # Pretend the bundled kanban-worker skill resolves for this isolated
     # HERMES_HOME — the fixture creates an empty tmpdir without the
@@ -2731,11 +2864,7 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
         conn.close()
 
     cmd = captured["cmd"]
-    assert "--skills" in cmd, f"spawn argv missing --skills: {cmd}"
-    idx = cmd.index("--skills")
-    assert cmd[idx + 1] == "kanban-worker", (
-        f"expected 'kanban-worker', got {cmd[idx + 1]!r}"
-    )
+    assert "--skills" not in cmd, f"spawn argv should not force-load skills: {cmd}"
     assert "--accept-hooks" in cmd, f"spawn argv missing --accept-hooks: {cmd}"
     assert cmd.index("--accept-hooks") < cmd.index("chat"), (
         f"--accept-hooks must come before 'chat' in argv: {cmd}"
@@ -2973,9 +3102,7 @@ def test_create_task_skills_lists_all_toolset_typos(kanban_home):
 
 
 def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
-    """Dispatcher argv must carry one `--skills X` pair per task skill,
-    in addition to the built-in kanban-worker."""
-    monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: True)
+    """Dispatcher argv must carry one `--skills X` pair per non-reserved task skill."""
     captured = {}
 
     class FakeProc:
@@ -3008,10 +3135,8 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     for i, tok in enumerate(cmd):
         if tok == "--skills" and i + 1 < len(cmd):
             skill_names.append(cmd[i + 1])
-    # kanban-worker first (built-in), then per-task extras in order.
-    assert skill_names[0] == "kanban-worker", skill_names
-    assert "translation" in skill_names
-    assert "github-code-review" in skill_names
+    # Per-task extras only, in order. Reserved kanban-worker is not injected.
+    assert skill_names == ["translation", "github-code-review"]
     # --skills must appear BEFORE the `chat` subcommand so argparse
     # attaches them to the top-level parser, not the subcommand.
     chat_idx = cmd.index("chat")
@@ -3023,9 +3148,8 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     )
 
 
-def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monkeypatch):
-    """If a task explicitly lists 'kanban-worker', we don't double-pass it."""
-    monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: True)
+def test_default_spawn_drops_reserved_kanban_worker_from_task_skills(kanban_home, monkeypatch):
+    """If a task explicitly lists 'kanban-worker', do not pass it to child CLI."""
     captured = {}
 
     class FakeProc:
@@ -3054,9 +3178,41 @@ def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monke
         i for i, tok in enumerate(cmd)
         if tok == "--skills" and i + 1 < len(cmd) and cmd[i + 1] == "kanban-worker"
     ]
-    assert len(worker_pairs) == 1, (
-        f"kanban-worker appeared {len(worker_pairs)} times in argv: {cmd}"
+    assert len(worker_pairs) == 0, (
+        f"kanban-worker must not be passed in argv: {cmd}"
     )
+    assert [
+        cmd[i + 1] for i, tok in enumerate(cmd)
+        if tok == "--skills" and i + 1 < len(cmd)
+    ] == ["translation"]
+
+
+def test_default_spawn_drops_only_reserved_kanban_worker_skill(kanban_home, monkeypatch):
+    """All-reserved task skills produce no --skills argv entries."""
+    captured = {}
+
+    class FakeProc:
+        pid = 1
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="reserved", assignee="x", skills=["kanban-worker"]
+        )
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert "--skills" not in cmd, f"reserved skill should be omitted: {cmd}"
 
 
 def test_cli_create_skill_flag_repeatable(kanban_home):

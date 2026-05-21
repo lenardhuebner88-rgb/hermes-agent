@@ -109,6 +109,12 @@ def test_run_slash_create_worktree_path_and_branch(kanban_home, tmp_path):
 def test_run_slash_rejects_branch_without_worktree(kanban_home):
     out = kc.run_slash("create 'bad branch' --workspace scratch --branch wt/bad")
     assert "--branch is only valid with --workspace worktree" in out
+def test_run_slash_create_coordinator_blocks_without_control_plane_gate(kanban_home):
+    out = kc.run_slash("create 'coordinator bypass' --assignee coordinator")
+
+    assert "control_plane_gate" in out
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
 
 
 def test_run_slash_create_with_parent_and_cascade(kanban_home):
