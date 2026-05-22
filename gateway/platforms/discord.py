@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Any, Tuple
 from unittest.mock import Mock as _UnitTestMock
 
@@ -595,6 +596,194 @@ class DiscordAdapter(BasePlatformAdapter):
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        self._last_connect_at: Optional[str] = None
+        self._last_ready_at: Optional[str] = None
+        self._last_disconnect_at: Optional[str] = None
+        self._last_resumed_at: Optional[str] = None
+        self._last_gateway_event_at: Optional[str] = None
+        self._last_heartbeat_ack_at: Optional[str] = None
+        self._last_connect_monotonic: float = 0.0
+        self._last_ready_monotonic: float = 0.0
+        self._last_gateway_event_monotonic: float = 0.0
+        self._last_heartbeat_ack_monotonic: float = 0.0
+        self._last_runtime_health_write_monotonic: float = 0.0
+        self._runtime_health_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _bool_client_call(client: Any, attr: str) -> bool:
+        if client is None:
+            return False
+        fn = getattr(client, attr, None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _discord_stale_after_seconds(self) -> float:
+        try:
+            return max(10.0, float(os.getenv("HERMES_DISCORD_STALE_AFTER_SECONDS", "120")))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _mark_discord_runtime_event(
+        self,
+        event_name: str,
+        *,
+        heartbeat_ack: bool = False,
+        force_status_write: bool = True,
+    ) -> None:
+        now_iso = self._utc_now_iso()
+        now_mono = time.monotonic()
+        if event_name == "connect":
+            self._last_connect_at = now_iso
+            self._last_connect_monotonic = now_mono
+        elif event_name == "ready":
+            self._last_ready_at = now_iso
+            self._last_ready_monotonic = now_mono
+        elif event_name == "disconnect":
+            self._last_disconnect_at = now_iso
+        elif event_name == "resumed":
+            self._last_resumed_at = now_iso
+        if event_name != "disconnect":
+            self._last_gateway_event_at = now_iso
+            self._last_gateway_event_monotonic = now_mono
+        if heartbeat_ack:
+            self._last_heartbeat_ack_at = now_iso
+            self._last_heartbeat_ack_monotonic = now_mono
+        platform_state = {
+            "connect": "connecting",
+            "ready": "connected",
+            "disconnect": "retrying",
+            "resumed": "connected",
+            "socket_response": None,
+        }.get(event_name)
+        self._write_discord_runtime_health(
+            platform_state=platform_state,
+            force=force_status_write,
+        )
+
+    def runtime_health(self) -> dict:
+        now_mono = time.monotonic()
+        client = self._client
+        client_closed = client is None or self._bool_client_call(client, "is_closed")
+        client_ready = self._bool_client_call(client, "is_ready")
+        discord_ready = bool(self._ready_event.is_set() or client_ready)
+        websocket_connected = bool(client is not None and not client_closed and discord_ready)
+        stale_after = self._discord_stale_after_seconds()
+        latency_ms = None
+        try:
+            latency = getattr(client, "latency", None)
+            if latency is not None:
+                latency_ms = round(float(latency) * 1000)
+        except (TypeError, ValueError, OverflowError):
+            latency_ms = None
+
+        status = "online"
+        reason = None
+        freshness_age = None
+        if getattr(self, "has_fatal_error", False) and not getattr(self, "fatal_error_retryable", True):
+            status = "blocked"
+            reason = getattr(self, "fatal_error_message", None) or "non-retryable Discord error"
+        elif client_closed:
+            status = "reconnecting"
+            reason = "discord client closed"
+        elif not websocket_connected:
+            status = "reconnecting"
+            reason = "websocket not ready"
+        else:
+            freshness_source = None
+            freshness_mono = 0.0
+            if self._last_heartbeat_ack_monotonic:
+                freshness_source = "heartbeat"
+                freshness_mono = self._last_heartbeat_ack_monotonic
+            elif self._last_gateway_event_monotonic:
+                freshness_source = "gateway event"
+                freshness_mono = self._last_gateway_event_monotonic
+            elif self._last_ready_monotonic:
+                freshness_source = "ready"
+                freshness_mono = self._last_ready_monotonic
+            elif self._last_connect_monotonic:
+                freshness_source = "connect"
+                freshness_mono = self._last_connect_monotonic
+            if freshness_mono:
+                freshness_age = max(0.0, now_mono - freshness_mono)
+                if freshness_age > stale_after:
+                    status = "stale"
+                    reason = f"{freshness_source} stale"
+            else:
+                status = "stale"
+                reason = "no Discord freshness event recorded"
+
+        health = {
+            "status": status,
+            "reason": reason,
+            "websocket_connected": websocket_connected,
+            "discord_ready": discord_ready,
+            "client_closed": client_closed,
+            "latency_ms": latency_ms,
+            "last_connect_at": self._last_connect_at,
+            "last_ready_at": self._last_ready_at,
+            "last_disconnect_at": self._last_disconnect_at,
+            "last_resumed_at": self._last_resumed_at,
+            "last_gateway_event_at": self._last_gateway_event_at,
+            "last_heartbeat_ack_at": self._last_heartbeat_ack_at,
+            "freshness_age_seconds": (
+                round(freshness_age, 1) if freshness_age is not None else None
+            ),
+            "stale_after_seconds": stale_after,
+        }
+        return health
+
+    def _write_discord_runtime_health(
+        self,
+        *,
+        platform_state: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._last_runtime_health_write_monotonic) < 15.0:
+            return
+        self._last_runtime_health_write_monotonic = now_mono
+        try:
+            from gateway.status import write_runtime_status
+            kwargs = {
+                "platform": "discord",
+                "error_code": None,
+                "error_message": None,
+                "platform_health": self.runtime_health(),
+            }
+            if platform_state is not None:
+                kwargs["platform_state"] = platform_state
+            write_runtime_status(**kwargs)
+        except Exception:
+            logger.debug("[%s] Failed to write Discord runtime health", self.name, exc_info=True)
+
+    def _discord_health_poll_interval_seconds(self) -> float:
+        try:
+            return max(5.0, float(os.getenv("HERMES_DISCORD_HEALTH_POLL_SECONDS", "30")))
+        except (TypeError, ValueError):
+            return 30.0
+
+    async def _discord_runtime_health_loop(self) -> None:
+        try:
+            while self._client is not None and not self._bool_client_call(self._client, "is_closed"):
+                await asyncio.sleep(self._discord_health_poll_interval_seconds())
+                self._write_discord_runtime_health(force=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("[%s] Discord runtime health loop stopped", self.name, exc_info=True)
+
+    def _ensure_discord_runtime_health_loop(self) -> None:
+        if self._runtime_health_task and not self._runtime_health_task.done():
+            return
+        self._runtime_health_task = asyncio.create_task(self._discord_runtime_health_loop())
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -698,11 +887,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
                 allowed_mentions=_build_allowed_mentions(),
+                enable_debug_events=True,
                 **proxy_kwargs_for_bot(proxy_url),
             )
             adapter_self = self  # capture for closure
 
             # Register event handlers
+            @self._client.event
+            async def on_connect():
+                adapter_self._mark_discord_runtime_event("connect")
+
             @self._client.event
             async def on_ready():
                 logger.info("[%s] Connected as %s", adapter_self.name, adapter_self._client.user)
@@ -710,11 +904,42 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
+                adapter_self._running = True
+                adapter_self._mark_discord_runtime_event("ready")
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
+                )
+
+            @self._client.event
+            async def on_resumed():
+                adapter_self._mark_discord_runtime_event("resumed")
+
+            @self._client.event
+            async def on_disconnect():
+                adapter_self._running = False
+                adapter_self._ready_event.clear()
+                adapter_self._mark_discord_runtime_event("disconnect")
+
+            @self._client.event
+            async def on_socket_raw_receive(payload):
+                if isinstance(payload, (bytes, bytearray)):
+                    try:
+                        payload = payload.decode("utf-8")
+                    except UnicodeDecodeError:
+                        payload = None
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        payload = None
+                heartbeat_ack = isinstance(payload, dict) and payload.get("op") == 11
+                adapter_self._mark_discord_runtime_event(
+                    "socket_raw_receive",
+                    heartbeat_ack=heartbeat_ack,
+                    force_status_write=heartbeat_ack,
                 )
 
             @self._client.event
@@ -919,11 +1144,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start the bot in background
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
+            self._ensure_discord_runtime_health_loop()
 
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
 
             self._running = True
+            self._write_discord_runtime_health(platform_state="connected", force=True)
             return True
 
         except asyncio.TimeoutError:
@@ -950,6 +1177,16 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning("[%s] Error during disconnect: %s", self.name, e, exc_info=True)
 
+        self._running = False
+        self._mark_discord_runtime_event("disconnect")
+
+        if self._runtime_health_task and not self._runtime_health_task.done():
+            self._runtime_health_task.cancel()
+            try:
+                await self._runtime_health_task
+            except asyncio.CancelledError:
+                pass
+
         if self._post_connect_task and not self._post_connect_task.done():
             self._post_connect_task.cancel()
             try:
@@ -957,10 +1194,10 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        self._running = False
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
+        self._runtime_health_task = None
 
         self._release_platform_lock()
 

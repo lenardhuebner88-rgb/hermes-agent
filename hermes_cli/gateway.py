@@ -3837,6 +3837,46 @@ def _runtime_health_lines() -> list[str]:
     platforms = state.get("platforms", {}) or {}
 
     for platform, pdata in platforms.items():
+        health = pdata.get("health") if isinstance(pdata, dict) else None
+        if isinstance(health, dict):
+            status = str(health.get("status") or "").lower()
+            reason = str(health.get("reason") or "").strip()
+            reason_part = f" — {reason}" if reason else ""
+            if status == "online":
+                heartbeat_age = health.get("last_heartbeat_ack_age_seconds")
+                if heartbeat_age is not None:
+                    try:
+                        lines.append(f"✓ {platform}: online (last heartbeat {int(heartbeat_age)}s ago)")
+                    except (TypeError, ValueError):
+                        lines.append(f"✓ {platform}: online")
+                else:
+                    lines.append(f"✓ {platform}: online")
+                continue
+            if status == "stale":
+                heartbeat_age = health.get("last_heartbeat_ack_age_seconds")
+                age_part = ""
+                if heartbeat_age is not None:
+                    try:
+                        age_part = f" (last heartbeat {int(heartbeat_age)}s ago)"
+                    except (TypeError, ValueError):
+                        age_part = ""
+                lines.append(f"⚠ {platform}: stale{reason_part}{age_part}")
+                continue
+            if status == "reconnecting":
+                detail_parts = []
+                attempts = health.get("reconnect_attempts")
+                next_retry = health.get("next_retry_seconds")
+                if attempts is not None:
+                    detail_parts.append(f"attempt {attempts}")
+                if next_retry is not None:
+                    detail_parts.append(f"next retry {next_retry}s")
+                suffix = f" ({', '.join(detail_parts)})" if detail_parts else ""
+                lines.append(f"⏳ {platform}: reconnecting{reason_part}{suffix}")
+                continue
+            if status == "blocked":
+                lines.append(f"⚠ {platform}: blocked{reason_part}")
+                continue
+
         if pdata.get("state") == "fatal":
             message = pdata.get("error_message") or "unknown error"
             lines.append(f"⚠ {platform}: {message}")

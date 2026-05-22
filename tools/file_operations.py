@@ -57,6 +57,37 @@ _OSC_SEQUENCE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _FENCE_MARKER_RE = re.compile(r"'?\x07?__HERMES_FENCE_[A-Za-z0-9]+__\x07?'?")
 
 
+def _is_gateway_message_context() -> bool:
+    if os.getenv("HERMES_GATEWAY_SESSION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        from gateway.session_context import get_session_env
+
+        return bool(get_session_env("HERMES_SESSION_PLATFORM", ""))
+    except Exception:
+        return False
+
+
+def _is_default_hermes_profile_home() -> bool:
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        home = get_hermes_home().resolve()
+        profiles_root = (get_default_hermes_root() / "profiles").resolve()
+        try:
+            home.relative_to(profiles_root)
+            return False
+        except ValueError:
+            return True
+    except Exception:
+        return True
+
+
+def _default_gateway_lsp_disabled() -> bool:
+    """Return True when host LSP would run inside the durable default gateway."""
+    return _is_gateway_message_context() and _is_default_hermes_profile_home()
+
+
 def _strip_terminal_fence_leaks(text: str) -> str:
     """Strip leaked terminal fence wrappers from file read output."""
     if not text:
@@ -1348,6 +1379,8 @@ class ShellFileOperations(FileOperations):
         host-side LSP server can't reach them, so we skip the LSP
         path for those entirely.
         """
+        if _default_gateway_lsp_disabled():
+            return False
         env = getattr(self, "env", None)
         if env is None:
             # Defensive: some tests construct ShellFileOperations via

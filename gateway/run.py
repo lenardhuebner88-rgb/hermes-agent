@@ -2463,17 +2463,43 @@ class GatewayRunner:
         platform_state: Optional[str] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        platform_health: Optional[dict] = None,
     ) -> None:
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(
-                platform=platform,
-                platform_state=platform_state,
-                error_code=error_code,
-                error_message=error_message,
-            )
+            kwargs = {
+                "platform": platform,
+                "platform_state": platform_state,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
+            if platform_health is not None:
+                kwargs["platform_health"] = platform_health
+            write_runtime_status(**kwargs)
         except Exception:
             pass
+
+    def _adapter_runtime_health(
+        self,
+        adapter,
+        *,
+        fallback_status: str,
+        **extra,
+    ) -> dict:
+        health = {}
+        try:
+            health_fn = getattr(adapter, "runtime_health", None)
+            if callable(health_fn):
+                maybe_health = health_fn()
+                if isinstance(maybe_health, dict):
+                    health.update(maybe_health)
+        except Exception:
+            pass
+        health.setdefault("status", fallback_status)
+        for key, value in extra.items():
+            if value is not None:
+                health[key] = value
+        return health
 
     # ------------------------------------------------------------------
     # Per-platform circuit breaker (pause/resume) — used by the reconnect
@@ -2505,6 +2531,11 @@ class GatewayRunner:
                 platform_state="paused",
                 error_code=None,
                 error_message=info["pause_reason"],
+                platform_health={
+                    "status": "blocked",
+                    "reason": info["pause_reason"],
+                    "reconnect_attempts": info.get("attempts", 0),
+                },
             )
         except Exception:
             pass
@@ -2536,6 +2567,12 @@ class GatewayRunner:
                 platform_state="retrying",
                 error_code=None,
                 error_message=None,
+                platform_health={
+                    "status": "reconnecting",
+                    "reason": "manual resume queued",
+                    "reconnect_attempts": 0,
+                    "next_retry_seconds": 0,
+                },
             )
         except Exception:
             pass
@@ -3976,6 +4013,12 @@ class GatewayRunner:
                 platform_state="connecting",
                 error_code=None,
                 error_message=None,
+                platform_health={
+                    "status": "reconnecting",
+                    "reason": "connect in progress",
+                    "reconnect_attempts": 0,
+                    "next_retry_seconds": 0,
+                },
             )
             try:
                 success = await self._connect_adapter_with_timeout(adapter, platform)
@@ -3988,6 +4031,10 @@ class GatewayRunner:
                         platform_state="connected",
                         error_code=None,
                         error_message=None,
+                        platform_health=self._adapter_runtime_health(
+                            adapter,
+                            fallback_status="online",
+                        ),
                     )
                     logger.info("✓ %s connected", platform.value)
                 else:
@@ -4007,6 +4054,16 @@ class GatewayRunner:
                             platform_state="retrying" if adapter.fatal_error_retryable else "fatal",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message,
+                            platform_health={
+                                "status": (
+                                    "reconnecting"
+                                    if adapter.fatal_error_retryable
+                                    else "blocked"
+                                ),
+                                "reason": adapter.fatal_error_message,
+                                "reconnect_attempts": 1 if adapter.fatal_error_retryable else 0,
+                                "next_retry_seconds": 30 if adapter.fatal_error_retryable else None,
+                            },
                         )
                         target = (
                             startup_retryable_errors
@@ -4029,6 +4086,12 @@ class GatewayRunner:
                             platform_state="retrying",
                             error_code=None,
                             error_message="failed to connect",
+                            platform_health={
+                                "status": "reconnecting",
+                                "reason": "failed to connect",
+                                "reconnect_attempts": 1,
+                                "next_retry_seconds": 30,
+                            },
                         )
                         startup_retryable_errors.append(
                             f"{platform.value}: failed to connect"
@@ -5593,6 +5656,10 @@ class GatewayRunner:
                             platform_state="connected",
                             error_code=None,
                             error_message=None,
+                            platform_health=self._adapter_runtime_health(
+                                adapter,
+                                fallback_status="online",
+                            ),
                         )
                         logger.info("✓ %s reconnected successfully", platform.value)
 
@@ -5609,6 +5676,11 @@ class GatewayRunner:
                             platform_state="fatal",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message,
+                            platform_health={
+                                "status": "blocked",
+                                "reason": adapter.fatal_error_message,
+                                "reconnect_attempts": attempt,
+                            },
                         )
                         logger.warning(
                             "Reconnect %s: non-retryable error (%s), removing from retry queue",
@@ -5616,13 +5688,22 @@ class GatewayRunner:
                         )
                         del self._failed_platforms[platform]
                     else:
+                        backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="retrying",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message or "failed to reconnect",
+                            platform_health={
+                                "status": "reconnecting",
+                                "reason": (
+                                    adapter.fatal_error_message
+                                    or "failed to reconnect"
+                                ),
+                                "reconnect_attempts": attempt,
+                                "next_retry_seconds": backoff,
+                            },
                         )
-                        backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                         info["attempts"] = attempt
                         info["next_retry"] = time.monotonic() + backoff
                         logger.info(
@@ -5638,13 +5719,19 @@ class GatewayRunner:
                                 ),
                             )
                 except Exception as e:
+                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                     self._update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",
                         error_code=None,
                         error_message=str(e),
+                        platform_health={
+                            "status": "reconnecting",
+                            "reason": str(e),
+                            "reconnect_attempts": attempt,
+                            "next_retry_seconds": backoff,
+                        },
                     )
-                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                     info["attempts"] = attempt
                     info["next_retry"] = time.monotonic() + backoff
                     logger.warning(

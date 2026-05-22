@@ -168,3 +168,43 @@ def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
     assert terminal_tool._validate_workdir("C:\\Users\\Alice\\project\nwhoami")
+
+
+def test_default_gateway_blocks_dev_build_workloads_in_default_profile(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+
+    error = terminal_tool._default_gateway_local_workload_guard(
+        "pnpm build", background=True, env_type="local"
+    )
+
+    assert error
+    assert "Default Hermes gateway" in error
+    assert "build" in error
+
+
+def test_default_gateway_allows_named_profile_workloads(monkeypatch, tmp_path):
+    profile_home = tmp_path / ".hermes" / "profiles" / "builder"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+
+    assert terminal_tool._default_gateway_local_workload_guard(
+        "pnpm build", background=True, env_type="local"
+    ) is None
+
+
+def test_default_gateway_guard_ignores_nonlocal_backends(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+
+    assert terminal_tool._default_gateway_local_workload_guard(
+        "pnpm build", background=True, env_type="docker"
+    ) is None

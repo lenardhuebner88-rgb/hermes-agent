@@ -94,6 +94,9 @@ class ProcessSession:
     task_id: str = ""                           # Task/sandbox isolation key
     session_key: str = ""                       # Gateway session key (for reset protection)
     pid: Optional[int] = None                   # OS process ID
+    pgid: Optional[int] = None                  # POSIX process group ID for local children
+    memory_limit_mb: Optional[int] = None       # Optional local process virtual-memory limit
+    runtime_timeout_seconds: Optional[int] = None  # Optional local process runtime timeout
     process: Optional[subprocess.Popen] = None  # Popen handle (local only)
     env_ref: Any = None                         # Reference to the environment object
     cwd: Optional[str] = None                   # Working directory
@@ -456,6 +459,148 @@ class ProcessRegistry:
             except (OSError, ProcessLookupError, PermissionError):
                 pass
 
+    @staticmethod
+    def _process_group_alive(pgid: int) -> bool:
+        """Return True when a POSIX process group still has live members."""
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _wait_for_process_group_exit(
+        self,
+        pgid: int,
+        *,
+        proc: Optional[subprocess.Popen] = None,
+        timeout: float,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if proc is not None:
+                try:
+                    proc.poll()
+                except Exception:
+                    pass
+            if not self._process_group_alive(pgid):
+                return True
+            time.sleep(0.05)
+        if proc is not None:
+            try:
+                proc.poll()
+            except Exception:
+                pass
+        return not self._process_group_alive(pgid)
+
+    def _terminate_local_process_group(
+        self,
+        *,
+        proc: subprocess.Popen,
+        pgid: Optional[int],
+    ) -> None:
+        """Terminate the whole local POSIX process group with TERM then KILL."""
+        if _IS_WINDOWS:
+            proc.terminate()
+            return
+
+        resolved_pgid = pgid
+        if resolved_pgid is None:
+            try:
+                resolved_pgid = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+
+        try:
+            os.killpg(resolved_pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return
+
+        if self._wait_for_process_group_exit(resolved_pgid, proc=proc, timeout=1.0):
+            return
+
+        try:
+            os.killpg(resolved_pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        self._wait_for_process_group_exit(resolved_pgid, proc=proc, timeout=2.0)
+        try:
+            proc.wait(timeout=0.2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    def _terminate_detached_host_session(self, session: ProcessSession) -> None:
+        """Terminate a recovered host process, preferring its stored POSIX group."""
+        if not _IS_WINDOWS and session.pgid:
+            try:
+                os.killpg(session.pgid, signal.SIGTERM)
+                if self._wait_for_process_group_exit(session.pgid, timeout=1.0):
+                    return
+                os.killpg(session.pgid, signal.SIGKILL)
+                self._wait_for_process_group_exit(session.pgid, timeout=2.0)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        if session.pid:
+            self._terminate_host_pid(session.pid)
+
+    @staticmethod
+    def _positive_int_env(env: Dict[str, str], *names: str) -> Optional[int]:
+        for name in names:
+            raw = env.get(name)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                value = int(str(raw).strip())
+            except (TypeError, ValueError):
+                logger.warning("Ignoring invalid local process limit %s=%r", name, raw)
+                continue
+            if value > 0:
+                return value
+        return None
+
+    def _local_process_shell_command(
+        self,
+        *,
+        command: str,
+        user_shell: str,
+        env: Dict[str, str],
+        session: ProcessSession,
+    ) -> str:
+        shell_command = f"set +m; {command}"
+        if _IS_WINDOWS:
+            return shell_command
+
+        session.memory_limit_mb = self._positive_int_env(
+            env,
+            "HERMES_LOCAL_PROCESS_MEMORY_MB",
+            "TERMINAL_MEMORY_LIMIT_MB",
+        )
+        session.runtime_timeout_seconds = self._positive_int_env(
+            env,
+            "HERMES_LOCAL_PROCESS_TIMEOUT_SECONDS",
+            "TERMINAL_BACKGROUND_TIMEOUT_SECONDS",
+        )
+
+        if session.memory_limit_mb:
+            shell_command = f"ulimit -v {session.memory_limit_mb * 1024}; {shell_command}"
+        if session.runtime_timeout_seconds:
+            shell_command = (
+                "timeout --foreground --kill-after=5s "
+                f"{session.runtime_timeout_seconds}s "
+                f"{shlex.quote(user_shell)} -lc {shlex.quote(shell_command)}"
+            )
+        return shell_command
+
     # ----- Spawn -----
 
     @staticmethod
@@ -551,9 +696,15 @@ class ProcessRegistry:
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
         _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        shell_command = self._local_process_shell_command(
+            command=command,
+            user_shell=user_shell,
+            env=bg_env,
+            session=session,
+        )
 
         proc = subprocess.Popen(
-            [user_shell, "-lic", f"set +m; {command}"],
+            [user_shell, "-lic", shell_command],
             text=True,
             cwd=session.cwd,
             env=bg_env,
@@ -568,6 +719,11 @@ class ProcessRegistry:
 
         session.process = proc
         session.pid = proc.pid
+        if not _IS_WINDOWS:
+            try:
+                session.pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                session.pgid = None
 
         try:
             # Start output reader thread
@@ -592,7 +748,7 @@ class ProcessRegistry:
             try:
                 if not _IS_WINDOWS:
                     try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # windows-footgun: ok — guarded by _IS_WINDOWS check above
+                        self._terminate_local_process_group(proc=proc, pgid=session.pgid)
                     except (ProcessLookupError, PermissionError, OSError):
                         proc.kill()
                 else:
@@ -1097,17 +1253,13 @@ class ProcessRegistry:
                     if _IS_WINDOWS:
                         session.process.terminate()
                     else:
-                        import psutil
                         try:
-                            parent = psutil.Process(session.process.pid)
-                            for child in parent.children(recursive=True):
-                                try:
-                                    child.terminate()
-                                except psutil.NoSuchProcess:
-                                    pass
-                            parent.terminate()
-                        except psutil.NoSuchProcess:
-                            pass
+                            self._terminate_local_process_group(
+                                proc=session.process,
+                                pgid=session.pgid,
+                            )
+                        except (ProcessLookupError, PermissionError, OSError):
+                            session.process.kill()
                 except (ProcessLookupError, PermissionError):
                     session.process.kill()
             elif session.env_ref and session.pid:
@@ -1123,7 +1275,7 @@ class ProcessRegistry:
                         "status": "already_exited",
                         "exit_code": session.exit_code,
                     }
-                self._terminate_host_pid(session.pid)
+                self._terminate_detached_host_session(session)
             else:
                 return {
                     "status": "error",
@@ -1310,6 +1462,9 @@ class ProcessRegistry:
                             "session_id": s.id,
                             "command": s.command,
                             "pid": s.pid,
+                            "pgid": s.pgid,
+                            "memory_limit_mb": s.memory_limit_mb,
+                            "runtime_timeout_seconds": s.runtime_timeout_seconds,
                             "pid_scope": s.pid_scope,
                             "cwd": s.cwd,
                             "started_at": s.started_at,
@@ -1375,6 +1530,9 @@ class ProcessRegistry:
                     task_id=entry.get("task_id", ""),
                     session_key=entry.get("session_key", ""),
                     pid=pid,
+                    pgid=entry.get("pgid"),
+                    memory_limit_mb=entry.get("memory_limit_mb"),
+                    runtime_timeout_seconds=entry.get("runtime_timeout_seconds"),
                     pid_scope=pid_scope,
                     cwd=entry.get("cwd"),
                     started_at=entry.get("started_at", time.time()),
