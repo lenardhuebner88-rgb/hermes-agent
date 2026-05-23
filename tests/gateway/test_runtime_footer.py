@@ -15,6 +15,7 @@ from gateway.runtime_footer import (
     build_footer_line,
     format_context_usage_footer,
     format_runtime_footer,
+    resolve_token_detail_usage,
     resolve_footer_config,
 )
 
@@ -306,6 +307,49 @@ def test_format_context_usage_footer_estimated_prefixes_estimated_values():
         estimated=True,
     )
     assert out == "Kontext: ~7 % · ~14.8k/200k Token · Antwort: 312"
+
+
+def test_resolve_token_detail_usage_prefers_exact_last_values():
+    input_tokens, output_tokens, estimated = resolve_token_detail_usage({
+        "last_input_tokens": 14_800,
+        "last_output_tokens": 312,
+        "input_tokens": 99_999,
+        "output_tokens": 9_999,
+    })
+
+    assert (input_tokens, output_tokens, estimated) == (14_800, 312, False)
+
+
+def test_resolve_token_detail_usage_falls_back_to_aggregate_as_estimated():
+    input_tokens, output_tokens, estimated = resolve_token_detail_usage({
+        "last_input_tokens": None,
+        "last_output_tokens": None,
+        "input_tokens": 64_000,
+        "output_tokens": 1_234,
+    })
+
+    assert (input_tokens, output_tokens, estimated) == (64_000, 1_234, True)
+
+
+def test_build_footer_token_detail_renders_aggregate_fallback_as_estimated():
+    input_tokens, output_tokens, estimated = resolve_token_detail_usage({
+        "input_tokens": 64_000,
+        "output_tokens": 1_234,
+    })
+
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True, "fields": ["model", "token_detail"]}}},
+        platform_key="discord",
+        model="openai/gpt-5.5",
+        context_tokens=32_000,
+        context_length=200_000,
+        cwd="",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        token_detail_estimated=estimated,
+    )
+
+    assert out == "gpt-5.5 · Kontext: ~32 % · ~64k/200k Token · Antwort: 1234"
 
 
 def test_token_detail_uses_codex_responses_normalized_effective_input_tokens():

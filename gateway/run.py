@@ -9093,6 +9093,8 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                from gateway.runtime_footer import resolve_token_detail_usage as _rtdu
+                _footer_input_tokens, _footer_output_tokens, _footer_estimated = _rtdu(agent_result)
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
@@ -9100,8 +9102,9 @@ class GatewayRunner:
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
-                    input_tokens=agent_result.get("last_input_tokens"),
-                    output_tokens=agent_result.get("last_output_tokens"),
+                    input_tokens=_footer_input_tokens,
+                    output_tokens=_footer_output_tokens,
+                    token_detail_estimated=_footer_estimated,
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
