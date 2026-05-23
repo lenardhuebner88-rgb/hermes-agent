@@ -238,6 +238,28 @@ def test_whole_pool_merges_global_providers_when_missing_locally(profile_env):
 # ---------------------------------------------------------------------------
 
 
+def test_read_codex_tokens_falls_back_to_global_when_profile_has_none(profile_env):
+    from hermes_cli.auth import _read_codex_tokens
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(providers={
+        "openai-codex": {
+            "tokens": {
+                "access_token": "codex-global-access",
+                "refresh_token": "codex-global-refresh",
+            },
+            "last_refresh": "2026-05-22T00:00:00Z",
+            "auth_mode": "chatgpt",
+        },
+    }))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(providers={}))
+
+    data = _read_codex_tokens()
+
+    assert data["tokens"]["access_token"] == "codex-global-access"
+    assert data["tokens"]["refresh_token"] == "codex-global-refresh"
+    assert data["last_refresh"] == "2026-05-22T00:00:00Z"
+
+
 def test_provider_auth_state_falls_back_to_global_when_profile_has_none(profile_env):
     from hermes_cli.auth import get_provider_auth_state
 

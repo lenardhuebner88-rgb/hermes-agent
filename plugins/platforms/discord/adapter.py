@@ -20,7 +20,9 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Any, Tuple
+from unittest.mock import Mock as _UnitTestMock
 
 logger = logging.getLogger(__name__)
 
@@ -594,6 +596,194 @@ class DiscordAdapter(BasePlatformAdapter):
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        self._last_connect_at: Optional[str] = None
+        self._last_ready_at: Optional[str] = None
+        self._last_disconnect_at: Optional[str] = None
+        self._last_resumed_at: Optional[str] = None
+        self._last_gateway_event_at: Optional[str] = None
+        self._last_heartbeat_ack_at: Optional[str] = None
+        self._last_connect_monotonic: float = 0.0
+        self._last_ready_monotonic: float = 0.0
+        self._last_gateway_event_monotonic: float = 0.0
+        self._last_heartbeat_ack_monotonic: float = 0.0
+        self._last_runtime_health_write_monotonic: float = 0.0
+        self._runtime_health_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _bool_client_call(client: Any, attr: str) -> bool:
+        if client is None:
+            return False
+        fn = getattr(client, attr, None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _discord_stale_after_seconds(self) -> float:
+        try:
+            return max(10.0, float(os.getenv("HERMES_DISCORD_STALE_AFTER_SECONDS", "120")))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _mark_discord_runtime_event(
+        self,
+        event_name: str,
+        *,
+        heartbeat_ack: bool = False,
+        force_status_write: bool = True,
+    ) -> None:
+        now_iso = self._utc_now_iso()
+        now_mono = time.monotonic()
+        if event_name == "connect":
+            self._last_connect_at = now_iso
+            self._last_connect_monotonic = now_mono
+        elif event_name == "ready":
+            self._last_ready_at = now_iso
+            self._last_ready_monotonic = now_mono
+        elif event_name == "disconnect":
+            self._last_disconnect_at = now_iso
+        elif event_name == "resumed":
+            self._last_resumed_at = now_iso
+        if event_name != "disconnect":
+            self._last_gateway_event_at = now_iso
+            self._last_gateway_event_monotonic = now_mono
+        if heartbeat_ack:
+            self._last_heartbeat_ack_at = now_iso
+            self._last_heartbeat_ack_monotonic = now_mono
+        platform_state = {
+            "connect": "connecting",
+            "ready": "connected",
+            "disconnect": "retrying",
+            "resumed": "connected",
+            "socket_response": None,
+        }.get(event_name)
+        self._write_discord_runtime_health(
+            platform_state=platform_state,
+            force=force_status_write,
+        )
+
+    def runtime_health(self) -> dict:
+        now_mono = time.monotonic()
+        client = self._client
+        client_closed = client is None or self._bool_client_call(client, "is_closed")
+        client_ready = self._bool_client_call(client, "is_ready")
+        discord_ready = bool(self._ready_event.is_set() or client_ready)
+        websocket_connected = bool(client is not None and not client_closed and discord_ready)
+        stale_after = self._discord_stale_after_seconds()
+        latency_ms = None
+        try:
+            latency = getattr(client, "latency", None)
+            if latency is not None:
+                latency_ms = round(float(latency) * 1000)
+        except (TypeError, ValueError, OverflowError):
+            latency_ms = None
+
+        status = "online"
+        reason = None
+        freshness_age = None
+        if getattr(self, "has_fatal_error", False) and not getattr(self, "fatal_error_retryable", True):
+            status = "blocked"
+            reason = getattr(self, "fatal_error_message", None) or "non-retryable Discord error"
+        elif client_closed:
+            status = "reconnecting"
+            reason = "discord client closed"
+        elif not websocket_connected:
+            status = "reconnecting"
+            reason = "websocket not ready"
+        else:
+            freshness_source = None
+            freshness_mono = 0.0
+            if self._last_heartbeat_ack_monotonic:
+                freshness_source = "heartbeat"
+                freshness_mono = self._last_heartbeat_ack_monotonic
+            elif self._last_gateway_event_monotonic:
+                freshness_source = "gateway event"
+                freshness_mono = self._last_gateway_event_monotonic
+            elif self._last_ready_monotonic:
+                freshness_source = "ready"
+                freshness_mono = self._last_ready_monotonic
+            elif self._last_connect_monotonic:
+                freshness_source = "connect"
+                freshness_mono = self._last_connect_monotonic
+            if freshness_mono:
+                freshness_age = max(0.0, now_mono - freshness_mono)
+                if freshness_age > stale_after:
+                    status = "stale"
+                    reason = f"{freshness_source} stale"
+            else:
+                status = "stale"
+                reason = "no Discord freshness event recorded"
+
+        health = {
+            "status": status,
+            "reason": reason,
+            "websocket_connected": websocket_connected,
+            "discord_ready": discord_ready,
+            "client_closed": client_closed,
+            "latency_ms": latency_ms,
+            "last_connect_at": self._last_connect_at,
+            "last_ready_at": self._last_ready_at,
+            "last_disconnect_at": self._last_disconnect_at,
+            "last_resumed_at": self._last_resumed_at,
+            "last_gateway_event_at": self._last_gateway_event_at,
+            "last_heartbeat_ack_at": self._last_heartbeat_ack_at,
+            "freshness_age_seconds": (
+                round(freshness_age, 1) if freshness_age is not None else None
+            ),
+            "stale_after_seconds": stale_after,
+        }
+        return health
+
+    def _write_discord_runtime_health(
+        self,
+        *,
+        platform_state: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._last_runtime_health_write_monotonic) < 15.0:
+            return
+        self._last_runtime_health_write_monotonic = now_mono
+        try:
+            from gateway.status import write_runtime_status
+            kwargs = {
+                "platform": "discord",
+                "error_code": None,
+                "error_message": None,
+                "platform_health": self.runtime_health(),
+            }
+            if platform_state is not None:
+                kwargs["platform_state"] = platform_state
+            write_runtime_status(**kwargs)
+        except Exception:
+            logger.debug("[%s] Failed to write Discord runtime health", self.name, exc_info=True)
+
+    def _discord_health_poll_interval_seconds(self) -> float:
+        try:
+            return max(5.0, float(os.getenv("HERMES_DISCORD_HEALTH_POLL_SECONDS", "30")))
+        except (TypeError, ValueError):
+            return 30.0
+
+    async def _discord_runtime_health_loop(self) -> None:
+        try:
+            while self._client is not None and not self._bool_client_call(self._client, "is_closed"):
+                await asyncio.sleep(self._discord_health_poll_interval_seconds())
+                self._write_discord_runtime_health(force=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("[%s] Discord runtime health loop stopped", self.name, exc_info=True)
+
+    def _ensure_discord_runtime_health_loop(self) -> None:
+        if self._runtime_health_task and not self._runtime_health_task.done():
+            return
+        self._runtime_health_task = asyncio.create_task(self._discord_runtime_health_loop())
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -697,11 +887,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
                 allowed_mentions=_build_allowed_mentions(),
+                enable_debug_events=True,
                 **proxy_kwargs_for_bot(proxy_url),
             )
             adapter_self = self  # capture for closure
 
             # Register event handlers
+            @self._client.event
+            async def on_connect():
+                adapter_self._mark_discord_runtime_event("connect")
+
             @self._client.event
             async def on_ready():
                 logger.info("[%s] Connected as %s", adapter_self.name, adapter_self._client.user)
@@ -709,11 +904,42 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
+                adapter_self._running = True
+                adapter_self._mark_discord_runtime_event("ready")
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
+                )
+
+            @self._client.event
+            async def on_resumed():
+                adapter_self._mark_discord_runtime_event("resumed")
+
+            @self._client.event
+            async def on_disconnect():
+                adapter_self._running = False
+                adapter_self._ready_event.clear()
+                adapter_self._mark_discord_runtime_event("disconnect")
+
+            @self._client.event
+            async def on_socket_raw_receive(payload):
+                if isinstance(payload, (bytes, bytearray)):
+                    try:
+                        payload = payload.decode("utf-8")
+                    except UnicodeDecodeError:
+                        payload = None
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        payload = None
+                heartbeat_ack = isinstance(payload, dict) and payload.get("op") == 11
+                adapter_self._mark_discord_runtime_event(
+                    "socket_raw_receive",
+                    heartbeat_ack=heartbeat_ack,
+                    force_status_write=heartbeat_ack,
                 )
 
             @self._client.event
@@ -740,29 +966,87 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return
 
-                # Bot message filtering (DISCORD_ALLOW_BOTS):
-                #   "none"     — ignore all other bots (default)
-                #   "mentions" — accept bot messages only when they @mention us
-                #   "all"      — accept all bot messages
-                # Must run BEFORE the user allowlist check so that bots
-                # permitted by DISCORD_ALLOW_BOTS are not rejected for
-                # not being in DISCORD_ALLOWED_USERS (fixes #4466).
-                if getattr(message.author, "bot", False):
+                # Bot/webhook/app-authored message filtering (DISCORD_ALLOW_BOTS):
+                #   "none"     — ignore all other bots/apps (default)
+                #   "mentions" — accept bot/app messages only when they @mention us
+                #   "all"      — accept bot/app messages (DMs) and shared-channel
+                #                 messages that explicitly @mention us
+                #
+                # In shared channels, bot/webhook/app-authored messages must not
+                # form feedback loops between Hermes gateways.  Even with
+                # DISCORD_ALLOW_BOTS=all, require an explicit self-mention before
+                # a bot/app-authored channel message can proceed.  DMs retain the
+                # legacy allow-bots policy.
+                #
+                # Must run BEFORE the user allowlist check so that permitted bots
+                # and webhooks are not rejected for not being in DISCORD_ALLOWED_USERS
+                # (fixes #4466 while hardening multi-bot shared channels).
+                _msg_guild = getattr(message, "guild", None)
+                _is_dm = isinstance(message.channel, discord.DMChannel) or _msg_guild is None
+                _self_mentioned = (
+                    self._client.user is not None
+                    and self._client.user in getattr(message, "mentions", [])
+                )
+                _author_is_bot = getattr(message.author, "bot", False) is True
+                _webhook_id = getattr(message, "webhook_id", None)
+                _application_id = getattr(message, "application_id", None)
+                _webhook_authored = _webhook_id is not None and not isinstance(
+                    _webhook_id, _UnitTestMock
+                )
+                _application_authored = _application_id is not None and not isinstance(
+                    _application_id, _UnitTestMock
+                )
+                _app_authored = bool(
+                    _author_is_bot or _webhook_authored or _application_authored
+                )
+                if _app_authored:
                     allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
+                    if not _is_dm and not _self_mentioned:
+                        return
                     if allow_bots == "none":
                         return
                     elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                        if not _self_mentioned:
                             return
-                    # "all" falls through; bot is permitted — skip the
-                    # human-user allowlist below (bots aren't in it).
+                    # v1.1 (2026-05-16) — Stop-Code-Gate für Bot-Author in Channels.
+                    # Verhindert Hub↔Coord-Feedback-Loops: in shared channels darf
+                    # ein Bot nur dann triggern, wenn die Message einen Inbound-
+                    # Stop-Code aus playbooks/hub-coordinator-reporting-v1.md §6.2
+                    # trägt.  Reine "[idle]"/"[ready]" Chatter wird verworfen.
+                    # Konfiguration: env HERMES_DISCORD_INBOUND_STOP_CODES (CSV)
+                    # überschreibt die Default-Liste; ein einzelner Wert "*"
+                    # deaktiviert das Gate.  RCA: vault/03-Agents/Hermes/analyses/
+                    # bot-loop-rca-and-architecture-2026-05-16T1748.md
+                    if not _is_dm:
+                        _stop_codes_csv = os.getenv(
+                            "HERMES_DISCORD_INBOUND_STOP_CODES",
+                            "hub-plan-ready,hub-budget-warn,hub-memory-warn,"
+                            "hub-shutdown,coord-ack-required,reviewer-rejected",
+                        )
+                        _inbound_codes = {
+                            c.strip().lower()
+                            for c in _stop_codes_csv.split(",")
+                            if c.strip()
+                        }
+                        if "*" not in _inbound_codes:
+                            import re as _stopcode_re
+                            _body_text = (getattr(message, "content", None) or "")
+                            _stop_match = _stopcode_re.search(
+                                r"\[STOP-CODE:\s*([a-zA-Z0-9_-]+)\]",
+                                _body_text,
+                            )
+                            if (
+                                not _stop_match
+                                or _stop_match.group(1).lower() not in _inbound_codes
+                            ):
+                                return
+                    # "all" falls through; bot/app is permitted — skip the
+                    # human-user allowlist below (bots/webhooks aren't in it).
                 else:
-                    # Non-bot: enforce the configured user/role allowlists.
+                    # Human: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
                     # originating guild (prevents cross-guild DM bypass, see
                     # _is_allowed_user docstring).
-                    _msg_guild = getattr(message, "guild", None)
-                    _is_dm = isinstance(message.channel, discord.DMChannel) or _msg_guild is None
                     if not self._is_allowed_user(
                         str(message.author.id),
                         message.author,
@@ -780,6 +1064,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 # This replaces the older DISCORD_IGNORE_NO_MENTION logic
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
+                #
+                # Finding F-2026-05-17-01 (Reactor-Matrix v1 row 21): a sibling
+                # bot @-mention does NOT trigger this gateway; the canonical
+                # cross-bot pickup path is the C4 pickup queue (Hub-Watcher
+                # converts coord-authored signals into hub TASKs). This is
+                # by-design: rejecting cross-bot mentions keeps the LLM cost
+                # boundary tight and avoids accidental N-bot reply storms.
+                # See tests/gateway/test_discord_cross_bot_filter.py.
                 if not isinstance(message.channel, discord.DMChannel) and message.mentions:
                     _self_mentioned = (
                         self._client.user is not None
@@ -852,11 +1144,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start the bot in background
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
+            self._ensure_discord_runtime_health_loop()
 
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
 
             self._running = True
+            self._write_discord_runtime_health(platform_state="connected", force=True)
             return True
 
         except asyncio.TimeoutError:
@@ -883,6 +1177,16 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning("[%s] Error during disconnect: %s", self.name, e, exc_info=True)
 
+        self._running = False
+        self._mark_discord_runtime_event("disconnect")
+
+        if self._runtime_health_task and not self._runtime_health_task.done():
+            self._runtime_health_task.cancel()
+            try:
+                await self._runtime_health_task
+            except asyncio.CancelledError:
+                pass
+
         if self._post_connect_task and not self._post_connect_task.done():
             self._post_connect_task.cancel()
             try:
@@ -890,10 +1194,10 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        self._running = False
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
+        self._runtime_health_task = None
 
         self._release_platform_lock()
 
@@ -3810,6 +4114,29 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] Failed to fetch channel history: %s", self.name, e)
             return ""
 
+    def _discord_mention_required_channels(self) -> set:
+        """Return Discord channel IDs where the bot MUST be @-mentioned.
+
+        This overrides a globally-permissive ``require_mention=false`` for
+        specific channels (e.g. shared lanes like ``#hermes-koordinator``
+        where the bot is a member but should only respond when explicitly
+        addressed).  Used by ``_handle_message`` to demand a mention even
+        when the global setting would let Human-author messages through.
+
+        Source order:
+          1. ``discord.mention_required_channels`` in config.yaml (list or CSV).
+          2. ``DISCORD_MENTION_REQUIRED_CHANNELS`` env (CSV) as fallback.
+        """
+        raw = self.config.extra.get("mention_required_channels")
+        if raw is None:
+            raw = os.getenv("DISCORD_MENTION_REQUIRED_CHANNELS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
+        return set()
+
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
         return getattr(channel, "parent", None) or channel
@@ -4519,6 +4846,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids.add(parent_channel_id)
 
             require_mention = self._discord_require_mention()
+            # Channel-specific mention-required override (added 2026-05-16, Sprint 2P).
+            # If the current channel is listed in ``discord.mention_required_channels``
+            # (config.yaml) or ``DISCORD_MENTION_REQUIRED_CHANNELS`` (env), force
+            # ``require_mention=True`` locally — even when the global setting is
+            # ``false``.  Prevents the Hub from answering human messages in shared
+            # lanes (e.g. ``#hermes-koordinator``) where the Coordinator is the
+            # primary responder.
+            _mention_req_channels = self._discord_mention_required_channels()
+            if _mention_req_channels and bool(channel_ids & _mention_req_channels):
+                require_mention = True
             # Voice-linked text channels act as free-response while voice is active.
             # Only the exact bound channel gets the exemption, not sibling threads.
             voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Any, Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name, get_profile_dir, seed_profile_skills
+from hermes_cli.scoped_auto_commit import create_scoped_local_commit
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,16 @@ def _fmt_ts(ts: Optional[int]) -> str:
     if not ts:
         return ""
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def _fmt_runtime(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return "unset"
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{seconds}s ({seconds // 3600}h)"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds}s ({seconds // 60}m)"
+    return f"{seconds}s"
 
 
 def _fmt_task_line(t: kb.Task) -> str:
@@ -74,6 +86,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "completed_at": t.completed_at,
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
+        "max_runtime_seconds": t.max_runtime_seconds,
         "max_retries": t.max_retries,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
@@ -328,10 +341,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--created-by", default="user",
                           help="Author name recorded on the task (default: user)")
     p_create.add_argument("--skill", action="append", default=[], dest="skills",
-                          help="Skill to force-load into the worker "
-                               "(repeatable). Appended to the built-in "
-                               "kanban-worker skill. Example: "
-                               "--skill translation --skill github-code-review")
+                          help="Optional specialist skill to force-load into "
+                               "the worker (repeatable). Do not pass "
+                               "kanban-worker; lifecycle guidance is injected "
+                               "separately. Example: --skill translation "
+                               "--skill github-code-review")
     p_create.add_argument("--max-retries", type=int, default=None,
                           metavar="N",
                           help="Per-task override for the consecutive-failure "
@@ -513,6 +527,29 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_complete.add_argument("--metadata", default=None,
                             help='JSON dict of structured facts (e.g. \'{"changed_files": [...], '
                                  '"tests_run": 12}\'). Stored on the closing run.')
+
+    p_review_commit = sub.add_parser(
+        "review-commit",
+        help="Opt-in local scoped Git commit after Coder handoff + Reviewer-B APPROVED",
+    )
+    p_review_commit.add_argument(
+        "coder_task_id",
+        help="Completed Coder task whose latest run metadata contains review_required=true",
+    )
+    p_review_commit.add_argument(
+        "--reviewer-task",
+        required=True,
+        help="Completed Reviewer-B task whose latest run metadata contains verdict=APPROVED",
+    )
+    p_review_commit.add_argument("--repo", required=True, help="Git repo path")
+    p_review_commit.add_argument(
+        "--scoped-path",
+        action="append",
+        required=True,
+        help="Repo-relative approved path to include (repeatable)",
+    )
+    p_review_commit.add_argument("--message", required=True, help="Local commit message")
+    p_review_commit.add_argument("--json", action="store_true")
 
     p_edit = sub.add_parser(
         "edit",
@@ -701,6 +738,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
              "(union of ~/.hermes/profiles/ and current assignees on the board)",
     )
     p_asg.add_argument("--json", action="store_true")
+
+    # --- profile model update (transactional control-plane primitive) ---
+    p_profile_model = sub.add_parser(
+        "update-profile-model",
+        help="Transactionally update a profile's model.provider/model.default",
+    )
+    p_profile_model.add_argument("profile", help="Target Hermes profile name")
+    p_profile_model.add_argument("provider", help="New model.provider value")
+    p_profile_model.add_argument("model", help="New model.default value")
+    p_profile_model.add_argument("--json", action="store_true")
 
     # --- context --- (for spawned workers)
     p_ctx = sub.add_parser(
@@ -895,6 +942,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "claim":    _cmd_claim,
         "comment":  _cmd_comment,
         "complete": _cmd_complete,
+        "review-commit": _cmd_review_commit,
         "edit":     _cmd_edit,
         "block":    _cmd_block,
         "schedule": _cmd_schedule,
@@ -909,6 +957,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "runs":     _cmd_runs,
         "heartbeat": _cmd_heartbeat,
         "assignees": _cmd_assignees,
+        "update-profile-model": _cmd_update_profile_model,
         "notify-subscribe":   _cmd_notify_subscribe,
         "notify-list":        _cmd_notify_list,
         "notify-unsubscribe": _cmd_notify_unsubscribe,
@@ -1263,6 +1312,24 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_update_profile_model(args: argparse.Namespace) -> int:
+    receipt = kb.kanban_update_profile_model(args.profile, args.provider, args.model)
+    if getattr(args, "json", False):
+        print(json.dumps(receipt, indent=2, ensure_ascii=False))
+        return 0
+    print("Profile model config updated transactionally.")
+    print(f"  Profile:      {receipt['profile']}")
+    print(f"  Config:       {receipt['changed_file']}")
+    print(f"  Backup:       {receipt['backup_path']}")
+    print(f"  Pre provider: {receipt['pre_values'].get('model.provider')}")
+    print(f"  Pre model:    {receipt['pre_values'].get('model.default')}")
+    print(f"  New provider: {receipt['post_values'].get('model.provider')}")
+    print(f"  New model:    {receipt['post_values'].get('model.default')}")
+    print(f"  Changed keys: {', '.join(receipt['changed_keys'])}")
+    print(f"  Rollback:     {receipt['rollback_status']}")
+    return 0
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
@@ -1270,6 +1337,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except argparse.ArgumentTypeError as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
+    triage = bool(getattr(args, "triage", False))
     if branch_name and ws_kind != "worktree":
         print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
         return 2
@@ -1278,6 +1346,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"kanban: --max-runtime: {exc}", file=sys.stderr)
         return 2
+    if max_runtime is None and not triage:
+        max_runtime = 12 * 60
     max_retries = getattr(args, "max_retries", None)
     if max_retries is not None and max_retries < 1:
         print(
@@ -1299,7 +1369,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             tenant=args.tenant,
             priority=args.priority,
             parents=tuple(args.parent or ()),
-            triage=bool(getattr(args, "triage", False)),
+            triage=triage,
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
@@ -1310,7 +1380,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
     else:
-        print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        print(
+            f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'}, "
+            f"max-runtime: {_fmt_runtime(task.max_runtime_seconds)})"
+        )
 
         # Warn when the task would sit in `ready` because no dispatcher is
         # present. Only warn on ready+assigned tasks — triage/todo are
@@ -1474,6 +1547,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
           (f" @ {task.workspace_path}" if task.workspace_path else ""))
     if task.branch_name:
         print(f"  branch:    {task.branch_name}")
+    print(f"  max-runtime: {_fmt_runtime(task.max_runtime_seconds)}")
     if task.skills:
         print(f"  skills:    {', '.join(task.skills)}")
     if task.model_override:
@@ -1523,6 +1597,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
                     print(f"       → {a.label}")
     if task.started_at:
         print(f"  started:   {_fmt_ts(task.started_at)}")
+        if task.status == "running" and task.max_runtime_seconds:
+            elapsed = max(0, int(time.time()) - task.started_at)
+            remaining = task.max_runtime_seconds - elapsed
+            if remaining > 0:
+                print(f"  remaining: {_fmt_runtime(remaining)}")
+            else:
+                print(f"  remaining: 0s (expired by {-remaining}s)")
     if task.completed_at:
         print(f"  completed: {_fmt_ts(task.completed_at)}")
     if parents:
@@ -1820,6 +1901,76 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return int(raw)
     except ValueError:
         return None
+
+
+def _latest_completed_metadata(
+    conn,
+    task_id: str,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"{label} task not found: {task_id}")
+    run = kb.latest_run(conn, task_id)
+    if run is None or run.outcome != "completed":
+        raise ValueError(f"{label} task has no completed run: {task_id}")
+    if not isinstance(run.metadata, dict):
+        raise ValueError(f"{label} metadata object is required: {task_id}")
+    return run.metadata
+
+
+def _cmd_review_commit(args: argparse.Namespace) -> int:
+    """Opt-in local scoped commit after Coder handoff and Reviewer-B verdict."""
+    try:
+        with kb.connect() as conn:
+            coder_metadata = _latest_completed_metadata(
+                conn,
+                args.coder_task_id,
+                label="coder",
+            )
+            reviewer_metadata = _latest_completed_metadata(
+                conn,
+                args.reviewer_task,
+                label="reviewer",
+            )
+
+        acceptance_checks = (
+            coder_metadata.get("acceptance_checks")
+            or reviewer_metadata.get("acceptance_checks")
+        )
+        anti_scope = coder_metadata.get("anti_scope") or reviewer_metadata.get("anti_scope")
+        expected_workflow_id = coder_metadata.get("workflow_id") or reviewer_metadata.get("workflow_id")
+        receipt = create_scoped_local_commit(
+            repo_path=args.repo,
+            scoped_paths=args.scoped_path,
+            message=args.message,
+            coder_metadata=coder_metadata,
+            reviewer_metadata=reviewer_metadata,
+            acceptance_checks=acceptance_checks,
+            anti_scope=anti_scope,
+            expected_workflow_id=str(expected_workflow_id) if expected_workflow_id else None,
+        )
+    except (PermissionError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"review-commit blocked: {exc}", file=sys.stderr)
+        return 1
+
+    payload = {
+        "commit_hash": receipt.commit_hash,
+        "committed_paths": receipt.committed_paths,
+        "preexisting_dirty_paths": receipt.preexisting_dirty_paths,
+        "reviewer_verdict": receipt.reviewer_verdict,
+        "pushed": False,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Review commit created {receipt.commit_hash}")
+        print("Committed paths: " + ", ".join(receipt.committed_paths))
+        if receipt.preexisting_dirty_paths:
+            print("Pre-existing dirty left untouched: " + ", ".join(receipt.preexisting_dirty_paths))
+        print("Push: not executed")
+    return 0
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:

@@ -1580,6 +1580,33 @@ _LONG_LIVED_FOREGROUND_PATTERNS = (
     re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
 )
 
+_DEFAULT_GATEWAY_HOST_WORKLOAD_PATTERNS = (
+    (
+        "development server",
+        re.compile(
+            r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b"
+            r"|\b(?:next\s+dev|vite(?:\s|$)|nodemon|webpack(?:-dev-server)?|turbo\s+(?:dev|watch))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "build",
+        re.compile(
+            r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|typecheck|lint|test:e2e)\b"
+            r"|\b(?:next\s+build|vite\s+build|turbo\s+(?:run\s+)?build|tsc\s+(?:-b|--build))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "language server",
+        re.compile(
+            r"\b(?:typescript-language-server|tsserver|pyright-langserver|"
+            r"vscode-[a-z0-9_-]*language-server|eslint_d)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
 
 def _looks_like_help_or_version_command(command: str) -> bool:
     """Return True for informational invocations that should never be blocked."""
@@ -1626,6 +1653,71 @@ def _foreground_background_guidance(command: str) -> str | None:
                 "then execute tests in a separate command."
             )
 
+    return None
+
+
+def _is_gateway_message_context() -> bool:
+    """Return True when a terminal call is executing from a gateway turn."""
+    if env_var_enabled("HERMES_GATEWAY_SESSION"):
+        return True
+    try:
+        from gateway.session_context import get_session_env
+
+        return bool(get_session_env("HERMES_SESSION_PLATFORM", ""))
+    except Exception:
+        return False
+
+
+def _is_default_hermes_profile_home() -> bool:
+    """Return True for the root/default Hermes profile, False for named profiles."""
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        home = get_hermes_home().resolve()
+        profiles_root = (get_default_hermes_root() / "profiles").resolve()
+        try:
+            home.relative_to(profiles_root)
+            return False
+        except ValueError:
+            return True
+    except Exception:
+        return True
+
+
+def _default_gateway_local_workload_guard(
+    command: str,
+    *,
+    background: bool,
+    env_type: str,
+) -> str | None:
+    """Block heavy host workloads from the default gateway profile.
+
+    The default messaging gateway is a durable Discord/Telegram/cron process,
+    not a build runner. POSIX process groups help cleanup, but they do not move
+    children out of the systemd service cgroup, so dev/build/LSP commands can
+    still inflate or poison the gateway cgroup. Named profiles and non-local
+    terminal backends remain available for explicit worker/build lanes.
+    """
+    if env_type != "local":
+        return None
+    if not _is_gateway_message_context():
+        return None
+    if not _is_default_hermes_profile_home():
+        return None
+    if _looks_like_help_or_version_command(command):
+        return None
+
+    unquoted = _strip_quotes(command)
+    for label, pattern in _DEFAULT_GATEWAY_HOST_WORKLOAD_PATTERNS:
+        if pattern.search(unquoted):
+            mode = "background" if background else "foreground"
+            return (
+                "Default Hermes gateway refuses local host "
+                f"{label} workloads ({mode}) so Discord/Telegram stay online. "
+                "Run this from a named Hermes worker/profile, a non-local terminal "
+                "backend, or request operator approval for an isolated systemd-scope "
+                "runner before using the default gateway for build/dev/LSP work."
+            )
     return None
 
 
@@ -1749,6 +1841,19 @@ def terminal_tool(
                     f"{FOREGROUND_MAX_TIMEOUT}s. Use background=true with "
                     f"notify_on_complete=true for long-running commands."
                 ),
+            }, ensure_ascii=False)
+
+        default_gateway_error = _default_gateway_local_workload_guard(
+            command,
+            background=background,
+            env_type=env_type,
+        )
+        if default_gateway_error:
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": default_gateway_error,
+                "status": "blocked",
             }, ensure_ascii=False)
 
         # Guardrail: long-lived server/watch commands should run as managed
@@ -1958,6 +2063,10 @@ def terminal_tool(
                     result_data["approval"] = approval_note
                 if pty_disabled_reason:
                     result_data["pty_note"] = pty_disabled_reason
+                if getattr(proc_session, "memory_limit_mb", None):
+                    result_data["memory_limit_mb"] = proc_session.memory_limit_mb
+                if getattr(proc_session, "runtime_timeout_seconds", None):
+                    result_data["timeout_seconds"] = proc_session.runtime_timeout_seconds
 
                 # Populate routing metadata on the session so that
                 # watch-pattern and completion notifications can be

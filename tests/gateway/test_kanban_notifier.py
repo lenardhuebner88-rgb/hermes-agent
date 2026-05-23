@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,8 +13,8 @@ class RecordingAdapter:
     def __init__(self):
         self.sent = []
 
-    async def send(self, chat_id, text, metadata=None):
-        self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata or {}})
+    async def send(self, chat_id, text, reply_to=None, metadata=None):
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_to": reply_to, "metadata": metadata or {}})
 
 
 class DisconnectedAdapters(dict):
@@ -36,10 +37,10 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
-def _make_runner(adapter):
+def _make_runner(adapter, platform=Platform.TELEGRAM):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
 
@@ -144,9 +145,18 @@ class FailingAdapter:
     def __init__(self):
         self.attempts = 0
 
-    async def send(self, chat_id, text, metadata=None):
+    async def send(self, chat_id, text, reply_to=None, metadata=None):
         self.attempts += 1
         raise RuntimeError("simulated send failure")
+
+
+class SendResultFailingAdapter:
+    def __init__(self):
+        self.attempts = 0
+
+    async def send(self, chat_id, text, reply_to=None, metadata=None):
+        self.attempts += 1
+        return SimpleNamespace(success=False, error="simulated success false")
 
 
 def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
@@ -172,6 +182,45 @@ def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
     # still returns the event for retry on the next tick.
     assert adapter.attempts >= 1, "send should have been attempted at least once"
     assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
+
+
+def test_kanban_notifier_rewinds_claim_on_send_result_failure(tmp_path, monkeypatch):
+    db_path = tmp_path / "send-result-failure.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    tid = _create_completed_subscription()
+
+    adapter = SendResultFailingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.attempts >= 1
+    assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
+
+
+def test_kanban_notifier_routes_discord_to_dedicated_thread(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-thread.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID", "1505596156405874909")
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="discord thread notify", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="discord", chat_id="1500203113867378789")
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["chat_id"] == "1500203113867378789"
+    assert adapter.sent[0]["metadata"] == {"thread_id": "1505596156405874909"}
 
 
 def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):

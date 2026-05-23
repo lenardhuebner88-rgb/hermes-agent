@@ -126,7 +126,7 @@ class TestCmdUpdateBranchFallback:
             if call.args and call.args[0][0] == "/usr/bin/npm"
         ]
 
-        # cmd_update runs npm commands in three locations:
+        # cmd_update runs npm commands in two locations:
         #   1. repo root  — slash-command / TUI bridge deps
         #   2. ui-tui/    — Ink TUI deps
         #   3. web/       — install + "npm run build" for the web frontend

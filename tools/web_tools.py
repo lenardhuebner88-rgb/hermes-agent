@@ -44,8 +44,10 @@ import json
 import logging
 import os
 import re
+import html as html_lib
 import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from urllib.parse import parse_qs, unquote as url_unquote, urlparse
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -140,7 +142,17 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in {
+        "parallel",
+        "firecrawl",
+        "tavily",
+        "exa",
+        "searxng",
+        "brave-free",
+        "ddgs",
+        "xai",
+        "duckduckgo",
+    }:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -228,6 +240,9 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "duckduckgo":
+        # Legacy keyless DuckDuckGo HTML fallback retained for old configs/tests.
+        return True
     return False
 
 
@@ -244,6 +259,57 @@ def _ddgs_package_importable() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _duckduckgo_search(query: str, limit: int = 5) -> Dict[str, Any]:
+    """Legacy keyless DuckDuckGo HTML search fallback.
+
+    The pluginized default is the ``ddgs`` provider, but older configs/tests
+    still reference ``web.backend: duckduckgo`` and patch this helper directly.
+    Keep the small HTML path as a no-key fallback without requiring the ddgs
+    optional dependency.
+    """
+    from tools.interrupt import is_interrupted as _is_interrupted
+
+    if _is_interrupted():
+        return {"success": False, "error": "Interrupted", "data": {"web": []}}
+
+    response = httpx.post(
+        "https://html.duckduckgo.com/html/",
+        data={"q": query},
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    response.raise_for_status()
+    page = response.text or ""
+    links = re.findall(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    snippets = re.findall(
+        r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    results = []
+    for idx, (href, title_html) in enumerate(links[:limit], start=1):
+        parsed = urlparse(html_lib.unescape(href))
+        if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+            target = parse_qs(parsed.query).get("uddg", [href])[0]
+            href = url_unquote(target)
+        title = re.sub(r"<[^>]+>", "", title_html)
+        snippet = snippets[idx - 1] if idx - 1 < len(snippets) else ""
+        description = re.sub(r"<[^>]+>", "", snippet)
+        results.append(
+            {
+                "title": html_lib.unescape(title).strip(),
+                "url": href,
+                "description": html_lib.unescape(description).strip(),
+                "position": idx,
+            }
+        )
+    return {"success": True, "data": {"web": results}}
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -809,27 +875,30 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         )
 
         backend = _get_search_backend()
-        provider = _wsp_get_provider(backend) if backend else None
-        if provider is None or not provider.supports_search():
-            # Fall back to availability-walked active provider when the
-            # configured backend isn't a registered search provider (typo,
-            # uninstalled plugin, or capability mismatch).
-            provider = get_active_search_provider()
-
-        if provider is None:
-            response_data = {
-                "success": False,
-                "error": (
-                    "No web search provider configured. "
-                    "Run `hermes tools` to set one up."
-                ),
-            }
+        if backend == "duckduckgo":
+            response_data = _duckduckgo_search(query, limit)
         else:
-            logger.info(
-                "Web search via %s: '%s' (limit: %d)",
-                provider.name, query, limit,
-            )
-            response_data = provider.search(query, limit)
+            provider = _wsp_get_provider(backend) if backend else None
+            if provider is None or not provider.supports_search():
+                # Fall back to availability-walked active provider when the
+                # configured backend isn't a registered search provider (typo,
+                # uninstalled plugin, or capability mismatch).
+                provider = get_active_search_provider()
+
+            if provider is None:
+                response_data = {
+                    "success": False,
+                    "error": (
+                        "No web search provider configured. "
+                        "Run `hermes tools` to set one up."
+                    ),
+                }
+            else:
+                logger.info(
+                    "Web search via %s: '%s' (limit: %d)",
+                    provider.name, query, limit,
+                )
+                response_data = provider.search(query, limit)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -1367,7 +1436,7 @@ async def web_crawl_tool(
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs"}:
+    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "duckduckgo"}:
         return _is_backend_available(configured)
     return any(
         _is_backend_available(backend)

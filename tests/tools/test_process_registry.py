@@ -475,6 +475,41 @@ class TestSpawnEnvSanitization:
         assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell limits only")
+    def test_spawn_local_applies_opt_in_resource_limits(self, registry):
+        captured = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            proc = MagicMock()
+            proc.pid = 4322
+            proc.stdout = iter([])
+            proc.stdin = MagicMock()
+            proc.poll.return_value = None
+            return proc
+
+        fake_thread = MagicMock()
+
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/user",
+            "USER": "tester",
+            "HERMES_LOCAL_PROCESS_MEMORY_MB": "256",
+            "HERMES_LOCAL_PROCESS_TIMEOUT_SECONDS": "45",
+        }, clear=True), \
+            patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+            patch("subprocess.Popen", side_effect=fake_popen), \
+            patch("threading.Thread", return_value=fake_thread), \
+            patch.object(registry, "_write_checkpoint"):
+            session = registry.spawn_local("npm run build", cwd="/tmp")
+
+        assert session.memory_limit_mb == 256
+        assert session.runtime_timeout_seconds == 45
+        shell_command = captured["cmd"][2]
+        assert "ulimit -v 262144" in shell_command
+        assert "timeout --foreground --kill-after=5s 45s" in shell_command
+        assert "npm run build" in shell_command
+
     def test_spawn_via_env_uses_backend_temp_dir_for_artifacts(self, registry):
         class FakeEnv:
             def __init__(self):
@@ -625,6 +660,51 @@ class TestPopenLeakOnSetupFailure:
 
         assert not killed, "proc.kill() must NOT be called on successful spawn"
         assert session.pid == 7777
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+    def test_spawn_local_records_process_group(self, registry):
+        proc = MagicMock()
+        proc.pid = 7777
+        proc.stdout = iter([])
+        proc.stdin = MagicMock()
+        proc.poll.return_value = None
+
+        fake_thread = MagicMock()
+
+        with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+             patch("subprocess.Popen", return_value=proc), \
+             patch("tools.process_registry.os.getpgid", return_value=4321), \
+             patch("threading.Thread", return_value=fake_thread), \
+             patch.object(registry, "_write_checkpoint"):
+            session = registry.spawn_local("echo hello", cwd="/tmp")
+
+        assert session.pgid == 4321
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+    def test_kill_process_terminates_recorded_process_group(self, registry):
+        proc = MagicMock()
+        proc.pid = 7777
+        proc.poll.return_value = None
+        proc.wait.return_value = None
+
+        session = _make_session(sid="proc_group_kill")
+        session.process = proc
+        session.pid = proc.pid
+        session.pgid = 4321
+        registry._running[session.id] = session
+
+        killpg_calls = []
+
+        def fake_killpg(pgid, sig):
+            killpg_calls.append((pgid, sig))
+
+        with patch("tools.process_registry.os.killpg", side_effect=fake_killpg), \
+             patch.object(registry, "_wait_for_process_group_exit", return_value=True), \
+             patch.object(registry, "_write_checkpoint"):
+            result = registry.kill_process(session.id)
+
+        assert result["status"] == "killed"
+        assert killpg_calls == [(4321, signal.SIGTERM)]
 
 
 # =========================================================================

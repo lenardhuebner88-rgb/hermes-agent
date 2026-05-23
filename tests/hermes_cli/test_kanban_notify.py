@@ -654,3 +654,38 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     # Only the real file was uploaded.
     assert len(documents_uploaded) == 1
     assert "real.pdf" in documents_uploaded[0]
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_autosubscribes_discord_to_dedicated_thread(kanban_home, monkeypatch):
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    monkeypatch.setenv("HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID", "1505596156405874909")
+
+    runner = object.__new__(GatewayRunner)
+    source = SimpleNamespace(
+        platform=Platform.DISCORD,
+        chat_id="1500203113867378789",
+        thread_id="source-thread",
+        user_id="207500364776341504",
+    )
+    event = SimpleNamespace(
+        text='/kanban create "hello discord" --assignee alice',
+        source=source,
+    )
+
+    out = await GatewayRunner._handle_kanban_command(runner, event)
+
+    assert "subscribed" in out.lower()
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn)
+        tasks = kb.list_tasks(conn)
+    finally:
+        conn.close()
+
+    assert [t.title for t in tasks] == ["hello discord"]
+    assert len(subs) == 1
+    assert subs[0]["chat_id"] == "1500203113867378789"
+    assert subs[0]["thread_id"] == "1505596156405874909"

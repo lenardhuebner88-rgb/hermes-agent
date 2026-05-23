@@ -13,6 +13,11 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+Direct `python3 -m pytest ...` commands must be run after activating that
+checkout's venv. The system Python may still load pytest and anyio, but it can
+miss dev-only plugins such as `pytest-asyncio` and silently skip
+`@pytest.mark.asyncio` tests.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.

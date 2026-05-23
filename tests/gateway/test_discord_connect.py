@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -100,6 +101,9 @@ class FakeBot:
         self.application_id = 999
         self.user = SimpleNamespace(id=999, name="Hermes")
         self._events = {}
+        self._closed = False
+        self._ready = False
+        self.latency = 0.123
         self.tree = FakeTree()
         self.http = SimpleNamespace(
             upsert_global_command=AsyncMock(),
@@ -114,9 +118,18 @@ class FakeBot:
     async def start(self, token):
         if "on_ready" in self._events:
             await self._events["on_ready"]()
+        self._ready = True
 
     async def close(self):
+        self._closed = True
+        self._ready = False
         return None
+
+    def is_closed(self):
+        return self._closed
+
+    def is_ready(self):
+        return self._ready
 
 
 class SlowSyncTree(FakeTree):
@@ -180,6 +193,115 @@ async def test_connect_only_requests_members_intent_when_needed(monkeypatch, all
     assert am.roles is False
 
     await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_runtime_health_records_discord_websocket_freshness(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+    monkeypatch.setattr(adapter, "_resolve_allowed_usernames", AsyncMock())
+
+    writes = []
+    monkeypatch.setattr(
+        "gateway.status.write_runtime_status",
+        lambda **kwargs: writes.append(kwargs),
+    )
+
+    created = {}
+
+    def fake_bot_factory(*, command_prefix, intents, proxy=None, allowed_mentions=None, **kwargs):
+        bot = FakeBot(intents=intents, allowed_mentions=allowed_mentions)
+        bot.enable_debug_events = kwargs.get("enable_debug_events")
+        created["bot"] = bot
+        return bot
+
+    monkeypatch.setattr(discord_platform.commands, "Bot", fake_bot_factory)
+
+    ok = await adapter.connect()
+    assert ok is True
+
+    assert created["bot"].enable_debug_events is True
+    await created["bot"]._events["on_socket_raw_receive"](json.dumps({"op": 11, "t": None}))
+
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["websocket_connected"] is True
+    assert health["last_heartbeat_ack_at"]
+    assert health["latency_ms"] == 123
+    assert any(
+        call.get("platform") == "discord"
+        and call.get("platform_health", {}).get("status") == "online"
+        for call in writes
+    )
+
+    await adapter.disconnect()
+
+
+def test_runtime_health_marks_discord_stale(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    client = SimpleNamespace(
+        is_closed=lambda: False,
+        is_ready=lambda: True,
+        latency=0.05,
+    )
+    adapter._client = client
+    adapter._running = True
+    adapter._last_connect_at = "2026-05-22T08:00:00+00:00"
+    adapter._last_ready_at = "2026-05-22T08:00:01+00:00"
+    adapter._last_gateway_event_at = "2026-05-22T08:00:02+00:00"
+    adapter._last_heartbeat_ack_at = "2026-05-22T08:00:03+00:00"
+    adapter._last_gateway_event_monotonic = time.monotonic() - 300
+    adapter._last_heartbeat_ack_monotonic = time.monotonic() - 300
+
+    monkeypatch.setenv("HERMES_DISCORD_STALE_AFTER_SECONDS", "120")
+
+    health = adapter.runtime_health()
+
+    assert health["status"] == "stale"
+    assert health["reason"] == "heartbeat stale"
+
+
+@pytest.mark.asyncio
+async def test_runtime_health_loop_refreshes_stale_snapshot(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    closed = False
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: closed,
+        is_ready=lambda: True,
+        latency=0.05,
+    )
+    adapter._ready_event.set()
+    adapter._last_ready_at = "2026-05-22T08:00:01+00:00"
+    adapter._last_ready_monotonic = time.monotonic() - 300
+
+    writes = []
+    monkeypatch.setattr(
+        "gateway.status.write_runtime_status",
+        lambda **kwargs: writes.append(kwargs),
+    )
+    monkeypatch.setenv("HERMES_DISCORD_STALE_AFTER_SECONDS", "120")
+
+    async def fake_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(discord_platform.asyncio, "sleep", fake_sleep)
+    original_write = adapter._write_discord_runtime_health
+
+    def write_once_then_stop(**kwargs):
+        nonlocal closed
+        original_write(**kwargs)
+        closed = True
+
+    adapter._write_discord_runtime_health = write_once_then_stop
+
+    await adapter._discord_runtime_health_loop()
+
+    assert writes[-1]["platform"] == "discord"
+    assert "platform_state" not in writes[-1]
+    assert writes[-1]["platform_health"]["status"] == "stale"
+    assert writes[-1]["platform_health"]["freshness_age_seconds"] >= 300
 
 
 @pytest.mark.asyncio
