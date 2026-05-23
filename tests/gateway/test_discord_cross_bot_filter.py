@@ -99,7 +99,7 @@ class TestDiscordCrossBotFilter(unittest.TestCase):
 
     def test_finding_f_2026_05_17_01_reference_in_discord_py(self):
         """The discord.py multi-agent filter block must reference the finding ID."""
-        discord_py = Path("/home/piet/.hermes/hermes-agent/gateway/platforms/discord.py")
+        discord_py = Path("/home/piet/.hermes/hermes-agent/plugins/platforms/discord/adapter.py")
         self.assertTrue(discord_py.exists(), f"discord.py missing at {discord_py}")
         text = discord_py.read_text(encoding="utf-8")
         # The finding ID is stamped in the comment block immediately above the
