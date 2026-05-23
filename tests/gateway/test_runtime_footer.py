@@ -309,7 +309,19 @@ def test_format_context_usage_footer_estimated_prefixes_estimated_values():
     assert out == "Kontext: ~7 % · ~14.8k/200k Token · Antwort: 312"
 
 
-def test_resolve_token_detail_usage_prefers_exact_last_values():
+def test_resolve_token_detail_usage_prefers_last_prompt_tokens():
+    input_tokens, output_tokens, estimated = resolve_token_detail_usage({
+        "last_prompt_tokens": 12_000,
+        "last_input_tokens": 14_800,
+        "last_output_tokens": 312,
+        "input_tokens": 99_999,
+        "output_tokens": 9_999,
+    })
+
+    assert (input_tokens, output_tokens, estimated) == (12_000, 312, False)
+
+
+def test_resolve_token_detail_usage_uses_legacy_last_input_when_prompt_missing():
     input_tokens, output_tokens, estimated = resolve_token_detail_usage({
         "last_input_tokens": 14_800,
         "last_output_tokens": 312,
@@ -320,7 +332,7 @@ def test_resolve_token_detail_usage_prefers_exact_last_values():
     assert (input_tokens, output_tokens, estimated) == (14_800, 312, False)
 
 
-def test_resolve_token_detail_usage_falls_back_to_aggregate_as_estimated():
+def test_resolve_token_detail_usage_does_not_use_aggregate_input_tokens():
     input_tokens, output_tokens, estimated = resolve_token_detail_usage({
         "last_input_tokens": None,
         "last_output_tokens": None,
@@ -328,11 +340,12 @@ def test_resolve_token_detail_usage_falls_back_to_aggregate_as_estimated():
         "output_tokens": 1_234,
     })
 
-    assert (input_tokens, output_tokens, estimated) == (64_000, 1_234, True)
+    assert (input_tokens, output_tokens, estimated) == (None, 1_234, True)
 
 
-def test_build_footer_token_detail_renders_aggregate_fallback_as_estimated():
+def test_build_footer_token_detail_uses_last_prompt_with_output_fallback_as_estimated():
     input_tokens, output_tokens, estimated = resolve_token_detail_usage({
+        "last_prompt_tokens": 32_000,
         "input_tokens": 64_000,
         "output_tokens": 1_234,
     })
@@ -349,7 +362,7 @@ def test_build_footer_token_detail_renders_aggregate_fallback_as_estimated():
         token_detail_estimated=estimated,
     )
 
-    assert out == "gpt-5.5 · Kontext: ~32 % · ~64k/200k Token · Antwort: 1234"
+    assert out == "gpt-5.5 · Kontext: ~16 % · ~32k/200k Token · Antwort: 1234"
 
 
 def test_token_detail_uses_codex_responses_normalized_effective_input_tokens():

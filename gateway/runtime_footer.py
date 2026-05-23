@@ -100,19 +100,20 @@ def format_context_usage_footer(
 
 
 def resolve_token_detail_usage(agent_result: dict[str, Any]) -> tuple[int | None, int | None, bool]:
-    """Return token-detail usage from exact per-turn values or aggregate fallback.
+    """Return token-detail usage from exact per-turn values.
 
-    ``last_*`` values come from the provider's normalized per-turn usage. Some
-    gateway/provider paths only surface session aggregate counters; those are
-    less precise for a single response, so mark them as estimated when used.
+    ``last_prompt_tokens`` is the prompt/input side for the latest turn.  Legacy
+    ``last_input_tokens`` is accepted only when the newer prompt field is absent.
+    Aggregate ``input_tokens`` is cumulative and must not be used for per-turn
+    prompt detail.  Output aggregate remains a last-resort estimated fallback.
     """
-    input_tokens = agent_result.get("last_input_tokens")
+    input_tokens = agent_result.get("last_prompt_tokens")
+    if input_tokens is None:
+        input_tokens = agent_result.get("last_input_tokens")
+
     output_tokens = agent_result.get("last_output_tokens")
     estimated = False
 
-    if input_tokens is None and agent_result.get("input_tokens") is not None:
-        input_tokens = agent_result.get("input_tokens")
-        estimated = True
     if output_tokens is None and agent_result.get("output_tokens") is not None:
         output_tokens = agent_result.get("output_tokens")
         estimated = True
