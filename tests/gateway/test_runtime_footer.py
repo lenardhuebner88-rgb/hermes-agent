@@ -4,13 +4,16 @@ appended to final gateway replies."""
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
-
+from agent.usage_pricing import normalize_usage
+from gateway.platforms.base import BasePlatformAdapter
 from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
     build_footer_line,
+    format_context_usage_footer,
     format_runtime_footer,
     resolve_footer_config,
 )
@@ -260,3 +263,117 @@ def test_build_footer_no_data_returns_empty_even_when_enabled():
     # With no TERMINAL_CWD env either
     if not os.environ.get("TERMINAL_CWD"):
         assert out == ""
+
+
+# ---------------------------------------------------------------------------
+# token_detail / context usage footer
+# ---------------------------------------------------------------------------
+
+
+def test_format_context_usage_footer_exact_values():
+    assert format_context_usage_footer(
+        input_tokens=14_800,
+        output_tokens=312,
+        context_length=200_000,
+    ) == "Kontext: 7 % · 14.8k/200k Token · Antwort: 312"
+
+
+@pytest.mark.parametrize(
+    "input_tokens,output_tokens,context_length",
+    [
+        (14_800, 312, None),
+        (14_800, 312, 0),
+        (None, 312, 200_000),
+        (14_800, None, 200_000),
+        (-1, 312, 200_000),
+    ],
+)
+def test_format_context_usage_footer_missing_or_invalid_returns_none(
+    input_tokens, output_tokens, context_length,
+):
+    assert format_context_usage_footer(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        context_length=context_length,
+    ) is None
+
+
+def test_format_context_usage_footer_estimated_prefixes_estimated_values():
+    out = format_context_usage_footer(
+        input_tokens=14_800,
+        output_tokens=312,
+        context_length=200_000,
+        estimated=True,
+    )
+    assert out == "Kontext: ~7 % · ~14.8k/200k Token · Antwort: 312"
+
+
+def test_token_detail_uses_codex_responses_normalized_effective_input_tokens():
+    raw_usage = SimpleNamespace(
+        input_tokens=19_000,
+        output_tokens=312,
+        input_tokens_details=SimpleNamespace(cached_tokens=4_200),
+    )
+    usage = normalize_usage(raw_usage, provider="openai-codex", api_mode="codex_responses")
+
+    out = format_context_usage_footer(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        context_length=200_000,
+    )
+
+    assert usage.input_tokens == 14_800
+    assert usage.prompt_tokens == 19_000
+    assert out == "Kontext: 7 % · 14.8k/200k Token · Antwort: 312"
+
+
+def test_format_runtime_footer_token_detail_combines_with_existing_fields():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=14_800,
+        context_length=200_000,
+        cwd="",
+        input_tokens=14_800,
+        output_tokens=312,
+        fields=("model", "context_pct", "token_detail"),
+    )
+
+    assert out == "gpt-5.5 · 7% · Kontext: 7 % · 14.8k/200k Token · Antwort: 312"
+
+
+def test_build_footer_token_detail_opt_in_only():
+    base = {
+        "platform_key": "discord",
+        "model": "openai/gpt-5.5",
+        "context_tokens": 14_800,
+        "context_length": 200_000,
+        "cwd": "",
+        "input_tokens": 14_800,
+        "output_tokens": 312,
+    }
+
+    assert build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": False, "fields": ["token_detail"]}}},
+        **base,
+    ) == ""
+    assert build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True, "fields": ["token_detail"]}}},
+        **base,
+    ) == "Kontext: 7 % · 14.8k/200k Token · Antwort: 312"
+    assert build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True, "fields": ["token_detail"]}}},
+        **{**base, "input_tokens": None},
+    ) == ""
+
+
+def test_footer_appended_message_splits_with_token_detail_in_final_chunk():
+    footer = format_context_usage_footer(
+        input_tokens=14_800,
+        output_tokens=312,
+        context_length=200_000,
+    )
+    message = ("x" * 1980) + "\n\n" + footer
+    chunks = BasePlatformAdapter.truncate_message(message, max_length=2000)
+
+    assert chunks[-1].endswith(f"{footer} ({len(chunks)}/{len(chunks)})")
+    assert all(len(chunk) <= 2000 for chunk in chunks)

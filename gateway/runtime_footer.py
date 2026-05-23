@@ -54,6 +54,51 @@ def _model_short(model: Optional[str]) -> str:
     return model.rsplit("/", 1)[-1]
 
 
+def _format_token_count(tokens: int) -> str:
+    """Compact token count for the runtime footer (``14800`` → ``14.8k``)."""
+    if tokens < 1_000:
+        return str(tokens)
+    if tokens < 1_000_000:
+        value = tokens / 1_000
+        if value.is_integer() or value >= 100:
+            return f"{value:.0f}k"
+        return f"{value:.1f}k"
+    value = tokens / 1_000_000
+    if value.is_integer() or value >= 100:
+        return f"{value:.0f}m"
+    return f"{value:.1f}m"
+
+
+def format_context_usage_footer(
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    context_length: int | None,
+    estimated: bool = False,
+) -> str | None:
+    """Render exact/estimated per-response token detail, or ``None``.
+
+    ``input_tokens`` and ``output_tokens`` are expected to come from the latest
+    already-normalized ``CanonicalUsage`` object. Callers should pass ``None``
+    when provider usage is unavailable; this helper never invents exact token
+    numbers.
+    """
+    if input_tokens is None or output_tokens is None:
+        return None
+    if context_length is None or context_length <= 0:
+        return None
+    if input_tokens < 0 or output_tokens < 0:
+        return None
+
+    prefix = "~" if estimated else ""
+    pct = max(0, min(100, round((input_tokens / context_length) * 100)))
+    return (
+        f"Kontext: {prefix}{pct} % · "
+        f"{prefix}{_format_token_count(input_tokens)}/{_format_token_count(context_length)} Token · "
+        f"Antwort: {output_tokens}"
+    )
+
+
 def resolve_footer_config(
     user_config: dict[str, Any] | None,
     platform_key: str | None = None,
@@ -95,6 +140,9 @@ def format_runtime_footer(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    token_detail_estimated: bool = False,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
@@ -116,6 +164,15 @@ def format_runtime_footer(
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
                 parts.append(rel)
+        elif field == "token_detail":
+            detail = format_context_usage_footer(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                context_length=context_length,
+                estimated=token_detail_estimated,
+            )
+            if detail:
+                parts.append(detail)
         # Unknown field names are silently ignored.
 
     if not parts:
@@ -131,6 +188,9 @@ def build_footer_line(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    token_detail_estimated: bool = False,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -146,5 +206,8 @@ def build_footer_line(
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        token_detail_estimated=token_detail_estimated,
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )

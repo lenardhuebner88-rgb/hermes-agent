@@ -603,6 +603,7 @@ def run_conversation(
     # Main conversation loop
     api_call_count = 0
     final_response = None
+    latest_canonical_usage = None
     interrupted = False
     failed = False
     codex_ack_continuations = 0
@@ -1665,6 +1666,7 @@ def run_conversation(
                         provider=agent.provider,
                         api_mode=agent.api_mode,
                     )
+                    latest_canonical_usage = canonical_usage
                     prompt_tokens = canonical_usage.prompt_tokens
                     completion_tokens = canonical_usage.output_tokens
                     total_tokens = canonical_usage.total_tokens
@@ -4265,6 +4267,13 @@ def run_conversation(
         "completion_tokens": agent.session_completion_tokens,
         "total_tokens": agent.session_total_tokens,
         "last_prompt_tokens": getattr(agent.context_compressor, "last_prompt_tokens", 0) or 0,
+        "last_input_tokens": (
+            latest_canonical_usage.input_tokens if latest_canonical_usage is not None else None
+        ),
+        "last_output_tokens": (
+            latest_canonical_usage.output_tokens if latest_canonical_usage is not None else None
+        ),
+        "context_length": getattr(agent.context_compressor, "context_length", None),
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
