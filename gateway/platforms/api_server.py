@@ -35,6 +35,7 @@ import re
 import sqlite3
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -317,6 +318,18 @@ def check_api_server_requirements() -> bool:
     return AIOHTTP_AVAILABLE
 
 
+def _provider_for_model_override(model_name: str) -> Optional[str]:
+    """Infer the provider for an API-server-only model override.
+
+    Keep this deliberately narrow: an absent or unknown override must preserve
+    the gateway's global model/provider resolution for every other surface.
+    """
+    normalized = (model_name or "").strip().lower()
+    if normalized.startswith("minimax"):
+        return "minimax"
+    return None
+
+
 class ResponseStore:
     """
     SQLite-backed LRU store for Responses API state.
@@ -337,10 +350,12 @@ class ResponseStore:
                 db_path = str(get_hermes_home() / "response_store.db")
             except Exception:
                 db_path = ":memory:"
+        self._db_path: Optional[str] = db_path if db_path != ":memory:" else None
         try:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._db_path = None
         # Use shared WAL-fallback helper so response_store.db degrades
         # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
         # issue addressed for state.db/kanban.db — see
@@ -361,6 +376,31 @@ class ResponseStore:
             )"""
         )
         self._conn.commit()
+        # response_store.db contains conversation history (tool payloads,
+        # prompts, results). Tighten to owner-only after creation so other
+        # local users on a shared box can't read it. Run once at __init__
+        # rather than after every commit — chmod-on-every-write is wasted
+        # syscalls on a hot path.
+        self._tighten_file_permissions()
+
+    def _tighten_file_permissions(self) -> None:
+        """Force owner-only permissions on the DB and SQLite sidecars."""
+        if not self._db_path:
+            return
+        for candidate in (
+            Path(self._db_path),
+            Path(f"{self._db_path}-wal"),
+            Path(f"{self._db_path}-shm"),
+        ):
+            try:
+                if candidate.exists():
+                    candidate.chmod(0o600)
+            except OSError:
+                logger.debug(
+                    "Failed to restrict response store permissions for %s",
+                    candidate,
+                    exc_info=True,
+                )
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
@@ -648,9 +688,9 @@ class APIServerAdapter(BasePlatformAdapter):
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
             extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
         )
-        self._model_name: str = self._resolve_model_name(
-            extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
-        )
+        raw_model_name = extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", ""))
+        self._runtime_model_name: str = str(raw_model_name or "").strip()
+        self._model_name: str = self._resolve_model_name(raw_model_name)
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -880,6 +920,23 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+
+        runtime_model_override = self._runtime_model_name
+        runtime_provider_override = _provider_for_model_override(runtime_model_override)
+        if runtime_model_override and runtime_provider_override:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            runtime_kwargs = resolve_runtime_provider(
+                requested=runtime_provider_override,
+                target_model=runtime_model_override,
+            )
+            runtime_kwargs.pop("source", None)
+            runtime_kwargs.pop("requested_provider", None)
+            model = runtime_model_override
+            logger.info(
+                "[%s] API server runtime model override active: provider=%s model=%s",
+                self.name, runtime_provider_override, runtime_model_override,
+            )
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
