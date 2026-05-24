@@ -1399,6 +1399,119 @@ completion_policy:
         assert kb.get_task(conn, t).status == "done"
 
 
+def _append_tool_call_evidence(home: Path, profile: str, session_id: str, *, path: str) -> None:
+    from hermes_state import SessionDB
+
+    db = SessionDB(home / "profiles" / profile / "state.db")
+    db.create_session(session_id, source="cli")
+    db.append_message(
+        session_id,
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "call_search_receipts",
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "arguments": json.dumps({
+                        "path": path,
+                        "pattern": "*",
+                        "target": "files",
+                    }),
+                },
+            }
+        ],
+    )
+    db.append_message(
+        session_id,
+        role="tool",
+        tool_name="search_files",
+        tool_call_id="call_search_receipts",
+        content=json.dumps({"total_count": 1, "files": [f"{path.rstrip('/')}/receipt.md"]}),
+    )
+
+
+def _file_evidence_task_body(path: str) -> str:
+    return f"""
+scope_contract:
+  version: 2
+  allowed_tools: [kanban_show, search_files, kanban_complete, kanban_block]
+completion_policy:
+  require_scope_attestation: true
+  required_tool_evidence:
+    - tool: search_files
+      path: {path}
+      target: files
+      same_worker_session: true
+"""
+
+
+def _file_evidence_metadata(worker_session_id: str) -> dict:
+    return {
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+        "effective_toolsets": ["kanban_show", "search_files", "kanban_complete", "kanban_block"],
+        "worker_session_id": worker_session_id,
+    }
+
+
+def test_required_tool_evidence_profile_state_db_rejects_profile_path_traversal(kanban_home):
+    assert kb._profile_state_db_path("../alice") is None
+    assert kb._profile_state_db_path("alice/bob") is None
+    assert kb._profile_state_db_path(r"alice\bob") is None
+
+
+def test_complete_task_blocks_required_file_evidence_missing_from_worker_session(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "completion_blocked_missing_tool_evidence"]
+        assert events
+        assert events[-1].payload["worker_session_id"] == "worker-session"
+
+
+def test_complete_task_rejects_parent_session_file_evidence(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "parent-session", path=receipts)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_complete_task_accepts_same_worker_session_file_evidence(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "worker-session", path=receipts)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        assert kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+        assert kb.get_task(conn, t).status == "done"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "completion_required_tool_evidence_verified"]
+        assert events
+        assert events[-1].payload["worker_session_id"] == "worker-session"
+
+
+def test_complete_task_rejects_required_file_evidence_wrong_path(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "worker-session", path="/home/piet/vault/03-Agents/Hermes/plans/")
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+
+
 def test_scope_attestation_policy_uses_outer_contract_after_embedded_child_template(
     kanban_home, all_assignees_spawnable
 ):
@@ -5085,6 +5198,113 @@ def test_init_db_allows_missing_then_healthy(tmp_path):
     with kb.connect(db_path=db_path) as conn:
         tasks = kb.list_tasks(conn)
     assert [t.title for t in tasks] == ["keeps"]
+
+
+# ---------------------------------------------------------------------------
+# First-use tip for scratch workspaces
+# ---------------------------------------------------------------------------
+
+def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
+    """First scratch workspace materialization warns + emits an event.
+
+    Subsequent scratch workspaces on the SAME install stay silent — the
+    sentinel file under kanban_home() flips after the first emit.
+    """
+    import logging
+
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="first scratch")
+        t2 = kb.create_task(conn, title="second scratch")
+
+    # Sentinel must not exist yet on a fresh install.
+    assert not kb._scratch_tip_shown()
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        with kb.connect() as conn:
+            kb._maybe_emit_scratch_tip(conn, t1, "scratch")
+
+    # Sentinel is now set.
+    assert kb._scratch_tip_shown()
+    assert kb._scratch_tip_sentinel_path().exists()
+
+    # Warning was logged exactly once.
+    tip_records = [
+        r for r in caplog.records
+        if "scratch workspaces are ephemeral" in r.getMessage()
+    ]
+    assert len(tip_records) == 1, (
+        f"Expected exactly one tip warning, got {len(tip_records)}: "
+        f"{[r.getMessage() for r in tip_records]!r}"
+    )
+
+    # An event row was appended on the first task.
+    with kb.connect() as conn:
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+            (t1,),
+        ).fetchall()
+    kinds = [e["kind"] for e in events]
+    assert "tip_scratch_workspace" in kinds, (
+        f"Expected tip_scratch_workspace event on first scratch task; "
+        f"got {kinds!r}"
+    )
+
+    # Second scratch materialization on the same install stays silent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        with kb.connect() as conn:
+            kb._maybe_emit_scratch_tip(conn, t2, "scratch")
+    tip_records2 = [
+        r for r in caplog.records
+        if "scratch workspaces are ephemeral" in r.getMessage()
+    ]
+    assert tip_records2 == [], (
+        f"Tip should not re-fire after sentinel is set; got "
+        f"{[r.getMessage() for r in tip_records2]!r}"
+    )
+    with kb.connect() as conn:
+        events2 = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+            (t2,),
+        ).fetchall()
+    assert "tip_scratch_workspace" not in [e["kind"] for e in events2], (
+        "Tip event should not be appended for subsequent scratch tasks."
+    )
+
+
+def test_maybe_emit_scratch_tip_skips_non_scratch_workspaces(kanban_home, caplog):
+    """worktree/dir workspaces are preserved on completion and must not
+    trigger the scratch-cleanup tip."""
+    import logging
+
+    with kb.connect() as conn:
+        t_wt = kb.create_task(conn, title="worktree task")
+        t_dir = kb.create_task(conn, title="dir task")
+
+    assert not kb._scratch_tip_shown()
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        with kb.connect() as conn:
+            kb._maybe_emit_scratch_tip(conn, t_wt, "worktree")
+            kb._maybe_emit_scratch_tip(conn, t_dir, "dir")
+
+    # Sentinel stays unset — these workspaces are preserved by design,
+    # so the warning is irrelevant for them and we save the one-shot
+    # for a real scratch user.
+    assert not kb._scratch_tip_shown()
+    tip_records = [
+        r for r in caplog.records
+        if "scratch workspaces are ephemeral" in r.getMessage()
+    ]
+    assert tip_records == []
+    with kb.connect() as conn:
+        for tid in (t_wt, t_dir):
+            events = conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (tid,),
+            ).fetchall()
+            assert "tip_scratch_workspace" not in [e["kind"] for e in events]
+
+
 def test_dispatch_preflight_blocks_scope_v2_with_unknown_assignee(kanban_home, monkeypatch):
     """Scope v2 task with unknown assignee must be blocked, not silently skipped.
 

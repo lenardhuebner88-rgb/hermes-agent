@@ -3402,6 +3402,202 @@ def _body_requires_scope_attestation(body: Optional[str]) -> bool:
     return False
 
 
+def _completion_policy_required_tool_evidence(body: Optional[str]) -> list[dict[str, Any]]:
+    """Return structured ``completion_policy.required_tool_evidence`` entries."""
+    selected: list[dict[str, Any]] = []
+    for mapping in _iter_task_policy_mappings(body):
+        policy = mapping.get("completion_policy")
+        if not isinstance(policy, dict):
+            continue
+        raw = policy.get("required_tool_evidence")
+        if not isinstance(raw, list):
+            continue
+        entries: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool") or "").strip()
+            path = str(item.get("path") or "").strip()
+            target = str(item.get("target") or "").strip()
+            if not tool:
+                continue
+            entry = {
+                "tool": tool,
+                "path": path,
+                "target": target,
+                "same_worker_session": _truthy_policy_value(item.get("same_worker_session")),
+            }
+            entries.append(entry)
+        if entries:
+            selected = entries
+    return selected
+
+
+def _normalize_required_evidence_path(path: str) -> str:
+    value = str(path or "").strip()
+    if value != "/":
+        value = value.rstrip("/")
+    return value
+
+
+def _profile_state_db_path(profile: Optional[str]) -> Optional[Path]:
+    if not profile:
+        return None
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        root = get_default_hermes_root()
+        home = get_hermes_home()
+    except Exception:
+        root = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        home = root
+    profile_name = str(profile).strip()
+    if not profile_name or "/" in profile_name or "\\" in profile_name:
+        return None
+    profile_path = Path(profile_name)
+    if profile_path.is_absolute() or profile_path.name != profile_name or profile_name in {".", ".."}:
+        return None
+    if home.parent.name == "profiles" and home.name == profile_name:
+        return home / "state.db"
+    return root / "profiles" / profile_name / "state.db"
+
+
+def _json_object(value: Any) -> Optional[dict[str, Any]]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _tool_call_arguments(call: Mapping[str, Any]) -> dict[str, Any]:
+    function = call.get("function") if isinstance(call, Mapping) else None
+    if not isinstance(function, Mapping):
+        return {}
+    args = function.get("arguments")
+    parsed = _json_object(args)
+    return parsed or {}
+
+
+def _validate_required_tool_evidence(
+    *,
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+    required: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate required tool evidence against same worker session history."""
+    if not required:
+        return [], []
+    missing: list[dict[str, Any]] = []
+    verified: list[dict[str, Any]] = []
+    if not isinstance(metadata, dict):
+        return ([{"reason": "metadata object is required", "required": item} for item in required], [])
+    worker_session_id = str(metadata.get("worker_session_id") or "").strip()
+    if not worker_session_id:
+        return ([{"reason": "worker_session_id missing", "required": item} for item in required], [])
+
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    profile = row["assignee"] if row is not None and "assignee" in row.keys() else None
+    state_db = _profile_state_db_path(profile)
+    if state_db is None or not state_db.exists():
+        return ([{"reason": "profile state.db missing", "required": item} for item in required], [])
+
+    state: Optional[sqlite3.Connection] = None
+    try:
+        state = sqlite3.connect(str(state_db))
+        state.row_factory = sqlite3.Row
+        rows = state.execute(
+            """
+            SELECT id, role, content, tool_call_id, tool_calls, tool_name
+              FROM messages
+             WHERE session_id = ?
+             ORDER BY id ASC
+            """,
+            (worker_session_id,),
+        ).fetchall()
+    except Exception as exc:
+        return ([{"reason": f"profile state.db unreadable: {exc}", "required": item} for item in required], [])
+    finally:
+        if state is not None:
+            state.close()
+
+    calls: dict[str, dict[str, Any]] = {}
+    for msg in rows:
+        raw_calls = msg["tool_calls"]
+        if not raw_calls:
+            continue
+        try:
+            parsed_calls = json.loads(raw_calls)
+        except Exception:
+            continue
+        if isinstance(parsed_calls, dict):
+            parsed_calls = [parsed_calls]
+        if not isinstance(parsed_calls, list):
+            continue
+        for call in parsed_calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = str(call.get("id") or "").strip()
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            if not call_id or not function:
+                continue
+            calls[call_id] = {
+                "tool": str(function.get("name") or "").strip(),
+                "args": _tool_call_arguments(call),
+            }
+
+    responses: dict[str, sqlite3.Row] = {}
+    for msg in rows:
+        if msg["role"] == "tool" and msg["tool_call_id"]:
+            responses[str(msg["tool_call_id"])] = msg
+
+    for item in required:
+        want_tool = str(item.get("tool") or "").strip()
+        want_path = _normalize_required_evidence_path(str(item.get("path") or ""))
+        want_target = str(item.get("target") or "").strip()
+        matched = False
+        error_reason: Optional[str] = None
+        for call_id, call in calls.items():
+            if call.get("tool") != want_tool:
+                continue
+            args = call.get("args") or {}
+            got_path = _normalize_required_evidence_path(str(args.get("path") or ""))
+            got_target = str(args.get("target") or "").strip()
+            if want_path and got_path != want_path:
+                continue
+            if want_target and got_target != want_target:
+                continue
+            response = responses.get(call_id)
+            if response is None:
+                error_reason = "matching tool response missing"
+                continue
+            content_obj = _json_object(response["content"])
+            if isinstance(content_obj, dict) and content_obj.get("error"):
+                error_reason = "matching tool response contains error"
+                continue
+            verified.append({
+                "tool": want_tool,
+                "path": item.get("path"),
+                "target": want_target or None,
+                "worker_session_id": worker_session_id,
+                "tool_call_id": call_id,
+            })
+            matched = True
+            break
+        if not matched:
+            missing.append({
+                "reason": error_reason or "matching same-worker-session tool call missing",
+                "required": item,
+                "worker_session_id": worker_session_id,
+            })
+    return missing, verified
+
+
 def _selected_policy_value(body: Optional[str], key: str) -> Any:
     """Return the last parser-backed policy value for ``key`` in a task body."""
     selected = None
@@ -3906,6 +4102,57 @@ def complete_task(
                 )
             raise ScopeAttestationError(missing_scope, task_id)
 
+        required_tool_evidence = _completion_policy_required_tool_evidence(task_body)
+        if required_tool_evidence:
+            missing_evidence, verified_evidence = _validate_required_tool_evidence(
+                conn=conn,
+                task_id=task_id,
+                metadata=metadata,
+                required=required_tool_evidence,
+            )
+            if missing_evidence:
+                worker_session_id = (
+                    str(metadata.get("worker_session_id") or "").strip()
+                    if isinstance(metadata, dict)
+                    else ""
+                )
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "completion_blocked_missing_tool_evidence",
+                        {
+                            "missing": missing_evidence,
+                            "required_tool_evidence": required_tool_evidence,
+                            "worker_session_id": worker_session_id or None,
+                            "summary_preview": (
+                                (summary or result or "").strip().splitlines()[0][:200]
+                                if (summary or result)
+                                else None
+                            ),
+                        },
+                    )
+                missing_labels = [
+                    f"required_tool_evidence: {item.get('reason', 'missing')}"
+                    for item in missing_evidence
+                ]
+                raise ScopeAttestationError(missing_labels, task_id)
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_required_tool_evidence_verified",
+                    {
+                        "verified_tool_evidence": verified_evidence,
+                        "required_tool_evidence": required_tool_evidence,
+                        "worker_session_id": (
+                            str(metadata.get("worker_session_id") or "").strip()
+                            if isinstance(metadata, dict)
+                            else None
+                        ),
+                    },
+                )
+
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
@@ -4114,6 +4361,93 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
         pass  # best-effort — never block completion
 
 
+# ---------------------------------------------------------------------------
+# First-use tip for scratch workspaces
+# ---------------------------------------------------------------------------
+#
+# Scratch workspaces are intentionally ephemeral — ``_cleanup_workspace``
+# removes them as soon as ``complete_task`` runs.  New users often don't
+# realize that and lose worker output (community report, May 2026).  The
+# behavior is right; the lack of warning is the bug.
+#
+# On the FIRST scratch workspace materialization across the whole install
+# we:
+#   1. Log a warning line on the dispatcher logger.
+#   2. Append a ``tip_scratch_workspace`` event on the task so it's visible
+#      via ``hermes kanban show <id>`` and the dashboard.
+#   3. Touch a sentinel file under ``kanban_home() / '.scratch_tip_shown'``
+#      so we don't repeat the tip — once you know, you know.
+#
+# Scope is per-install, not per-board: a user creating a second board
+# already learned the lesson on board #1.
+
+_SCRATCH_TIP_SENTINEL_NAME = ".scratch_tip_shown"
+
+_SCRATCH_TIP_MESSAGE = (
+    "scratch workspaces are ephemeral — they're deleted when the task "
+    "completes. Use --workspace worktree: (git worktree) or "
+    "--workspace dir:/abs/path (existing dir) to preserve worker output."
+)
+
+
+def _scratch_tip_sentinel_path() -> Path:
+    """Path to the per-install scratch-workspace-tip sentinel file."""
+    return kanban_home() / _SCRATCH_TIP_SENTINEL_NAME
+
+
+def _scratch_tip_shown() -> bool:
+    """True iff the scratch-workspace tip has already been emitted on this
+    install. Best-effort — any error means we re-emit, which is the safer
+    failure mode for a help message."""
+    try:
+        return _scratch_tip_sentinel_path().exists()
+    except OSError:
+        return False
+
+
+def _mark_scratch_tip_shown() -> None:
+    """Touch the sentinel so future scratch workspaces stay silent.
+
+    Best-effort: a failure here just means the tip might appear once more,
+    which is preferable to crashing dispatch over a help message.
+    """
+    try:
+        path = _scratch_tip_sentinel_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+    except OSError:
+        pass
+
+
+def _maybe_emit_scratch_tip(
+    conn: sqlite3.Connection,
+    task_id: str,
+    workspace_kind: Optional[str],
+) -> None:
+    """Emit the first-use scratch-workspace tip exactly once per install.
+
+    Called from the dispatcher right after a scratch workspace is
+    materialized. No-op for ``worktree`` / ``dir`` workspaces (they're
+    preserved by design) and no-op after the sentinel exists.
+    """
+    if (workspace_kind or "scratch") != "scratch":
+        return
+    if _scratch_tip_shown():
+        return
+    try:
+        _log.warning("kanban: %s (task %s)", _SCRATCH_TIP_MESSAGE, task_id)
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "tip_scratch_workspace",
+                {"message": _SCRATCH_TIP_MESSAGE},
+            )
+    except Exception:
+        # Best-effort — never block the spawn loop over a help message.
+        pass
+    finally:
+        _mark_scratch_tip_shown()
+
+
 def edit_completed_task_result(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4266,6 +4600,77 @@ def block_task(
         )
         _append_event(conn, task_id, "blocked", block_payload, run_id=run_id)
         return True
+
+
+
+def promote_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    actor: str,
+    reason: Optional[str] = None,
+    force: bool = False,
+    dry_run: bool = False,
+) -> tuple[bool, Optional[str]]:
+    """Manually promote a `todo` or `blocked` task to `ready`.
+
+    Mirrors the automatic promotion done by ``recompute_ready`` but
+    drives it from a deliberate operator action with an audit-trail
+    entry. Refuses to promote if any parent dep is not in a terminal
+    state (`done`/`archived`) unless ``force=True``. Does NOT change
+    assignee or claim state. Returns ``(True, None)`` on success and
+    ``(False, reason)`` if refused. ``dry_run=True`` validates the
+    promotion would succeed without mutating state.
+    """
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return False, f"task {task_id} not found"
+
+    cur_status = row["status"]
+    if cur_status not in ("todo", "blocked"):
+        return False, (
+            f"task {task_id} is {cur_status!r}; promote only applies to "
+            f"'todo' or 'blocked'"
+        )
+
+    if not force:
+        parents = conn.execute(
+            "SELECT t.id, t.status FROM tasks t "
+            "JOIN task_links l ON l.parent_id = t.id "
+            "WHERE l.child_id = ?",
+            (task_id,),
+        ).fetchall()
+        unsatisfied = [
+            p["id"] for p in parents
+            if p["status"] not in ("done", "archived")
+        ]
+        if unsatisfied:
+            return False, (
+                f"unsatisfied parent dependencies: "
+                f"{', '.join(unsatisfied)} (use --force to override)"
+            )
+
+    if dry_run:
+        return True, None
+
+    with write_txn(conn):
+        upd = conn.execute(
+            "UPDATE tasks SET status = 'ready' "
+            "WHERE id = ? AND status IN ('todo', 'blocked')",
+            (task_id,),
+        )
+        if upd.rowcount != 1:
+            return False, f"task {task_id} status changed during promotion"
+        _append_event(
+            conn,
+            task_id,
+            "promoted_manual",
+            {"actor": actor, "reason": reason, "forced": force},
+        )
+
+    return True, None
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -7488,6 +7893,7 @@ def dispatch_once(
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
+        _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -7566,6 +7972,7 @@ def dispatch_once(
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
+        _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         # Force-load sdlc-review skill for review agents.  The
         # _default_spawn function already auto-loads kanban-worker, and
         # appends task.skills via --skills.  Setting task.skills here
