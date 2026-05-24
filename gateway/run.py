@@ -3718,8 +3718,15 @@ class GatewayRunner:
                     "Gateway restart queued until idle; active_agents=%d",
                     self._running_agent_count(),
                 )
+                last_active_count: Optional[int] = None
+                last_status_at = 0.0
                 while self._running_agent_count() > 0:
-                    self._update_runtime_status("restart_queued")
+                    active_count = self._running_agent_count()
+                    now = asyncio.get_running_loop().time()
+                    if last_active_count != active_count or (now - last_status_at) >= 1.0:
+                        self._update_runtime_status("restart_queued")
+                        last_active_count = active_count
+                        last_status_at = now
                     await asyncio.sleep(0.1)
             await self.stop(restart=True, detached_restart=detached, service_restart=via_service)
 
