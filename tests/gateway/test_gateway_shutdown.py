@@ -165,6 +165,48 @@ async def test_drain_active_agents_throttles_status_updates():
 
 
 @pytest.mark.asyncio
+async def test_request_restart_after_idle_throttles_queued_status_updates():
+    runner, _adapter = make_restart_runner()
+    runner._running_agents = {"session": MagicMock()}
+    runner._update_runtime_status = MagicMock()
+    runner.stop = AsyncMock()
+
+    assert runner.request_restart(after_idle=True) is True
+    await asyncio.sleep(0.25)
+
+    assert runner._update_runtime_status.call_count == 1
+    runner._update_runtime_status.assert_called_once_with("restart_queued")
+
+    runner._running_agents.clear()
+    await asyncio.sleep(0.2)
+
+    runner.stop.assert_awaited_once_with(
+        restart=True,
+        detached_restart=False,
+        service_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_restart_after_idle_emits_queued_status_heartbeat():
+    runner, _adapter = make_restart_runner()
+    runner._running_agents = {"session": MagicMock()}
+    runner._update_runtime_status = MagicMock()
+    runner.stop = AsyncMock()
+
+    assert runner.request_restart(after_idle=True) is True
+    await asyncio.sleep(1.15)
+
+    assert runner._update_runtime_status.call_count == 2
+    assert runner._update_runtime_status.call_args_list[0].args == ("restart_queued",)
+    assert runner._update_runtime_status.call_args_list[1].args == ("restart_queued",)
+
+    runner._running_agents.clear()
+    await asyncio.sleep(0.2)
+    runner.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_kills_tool_subprocesses_before_adapter_disconnect_on_timeout(monkeypatch):
     """On drain timeout, tool subprocesses must be killed BEFORE adapter
     disconnect so systemd's TimeoutStopSec doesn't SIGKILL the cgroup with
