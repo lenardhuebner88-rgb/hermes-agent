@@ -18,6 +18,16 @@ _DEFAULT_OUTPUT_BYTES = 20_000
 _TRUNCATION_MARKER = b"\n[truncated]\n"
 _SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
 _VALID_WORKSPACE_KINDS = {"scratch", "dir", "worktree"}
+_VITEST_TEST_SUFFIXES = (
+    ".test.ts",
+    ".test.tsx",
+    ".spec.ts",
+    ".spec.tsx",
+    ".test.js",
+    ".test.jsx",
+    ".spec.js",
+    ".spec.jsx",
+)
 _ALLOWED_COMMANDS = {
     "python3": {
         "allowed_extensions": {".py"},
@@ -93,7 +103,15 @@ def _safe_env(workspace: Path) -> dict[str, str]:
     env = {
         "PATH": _SAFE_PATH,
         "HOME": str(workspace),
+        "CI": "1",
+        "NO_COLOR": "1",
         "PYTHONNOUSERSITE": "1",
+        "npm_config_audit": "false",
+        "npm_config_cache": str(workspace / ".npm-cache"),
+        "npm_config_fund": "false",
+        "npm_config_offline": "true",
+        "npm_config_update_notifier": "false",
+        "npm_config_yes": "false",
     }
     for key in ("LANG", "LC_ALL", "LC_CTYPE"):
         value = os.environ.get(key)
@@ -106,6 +124,48 @@ def _safe_env(workspace: Path) -> dict[str, str]:
     }
 
 
+def _validate_workspace_path(
+    *,
+    workspace: Path,
+    target_arg: str,
+    path_label: str,
+    allowed_extensions: set[str] | None = None,
+    allowed_suffixes: tuple[str, ...] | None = None,
+) -> tuple[str | None, str | None]:
+    if target_arg.startswith("-"):
+        return None, f"flag is not allowed for {path_label}: {target_arg}"
+    target = (workspace / target_arg).resolve()
+    try:
+        target.relative_to(workspace)
+    except ValueError:
+        return None, f"{path_label} path is outside workspace: {target_arg}"
+    if allowed_extensions is not None and target.suffix not in allowed_extensions:
+        return None, f"{path_label} extension is not allowlisted: {target_arg}"
+    if allowed_suffixes is not None and not target.name.endswith(allowed_suffixes):
+        return None, f"{path_label} extension is not allowlisted: {target_arg}"
+    if not target.exists() or not target.is_file():
+        return None, f"{path_label} file not found in workspace: {target_arg}"
+    return str(target.relative_to(workspace)), None
+
+
+def _validate_vitest_argv(argv: list[str], workspace: Path) -> tuple[list[str] | None, str | None]:
+    expected = "npm exec vitest -- run <workspace-relative JS/TS test file>"
+    if len(argv) != 6:
+        return None, f"npm vitest command requires exactly: {expected}"
+    if argv[1:5] != ["exec", "vitest", "--", "run"]:
+        return None, f"npm command shape is not allowlisted; expected: {expected}"
+    normalized_target, error = _validate_workspace_path(
+        workspace=workspace,
+        target_arg=argv[5],
+        path_label="test",
+        allowed_suffixes=_VITEST_TEST_SUFFIXES,
+    )
+    if error:
+        return None, error
+    assert normalized_target is not None
+    return ["npm", "exec", "vitest", "--", "run", normalized_target], None
+
+
 def _validate_argv(argv: Any, workspace: Path) -> tuple[list[str] | None, str | None]:
     if not isinstance(argv, list):
         return None, "argv must be a list of strings"
@@ -116,6 +176,8 @@ def _validate_argv(argv: Any, workspace: Path) -> tuple[list[str] | None, str | 
     if any("\x00" in item for item in argv):
         return None, "argv must not contain NUL bytes"
     command = Path(argv[0]).name
+    if command == "npm":
+        return _validate_vitest_argv(argv, workspace)
     policy = _ALLOWED_COMMANDS.get(command)
     if policy is None:
         return None, f"command is not allowlisted: {argv[0]}"
@@ -127,16 +189,16 @@ def _validate_argv(argv: Any, workspace: Path) -> tuple[list[str] | None, str | 
         return None, f"flag is not allowed for {command}: {target_arg}"
     if len(argv) > policy["max_args"]:
         return None, f"too many arguments for {command}"
-    target = (workspace / target_arg).resolve()
-    try:
-        target.relative_to(workspace)
-    except ValueError:
-        return None, f"{path_label} path is outside workspace: {target_arg}"
-    if target.suffix not in policy["allowed_extensions"]:
-        return None, f"{path_label} extension is not allowlisted: {target_arg}"
-    if not target.exists() or not target.is_file():
-        return None, f"{path_label} file not found in workspace: {target_arg}"
-    normalized = [command, str(target.relative_to(workspace))]
+    normalized_target, error = _validate_workspace_path(
+        workspace=workspace,
+        target_arg=target_arg,
+        path_label=path_label,
+        allowed_extensions=policy["allowed_extensions"],
+    )
+    if error:
+        return None, error
+    assert normalized_target is not None
+    normalized = [command, normalized_target]
     return normalized, None
 
 
@@ -145,6 +207,8 @@ def _execution_argv(display_argv: list[str]) -> list[str]:
     # python/python3 through worker-controlled PATH.
     if display_argv[0] == "pytest":
         return [sys.executable, "-m", "pytest", display_argv[1]]
+    if display_argv[0] == "npm":
+        return display_argv
     return [sys.executable, display_argv[1]]
 
 
@@ -232,8 +296,8 @@ registry.register(
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 2,
-                    "maxItems": 2,
-                    "description": "Must be exactly ['python3', 'relative_file.py'], ['python', 'relative_file.py'], or ['pytest', 'relative_test_file.py'].",
+                    "maxItems": 6,
+                    "description": "Must be exactly ['python3', 'relative_file.py'], ['python', 'relative_file.py'], ['pytest', 'relative_test_file.py'], or ['npm', 'exec', 'vitest', '--', 'run', 'relative_test.test.tsx'].",
                 },
                 "timeout_seconds": {
                     "type": "integer",

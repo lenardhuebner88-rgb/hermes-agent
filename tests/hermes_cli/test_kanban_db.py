@@ -2409,6 +2409,80 @@ def test_dispatch_blocks_unknown_force_loaded_skill_before_spawn(kanban_home, al
         assert "unknown force-loaded skill" in (task.result or "")
 
 
+def _write_test_skill(profile_home: Path, skill_name: str) -> None:
+    skill_dir = profile_home / "skills" / "test" / skill_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(f"# {skill_name}\n", encoding="utf-8")
+
+
+def test_dispatch_force_skill_preflight_uses_target_profile_not_dispatcher_context(
+    kanban_home, monkeypatch
+):
+    """Coordinator-only skills must not satisfy a coder worker preflight."""
+    from hermes_cli import profiles
+
+    coordinator_home = profiles.create_profile("coordinator", no_alias=True)
+    profiles.create_profile("coder", no_alias=True)
+    _write_test_skill(coordinator_home, "family-organizer-agent-workflow")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    monkeypatch.setenv("HERMES_HOME", str(coordinator_home))
+    monkeypatch.setattr(
+        profiles,
+        "profile_exists",
+        lambda name: str(name).strip().lower() in {"coordinator", "coder"},
+    )
+    spawns = []
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="coordinator-only skill for coder",
+            assignee="coder",
+            skills=["family-organizer-agent-workflow"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, _workspace: spawns.append(task.id))
+        assert t in res.preflight_blocked
+        assert spawns == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert "family-organizer-agent-workflow" in (task.result or "")
+        assert kb.latest_run(conn, t) is None
+        event_kinds = [event.kind for event in kb.list_events(conn, t)]
+        assert "dispatch_preflight_unknown_skills" in event_kinds
+        assert "claimed" not in event_kinds
+        assert "spawned" not in event_kinds
+
+
+def test_dispatch_force_skill_preflight_allows_target_profile_skill_and_ignores_kanban_worker(
+    kanban_home, monkeypatch
+):
+    from hermes_cli import profiles
+
+    coder_home = profiles.create_profile("coder", no_alias=True)
+    _write_test_skill(coder_home, "target-only-skill")
+    monkeypatch.setattr(
+        profiles,
+        "profile_exists",
+        lambda name: str(name).strip().lower() == "coder",
+    )
+    spawns = []
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="target skill exists",
+            assignee="coder",
+            skills=["kanban-worker", "target-only-skill"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, _workspace: spawns.append(task.id))
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "running"
+
+
 def test_dispatch_preflight_blocks_scope_policy_without_scope_contract_v2(kanban_home, all_assignees_spawnable):
     body = """
 completion_policy:

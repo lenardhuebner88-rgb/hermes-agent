@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -195,7 +196,9 @@ def test_runner_schema_declares_tight_argv_shape(worker_workspace):
     argv_schema = schema["parameters"]["properties"]["argv"]
 
     assert argv_schema["minItems"] == 2
-    assert argv_schema["maxItems"] == 2
+    assert argv_schema["maxItems"] == 6
+    assert "npm" in argv_schema["description"]
+    assert "vitest" in argv_schema["description"]
 
 
 def test_runner_accepts_registry_dispatch_kwargs(worker_workspace):
@@ -297,6 +300,107 @@ def test_runner_pytest_rejects_unsafe_shapes(worker_workspace, tmp_path, argv, e
     (worker_workspace / "test_probe.py").write_text("def test_probe():\n    assert True\n", encoding="utf-8")
     (worker_workspace / "README.md").write_text("# no\n", encoding="utf-8")
     (tmp_path / "test_probe.py").write_text("def test_outside():\n    assert False\n", encoding="utf-8")
+
+    result = _run({"argv": argv})
+
+    assert "error" in result
+    assert expected in result["error"]
+
+
+def test_runner_accepts_vitest_file_in_workspace(worker_workspace, monkeypatch):
+    test_file = worker_workspace / "src/components/kitchen/WeekMobileList.test.tsx"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("import { describe, it } from 'vitest'\n", encoding="utf-8")
+    monkeypatch.setenv("NPM_TOKEN", "secret-token")
+    calls = {}
+
+    def fake_run(run_argv, **kwargs):
+        calls["argv"] = run_argv
+        calls.update(kwargs)
+        return subprocess.CompletedProcess(
+            run_argv,
+            0,
+            stdout=b"vitest-ok\n",
+            stderr=b"",
+        )
+
+    from tools import kanban_workspace_runner as runner
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = _run({
+        "argv": [
+            "npm",
+            "exec",
+            "vitest",
+            "--",
+            "run",
+            "src/components/kitchen/WeekMobileList.test.tsx",
+        ],
+        "timeout_seconds": 20,
+    })
+
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "vitest-ok\n"
+    assert result["argv"] == [
+        "npm",
+        "exec",
+        "vitest",
+        "--",
+        "run",
+        "src/components/kitchen/WeekMobileList.test.tsx",
+    ]
+    assert calls["argv"] == result["argv"]
+    assert calls["cwd"] == str(worker_workspace.resolve())
+    assert calls["shell"] is False
+    assert calls["stdin"] == subprocess.DEVNULL
+    assert calls["env"]["HOME"] == str(worker_workspace.resolve())
+    assert calls["env"]["npm_config_offline"] == "true"
+    assert calls["env"]["npm_config_yes"] == "false"
+    assert "NPM_TOKEN" not in calls["env"]
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (
+            ["npm", "exec", "vitest", "--", "run", "../outside.test.ts"],
+            "test path is outside workspace",
+        ),
+        (
+            ["npm", "run", "vitest", "--", "run", "src/components/kitchen/WeekMobileList.test.tsx"],
+            "npm command shape is not allowlisted",
+        ),
+        (
+            ["npm", "exec", "jest", "--", "run", "src/components/kitchen/WeekMobileList.test.tsx"],
+            "npm command shape is not allowlisted",
+        ),
+        (
+            ["npm", "exec", "vitest", "--", "run", "src/components/kitchen/WeekMobileList.tsx"],
+            "test extension is not allowlisted",
+        ),
+        (
+            [
+                "npm",
+                "exec",
+                "vitest",
+                "--",
+                "run",
+                "src/components/kitchen/WeekMobileList.test.tsx",
+                "--watch",
+            ],
+            "npm vitest command requires exactly",
+        ),
+    ],
+)
+def test_runner_vitest_rejects_unsafe_shapes(worker_workspace, tmp_path, argv, expected):
+    test_file = worker_workspace / "src/components/kitchen/WeekMobileList.test.tsx"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("import { describe, it } from 'vitest'\n", encoding="utf-8")
+    non_test_file = worker_workspace / "src/components/kitchen/WeekMobileList.tsx"
+    non_test_file.write_text("export default function WeekMobileList() {}\n", encoding="utf-8")
+    (tmp_path / "outside.test.ts").write_text("import { it } from 'vitest'\n", encoding="utf-8")
 
     result = _run({"argv": argv})
 

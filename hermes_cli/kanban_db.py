@@ -5247,16 +5247,78 @@ def _task_requires_dispatcher_scope_preflight(body: Optional[str]) -> bool:
     return any("scope_contract" in mapping for mapping in _iter_task_policy_mappings(body))
 
 
-def _validate_task_extra_skills(skills: Optional[list]) -> list[str]:
-    """Return force-loaded skills that the current CLI cannot resolve.
+def _target_profile_home(profile: Optional[str]) -> Optional[str]:
+    """Return the HERMES_HOME a spawned worker will use for ``profile``.
+
+    The dispatcher runs under its own profile, but the worker will activate
+    ``task.assignee``. Force-skill preflight must therefore resolve against the
+    target profile home, not the dispatcher's currently imported skill context.
+    """
+    profile_name = str(profile or "").strip()
+    if not profile_name:
+        return None
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+        return resolve_profile_env(normalize_profile_name(profile_name))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _skill_available_in_home(skill_name: str, hermes_home: str) -> bool:
+    """Return True when ``skill_name`` has a SKILL.md under ``hermes_home``."""
+    name = str(skill_name or "").strip()
+    if not name:
+        return False
+    skills_root = Path(hermes_home) / "skills"
+    if not skills_root.is_dir():
+        return False
+
+    try:
+        direct = (skills_root / name / "SKILL.md").resolve()
+        skills_root_resolved = skills_root.resolve()
+        if direct.is_file() and skills_root_resolved in direct.parents:
+            return True
+    except (OSError, RuntimeError):
+        pass
+
+    try:
+        for skill_md in skills_root.rglob("SKILL.md"):
+            if skill_md.is_file() and skill_md.parent.name == name:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _validate_task_extra_skills(
+    skills: Optional[list],
+    *,
+    profile: Optional[str] = None,
+) -> list[str]:
+    """Return force-loaded skills the target worker profile cannot resolve.
 
     This preflight prevents crash loops where the spawned process exits with
-    ``Unknown skill(s): ...`` before it can block its own task.
+    ``Unknown skill(s): ...`` before it can block its own task. When ``profile``
+    is provided, resolve against the profile home that ``hermes -p <profile>``
+    will use; falling back to the dispatcher's current skill context would miss
+    coordinator-only skills assigned to coder/reviewer workers.
     """
     requested = [str(s).strip() for s in (skills or []) if str(s).strip()]
     requested = [s for s in requested if s != "kanban-worker"]
     if not requested:
         return []
+
+    if profile is not None:
+        target_home = _target_profile_home(profile)
+        if not target_home:
+            # Fail closed: if the dispatcher cannot determine the target
+            # profile's skill root, it cannot prove the worker CLI will start.
+            return list(requested)
+        return [s for s in requested if not _skill_available_in_home(s, target_home)]
+
     try:
         from agent.skill_commands import build_preloaded_skills_prompt
         _prompt, _loaded, missing = build_preloaded_skills_prompt(requested)
@@ -7309,7 +7371,18 @@ def dispatch_once(
                     )
             continue
         task_for_preflight = Task.from_row(row)
-        missing_skills = _validate_task_extra_skills(task_for_preflight.skills) if not dry_run else []
+        if not dry_run:
+            try:
+                missing_skills = _validate_task_extra_skills(
+                    task_for_preflight.skills,
+                    profile=task_for_preflight.assignee,
+                )
+            except TypeError:
+                # Back-compat for tests/embedders that monkeypatch the older
+                # one-argument helper; the real helper accepts ``profile``.
+                missing_skills = _validate_task_extra_skills(task_for_preflight.skills)
+        else:
+            missing_skills = []
         if missing_skills:
             reason = (
                 "dispatch preflight blocked task: unknown force-loaded skill(s): "
