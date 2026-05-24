@@ -868,6 +868,17 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = channel_prompts
                 if "gateway_restart_notification" in platform_cfg:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
+                if plat == Platform.API_SERVER:
+                    # API server historically accepted api_server.extra.model_name
+                    # (and some configs use api_server.model_name) but the
+                    # adapter only reads PlatformConfig.extra. Bridge that
+                    # surface-local value here without touching global
+                    # model.default used by other gateway surfaces.
+                    api_server_extra = platform_cfg.get("extra")
+                    if isinstance(api_server_extra, dict) and "model_name" in api_server_extra:
+                        bridged["model_name"] = api_server_extra["model_name"]
+                    elif "model_name" in platform_cfg:
+                        bridged["model_name"] = platform_cfg["model_name"]
                 enabled_was_explicit = "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
