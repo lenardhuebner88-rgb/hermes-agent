@@ -2063,10 +2063,12 @@ def terminal_tool(
                     result_data["approval"] = approval_note
                 if pty_disabled_reason:
                     result_data["pty_note"] = pty_disabled_reason
-                if getattr(proc_session, "memory_limit_mb", None):
-                    result_data["memory_limit_mb"] = proc_session.memory_limit_mb
-                if getattr(proc_session, "runtime_timeout_seconds", None):
-                    result_data["timeout_seconds"] = proc_session.runtime_timeout_seconds
+                memory_limit_mb = getattr(proc_session, "memory_limit_mb", None)
+                if isinstance(memory_limit_mb, (int, float)) and memory_limit_mb > 0:
+                    result_data["memory_limit_mb"] = memory_limit_mb
+                runtime_timeout_seconds = getattr(proc_session, "runtime_timeout_seconds", None)
+                if isinstance(runtime_timeout_seconds, (int, float)) and runtime_timeout_seconds > 0:
+                    result_data["timeout_seconds"] = runtime_timeout_seconds
 
                 # Populate routing metadata on the session so that
                 # watch-pattern and completion notifications can be

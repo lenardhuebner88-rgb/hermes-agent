@@ -27,6 +27,8 @@ HUB_SELF_HEALING = Path("/home/piet/.hermes/bin/hub_self_healing.py")
 
 def _load_mod(monkeypatch, db_path: Path):
     """Load hub_self_healing with KANBAN_DB pointed at our tmp DB."""
+    if not HUB_SELF_HEALING.exists():
+        pytest.skip(f"local ops script not present: {HUB_SELF_HEALING}")
     spec = importlib.util.spec_from_file_location(
         "hub_self_healing_under_test", str(HUB_SELF_HEALING)
     )

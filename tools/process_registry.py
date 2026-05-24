@@ -41,6 +41,7 @@ import time
 import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
@@ -49,6 +50,14 @@ from typing import Any, Dict, List, Optional
 from hermes_cli.config import get_hermes_home
 
 logger = logging.getLogger(__name__)
+
+
+def _posix_killpg(pgid: int, sig: int) -> None:
+    """Send a signal to a POSIX process group; no-op on Windows."""
+    if _IS_WINDOWS:
+        return
+    killpg = getattr(os, "killpg")
+    killpg(pgid, sig)
 
 
 # Checkpoint file for crash recovery (gateway only)
@@ -462,8 +471,10 @@ class ProcessRegistry:
     @staticmethod
     def _process_group_alive(pgid: int) -> bool:
         """Return True when a POSIX process group still has live members."""
+        if _IS_WINDOWS:
+            return False
         try:
-            os.killpg(pgid, 0)
+            _posix_killpg(pgid, 0)
             return True
         except ProcessLookupError:
             return False
@@ -517,7 +528,7 @@ class ProcessRegistry:
                 return
 
         try:
-            os.killpg(resolved_pgid, signal.SIGTERM)
+            _posix_killpg(resolved_pgid, signal.SIGTERM)
         except ProcessLookupError:
             try:
                 proc.kill()
@@ -529,7 +540,7 @@ class ProcessRegistry:
             return
 
         try:
-            os.killpg(resolved_pgid, signal.SIGKILL)
+            _posix_killpg(resolved_pgid, _SIGKILL)
         except ProcessLookupError:
             return
         self._wait_for_process_group_exit(resolved_pgid, proc=proc, timeout=2.0)
@@ -542,10 +553,10 @@ class ProcessRegistry:
         """Terminate a recovered host process, preferring its stored POSIX group."""
         if not _IS_WINDOWS and session.pgid:
             try:
-                os.killpg(session.pgid, signal.SIGTERM)
+                _posix_killpg(session.pgid, signal.SIGTERM)
                 if self._wait_for_process_group_exit(session.pgid, timeout=1.0):
                     return
-                os.killpg(session.pgid, signal.SIGKILL)
+                _posix_killpg(session.pgid, _SIGKILL)
                 self._wait_for_process_group_exit(session.pgid, timeout=2.0)
                 return
             except (ProcessLookupError, PermissionError, OSError):
