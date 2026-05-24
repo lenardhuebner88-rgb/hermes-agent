@@ -26,6 +26,80 @@ _skill_commands_platform: Optional[str] = None
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
 
+_SUPPORTING_FILE_GROUPS: tuple[tuple[str, str], ...] = (
+    ("references", "background knowledge, API docs, and deep references"),
+    ("templates", "starter files to copy or adapt"),
+    ("scripts", "re-runnable probes or actions"),
+    ("assets", "supplementary assets or binary files"),
+)
+
+
+def _collect_supporting_files_by_group(
+    loaded_skill: dict[str, Any],
+    skill_dir: Path | None,
+) -> dict[str, list[str]]:
+    """Return supporting files grouped by canonical skill subdirectory."""
+    grouped: dict[str, list[str]] = {name: [] for name, _ in _SUPPORTING_FILE_GROUPS}
+
+    linked_files = loaded_skill.get("linked_files") or {}
+    if isinstance(linked_files, dict):
+        for group_name, _purpose in _SUPPORTING_FILE_GROUPS:
+            entries = linked_files.get(group_name)
+            if isinstance(entries, list):
+                grouped[group_name].extend(str(entry) for entry in entries if entry)
+
+    if not any(grouped.values()) and skill_dir:
+        for group_name, _purpose in _SUPPORTING_FILE_GROUPS:
+            subdir_path = skill_dir / group_name
+            if subdir_path.exists():
+                for f in sorted(subdir_path.rglob("*")):
+                    if f.is_file() and not f.is_symlink():
+                        grouped[group_name].append(str(f.relative_to(skill_dir)))
+
+    deduped: dict[str, list[str]] = {}
+    for group_name, _purpose in _SUPPORTING_FILE_GROUPS:
+        seen: set[str] = set()
+        files: list[str] = []
+        for rel in sorted(grouped[group_name]):
+            if rel in seen:
+                continue
+            seen.add(rel)
+            files.append(rel)
+        if files:
+            deduped[group_name] = files
+    return deduped
+
+
+def _append_supporting_files_block(
+    parts: list[str],
+    grouped: dict[str, list[str]],
+    skill_dir: Path,
+    skill_view_target: str,
+) -> None:
+    """Append a grouped supporting-files hint to the skill message."""
+    if not grouped:
+        return
+
+    parts.append("")
+    parts.append("[This skill has supporting files:]")
+    first_group = True
+    purposes = dict(_SUPPORTING_FILE_GROUPS)
+    for group_name, _purpose in _SUPPORTING_FILE_GROUPS:
+        entries = grouped.get(group_name) or []
+        if not entries:
+            continue
+        if not first_group:
+            parts.append("")
+        first_group = False
+        parts.append(f"{group_name}/ — {purposes[group_name]}:")
+        for rel in entries:
+            parts.append(f"- {rel}  ->  {skill_dir / rel}")
+    parts.append(
+        f'\nLoad any of these with skill_view(name="{skill_view_target}", '
+        f'file_path="<path>"), or run scripts directly by absolute path '
+        f"(e.g. `node {skill_dir}/scripts/foo.js`)."
+    )
+
 
 def _resolve_skill_commands_platform() -> Optional[str]:
     """Return the current platform scope used for disabled-skill filtering.
@@ -218,36 +292,20 @@ def _build_skill_message(
             ]
         )
 
-    supporting = []
-    linked_files = loaded_skill.get("linked_files") or {}
-    for entries in linked_files.values():
-        if isinstance(entries, list):
-            supporting.extend(entries)
-
-    if not supporting and skill_dir:
-        for subdir in ("references", "templates", "scripts", "assets"):
-            subdir_path = skill_dir / subdir
-            if subdir_path.exists():
-                for f in sorted(subdir_path.rglob("*")):
-                    if f.is_file() and not f.is_symlink():
-                        rel = str(f.relative_to(skill_dir))
-                        supporting.append(rel)
-
-    if supporting and skill_dir:
-        try:
-            skill_view_target = str(skill_dir.relative_to(SKILLS_DIR))
-        except ValueError:
-            # Skill is from an external dir — use the skill name instead
-            skill_view_target = skill_dir.name
-        parts.append("")
-        parts.append("[This skill has supporting files:]")
-        for sf in supporting:
-            parts.append(f"- {sf}  ->  {skill_dir / sf}")
-        parts.append(
-            f'\nLoad any of these with skill_view(name="{skill_view_target}", '
-            f'file_path="<path>"), or run scripts directly by absolute path '
-            f"(e.g. `node {skill_dir}/scripts/foo.js`)."
-        )
+    if skill_dir:
+        grouped_supporting = _collect_supporting_files_by_group(loaded_skill, skill_dir)
+        if grouped_supporting:
+            try:
+                skill_view_target = str(skill_dir.relative_to(SKILLS_DIR))
+            except ValueError:
+                # Skill is from an external dir — use the skill name instead
+                skill_view_target = skill_dir.name
+            _append_supporting_files_block(
+                parts,
+                grouped_supporting,
+                skill_dir,
+                skill_view_target,
+            )
 
     if user_instruction:
         parts.append("")

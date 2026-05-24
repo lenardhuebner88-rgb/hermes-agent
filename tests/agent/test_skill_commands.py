@@ -8,6 +8,7 @@ import pytest
 
 import tools.skills_tool as skills_tool_module
 from agent.skill_commands import (
+    _build_skill_message,
     build_preloaded_skills_prompt,
     build_skill_invocation_message,
     resolve_skill_command_key,
@@ -451,6 +452,42 @@ class TestBuildPreloadedSkillsPrompt:
         assert loaded == ["present-skill"]
         assert missing == ["missing-skill"]
 
+    def test_preloaded_prompt_groups_supporting_files_by_type(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = _make_skill(tmp_path, "grouped-skill")
+            (skill_dir / "references").mkdir()
+            (skill_dir / "templates").mkdir()
+            (skill_dir / "scripts").mkdir()
+            (skill_dir / "assets").mkdir()
+            (skill_dir / "references" / "api.md").write_text("api")
+            (skill_dir / "templates" / "config.yaml").write_text("key: value")
+            (skill_dir / "scripts" / "run.js").write_text("console.log('hi')")
+            (skill_dir / "assets" / "logo.png").write_bytes(b"png")
+
+            prompt, loaded, missing = build_preloaded_skills_prompt(["grouped-skill"])
+
+        assert loaded == ["grouped-skill"]
+        assert missing == []
+        headings = [
+            "references/ — background knowledge, API docs, and deep references:",
+            "templates/ — starter files to copy or adapt:",
+            "scripts/ — re-runnable probes or actions:",
+            "assets/ — supplementary assets or binary files:",
+        ]
+        for heading in headings:
+            assert heading in prompt
+        assert [prompt.index(heading) for heading in headings] == sorted(
+            prompt.index(heading) for heading in headings
+        )
+        for rel in (
+            "references/api.md",
+            "templates/config.yaml",
+            "scripts/run.js",
+            "assets/logo.png",
+        ):
+            assert rel in prompt
+            assert str(skill_dir / rel) in prompt
+
 
 class TestBuildSkillInvocationMessage:
     def test_loads_skill_by_stored_path_when_frontmatter_name_differs(self, tmp_path):
@@ -647,6 +684,61 @@ class TestSkillDirectoryHeader:
         assert "scripts/run.js" in msg
         assert str(skill_dir / "scripts" / "run.js") in msg
         assert f"node {skill_dir}/scripts/foo.js" in msg
+
+    def test_supporting_files_are_grouped_by_type(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = _make_skill(tmp_path, "grouped-skill")
+            (skill_dir / "references").mkdir()
+            (skill_dir / "templates").mkdir()
+            (skill_dir / "scripts").mkdir()
+            (skill_dir / "assets").mkdir()
+            (skill_dir / "references" / "api.md").write_text("api")
+            (skill_dir / "templates" / "config.yaml").write_text("key: value")
+            (skill_dir / "scripts" / "run.js").write_text("console.log('hi')")
+            (skill_dir / "assets" / "logo.png").write_bytes(b"png")
+            scan_skill_commands()
+            msg = build_skill_invocation_message("/grouped-skill")
+
+        assert msg is not None
+        headings = [
+            "references/ — background knowledge, API docs, and deep references:",
+            "templates/ — starter files to copy or adapt:",
+            "scripts/ — re-runnable probes or actions:",
+            "assets/ — supplementary assets or binary files:",
+        ]
+        for heading in headings:
+            assert heading in msg
+        assert [msg.index(heading) for heading in headings] == sorted(
+            msg.index(heading) for heading in headings
+        )
+        for rel in (
+            "references/api.md",
+            "templates/config.yaml",
+            "scripts/run.js",
+            "assets/logo.png",
+        ):
+            assert rel in msg
+            assert str(skill_dir / rel) in msg
+
+    def test_supporting_file_fallback_groups_recursive_files(self, tmp_path):
+        skill_dir = tmp_path / "fallback-skill"
+        (skill_dir / "references" / "deep").mkdir(parents=True)
+        (skill_dir / "references" / "deep" / "guide.md").write_text("guide")
+        loaded_skill = {
+            "content": "# Fallback skill\n\nDo the thing.",
+            "name": "fallback-skill",
+        }
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            msg = _build_skill_message(
+                loaded_skill,
+                skill_dir,
+                "[activation]",
+            )
+
+        assert "references/ — background knowledge, API docs, and deep references:" in msg
+        assert "references/deep/guide.md" in msg
+        assert str(skill_dir / "references" / "deep" / "guide.md") in msg
 
 
 class TestTemplateVarSubstitution:
