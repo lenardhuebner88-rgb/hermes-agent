@@ -20,6 +20,8 @@ HUB_WATCHER = Path("/home/piet/.hermes/bin/hub_watcher.py")
 
 
 def _load_mod(tmp_path, monkeypatch):
+    if not HUB_WATCHER.exists():
+        pytest.skip(f"local ops script not present: {HUB_WATCHER}")
     spec = importlib.util.spec_from_file_location(
         "hub_watcher_under_test", str(HUB_WATCHER)
     )

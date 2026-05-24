@@ -462,6 +462,8 @@ class ProcessRegistry:
     @staticmethod
     def _process_group_alive(pgid: int) -> bool:
         """Return True when a POSIX process group still has live members."""
+        if _IS_WINDOWS:
+            return False
         try:
             os.killpg(pgid, 0)
             return True
@@ -516,6 +518,7 @@ class ProcessRegistry:
                     pass
                 return
 
+        # _IS_WINDOWS guard above keeps POSIX-only os.killpg off Windows.
         try:
             os.killpg(resolved_pgid, signal.SIGTERM)
         except ProcessLookupError:
@@ -528,6 +531,7 @@ class ProcessRegistry:
         if self._wait_for_process_group_exit(resolved_pgid, proc=proc, timeout=1.0):
             return
 
+        # _IS_WINDOWS guard above keeps POSIX-only os.killpg off Windows.
         try:
             os.killpg(resolved_pgid, signal.SIGKILL)
         except ProcessLookupError:
