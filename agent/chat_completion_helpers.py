@@ -223,9 +223,15 @@ def interruptible_api_call(agent, api_kwargs: dict):
             )
 
         # Stale-call detector: kill the connection if no response
-        # arrives within the configured timeout.
+        # arrives within the configured timeout.  The Codex Responses path
+        # runs a real stream inside this non-streaming wrapper; for that path,
+        # treat fresh stream activity as progress and kill only on idle time.
         _elapsed = time.time() - _call_start
-        if _elapsed > _stale_timeout:
+        _idle_elapsed = time.time() - getattr(agent, "_last_activity_ts", _call_start)
+        _codex_stream_active = (
+            agent.api_mode == "codex_responses" and _idle_elapsed <= _stale_timeout
+        )
+        if _elapsed > _stale_timeout and not _codex_stream_active:
             _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
             logger.warning(
                 "Non-streaming API call stale for %.0fs (threshold %.0fs). "
