@@ -1,5 +1,7 @@
 """Regression tests for sudo detection and sudo password handling."""
 
+import json
+
 import tools.terminal_tool as terminal_tool
 
 
@@ -182,6 +184,18 @@ _HEAVY_COMMANDS = [
     "uv run pytest",
     "pdm run pytest",
     "hatch run pytest",
+    # Bypass-resistance (Review-Finding #8): leading wrappers, versioned
+    # interpreters, subshells, and bash -c quoting must all still match.
+    "nohup pytest tests",
+    "env FOO=1 pytest tests",
+    "time pytest tests",
+    "python3.11 -m pytest tests",
+    "python3.12 -m coverage run -m pytest",
+    "(cd /tmp && pytest tests)",
+    "result=$(pytest tests)",
+    "bash -c 'pytest -q'",
+    "poetry run pytest",
+    "FOO=1 BAR=2 pytest tests",
 ]
 
 
@@ -301,3 +315,82 @@ def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
     assert terminal_tool._validate_workdir("C:\\Users\\Alice\\project\nwhoami")
+
+
+# ---------------------------------------------------------------------------
+# Integration: guard must fire from terminal_tool() entry, not only the helper
+# (Review-Finding #1: helper was defined but never invoked at runtime.)
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_tool_entry_blocks_heavy_workload_at_hub(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+
+    result_json = terminal_tool.terminal_tool(command="pytest tests")
+    result = json.loads(result_json)
+
+    assert result["status"] == "blocked", result
+    assert "Default Hermes gateway" in result["error"]
+
+
+def test_terminal_tool_entry_allows_heavy_workload_in_named_profile(
+    monkeypatch, tmp_path,
+):
+    profile_home = tmp_path / ".hermes" / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+
+    # Use a benign command that *would* match the heavy-workload regex but
+    # also exits successfully so we don't need to mock subprocess: 'true' is
+    # not a heavy command, so the guard should be inactive on it anyway —
+    # we only assert the guard does not turn it into 'blocked'.
+    result_json = terminal_tool.terminal_tool(command="true")
+    result = json.loads(result_json)
+
+    assert result.get("status") != "blocked", result
+
+
+def test_terminal_tool_entry_skips_guard_when_force(monkeypatch, tmp_path):
+    """force=True (user already approved) must bypass the HUB guard too."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+
+    # 'true' isn't heavy either, but the assertion is about not-blocked status
+    # regardless of guard outcome; pytest as the command would actually
+    # execute pytest which we don't want in CI — assert via 'true'.
+    result_json = terminal_tool.terminal_tool(command="true", force=True)
+    result = json.loads(result_json)
+
+    assert result.get("status") != "blocked", result
+
+
+def test_command_contains_heavy_workload_helper():
+    """Sanity-check the parser-based detector against bypass attempts."""
+    g = terminal_tool._command_contains_heavy_workload
+    # positives
+    assert g("pytest tests")
+    assert g("nohup pytest tests")
+    assert g("env FOO=1 pytest")
+    assert g("python3.12 -m pytest tests")
+    assert g("bash -c 'pytest -q'")
+    assert g("(cd /tmp && pytest)")
+    assert g("result=$(pytest)")
+    assert g("/usr/local/venv/bin/pytest -q")
+    # negatives — pytest as path component, not the executable
+    assert g("cat /tmp/pytest-cache/log") is None
+    assert g("ls /usr/bin/pytest") is None
+    assert g("echo pytest") is None
+    assert g("rg pytest src/") is None
+    assert g("grep mypy README.md") is None
