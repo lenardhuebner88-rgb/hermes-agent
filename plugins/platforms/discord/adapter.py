@@ -5028,10 +5028,18 @@ class DiscordAdapter(BasePlatformAdapter):
             lag_class           "ok" | "watch" | "critical"
         """
         from gateway.profile_policy import (
-            DISCORD_LAG_WATCH_MS,
-            DISCORD_LAG_CRITICAL_MS,
-            DISCORD_HEARTBEAT_AGE_WATCH_SECONDS,
-            DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS,
+            current_discord_lag_watch_ms,
+            current_discord_lag_critical_ms,
+            current_discord_heartbeat_age_watch_seconds,
+            current_discord_heartbeat_age_critical_seconds,
+        )
+        DISCORD_LAG_WATCH_MS = current_discord_lag_watch_ms()
+        DISCORD_LAG_CRITICAL_MS = current_discord_lag_critical_ms()
+        DISCORD_HEARTBEAT_AGE_WATCH_SECONDS = (
+            current_discord_heartbeat_age_watch_seconds()
+        )
+        DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS = (
+            current_discord_heartbeat_age_critical_seconds()
         )
 
         now_mono = time.monotonic()

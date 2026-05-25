@@ -539,10 +539,13 @@ def write_runtime_status(
             payload.pop("token_usage", None)
         elif isinstance(token_usage, dict):
             from gateway.profile_policy import (
-                PRESSURE_WATCH_PCT,
-                PRESSURE_CRITICAL_PCT,
-                PRESSURE_FLOOR_TOKENS,
+                current_pressure_watch_pct,
+                current_pressure_critical_pct,
+                current_pressure_floor_tokens,
             )
+            PRESSURE_WATCH_PCT = current_pressure_watch_pct()
+            PRESSURE_CRITICAL_PCT = current_pressure_critical_pct()
+            PRESSURE_FLOOR_TOKENS = current_pressure_floor_tokens()
             # Defensive snapshot — non-serialisable values degrade to str().
             usage = json.loads(json.dumps(token_usage, default=str))
             try:

@@ -83,6 +83,41 @@ def test_deployment_path_with_worktrees_ancestor_is_still_default(tmp_path):
     )
 
 
+def test_threshold_accessors_read_env_per_call_without_reload(monkeypatch):
+    """Review-Finding #10: per-call accessors honour env-var overrides
+    set AFTER module import, so operators don't need a full Python
+    process restart to retune thresholds."""
+    policy = _import_policy()
+    # No env override → matches the import-time default.
+    monkeypatch.delenv("HERMES_PRESSURE_WATCH_PCT", raising=False)
+    assert policy.current_pressure_watch_pct() == policy.PRESSURE_WATCH_PCT
+
+    # Set after module import — module-level constant is frozen, but the
+    # accessor returns the live value.
+    monkeypatch.setenv("HERMES_PRESSURE_WATCH_PCT", "42")
+    assert policy.current_pressure_watch_pct() == 42
+
+    # Invalid env falls back to the import-time default without raising.
+    monkeypatch.setenv("HERMES_PRESSURE_WATCH_PCT", "not-an-int")
+    assert policy.current_pressure_watch_pct() == policy.PRESSURE_WATCH_PCT
+
+
+def test_threshold_accessors_cover_all_thresholds(monkeypatch):
+    policy = _import_policy()
+    monkeypatch.setenv("HERMES_PRESSURE_CRITICAL_PCT", "91")
+    monkeypatch.setenv("HERMES_PRESSURE_FLOOR_TOKENS", "9999")
+    monkeypatch.setenv("HERMES_DISCORD_LAG_WATCH_MS", "111")
+    monkeypatch.setenv("HERMES_DISCORD_LAG_CRITICAL_MS", "222")
+    monkeypatch.setenv("HERMES_DISCORD_HEARTBEAT_AGE_WATCH_SECONDS", "33")
+    monkeypatch.setenv("HERMES_DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS", "44")
+    assert policy.current_pressure_critical_pct() == 91
+    assert policy.current_pressure_floor_tokens() == 9999
+    assert policy.current_discord_lag_watch_ms() == 111
+    assert policy.current_discord_lag_critical_ms() == 222
+    assert policy.current_discord_heartbeat_age_watch_seconds() == 33
+    assert policy.current_discord_heartbeat_age_critical_seconds() == 44
+
+
 def test_minimax_marker_no_longer_false_positives_on_m2_7(tmp_path):
     """Review-Finding #6: 'm2.7' was too generic. A non-Minimax model whose
     id merely contains the substring 'm2.7' must NOT be filtered."""

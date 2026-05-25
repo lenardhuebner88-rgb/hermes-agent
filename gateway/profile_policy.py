@@ -66,6 +66,49 @@ DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS: int = _int_env(
     "HERMES_DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS", 120
 )
 
+
+# Review-Finding #10: the module-level constants above are frozen at import
+# time. The ``current_*`` accessors below re-read the env var per call so
+# operators can tune thresholds without a full process re-import (for hot-
+# reload supervisors, sigup handlers, or tests that don't want importlib
+# .reload). Each returns the env value when set, else the import-time
+# default — preserving backward compatibility for callers that import the
+# bare constants.
+
+
+def current_pressure_watch_pct() -> int:
+    return _int_env("HERMES_PRESSURE_WATCH_PCT", PRESSURE_WATCH_PCT)
+
+
+def current_pressure_critical_pct() -> int:
+    return _int_env("HERMES_PRESSURE_CRITICAL_PCT", PRESSURE_CRITICAL_PCT)
+
+
+def current_pressure_floor_tokens() -> int:
+    return _int_env("HERMES_PRESSURE_FLOOR_TOKENS", PRESSURE_FLOOR_TOKENS)
+
+
+def current_discord_lag_watch_ms() -> int:
+    return _int_env("HERMES_DISCORD_LAG_WATCH_MS", DISCORD_LAG_WATCH_MS)
+
+
+def current_discord_lag_critical_ms() -> int:
+    return _int_env("HERMES_DISCORD_LAG_CRITICAL_MS", DISCORD_LAG_CRITICAL_MS)
+
+
+def current_discord_heartbeat_age_watch_seconds() -> int:
+    return _int_env(
+        "HERMES_DISCORD_HEARTBEAT_AGE_WATCH_SECONDS",
+        DISCORD_HEARTBEAT_AGE_WATCH_SECONDS,
+    )
+
+
+def current_discord_heartbeat_age_critical_seconds() -> int:
+    return _int_env(
+        "HERMES_DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS",
+        DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS,
+    )
+
 MINIMAX_PROVIDER_NAMES: frozenset[str] = frozenset(
     {"minimax", "minimax-ai", "minimaxio"}
 )
@@ -291,6 +334,13 @@ __all__ = [
     "DISCORD_LAG_CRITICAL_MS",
     "DISCORD_HEARTBEAT_AGE_WATCH_SECONDS",
     "DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS",
+    "current_pressure_watch_pct",
+    "current_pressure_critical_pct",
+    "current_pressure_floor_tokens",
+    "current_discord_lag_watch_ms",
+    "current_discord_lag_critical_ms",
+    "current_discord_heartbeat_age_watch_seconds",
+    "current_discord_heartbeat_age_critical_seconds",
     "MINIMAX_PROVIDER_NAMES",
     "MINIMAX_MODEL_MARKERS",
     "is_default_hermes_profile_home",
