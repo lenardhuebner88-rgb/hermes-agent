@@ -553,21 +553,41 @@ def write_runtime_status(
                 context_length = int(usage.get("context_length") or 0)
             except (TypeError, ValueError):
                 context_length = 0
-            pressure_pct = 0
+            pressure_pct: Optional[int] = 0
+            pressure_class: str
             if context_length > 0:
                 pressure_pct = max(
                     0, min(100, round(last_prompt / context_length * 100))
                 )
-            if last_prompt < PRESSURE_FLOOR_TOKENS:
-                pressure_class = "ok"
-            elif pressure_pct >= PRESSURE_CRITICAL_PCT:
-                pressure_class = "critical"
-            elif pressure_pct >= PRESSURE_WATCH_PCT:
-                pressure_class = "watch"
+                if last_prompt < PRESSURE_FLOOR_TOKENS:
+                    pressure_class = "ok"
+                elif pressure_pct >= PRESSURE_CRITICAL_PCT:
+                    pressure_class = "critical"
+                elif pressure_pct >= PRESSURE_WATCH_PCT:
+                    pressure_class = "watch"
+                else:
+                    pressure_class = "ok"
             else:
-                pressure_class = "ok"
+                # Review-Finding #7: when context_length is unknown (0), we
+                # cannot compute pressure_pct. Falling back to 'ok' falsely
+                # reassures the operator even if last_prompt is enormous.
+                # Surface 'unknown' so the CLI can render it accordingly.
+                pressure_pct = None
+                if last_prompt < PRESSURE_FLOOR_TOKENS:
+                    pressure_class = "ok"
+                else:
+                    pressure_class = "unknown"
             usage["pressure_pct"] = pressure_pct
             usage["pressure_class"] = pressure_class
+            # Review-Finding #14: stamp updated_at so the CLI can detect
+            # stale token_usage records (e.g. yesterday's 'critical' read
+            # this morning) and the snapshot doesn't masquerade as live.
+            usage["updated_at"] = _utc_now_iso()
+            # Review-Finding #15: ensure the model field is always a string
+            # so non-serialisable ModelConfig-like objects don't surface as
+            # '<Object 0x…>' in the persisted file and in CLI output.
+            if "model" in usage and usage["model"] is not None:
+                usage["model"] = str(usage["model"])
             payload["token_usage"] = usage
 
     if platform is not _UNSET:

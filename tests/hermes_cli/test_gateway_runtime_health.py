@@ -122,3 +122,68 @@ def test_runtime_health_lines_skip_token_pressure_when_incomplete(monkeypatch):
     )
     lines = _runtime_health_lines()
     assert all("Token pressure" not in line for line in lines)
+
+
+def test_runtime_health_lines_render_unknown_pressure_class(monkeypatch):
+    """Review-Finding #7: pressure_class='unknown' (context_length missing)
+    renders an explicit unknown line rather than silent 'ok'."""
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "running",
+            "token_usage": {
+                "last_prompt_tokens": 200_000,
+                "context_length": 0,
+                "pressure_pct": None,
+                "pressure_class": "unknown",
+                "model": "gpt-5.4",
+            },
+            "platforms": {},
+        },
+    )
+    lines = _runtime_health_lines()
+    joined = "\n".join(lines)
+    assert "Token pressure: unknown (context length not reported) on gpt-5.4" in joined
+
+
+def test_runtime_health_lines_reject_bool_pressure_pct(monkeypatch):
+    """Bool is a subclass of int in Python — a stray True must not render
+    as '1% of context'."""
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "running",
+            "token_usage": {
+                "pressure_pct": True,
+                "pressure_class": "watch",
+                "model": "gpt-5.4",
+            },
+            "platforms": {},
+        },
+    )
+    lines = _runtime_health_lines()
+    assert all("Token pressure" not in line for line in lines)
+
+
+def test_runtime_health_lines_mark_token_pressure_stale(monkeypatch):
+    """Review-Finding #14: a token_usage snapshot older than 5min gains a
+    '(stale Nm)' / '(stale Nh)' suffix so the operator can tell it's not
+    live."""
+    from datetime import datetime, timezone, timedelta
+    stale_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=8)).isoformat()
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "running",
+            "token_usage": {
+                "pressure_pct": 90,
+                "pressure_class": "critical",
+                "model": "gpt-5.4",
+                "updated_at": stale_ts,
+            },
+            "platforms": {},
+        },
+    )
+    lines = _runtime_health_lines()
+    joined = "\n".join(lines)
+    assert "(stale 8h)" in joined

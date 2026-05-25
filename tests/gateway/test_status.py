@@ -412,6 +412,8 @@ class TestGatewayRuntimeStatus:
     def test_write_runtime_status_token_usage_handles_zero_context(
         self, tmp_path, monkeypatch
     ):
+        """When both last_prompt and context_length are 0, classify 'ok' (an
+        empty session). pressure_pct is None — we don't have a denominator."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         status.write_runtime_status(token_usage={
             "last_prompt_tokens": 0,
@@ -419,8 +421,58 @@ class TestGatewayRuntimeStatus:
             "model": None,
         })
         tu = status.read_runtime_status()["token_usage"]
-        assert tu["pressure_pct"] == 0
+        assert tu["pressure_pct"] is None
         assert tu["pressure_class"] == "ok"
+
+    def test_write_runtime_status_token_usage_zero_context_huge_prompt(
+        self, tmp_path, monkeypatch,
+    ):
+        """Review-Finding #7: context_length=0 + last_prompt huge must NOT
+        silently classify as 'ok' — surface 'unknown' instead so the CLI
+        can render the missing-denominator case explicitly."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 200_000,
+            "context_length": 0,
+            "model": "claude-3.5-sonnet",
+        })
+        tu = status.read_runtime_status()["token_usage"]
+        assert tu["pressure_pct"] is None
+        assert tu["pressure_class"] == "unknown"
+
+    def test_write_runtime_status_token_usage_stamps_updated_at(
+        self, tmp_path, monkeypatch,
+    ):
+        """Review-Finding #14: token_usage must include updated_at so the
+        CLI can detect stale snapshots (yesterday's 'critical' read today)."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 5_000,
+            "context_length": 10_000,
+            "model": "x",
+        })
+        tu = status.read_runtime_status()["token_usage"]
+        assert "updated_at" in tu
+        assert isinstance(tu["updated_at"], str) and tu["updated_at"]
+
+    def test_write_runtime_status_token_usage_stringifies_model_object(
+        self, tmp_path, monkeypatch,
+    ):
+        """Review-Finding #15: non-string model values must be coerced to
+        str() so the persisted file never carries '<Object 0x...>' repr."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        class _ModelObj:
+            def __str__(self):
+                return "fancy-model-id"
+
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 5_000,
+            "context_length": 10_000,
+            "model": _ModelObj(),
+        })
+        tu = status.read_runtime_status()["token_usage"]
+        assert tu["model"] == "fancy-model-id"
 
     def test_write_runtime_status_token_usage_none_clears(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
