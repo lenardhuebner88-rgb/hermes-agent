@@ -69,7 +69,13 @@ DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS: int = _int_env(
 MINIMAX_PROVIDER_NAMES: frozenset[str] = frozenset(
     {"minimax", "minimax-ai", "minimaxio"}
 )
-MINIMAX_MODEL_MARKERS: tuple[str, ...] = ("minimax", "m2.7")
+# 'minimax' is intentionally kept as a substring marker — false-positives on
+# unrelated models would require an opaque model name containing the literal
+# vendor name, which we accept as a rare misclassification in exchange for
+# catching every known Minimax model id without an exhaustive enumeration.
+# 'm2.7' was previously included but was too short and too generic (e.g.
+# 'company-m2.7-bench' would have been falsely stripped — Review-Finding #6).
+MINIMAX_MODEL_MARKERS: tuple[str, ...] = ("minimax",)
 
 
 # ---------------------------------------------------------------------------

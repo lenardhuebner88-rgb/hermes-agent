@@ -83,6 +83,20 @@ def test_deployment_path_with_worktrees_ancestor_is_still_default(tmp_path):
     )
 
 
+def test_minimax_marker_no_longer_false_positives_on_m2_7(tmp_path):
+    """Review-Finding #6: 'm2.7' was too generic. A non-Minimax model whose
+    id merely contains the substring 'm2.7' must NOT be filtered."""
+    policy = _import_policy()
+    chain = [
+        {"provider": "openrouter", "model": "company-m2.7-benchmark"},
+        {"provider": "anthropic", "model": "claim2.7-eval"},
+    ]
+    filtered = policy.filter_default_gateway_fallbacks(
+        chain, default_root=tmp_path, hermes_home=tmp_path
+    )
+    assert filtered == chain  # both kept
+
+
 def test_corrupted_root_collapsed_onto_worktree_is_not_default(tmp_path):
     """Safety net: when get_default_hermes_root returns a path whose immediate
     parent is named 'profiles' or 'worktrees' (root collapsed onto a vault-
