@@ -311,6 +311,80 @@ def _reset_cached_sudo_passwords() -> None:
     with _sudo_password_cache_lock:
         _sudo_password_cache.clear()
 
+
+# =============================================================================
+# HUB/DEFAULT heavy-workload guard
+# =============================================================================
+#
+# At the default Hermes home the gateway is the durable Discord/Telegram/Slack
+# messaging surface.  Long-running Python test/lint/typecheck suites starve
+# the gateway's event loop and the host's CPU/memory budget.  Named profiles
+# (``<root>/profiles/<x>``) and worktrees (``<root>/worktrees/<x>``) carry
+# heavier workloads by design — the guard is silent for them.
+
+_DEFAULT_GATEWAY_HOST_WORKLOAD_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    (
+        "test/lint/typecheck",
+        re.compile(
+            r"(?:^|[;&|]\s*)(?:python(?:3)?\s+-m\s+)?pytest(?:\s|$)"
+            r"|(?:^|[;&|]\s*)(?:ruff|mypy|pyright|tox|nox)(?:\s|$)"
+            r"|(?:^|[;&|]\s*)coverage(?:\s|$)"
+            r"|(?:^|[;&|]\s*)(?:uv|pdm|hatch)\s+run\s+pytest(?:\s|$)",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
+def _default_gateway_local_workload_guard(
+    command: str,
+    *,
+    background: bool = False,
+    env_type: str = "local",
+) -> str | None:
+    """Return a refusal message when the command must be blocked at HUB.
+
+    Triggers iff ALL of:
+      • HERMES_GATEWAY_SESSION is enabled (running inside the gateway)
+      • ``env_type`` is ``"local"`` (sandboxed env_types route through a
+        remote host and don't compete with the gateway)
+      • ``background`` is False (background jobs can be triaged via
+        ``process('poll')`` without blocking the turn)
+      • the runtime is bound to the *default* Hermes home — named
+        profiles and worktrees fall through to the regular execution
+        path.
+      • the command matches a known heavy-workload pattern.
+
+    Returns ``None`` when the guard does not fire.
+    """
+    if background:
+        return None
+    if env_type != "local":
+        return None
+    if not env_var_enabled("HERMES_GATEWAY_SESSION"):
+        return None
+
+    try:
+        from gateway.profile_policy import is_default_hermes_profile_home
+        if not is_default_hermes_profile_home():
+            return None
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "profile_policy unavailable for workload guard: %s", exc
+        )
+        return None
+
+    for label, pattern in _DEFAULT_GATEWAY_HOST_WORKLOAD_PATTERNS:
+        if pattern.search(command):
+            return (
+                f"Default Hermes gateway profile refuses heavy {label} workloads. "
+                "Switch to a named profile (e.g. coder, reviewer, research) or "
+                "run inside a worktree under ~/.hermes/worktrees/ to execute "
+                "this command."
+            )
+    return None
+
+
 # =============================================================================
 # Dangerous Command Approval System
 # =============================================================================

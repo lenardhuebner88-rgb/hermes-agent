@@ -164,6 +164,139 @@ def test_validate_workdir_allows_windows_unc_paths():
     assert terminal_tool._validate_workdir(r"\\server\share\project") is None
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 — command-anchored heavy-workload guard for HUB/DEFAULT
+# ---------------------------------------------------------------------------
+
+
+_HEAVY_COMMANDS = [
+    "python -m pytest tests",
+    "python3 -m pytest tests",
+    "pytest tests",
+    "ruff check .",
+    "mypy .",
+    "pyright",
+    "tox",
+    "nox",
+    "coverage run -m pytest",
+    "uv run pytest",
+    "pdm run pytest",
+    "hatch run pytest",
+]
+
+
+def test_default_gateway_blocks_python_test_and_lint_workloads(
+    monkeypatch, tmp_path
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    for cmd in _HEAVY_COMMANDS:
+        err = terminal_tool._default_gateway_local_workload_guard(
+            cmd, background=False, env_type="local",
+        )
+        assert err, f"expected guard to block {cmd!r}"
+        assert "Default Hermes gateway" in err, cmd
+
+
+def test_default_gateway_does_not_block_pytest_in_paths(monkeypatch, tmp_path):
+    """Negativ-Test: 'pytest' as a substring inside a path must not match."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    for cmd in [
+        "cat /tmp/pytest-cache/log",
+        "ls /tmp/pytest.log",
+        "grep TODO /home/user/pytest-notes.txt",
+        "echo coverage",
+        "echo mypy",
+    ]:
+        assert (
+            terminal_tool._default_gateway_local_workload_guard(
+                cmd, background=False, env_type="local",
+            )
+            is None
+        ), cmd
+
+
+def test_named_profile_allows_python_test_workloads(monkeypatch, tmp_path):
+    profile_home = tmp_path / ".hermes" / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    for cmd in _HEAVY_COMMANDS:
+        assert (
+            terminal_tool._default_gateway_local_workload_guard(
+                cmd, background=False, env_type="local",
+            )
+            is None
+        ), cmd
+
+
+def test_worktree_home_allows_python_test_workloads(monkeypatch, tmp_path):
+    worktree = tmp_path / ".hermes" / "worktrees" / "fix"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(worktree))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    for cmd in _HEAVY_COMMANDS:
+        assert (
+            terminal_tool._default_gateway_local_workload_guard(
+                cmd, background=False, env_type="local",
+            )
+            is None
+        ), cmd
+
+
+def test_guard_inactive_outside_gateway_session(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    for cmd in _HEAVY_COMMANDS:
+        assert (
+            terminal_tool._default_gateway_local_workload_guard(
+                cmd, background=False, env_type="local",
+            )
+            is None
+        ), cmd
+
+
+def test_guard_inactive_for_nonlocal_env_type(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    assert (
+        terminal_tool._default_gateway_local_workload_guard(
+            "pytest tests", background=False, env_type="ssh",
+        )
+        is None
+    )
+
+
+def test_guard_recognises_chained_command(monkeypatch, tmp_path):
+    """Command anchored to `;`, `&&`, `||`, `|` — operator chains still match."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    for cmd in [
+        "cd /tmp && pytest tests",
+        "echo hi ; pytest tests",
+        "false || ruff check .",
+        "git status | mypy .",
+    ]:
+        assert (
+            terminal_tool._default_gateway_local_workload_guard(
+                cmd, background=False, env_type="local",
+            )
+            is not None
+        ), cmd
+
+
 def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
