@@ -55,6 +55,16 @@ PRESSURE_FLOOR_TOKENS: int = _int_env("HERMES_PRESSURE_FLOOR_TOKENS", 20_000)
 
 DISCORD_LAG_WATCH_MS: int = _int_env("HERMES_DISCORD_LAG_WATCH_MS", 500)
 DISCORD_LAG_CRITICAL_MS: int = _int_env("HERMES_DISCORD_LAG_CRITICAL_MS", 1000)
+# Heartbeat-age zombie-WS detection. Discord normally sends op=11 every ~41s;
+# a one-missed-beat gap (~60s) is a soft signal, two missed beats (~120s) is
+# a hard signal that the socket is dead even though latency may still report
+# a cached value (Review-Finding #11).
+DISCORD_HEARTBEAT_AGE_WATCH_SECONDS: int = _int_env(
+    "HERMES_DISCORD_HEARTBEAT_AGE_WATCH_SECONDS", 60
+)
+DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS: int = _int_env(
+    "HERMES_DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS", 120
+)
 
 MINIMAX_PROVIDER_NAMES: frozenset[str] = frozenset(
     {"minimax", "minimax-ai", "minimaxio"}
@@ -270,6 +280,8 @@ __all__ = [
     "PRESSURE_FLOOR_TOKENS",
     "DISCORD_LAG_WATCH_MS",
     "DISCORD_LAG_CRITICAL_MS",
+    "DISCORD_HEARTBEAT_AGE_WATCH_SECONDS",
+    "DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS",
     "MINIMAX_PROVIDER_NAMES",
     "MINIMAX_MODEL_MARKERS",
     "is_default_hermes_profile_home",

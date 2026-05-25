@@ -592,6 +592,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        # Periodic refresh of platform_health into gateway_state.json so the
+        # heartbeat-age field doesn't go stale during long uninterrupted
+        # sessions. Started after _mark_connected, cancelled on disconnect.
+        self._health_refresh_task: Optional[asyncio.Task] = None
         # Dedup cache: prevents duplicate bot responses when Discord
         # RESUME replays events after reconnects.
         self._dedup = MessageDeduplicator()
@@ -891,7 +895,12 @@ class DiscordAdapter(BasePlatformAdapter):
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
 
-            self._running = True
+            # Mark connected via the base lifecycle hook so runtime_health()
+            # is auto-attached to the persisted gateway_state.json snapshot.
+            self._mark_connected()
+            # Start periodic health refresh so heartbeat-age stays fresh in
+            # gateway_state.json even when no lifecycle event fires for hours.
+            self._start_health_refresh_loop()
             return True
 
         except asyncio.TimeoutError:
@@ -925,7 +934,19 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        self._running = False
+        await self._stop_health_refresh_loop()
+
+        # Reset heartbeat freshness markers so runtime_health() on the next
+        # reconnect does not report the pre-disconnect age while the socket
+        # is online but no op=11 has arrived yet (Review-Finding #12).
+        self._last_heartbeat_ack_monotonic = None
+        self._last_heartbeat_ack_at = None
+        self._last_gateway_event_monotonic = None
+        self._last_gateway_event_at = None
+
+        # Mark disconnected via the base lifecycle hook so the offline state
+        # plus a final runtime_health snapshot land in gateway_state.json.
+        self._mark_disconnected()
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
@@ -4955,6 +4976,45 @@ class DiscordAdapter(BasePlatformAdapter):
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
 
+    _HEALTH_REFRESH_INTERVAL_SECONDS = 30.0
+
+    def _start_health_refresh_loop(self) -> None:
+        existing = self._health_refresh_task
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._health_refresh_task = asyncio.create_task(
+                self._health_refresh_loop()
+            )
+        except RuntimeError:  # no running event loop (tests calling _mark_connected directly)
+            self._health_refresh_task = None
+
+    async def _stop_health_refresh_loop(self) -> None:
+        task = self._health_refresh_task
+        self._health_refresh_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _health_refresh_loop(self) -> None:
+        try:
+            while self._running:
+                await asyncio.sleep(self._HEALTH_REFRESH_INTERVAL_SECONDS)
+                if not self._running:
+                    return
+                try:
+                    self._write_runtime_status_safe(
+                        "health_refresh", platform_state="connected",
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.debug("discord health refresh failed: %s", exc)
+        except asyncio.CancelledError:
+            raise
+
     def runtime_health(self) -> Dict[str, Any]:
         """Return a snapshot of Discord-gateway health for ``hermes gateway status``.
 
@@ -4970,6 +5030,8 @@ class DiscordAdapter(BasePlatformAdapter):
         from gateway.profile_policy import (
             DISCORD_LAG_WATCH_MS,
             DISCORD_LAG_CRITICAL_MS,
+            DISCORD_HEARTBEAT_AGE_WATCH_SECONDS,
+            DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS,
         )
 
         now_mono = time.monotonic()
@@ -4982,10 +5044,12 @@ class DiscordAdapter(BasePlatformAdapter):
         else:
             latency_ms = None
 
+        heartbeat_age: Optional[float]
         if self._last_heartbeat_ack_monotonic is not None:
             heartbeat_age = max(0.0, now_mono - self._last_heartbeat_ack_monotonic)
             heartbeat_age_rounded: Optional[float] = round(heartbeat_age, 1)
         else:
+            heartbeat_age = None
             heartbeat_age_rounded = None
         if self._last_gateway_event_monotonic is not None:
             event_age = max(0.0, now_mono - self._last_gateway_event_monotonic)
@@ -5000,10 +5064,25 @@ class DiscordAdapter(BasePlatformAdapter):
         else:
             status = "online"
 
+        # Zombie-WS detection (Review-Finding #11): when the socket is "online"
+        # but op=11 frames have stopped arriving, client.latency keeps reporting
+        # the last cached round-trip while heartbeat-age grows unbounded. Fold
+        # heartbeat-age into lag_class with seconds-scale thresholds (the
+        # heartbeat interval is ~41s — millisecond thresholds would false-fire).
         if status in {"offline", "connecting"}:
+            lag_class = "critical"
+        elif (
+            heartbeat_age is not None
+            and heartbeat_age >= DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS
+        ):
             lag_class = "critical"
         elif latency_ms is not None and latency_ms >= DISCORD_LAG_CRITICAL_MS:
             lag_class = "critical"
+        elif (
+            heartbeat_age is not None
+            and heartbeat_age >= DISCORD_HEARTBEAT_AGE_WATCH_SECONDS
+        ):
+            lag_class = "watch"
         elif latency_ms is not None and latency_ms >= DISCORD_LAG_WATCH_MS:
             lag_class = "watch"
         else:
