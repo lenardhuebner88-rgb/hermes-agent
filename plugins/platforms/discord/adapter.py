@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import struct
 import subprocess
@@ -20,6 +21,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -555,6 +557,13 @@ class DiscordAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
+        # Heartbeat / gateway-event freshness tracking (Phase 3). Populated
+        # via on_socket_response — None means we have not yet observed an
+        # ack / gateway event in this process.
+        self._last_heartbeat_ack_monotonic: Optional[float] = None
+        self._last_heartbeat_ack_at: Optional[str] = None
+        self._last_gateway_event_monotonic: Optional[float] = None
+        self._last_gateway_event_at: Optional[str] = None
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
@@ -845,6 +854,32 @@ class DiscordAdapter(BasePlatformAdapter):
                         else f"moved {before.channel.name} -> {after.channel.name}",
                         guild_id,
                     )
+
+            @self._client.event
+            async def on_socket_response(msg):
+                """Track every gateway frame.
+
+                op=11 is HEARTBEAT_ACK — the canonical liveness signal we
+                want to surface as heartbeat-age. op=0 (dispatch) and op=9
+                (invalid session) are the broader "gateway is alive and
+                talking to us" signals captured under last_gateway_event_*.
+                """
+                now_mono = time.monotonic()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                adapter_self._last_gateway_event_monotonic = now_mono
+                adapter_self._last_gateway_event_at = now_iso
+                op = None
+                if isinstance(msg, dict):
+                    try:
+                        op = msg.get("op")
+                    except Exception as exc:  # pragma: no cover — defensive
+                        logger.warning(
+                            "discord on_socket_response: msg.get('op') failed: %s",
+                            exc,
+                        )
+                if op == 11:  # HEARTBEAT_ACK
+                    adapter_self._last_heartbeat_ack_monotonic = now_mono
+                    adapter_self._last_heartbeat_ack_at = now_iso
 
             # Register slash commands
             if self._slash_commands:
@@ -4919,6 +4954,70 @@ class DiscordAdapter(BasePlatformAdapter):
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
+
+    def runtime_health(self) -> Dict[str, Any]:
+        """Return a snapshot of Discord-gateway health for ``hermes gateway status``.
+
+        Fields:
+            status              "online" | "connecting" | "offline"
+            latency_ms          Heartbeat round-trip in milliseconds (None if N/A)
+            last_heartbeat_ack_age_seconds   Age of last op=11 frame (None if never)
+            last_heartbeat_ack_at            ISO-8601 timestamp of last op=11
+            last_gateway_event_age_seconds   Age of last gateway frame (any op)
+            last_gateway_event_at            ISO-8601 timestamp of last frame
+            lag_class           "ok" | "watch" | "critical"
+        """
+        from gateway.profile_policy import (
+            DISCORD_LAG_WATCH_MS,
+            DISCORD_LAG_CRITICAL_MS,
+        )
+
+        now_mono = time.monotonic()
+        client = self._client
+
+        latency_ms: Optional[int]
+        latency_raw = getattr(client, "latency", None) if client else None
+        if isinstance(latency_raw, (int, float)) and math.isfinite(float(latency_raw)):
+            latency_ms = round(float(latency_raw) * 1000)
+        else:
+            latency_ms = None
+
+        if self._last_heartbeat_ack_monotonic is not None:
+            heartbeat_age = max(0.0, now_mono - self._last_heartbeat_ack_monotonic)
+            heartbeat_age_rounded: Optional[float] = round(heartbeat_age, 1)
+        else:
+            heartbeat_age_rounded = None
+        if self._last_gateway_event_monotonic is not None:
+            event_age = max(0.0, now_mono - self._last_gateway_event_monotonic)
+            event_age_rounded: Optional[float] = round(event_age, 1)
+        else:
+            event_age_rounded = None
+
+        if client is None or client.is_closed():
+            status = "offline"
+        elif not self._ready_event.is_set():
+            status = "connecting"
+        else:
+            status = "online"
+
+        if status in {"offline", "connecting"}:
+            lag_class = "critical"
+        elif latency_ms is not None and latency_ms >= DISCORD_LAG_CRITICAL_MS:
+            lag_class = "critical"
+        elif latency_ms is not None and latency_ms >= DISCORD_LAG_WATCH_MS:
+            lag_class = "watch"
+        else:
+            lag_class = "ok"
+
+        return {
+            "status": status,
+            "latency_ms": latency_ms,
+            "last_heartbeat_ack_age_seconds": heartbeat_age_rounded,
+            "last_heartbeat_ack_at": self._last_heartbeat_ack_at,
+            "last_gateway_event_age_seconds": event_age_rounded,
+            "last_gateway_event_at": self._last_gateway_event_at,
+            "lag_class": lag_class,
+        }
 
 
 # ---------------------------------------------------------------------------

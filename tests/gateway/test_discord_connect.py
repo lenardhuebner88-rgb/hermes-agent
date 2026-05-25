@@ -905,3 +905,104 @@ async def test_safe_sync_detects_contexts_drift():
     fake_http.edit_global_command.assert_not_awaited()
     fake_http.delete_global_command.assert_awaited_once_with(999, 77)
     fake_http.upsert_global_command.assert_awaited_once_with(999, desired)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — runtime_health() instrumentation
+# ---------------------------------------------------------------------------
+
+
+def _make_adapter_for_health():
+    cfg = PlatformConfig(enabled=True, token="test-token")
+    return DiscordAdapter(cfg)
+
+
+def test_runtime_health_initial_state_offline_when_no_client():
+    adapter = _make_adapter_for_health()
+    health = adapter.runtime_health()
+    assert health["status"] == "offline"
+    assert health["latency_ms"] is None
+    assert health["last_heartbeat_ack_age_seconds"] is None
+    assert health["last_gateway_event_age_seconds"] is None
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_reports_discord_lag_class_watch():
+    import time as _time
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: False, is_ready=lambda: True, latency=0.75,
+    )
+    adapter._ready_event.set()
+    now = _time.monotonic()
+    adapter._last_heartbeat_ack_monotonic = now - 35
+    adapter._last_heartbeat_ack_at = "2026-05-26T20:00:00+00:00"
+    adapter._last_gateway_event_monotonic = now - 20
+    adapter._last_gateway_event_at = "2026-05-26T20:00:01+00:00"
+
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["latency_ms"] == 750
+    assert 34 <= health["last_heartbeat_ack_age_seconds"] <= 36
+    assert 19 <= health["last_gateway_event_age_seconds"] <= 21
+    assert health["lag_class"] == "watch"
+    assert health["last_heartbeat_ack_at"] == "2026-05-26T20:00:00+00:00"
+
+
+def test_runtime_health_lag_class_ok_for_low_latency():
+    import time as _time
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: False, is_ready=lambda: True, latency=0.05,
+    )
+    adapter._ready_event.set()
+    now = _time.monotonic()
+    adapter._last_heartbeat_ack_monotonic = now - 5
+    adapter._last_gateway_event_monotonic = now - 5
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["latency_ms"] == 50
+    assert health["lag_class"] == "ok"
+
+
+def test_runtime_health_lag_class_critical_for_high_latency():
+    import time as _time
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: False, is_ready=lambda: True, latency=1.5,
+    )
+    adapter._ready_event.set()
+    adapter._last_heartbeat_ack_monotonic = _time.monotonic()
+    health = adapter.runtime_health()
+    assert health["latency_ms"] == 1500
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_status_connecting_when_not_ready():
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: False, is_ready=lambda: False, latency=float("nan"),
+    )
+    # _ready_event not set
+    health = adapter.runtime_health()
+    assert health["status"] == "connecting"
+    assert health["latency_ms"] is None  # nan → None
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_status_offline_when_client_closed():
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: True, is_ready=lambda: False, latency=0.1,
+    )
+    health = adapter.runtime_health()
+    assert health["status"] == "offline"
+    assert health["lag_class"] == "critical"
+
+
+def test_heartbeat_fields_initialised_to_none_on_construction():
+    adapter = _make_adapter_for_health()
+    assert adapter._last_heartbeat_ack_monotonic is None
+    assert adapter._last_heartbeat_ack_at is None
+    assert adapter._last_gateway_event_monotonic is None
+    assert adapter._last_gateway_event_at is None
