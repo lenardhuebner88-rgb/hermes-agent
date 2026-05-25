@@ -89,3 +89,36 @@ def test_runtime_health_lines_emit_critical_when_offline(monkeypatch):
     assert "discord" in joined
     assert "offline" in joined
     assert "lag critical" in joined
+
+
+def test_runtime_health_lines_include_token_pressure(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "running",
+            "token_usage": {
+                "last_prompt_tokens": 130_000,
+                "context_length": 200_000,
+                "pressure_pct": 65,
+                "pressure_class": "watch",
+                "model": "gpt-5.4",
+            },
+            "platforms": {},
+        },
+    )
+    lines = _runtime_health_lines()
+    joined = "\n".join(lines)
+    assert "Token pressure: watch 65% of context on gpt-5.4" in joined
+
+
+def test_runtime_health_lines_skip_token_pressure_when_incomplete(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "running",
+            "token_usage": {"model": "gpt-5.4"},  # missing pressure_class
+            "platforms": {},
+        },
+    )
+    lines = _runtime_health_lines()
+    assert all("Token pressure" not in line for line in lines)

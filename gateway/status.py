@@ -512,6 +512,7 @@ def write_runtime_status(
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     platform_health: Any = _UNSET,
+    token_usage: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
@@ -532,6 +533,42 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
+
+    if token_usage is not _UNSET:
+        if token_usage is None:
+            payload.pop("token_usage", None)
+        elif isinstance(token_usage, dict):
+            from gateway.profile_policy import (
+                PRESSURE_WATCH_PCT,
+                PRESSURE_CRITICAL_PCT,
+                PRESSURE_FLOOR_TOKENS,
+            )
+            # Defensive snapshot — non-serialisable values degrade to str().
+            usage = json.loads(json.dumps(token_usage, default=str))
+            try:
+                last_prompt = int(usage.get("last_prompt_tokens") or 0)
+            except (TypeError, ValueError):
+                last_prompt = 0
+            try:
+                context_length = int(usage.get("context_length") or 0)
+            except (TypeError, ValueError):
+                context_length = 0
+            pressure_pct = 0
+            if context_length > 0:
+                pressure_pct = max(
+                    0, min(100, round(last_prompt / context_length * 100))
+                )
+            if last_prompt < PRESSURE_FLOOR_TOKENS:
+                pressure_class = "ok"
+            elif pressure_pct >= PRESSURE_CRITICAL_PCT:
+                pressure_class = "critical"
+            elif pressure_pct >= PRESSURE_WATCH_PCT:
+                pressure_class = "watch"
+            else:
+                pressure_class = "ok"
+            usage["pressure_pct"] = pressure_pct
+            usage["pressure_class"] = pressure_class
+            payload["token_usage"] = usage
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})

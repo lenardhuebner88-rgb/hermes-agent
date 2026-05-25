@@ -3872,6 +3872,16 @@ def _runtime_health_lines() -> list[str]:
     elif gateway_state == "stopped" and exit_reason:
         lines.append(f"⚠ Last shutdown reason: {exit_reason}")
 
+    token_usage = state.get("token_usage") or {}
+    if isinstance(token_usage, dict):
+        pressure_class = token_usage.get("pressure_class")
+        pressure_pct = token_usage.get("pressure_pct")
+        model = token_usage.get("model") or "unknown model"
+        if pressure_class and isinstance(pressure_pct, (int, float)):
+            lines.append(
+                f"Token pressure: {pressure_class} {int(pressure_pct)}% of context on {model}"
+            )
+
     return lines
 
 

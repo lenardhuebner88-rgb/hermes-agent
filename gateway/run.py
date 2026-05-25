@@ -17030,6 +17030,20 @@ class GatewayRunner:
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
+            try:
+                from gateway.status import write_runtime_status
+                write_runtime_status(token_usage={
+                    "last_prompt_tokens": _last_prompt_toks,
+                    "input_tokens": _input_toks,
+                    "output_tokens": _output_toks,
+                    "context_length": _context_length,
+                    "model": _resolved_model,
+                })
+            except Exception as exc:
+                logger.warning(
+                    "write_runtime_status(token_usage) failed (post-run): %s", exc
+                )
+
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
                 return {

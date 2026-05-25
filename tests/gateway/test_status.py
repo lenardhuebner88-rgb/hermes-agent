@@ -358,6 +358,96 @@ class TestGatewayRuntimeStatus:
         assert payload["platforms"]["discord"]["error_code"] is None
         assert payload["platforms"]["discord"]["error_message"] is None
 
+    def test_write_runtime_status_records_token_usage_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 120_000,
+            "input_tokens": 150_000,
+            "output_tokens": 4_000,
+            "context_length": 200_000,
+            "model": "gpt-5.4",
+        })
+        payload = status.read_runtime_status()
+        tu = payload["token_usage"]
+        assert tu["pressure_pct"] == 60
+        assert tu["pressure_class"] == "ok"   # 60 < WATCH=65
+        assert tu["model"] == "gpt-5.4"
+        assert tu["last_prompt_tokens"] == 120_000
+        assert tu["context_length"] == 200_000
+
+    def test_write_runtime_status_pressure_watch_threshold(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 140_000,
+            "context_length": 200_000,
+            "model": "x",
+        })
+        payload = status.read_runtime_status()
+        assert payload["token_usage"]["pressure_class"] == "watch"  # 70% ≥ 65
+        assert payload["token_usage"]["pressure_pct"] == 70
+
+    def test_write_runtime_status_pressure_critical_threshold(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 180_000,
+            "context_length": 200_000,
+            "model": "x",
+        })
+        payload = status.read_runtime_status()
+        assert payload["token_usage"]["pressure_class"] == "critical"  # 90% ≥ 85
+        assert payload["token_usage"]["pressure_pct"] == 90
+
+    def test_write_runtime_status_pressure_floor_for_small_contexts(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 15_000,
+            "context_length": 20_000,
+            "model": "x",
+        })
+        # 75% but absolute < FLOOR=20_000 → "ok"
+        assert status.read_runtime_status()["token_usage"]["pressure_class"] == "ok"
+
+    def test_write_runtime_status_token_usage_handles_zero_context(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 0,
+            "context_length": 0,
+            "model": None,
+        })
+        tu = status.read_runtime_status()["token_usage"]
+        assert tu["pressure_pct"] == 0
+        assert tu["pressure_class"] == "ok"
+
+    def test_write_runtime_status_token_usage_none_clears(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 140_000,
+            "context_length": 200_000,
+            "model": "x",
+        })
+        assert "token_usage" in status.read_runtime_status()
+        status.write_runtime_status(token_usage=None)
+        assert "token_usage" not in status.read_runtime_status()
+
+    def test_write_runtime_status_token_pressure_does_not_change_resolved_model(
+        self, tmp_path, monkeypatch
+    ):
+        """Q6 goal-check — persisting pressure must NEVER alter the model."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(token_usage={
+            "last_prompt_tokens": 180_000,
+            "context_length": 200_000,
+            "model": "openrouter/anthropic/claude-3.5-sonnet",
+        })
+        assert (
+            status.read_runtime_status()["token_usage"]["model"]
+            == "openrouter/anthropic/claude-3.5-sonnet"
+        )
+
 
 class TestTerminatePid:
     def test_force_uses_taskkill_on_windows(self, monkeypatch):
