@@ -3138,8 +3138,17 @@ class HermesCLI:
         
         # Fallback provider chain — tried in order when primary fails after retries.
         # Merge new ``fallback_providers`` entries with any legacy
-        # ``fallback_model`` entries so old configs still participate.
-        self._fallback_model = get_fallback_chain(CLI_CONFIG)
+        # ``fallback_model`` entries so old configs still participate. At the
+        # HUB/DEFAULT home, strip Minimax entries to match gateway behaviour
+        # (Review-Finding #5 — filter previously applied only in gateway/run.py
+        # so interactive CLI sessions would still hit Minimax fallback while
+        # gateway sessions wouldn't, diverging on identical config).
+        _raw_fallback = get_fallback_chain(CLI_CONFIG)
+        try:
+            from gateway.profile_policy import filter_default_gateway_fallbacks
+            self._fallback_model = filter_default_gateway_fallbacks(_raw_fallback)
+        except Exception:
+            self._fallback_model = _raw_fallback
 
         # Signature of the currently-initialised agent's runtime.  Used to
         # rebuild the agent when provider / model / base_url changes across

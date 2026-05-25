@@ -303,7 +303,14 @@ def _run_agent(
     session_db = _create_session_db_for_oneshot()
     # Read the effective fallback chain from profile config so oneshot workers
     # honour the same merge semantics as interactive CLI and gateway sessions.
-    _fb = get_fallback_chain(cfg)
+    # At the HUB/DEFAULT home, strip Minimax entries so the oneshot surface
+    # matches gateway behaviour (Review-Finding #5).
+    _fb_raw = get_fallback_chain(cfg)
+    try:
+        from gateway.profile_policy import filter_default_gateway_fallbacks
+        _fb = filter_default_gateway_fallbacks(_fb_raw)
+    except Exception:
+        _fb = _fb_raw
 
     agent = AIAgent(
         api_key=runtime.get("api_key"),
