@@ -3842,6 +3842,26 @@ def _runtime_health_lines() -> list[str]:
         if pdata.get("state") == "fatal":
             message = pdata.get("error_message") or "unknown error"
             lines.append(f"⚠ {platform}: {message}")
+            continue
+        health = pdata.get("health") or {}
+        if not isinstance(health, dict):
+            continue
+        hstatus = health.get("status")
+        if not hstatus:
+            continue
+        details: list[str] = []
+        age = health.get("last_heartbeat_ack_age_seconds")
+        if isinstance(age, (int, float)):
+            details.append(f"last heartbeat {int(age)}s ago")
+        latency_ms = health.get("latency_ms")
+        if isinstance(latency_ms, (int, float)):
+            details.append(f"latency {int(latency_ms)}ms")
+        lag = health.get("lag_class")
+        if isinstance(lag, str) and lag:
+            details.append(f"lag {lag}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        marker = "✓" if hstatus == "online" else "⚠"
+        lines.append(f"{marker} {platform}: {hstatus}{suffix}")
 
     if gateway_state == "startup_failed" and exit_reason:
         lines.append(f"⚠ Last startup issue: {exit_reason}")
