@@ -59,6 +59,45 @@ def test_nested_profile_path_still_not_default(tmp_path):
     )
 
 
+def test_deployment_path_with_profiles_ancestor_is_still_default(tmp_path):
+    """Review-Finding #4: paths like /srv/profiles/team-a/.hermes are valid
+    HUBs even though 'profiles' appears as an ancestor segment."""
+    policy = _import_policy()
+    home = tmp_path / "profiles" / "team-a" / ".hermes"
+    home.mkdir(parents=True)
+    assert (
+        policy.is_default_hermes_profile_home(default_root=home, hermes_home=home)
+        is True
+    )
+
+
+def test_deployment_path_with_worktrees_ancestor_is_still_default(tmp_path):
+    """Review-Finding #4: paths like /mnt/worktrees/hermes-prod/.hermes are
+    valid HUBs even though 'worktrees' appears as an ancestor segment."""
+    policy = _import_policy()
+    home = tmp_path / "worktrees" / "hermes-prod" / ".hermes"
+    home.mkdir(parents=True)
+    assert (
+        policy.is_default_hermes_profile_home(default_root=home, hermes_home=home)
+        is True
+    )
+
+
+def test_corrupted_root_collapsed_onto_worktree_is_not_default(tmp_path):
+    """Safety net: when get_default_hermes_root returns a path whose immediate
+    parent is named 'profiles' or 'worktrees' (root collapsed onto a vault-
+    internal child by misconfiguration), reject as non-HUB."""
+    policy = _import_policy()
+    collapsed = tmp_path / ".hermes" / "worktrees" / "fix-branch"
+    collapsed.mkdir(parents=True)
+    assert (
+        policy.is_default_hermes_profile_home(
+            default_root=collapsed, hermes_home=collapsed
+        )
+        is False
+    )
+
+
 # ---------------------------------------------------------------------------
 # filter_default_gateway_fallbacks
 # ---------------------------------------------------------------------------

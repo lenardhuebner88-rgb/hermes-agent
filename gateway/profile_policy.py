@@ -152,21 +152,24 @@ def is_default_hermes_profile_home(
     if _is_under(home, worktrees_dir):
         return False
 
-    # Ancestor-name signal: if any path segment of HERMES_HOME is "worktrees"
-    # or "profiles", treat it as non-HUB even when ``get_default_hermes_root``
-    # collapsed root onto the home itself (Docker / non-standard layouts).
     try:
         home_resolved = home.resolve()
-    except OSError:
-        home_resolved = home
-    for ancestor in home_resolved.parents:
-        if ancestor.name in {"worktrees", "profiles"}:
-            return False
-
-    try:
-        return home_resolved == root.resolve()
+        root_resolved = root.resolve()
     except OSError:
         return False
+
+    if home_resolved != root_resolved:
+        return False
+
+    # Corrupted-config safety net (Review-Finding #4): if ``get_default_hermes_root``
+    # collapsed *root* onto *home* and the path's immediate parent is named
+    # ``worktrees`` or ``profiles``, the home is actually a vault-internal
+    # profile/worktree masquerading as the HUB. Reject only this exact
+    # masquerade — checking arbitrary ancestors (previous behaviour) falsely
+    # rejected legitimate deployment paths like ``/srv/profiles/team/.hermes``.
+    if home_resolved.parent.name in {"profiles", "worktrees"}:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
