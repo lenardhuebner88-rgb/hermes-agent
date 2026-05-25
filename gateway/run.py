@@ -6635,8 +6635,21 @@ class GatewayRunner:
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
-        # are system-generated and must skip user authorization.
+        # are system-generated and must skip user authorization.  Process
+        # completion logs are delivery receipts, not user prompts: do not turn
+        # them into a new agent conversation turn.
         is_internal = bool(getattr(event, "internal", False))
+        if is_internal:
+            _event_text = event.text or ""
+            if (
+                _event_text.startswith("[IMPORTANT: Background process ")
+                and " completed (exit code " in _event_text
+                and "\nCommand: " in _event_text
+                and "\nOutput:\n" in _event_text
+                and _event_text.endswith("]")
+            ):
+                logger.info("Ignoring process completion log event without starting agent turn")
+                return None
 
         # Fire pre_gateway_dispatch plugin hook for user-originated messages.
         # Plugins receive the MessageEvent and may return a dict influencing flow:

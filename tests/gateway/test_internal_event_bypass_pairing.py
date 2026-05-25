@@ -68,9 +68,94 @@ def _watcher_dict_with_notify():
     }
 
 
+def _process_completion_log_event(source: SessionSource) -> MessageEvent:
+    return MessageEvent(
+        text=(
+            "[IMPORTANT: Background process proc_test_internal completed "
+            "(exit code 0).\n"
+            "Command: pytest -q\n"
+            "Output:\ndone]"
+        ),
+        source=source,
+        internal=True,
+    )
+
+
+def _internal_event_source() -> SessionSource:
+    return SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="123",
+        chat_type="dm",
+        user_id="user-42",
+        user_name="alice",
+    )
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_process_completion_log_does_not_start_agent_turn(monkeypatch, tmp_path):
+    """A process completion log is delivered as a notice, not a new agent turn."""
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+
+    runner = GatewayRunner(GatewayConfig())
+    runner._handle_message_with_agent = AsyncMock(return_value="agent-started")  # noqa: SLF001
+
+    result = await runner._handle_message(_process_completion_log_event(_internal_event_source()))
+
+    assert result is None
+    runner._handle_message_with_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_internal_event_without_process_completion_log_still_starts_agent_turn(monkeypatch, tmp_path):
+    """internal=True alone is not enough to suppress synthetic agent turns."""
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+
+    runner = GatewayRunner(GatewayConfig())
+    runner._handle_message_with_agent = AsyncMock(return_value="agent-started")  # noqa: SLF001
+
+    event = MessageEvent(
+        text="[Session was just handed off from CLI to this channel.]",
+        source=_internal_event_source(),
+        internal=True,
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "agent-started"
+    runner._handle_message_with_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_normal_user_message_still_starts_agent_turn(monkeypatch, tmp_path):
+    """Normal authorized user messages keep the existing agent dispatch path."""
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("DISCORD_ALLOWED_USERS", "user-42")
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+
+    runner = GatewayRunner(GatewayConfig())
+    runner._handle_message_with_agent = AsyncMock(return_value="agent-started")  # noqa: SLF001
+
+    event = MessageEvent(
+        text="hello",
+        source=_internal_event_source(),
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "agent-started"
+    runner._handle_message_with_agent.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_notify_on_complete_sets_internal_flag(monkeypatch, tmp_path):
