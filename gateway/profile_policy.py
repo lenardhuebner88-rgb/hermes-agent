@@ -142,8 +142,19 @@ def is_default_hermes_profile_home(
     if _is_under(home, worktrees_dir):
         return False
 
+    # Ancestor-name signal: if any path segment of HERMES_HOME is "worktrees"
+    # or "profiles", treat it as non-HUB even when ``get_default_hermes_root``
+    # collapsed root onto the home itself (Docker / non-standard layouts).
     try:
-        return home.resolve() == root.resolve()
+        home_resolved = home.resolve()
+    except OSError:
+        home_resolved = home
+    for ancestor in home_resolved.parents:
+        if ancestor.name in {"worktrees", "profiles"}:
+            return False
+
+    try:
+        return home_resolved == root.resolve()
     except OSError:
         return False
 

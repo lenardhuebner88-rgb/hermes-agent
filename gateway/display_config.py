@@ -79,6 +79,20 @@ _TIER_MINIMAL = {
     "streaming": False,
 }
 
+# ---------------------------------------------------------------------------
+# HUB/DEFAULT-aware Discord defaults
+# ---------------------------------------------------------------------------
+# Applied only when ``gateway.profile_policy.is_default_hermes_profile_home()``
+# returns True (i.e. the gateway is bound to the root Hermes home, not to a
+# named profile or a worktree).  Sits between hierarchy step 3 (global user
+# setting) and step 4 (built-in platform default), so explicit operator
+# configuration still wins.
+_HUB_DISCORD_DEFAULTS: dict[str, Any] = {
+    "tool_progress": "new",
+    "tool_preview_length": 80,
+}
+
+
 _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     # Tier 1 — full edit support, personal/team use
     "telegram":    {**_TIER_HIGH, "tool_progress": "new"},
@@ -163,7 +177,21 @@ def resolve_display_setting(
         if val is not None:
             return _normalise(setting, val)
 
-    # 3. Built-in platform default
+    # 3b. HUB-aware Discord defaults — only when the gateway is bound to the
+    # default Hermes home. Named profiles and worktrees keep the Tier-High
+    # defaults from _PLATFORM_DEFAULTS below.
+    if platform_key == "discord" and setting in _HUB_DISCORD_DEFAULTS:
+        try:
+            from gateway.profile_policy import is_default_hermes_profile_home
+            if is_default_hermes_profile_home():
+                return _HUB_DISCORD_DEFAULTS[setting]
+        except Exception as exc:  # pragma: no cover — defensive
+            import logging
+            logging.getLogger(__name__).warning(
+                "profile_policy unavailable for HUB display defaults: %s", exc
+            )
+
+    # 4. Built-in platform default
     plat_defaults = _PLATFORM_DEFAULTS.get(platform_key)
     if plat_defaults:
         val = plat_defaults.get(setting)
