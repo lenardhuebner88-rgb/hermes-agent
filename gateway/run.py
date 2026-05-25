@@ -17030,19 +17030,30 @@ class GatewayRunner:
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
+            # Token-pressure persistence is scoped to HUB/DEFAULT only —
+            # named profiles and worktrees keep their existing telemetry
+            # surface (Review-Finding #3: previous version persisted in
+            # every profile, violating the documented scope).
             try:
-                from gateway.status import write_runtime_status
-                write_runtime_status(token_usage={
-                    "last_prompt_tokens": _last_prompt_toks,
-                    "input_tokens": _input_toks,
-                    "output_tokens": _output_toks,
-                    "context_length": _context_length,
-                    "model": _resolved_model,
-                })
-            except Exception as exc:
-                logger.warning(
-                    "write_runtime_status(token_usage) failed (post-run): %s", exc
-                )
+                from gateway.profile_policy import is_default_hermes_profile_home
+                _persist_token_usage = is_default_hermes_profile_home()
+            except Exception:
+                _persist_token_usage = False
+
+            if _persist_token_usage:
+                try:
+                    from gateway.status import write_runtime_status
+                    write_runtime_status(token_usage={
+                        "last_prompt_tokens": _last_prompt_toks,
+                        "input_tokens": _input_toks,
+                        "output_tokens": _output_toks,
+                        "context_length": _context_length,
+                        "model": _resolved_model,
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "write_runtime_status(token_usage) failed (post-run): %s", exc
+                    )
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
