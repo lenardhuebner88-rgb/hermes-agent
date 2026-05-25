@@ -84,12 +84,18 @@ _TIER_MINIMAL = {
 # ---------------------------------------------------------------------------
 # Applied only when ``gateway.profile_policy.is_default_hermes_profile_home()``
 # returns True (i.e. the gateway is bound to the root Hermes home, not to a
-# named profile or a worktree).  Sits between hierarchy step 3 (global user
+# named profile or a worktree).  Sits between hierarchy step 2 (global user
 # setting) and step 4 (built-in platform default), so explicit operator
 # configuration still wins.
+#
+# Intent: keep Discord quieter at the HUB. ``tool_progress="new"`` collapses
+# multi-line progress streams to a single edited message, and the preview
+# length matches _TIER_HIGH (Review-Finding #9: a previous value of 80 was
+# double the tier default — netto *louder* per message, contradicting the
+# "quieter" framing).
 _HUB_DISCORD_DEFAULTS: dict[str, Any] = {
     "tool_progress": "new",
-    "tool_preview_length": 80,
+    "tool_preview_length": 40,
 }
 
 
@@ -179,12 +185,15 @@ def resolve_display_setting(
 
     # 3b. HUB-aware Discord defaults — only when the gateway is bound to the
     # default Hermes home. Named profiles and worktrees keep the Tier-High
-    # defaults from _PLATFORM_DEFAULTS below.
+    # defaults from _PLATFORM_DEFAULTS below. Return value passes through
+    # _normalise() like every other branch in this resolver (Sweep S4) so
+    # downstream string comparisons can't trip over a raw non-normalised
+    # value if _HUB_DISCORD_DEFAULTS ever gains non-string entries.
     if platform_key == "discord" and setting in _HUB_DISCORD_DEFAULTS:
         try:
             from gateway.profile_policy import is_default_hermes_profile_home
             if is_default_hermes_profile_home():
-                return _HUB_DISCORD_DEFAULTS[setting]
+                return _normalise(setting, _HUB_DISCORD_DEFAULTS[setting])
         except Exception as exc:  # pragma: no cover — defensive
             import logging
             logging.getLogger(__name__).warning(

@@ -38,7 +38,7 @@ be called from any gateway path.
   and `MINIMAX_MODEL_MARKERS` in `gateway/profile_policy.py` for the
   exact match list.
 * **Quiet Discord defaults** — `tool_progress="new"`,
-  `tool_preview_length=80`.  Tier-High remains the default for named
+  `tool_preview_length=40`.  Tier-High remains the default for named
   profiles and worktrees.  Explicit operator config in
   `display.platforms.discord.*` or `display.<key>` still wins.
 * **Token pressure is observed, not acted on** — every agent turn

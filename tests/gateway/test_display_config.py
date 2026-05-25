@@ -419,13 +419,16 @@ class TestHubAwareDiscordDefaults:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         assert resolve_display_setting({}, "discord", "tool_progress") == "new"
 
-    def test_hub_default_discord_tool_preview_length_is_80(
+    def test_hub_default_discord_tool_preview_length_matches_tier_high(
         self, tmp_path, monkeypatch
     ):
+        """Review-Finding #9: HUB default must not exceed the Tier-High
+        default — otherwise the 'quieter Discord at HUB' framing turns into
+        netto louder messages."""
         from gateway.display_config import resolve_display_setting
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        assert resolve_display_setting({}, "discord", "tool_preview_length") == 80
+        assert resolve_display_setting({}, "discord", "tool_preview_length") == 40
 
     def test_named_profile_discord_keeps_tier_high(self, tmp_path, monkeypatch):
         from gateway.display_config import resolve_display_setting
