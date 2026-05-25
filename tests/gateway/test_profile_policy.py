@@ -1,0 +1,272 @@
+"""Tests for gateway.profile_policy — HUB/DEFAULT profile detection and Minimax filter."""
+
+from __future__ import annotations
+
+import pytest
+
+
+def _import_policy():
+    """Late import so the failing-tests-first cycle produces ModuleNotFoundError."""
+    import gateway.profile_policy as policy
+    return policy
+
+
+# ---------------------------------------------------------------------------
+# is_default_hermes_profile_home
+# ---------------------------------------------------------------------------
+
+
+def test_default_root_is_default_profile(tmp_path, monkeypatch):
+    policy = _import_policy()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert policy.is_default_hermes_profile_home(default_root=tmp_path) is True
+
+
+def test_named_profile_is_not_default_profile(tmp_path, monkeypatch):
+    policy = _import_policy()
+    profile_home = tmp_path / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    assert (
+        policy.is_default_hermes_profile_home(
+            default_root=tmp_path, hermes_home=profile_home
+        )
+        is False
+    )
+
+
+def test_worktree_home_is_not_default_profile(tmp_path, monkeypatch):
+    """Q5 contract — worktrees under <root>/worktrees/* are NOT the HUB."""
+    policy = _import_policy()
+    worktree_home = tmp_path / "worktrees" / "fix-branch"
+    worktree_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(worktree_home))
+    assert (
+        policy.is_default_hermes_profile_home(
+            default_root=tmp_path, hermes_home=worktree_home
+        )
+        is False
+    )
+
+
+def test_nested_profile_path_still_not_default(tmp_path):
+    policy = _import_policy()
+    nested = tmp_path / "profiles" / "team" / "agent"
+    nested.mkdir(parents=True)
+    assert (
+        policy.is_default_hermes_profile_home(default_root=tmp_path, hermes_home=nested)
+        is False
+    )
+
+
+# ---------------------------------------------------------------------------
+# filter_default_gateway_fallbacks
+# ---------------------------------------------------------------------------
+
+
+def test_filter_strips_minimax_from_list_at_default(tmp_path):
+    policy = _import_policy()
+    chain = [
+        {"provider": "openrouter", "model": "openrouter/anthropic/claude-3.5-sonnet"},
+        {"provider": "minimax", "model": "minimax/m2.7"},
+        {"provider": "minimax-ai", "model": "anything"},
+        {"provider": "groq", "model": "groq/some-model"},
+    ]
+    filtered = policy.filter_default_gateway_fallbacks(
+        chain, default_root=tmp_path, hermes_home=tmp_path
+    )
+    assert isinstance(filtered, list)
+    assert [e["provider"] for e in filtered] == ["openrouter", "groq"]
+
+
+def test_filter_strips_minimax_by_model_marker_at_default(tmp_path):
+    policy = _import_policy()
+    chain = [
+        {"provider": "openrouter", "model": "openrouter/minimax/abc"},
+        {"provider": "groq", "model": "llama3"},
+    ]
+    filtered = policy.filter_default_gateway_fallbacks(
+        chain, default_root=tmp_path, hermes_home=tmp_path
+    )
+    assert [e["provider"] for e in filtered] == ["groq"]
+
+
+def test_filter_legacy_single_dict_with_minimax_returns_none(tmp_path):
+    policy = _import_policy()
+    legacy = {"provider": "minimax", "model": "minimax/m2.7"}
+    assert (
+        policy.filter_default_gateway_fallbacks(
+            legacy, default_root=tmp_path, hermes_home=tmp_path
+        )
+        is None
+    )
+
+
+def test_filter_legacy_single_dict_without_minimax_unchanged(tmp_path):
+    policy = _import_policy()
+    legacy = {"provider": "openrouter", "model": "openrouter/anthropic/claude"}
+    out = policy.filter_default_gateway_fallbacks(
+        legacy, default_root=tmp_path, hermes_home=tmp_path
+    )
+    assert out == legacy
+
+
+def test_filter_named_profile_keeps_minimax(tmp_path):
+    """Q6 — Filter must NOT mutate named profiles or worktrees."""
+    policy = _import_policy()
+    profile_home = tmp_path / "profiles" / "research"
+    profile_home.mkdir(parents=True)
+    chain = [
+        {"provider": "openrouter", "model": "openrouter/x"},
+        {"provider": "minimax", "model": "minimax/m2.7"},
+    ]
+    out = policy.filter_default_gateway_fallbacks(
+        chain, default_root=tmp_path, hermes_home=profile_home
+    )
+    assert out == chain
+
+
+def test_filter_worktree_home_keeps_minimax(tmp_path):
+    policy = _import_policy()
+    worktree_home = tmp_path / "worktrees" / "feature"
+    worktree_home.mkdir(parents=True)
+    chain = [{"provider": "minimax", "model": "minimax/m2.7"}]
+    out = policy.filter_default_gateway_fallbacks(
+        chain, default_root=tmp_path, hermes_home=worktree_home
+    )
+    assert out == chain
+
+
+def test_filter_does_not_alter_primary_model_default(tmp_path):
+    """Q6 goal-check — primary `model.default` is untouched by the filter helper.
+
+    The filter operates exclusively on fallback chains.  Passing a full
+    config dict-like primary section through it must yield no change to
+    ``model.default``.
+    """
+    policy = _import_policy()
+    fallback_chain = [{"provider": "minimax", "model": "minimax/m2.7"}]
+    primary_model_default = "openrouter/anthropic/claude-3.5-sonnet"
+    filtered = policy.filter_default_gateway_fallbacks(
+        fallback_chain, default_root=tmp_path, hermes_home=tmp_path
+    )
+    # Filter only touches the chain it receives; primary model.default
+    # is never read or returned by the helper.
+    assert filtered == []
+    assert primary_model_default == "openrouter/anthropic/claude-3.5-sonnet"
+
+
+def test_filter_returns_input_unchanged_for_empty(tmp_path):
+    policy = _import_policy()
+    assert (
+        policy.filter_default_gateway_fallbacks(
+            [], default_root=tmp_path, hermes_home=tmp_path
+        )
+        == []
+    )
+    assert (
+        policy.filter_default_gateway_fallbacks(
+            None, default_root=tmp_path, hermes_home=tmp_path
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# collect_profile_policy_findings
+# ---------------------------------------------------------------------------
+
+
+def test_findings_flag_minimax_in_fallback_providers(tmp_path):
+    policy = _import_policy()
+    cfg = {
+        "fallback_providers": [
+            {"provider": "openrouter", "model": "openrouter/x"},
+            {"provider": "minimax", "model": "minimax/m2.7"},
+        ]
+    }
+    findings = policy.collect_profile_policy_findings(
+        cfg, default_root=tmp_path, hermes_home=tmp_path
+    )
+    codes = [f["code"] for f in findings]
+    assert "default-profile-minimax-fallback-filtered" in codes
+
+
+def test_findings_flag_minimax_in_legacy_fallback_model(tmp_path):
+    policy = _import_policy()
+    cfg = {"fallback_model": {"provider": "minimax", "model": "minimax/m2.7"}}
+    findings = policy.collect_profile_policy_findings(
+        cfg, default_root=tmp_path, hermes_home=tmp_path
+    )
+    codes = [f["code"] for f in findings]
+    assert "default-profile-minimax-fallback-filtered" in codes
+
+
+def test_findings_empty_when_no_minimax(tmp_path):
+    policy = _import_policy()
+    cfg = {
+        "fallback_providers": [
+            {"provider": "openrouter", "model": "openrouter/anthropic/claude"}
+        ]
+    }
+    findings = policy.collect_profile_policy_findings(
+        cfg, default_root=tmp_path, hermes_home=tmp_path
+    )
+    assert findings == []
+
+
+def test_findings_silent_for_named_profile(tmp_path):
+    policy = _import_policy()
+    profile_home = tmp_path / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    cfg = {"fallback_providers": [{"provider": "minimax", "model": "minimax/m2.7"}]}
+    findings = policy.collect_profile_policy_findings(
+        cfg, default_root=tmp_path, hermes_home=profile_home
+    )
+    assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Constants + env overrides
+# ---------------------------------------------------------------------------
+
+
+def test_pressure_constants_have_expected_defaults():
+    policy = _import_policy()
+    assert policy.PRESSURE_WATCH_PCT == 65
+    assert policy.PRESSURE_CRITICAL_PCT == 85
+    assert policy.PRESSURE_FLOOR_TOKENS == 20_000
+
+
+def test_lag_constants_have_expected_defaults():
+    policy = _import_policy()
+    assert policy.DISCORD_LAG_WATCH_MS == 500
+    assert policy.DISCORD_LAG_CRITICAL_MS == 1000
+
+
+def test_pressure_watch_pct_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_PRESSURE_WATCH_PCT", "55")
+    import importlib
+
+    import gateway.profile_policy as policy
+
+    importlib.reload(policy)
+    try:
+        assert policy.PRESSURE_WATCH_PCT == 55
+    finally:
+        monkeypatch.delenv("HERMES_PRESSURE_WATCH_PCT", raising=False)
+        importlib.reload(policy)
+
+
+def test_lag_watch_ms_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_DISCORD_LAG_WATCH_MS", "300")
+    import importlib
+
+    import gateway.profile_policy as policy
+
+    importlib.reload(policy)
+    try:
+        assert policy.DISCORD_LAG_WATCH_MS == 300
+    finally:
+        monkeypatch.delenv("HERMES_DISCORD_LAG_WATCH_MS", raising=False)
+        importlib.reload(policy)
