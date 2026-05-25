@@ -12,6 +12,18 @@ from agent.models_dev import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_models_dev_cache():
+    """Keep models.dev global cache mutations isolated per test."""
+    import agent.models_dev as md
+
+    md._models_dev_cache = {}
+    md._models_dev_cache_time = 0
+    yield
+    md._models_dev_cache = {}
+    md._models_dev_cache_time = 0
+
+
 SAMPLE_REGISTRY = {
     "anthropic": {
         "id": "anthropic",
