@@ -1115,6 +1115,14 @@ def _try_resolve_fallback_provider() -> dict | None:
         with open(cfg_path, encoding="utf-8") as _f:
             cfg = _y.safe_load(_f) or {}
         fb_list = get_fallback_chain(cfg)
+        try:
+            from gateway.profile_policy import filter_default_gateway_fallbacks
+            fb_list = filter_default_gateway_fallbacks(fb_list)
+        except Exception as exc:
+            logger.warning(
+                "profile_policy fallback filter failed in _try_resolve_fallback_provider: %s",
+                exc,
+            )
         if not fb_list:
             return None
         for entry in fb_list:
@@ -3022,6 +3030,14 @@ class GatewayRunner:
                     cfg = _y.safe_load(_f) or {}
                 fb = get_fallback_chain(cfg)
                 if fb:
+                    try:
+                        from gateway.profile_policy import filter_default_gateway_fallbacks
+                        fb = filter_default_gateway_fallbacks(fb)
+                    except Exception as exc:
+                        logger.warning(
+                            "profile_policy fallback filter failed in _load_fallback_model: %s",
+                            exc,
+                        )
                     return fb
         except Exception:
             pass
@@ -3865,6 +3881,20 @@ class GatewayRunner:
             write_runtime_status(gateway_state="starting", exit_reason=None)
         except Exception:
             pass
+
+        # One-shot HUB/DEFAULT profile-policy diagnostic at gateway start.
+        # Worktrees and named profiles are silent here by contract.
+        try:
+            from gateway.profile_policy import collect_profile_policy_findings
+            _policy_cfg = _load_gateway_config()
+            for _finding in collect_profile_policy_findings(_policy_cfg):
+                logger.warning(
+                    "profile_policy: %s [%s]",
+                    _finding.get("message", ""),
+                    _finding.get("code", ""),
+                )
+        except Exception as exc:
+            logger.warning("profile_policy findings unavailable: %s", exc)
 
         # Log any active supply-chain security advisories. Operators see this
         # in gateway.log and `hermes status` surfaces it; we do NOT block
