@@ -61,6 +61,30 @@ def _fmt_runtime(seconds: Optional[int]) -> str:
     return f"{seconds}s"
 
 
+def _parse_since_seconds(value: str) -> int:
+    raw = (value or "").strip().lower()
+    if not raw:
+        raise argparse.ArgumentTypeError("--since requires a duration")
+    unit = raw[-1]
+    number = raw[:-1] if unit.isalpha() else raw
+    multiplier = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 7 * 86400,
+    }.get(unit, 1)
+    try:
+        parsed = int(number)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "duration must look like 7d, 12h, 30m, or seconds"
+        ) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("duration must be positive")
+    return parsed * multiplier
+
+
 def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
@@ -489,6 +513,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_diag.add_argument(
         "--json", action="store_true",
         help="Emit JSON (structured) instead of the default human table",
+    )
+    diag_sub = p_diag.add_subparsers(dest="diagnostics_action")
+    p_worker_exits = diag_sub.add_parser(
+        "worker-exits",
+        help="Read-only worker exit taxonomy counts",
+    )
+    p_worker_exits.add_argument(
+        "--since",
+        default=7 * 86400,
+        type=_parse_since_seconds,
+        help="Lookback window (default: 7d; accepts s/m/h/d/w)",
+    )
+    p_worker_exits.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of the default table",
     )
 
     # --- link / unlink ---
@@ -1769,6 +1808,9 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
     """List active diagnostics on the board. Wraps the same rule engine
     the dashboard uses, so CLI output matches what the UI shows.
     """
+    if getattr(args, "diagnostics_action", None) == "worker-exits":
+        return _cmd_diagnostics_worker_exits(args)
+
     from hermes_cli import kanban_diagnostics as kd
     from hermes_cli.config import load_config
 
@@ -1893,6 +1935,55 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                 if a.suggested:
                     print(f"       → {a.label}")
         print()
+    return 0
+
+
+def _cmd_diagnostics_worker_exits(args: argparse.Namespace) -> int:
+    since_seconds = int(getattr(args, "since", 7 * 86400))
+    cutoff = int(time.time()) - since_seconds
+    query = """
+        SELECT
+            COALESCE(worker_exit_kind, 'unknown') AS worker_exit_kind,
+            worker_exit_code AS worker_exit_code,
+            COALESCE(worker_protocol_state, 'unknown') AS worker_protocol_state,
+            COALESCE(worker_failure_fingerprint, '') AS worker_failure_fingerprint,
+            COUNT(*) AS count
+          FROM task_runs
+         WHERE COALESCE(ended_at, started_at) >= ?
+         GROUP BY
+            COALESCE(worker_exit_kind, 'unknown'),
+            worker_exit_code,
+            COALESCE(worker_protocol_state, 'unknown'),
+            COALESCE(worker_failure_fingerprint, '')
+         ORDER BY count DESC, worker_exit_kind ASC, worker_exit_code ASC
+    """
+    with kb.connect() as conn:
+        rows = [dict(row) for row in conn.execute(query, (cutoff,)).fetchall()]
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "since_seconds": since_seconds,
+            "cutoff": cutoff,
+            "worker_exits": rows,
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    if not rows:
+        print(f"No worker exits observed in the last {since_seconds}s.")
+        return 0
+
+    print(f"Worker exits since {_fmt_runtime(since_seconds)} ago:")
+    print("count  kind                           code  protocol          fingerprint")
+    for row in rows:
+        code = "" if row["worker_exit_code"] is None else str(row["worker_exit_code"])
+        fingerprint = row["worker_failure_fingerprint"] or ""
+        print(
+            f"{int(row['count']):5d}  "
+            f"{row['worker_exit_kind'][:30]:30s} "
+            f"{code[:5]:5s} "
+            f"{row['worker_protocol_state'][:17]:17s} "
+            f"{fingerprint[:80]}"
+        )
     return 0
 
 

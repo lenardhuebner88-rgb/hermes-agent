@@ -922,7 +922,11 @@ CREATE TABLE IF NOT EXISTS task_runs (
     --          gave_up | reclaimed | (null while still running)
     summary             TEXT,
     metadata            TEXT,
-    error               TEXT
+    error               TEXT,
+    worker_exit_kind    TEXT,
+    worker_exit_code    INTEGER,
+    worker_protocol_state TEXT,
+    worker_failure_fingerprint TEXT
 );
 
 -- Subscription from a gateway source (platform + chat + thread) to a
@@ -1412,6 +1416,29 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
     ).fetchone() is not None
     if runs_exist:
+        run_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        }
+        if "worker_exit_kind" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "worker_exit_kind", "worker_exit_kind TEXT"
+            )
+        if "worker_exit_code" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "worker_exit_code", "worker_exit_code INTEGER"
+            )
+        if "worker_protocol_state" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "worker_protocol_state", "worker_protocol_state TEXT"
+            )
+        if "worker_failure_fingerprint" not in run_cols:
+            _add_column_if_missing(
+                conn,
+                "task_runs",
+                "worker_failure_fingerprint",
+                "worker_failure_fingerprint TEXT",
+            )
+
         with write_txn(conn):
             inflight = conn.execute(
                 "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
@@ -1427,8 +1454,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         task_id, profile, status,
                         claim_lock, claim_expires, worker_pid,
                         max_runtime_seconds, last_heartbeat_at,
-                        started_at
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                        started_at, worker_exit_kind, worker_protocol_state
+                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, 'pending', 'pending')
                     """,
                     (
                         row["id"], row["assignee"], row["claim_lock"],
@@ -2374,8 +2401,7 @@ def _end_run(
                metadata      = ?,
                ended_at      = ?,
                claim_lock    = NULL,
-               claim_expires = NULL,
-               worker_pid    = NULL
+               claim_expires = NULL
          WHERE id = ?
            AND ended_at IS NULL
         """,
@@ -2491,8 +2517,9 @@ def _synthesize_ended_run(
             task_id, profile, step_key,
             status, outcome,
             summary, error, metadata,
-            started_at, ended_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, ended_at,
+            worker_exit_kind, worker_protocol_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending')
         """,
         (
             task_id, profile, step_key,
@@ -2695,8 +2722,8 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, worker_exit_kind, worker_protocol_state
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, 'pending', 'pending')
             """,
             (
                 task_id,
@@ -2769,8 +2796,8 @@ def claim_review_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, worker_exit_kind, worker_protocol_state
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, 'pending', 'pending')
             """,
             (
                 task_id,
@@ -6645,16 +6672,111 @@ _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
 
-def _record_worker_exit(pid: int, raw_status: int) -> None:
+def _protocol_state_for_run(row: sqlite3.Row) -> str:
+    outcome = row["outcome"] if "outcome" in row.keys() else None
+    status = row["status"] if "status" in row.keys() else None
+    if outcome == "completed" or status in {"done", "completed"}:
+        return "complete_emitted"
+    if outcome == "blocked" or status == "blocked":
+        return "block_emitted"
+    if status == "running" and row["ended_at"] is None:
+        return "silent"
+    return "silent"
+
+
+def _exit_taxonomy_from_wait_status(
+    raw_status: int,
+    protocol_state: str,
+) -> tuple[str, Optional[int]]:
+    try:
+        if os.WIFEXITED(raw_status):
+            code = os.WEXITSTATUS(raw_status)
+            if code == 0:
+                if protocol_state in {"complete_emitted", "block_emitted"}:
+                    return ("clean_exit_complete", 0)
+                return ("clean_exit_protocol_violation", 0)
+            return ("nonzero_exit", code)
+        if os.WIFSIGNALED(raw_status):
+            return ("signaled", os.WTERMSIG(raw_status))
+    except Exception:
+        pass
+    return ("pending", None)
+
+
+def _worker_exit_error_text(kind: str, pid: int, code: Optional[int]) -> Optional[str]:
+    if kind == "clean_exit_protocol_violation":
+        return (
+            "worker exited cleanly (rc=0) without calling "
+            "kanban_complete or kanban_block — protocol violation"
+        )
+    if kind == "nonzero_exit":
+        return f"pid {pid} exited with code {code}"
+    if kind == "signaled":
+        return f"pid {pid} killed by signal {code}"
+    if kind == "pid_not_alive":
+        return f"pid {pid} not alive"
+    return None
+
+
+def _record_worker_exit(
+    pid: int,
+    raw_status: int,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
     """Record a reaped child's exit status for later classification.
 
     Called from the reap loop in ``dispatch_once``. Safe to call many
-    times; duplicate pids overwrite (pids can cycle, latest wins).
+    times; duplicate pids overwrite (pids can cycle, latest wins). When
+    a DB connection is supplied, also persists the structured exit
+    taxonomy on the matching task_runs row at reap time.
     """
     if not pid or pid <= 0:
         return
     now = time.time()
     _recent_worker_exits[int(pid)] = (int(raw_status), now)
+    if conn is not None:
+        try:
+            row = conn.execute(
+                """
+                SELECT id, status, outcome, ended_at
+                  FROM task_runs
+                 WHERE worker_pid = ?
+                   AND COALESCE(worker_exit_kind, 'pending') = 'pending'
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (int(pid),),
+            ).fetchone()
+            if row is not None:
+                protocol_state = _protocol_state_for_run(row)
+                exit_kind, exit_code = _exit_taxonomy_from_wait_status(
+                    int(raw_status), protocol_state
+                )
+                error_text = _worker_exit_error_text(exit_kind, int(pid), exit_code)
+                fingerprint = (
+                    _error_fingerprint(error_text) if error_text else None
+                )
+                with write_txn(conn):
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                           SET worker_exit_kind = ?,
+                               worker_exit_code = ?,
+                               worker_protocol_state = ?,
+                               worker_failure_fingerprint = ?
+                         WHERE id = ?
+                           AND COALESCE(worker_exit_kind, 'pending') = 'pending'
+                        """,
+                        (
+                            exit_kind,
+                            exit_code,
+                            protocol_state,
+                            fingerprint,
+                            int(row["id"]),
+                        ),
+                    )
+        except Exception:
+            _log.warning("worker exit taxonomy persist failed", exc_info=True)
     # Age-based trim: drop entries older than the TTL.
     if len(_recent_worker_exits) > _RECENT_WORKER_EXITS_MAX // 2:
         cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
@@ -6995,11 +7117,23 @@ def enforce_max_runtime(
     return timed_out
 
 
-# Heartbeat staleness heartbeat gap — if a running task hasn't sent a
-# heartbeat in this many seconds it's considered inactive regardless of
-# the ``dispatch_stale_timeout_seconds`` threshold.  Hardcoded at 1 hour
-# to match the original spec (">4h started + no commits in 1h").
-_STALE_HEARTBEAT_GAP_SECONDS = 3600
+# Dispatcher-side worker heartbeat cadence. Auto-heartbeats are emitted by
+# the dispatcher process for spawned workers, so a long blocking tool call
+# still updates liveness while the worker is busy.
+WORKER_HEARTBEAT_SEC = 60
+_STALE_HEARTBEAT_GAP_SECONDS = 2 * WORKER_HEARTBEAT_SEC
+
+
+def _worker_heartbeat_interval_seconds() -> int:
+    raw = os.environ.get("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return WORKER_HEARTBEAT_SEC
 
 
 def detect_stale_running(
@@ -7059,6 +7193,24 @@ def detect_stale_running(
         last_hb = row["last_heartbeat_at"]
         hb_age = (now - int(last_hb)) if last_hb is not None else None
         if hb_age is not None and hb_age < _STALE_HEARTBEAT_GAP_SECONDS:
+            run_id = _current_run_id(conn, row["id"])
+            if run_id is not None and not _has_task_event_for_run(
+                conn, row["id"], "live_long_op", run_id
+            ):
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        row["id"],
+                        "live_long_op",
+                        {
+                            "elapsed_seconds": int(elapsed),
+                            "last_heartbeat_at": int(last_hb),
+                            "heartbeat_age_seconds": int(hb_age),
+                            "heartbeat_window_seconds": _STALE_HEARTBEAT_GAP_SECONDS,
+                            "timeout_seconds": stale_timeout_seconds,
+                        },
+                        run_id=run_id,
+                    )
             continue  # recent heartbeat → still alive
 
         pid = row["worker_pid"]
@@ -7177,8 +7329,20 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # (task_id, pid, claimer, protocol_violation, error_text)
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            """
+            SELECT
+                t.id,
+                t.worker_pid,
+                t.claim_lock,
+                t.current_run_id,
+                r.worker_exit_kind,
+                r.worker_exit_code,
+                r.worker_protocol_state,
+                r.worker_failure_fingerprint
+            FROM tasks t
+            LEFT JOIN task_runs r ON r.id = t.current_run_id
+            WHERE t.status = 'running' AND t.worker_pid IS NOT NULL
+            """
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
@@ -7190,14 +7354,66 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
 
             pid = int(row["worker_pid"])
-            kind, code = _classify_worker_exit(pid)
-            if kind == "clean_exit":
+            persisted_kind = (
+                row["worker_exit_kind"]
+                if "worker_exit_kind" in row.keys()
+                and row["worker_exit_kind"]
+                and row["worker_exit_kind"] != "pending"
+                else None
+            )
+            if persisted_kind:
+                kind = str(persisted_kind)
+                code = row["worker_exit_code"]
+            else:
+                legacy_kind, code = _classify_worker_exit(pid)
+                if legacy_kind == "clean_exit":
+                    kind = "clean_exit_protocol_violation"
+                elif legacy_kind in {"nonzero_exit", "signaled"}:
+                    kind = legacy_kind
+                else:
+                    kind = "pid_not_alive"
+                if row["current_run_id"]:
+                    protocol_state = (
+                        "silent"
+                        if kind == "clean_exit_protocol_violation"
+                        else (
+                            row["worker_protocol_state"]
+                            if "worker_protocol_state" in row.keys()
+                            and row["worker_protocol_state"]
+                            else "pending"
+                        )
+                    )
+                    failure_text = _worker_exit_error_text(kind, pid, code)
+                    with contextlib.suppress(Exception):
+                        conn.execute(
+                            """
+                            UPDATE task_runs
+                               SET worker_exit_kind = ?,
+                                   worker_exit_code = ?,
+                                   worker_protocol_state = ?,
+                                   worker_failure_fingerprint = ?
+                             WHERE id = ?
+                               AND worker_exit_kind IS NULL
+                            """,
+                            (
+                                kind,
+                                code,
+                                protocol_state,
+                                (
+                                    _error_fingerprint(failure_text)
+                                    if failure_text else None
+                                ),
+                                int(row["current_run_id"]),
+                            ),
+                        )
+
+            if kind == "clean_exit_protocol_violation":
                 # Worker subprocess returned 0 but its task is still
                 # ``running`` in the DB — it exited without calling
                 # ``kanban_complete`` / ``kanban_block``. Retrying won't
                 # help.
                 protocol_violation = True
-                error_text = (
+                error_text = _worker_exit_error_text(kind, pid, code) or (
                     "worker exited cleanly (rc=0) without calling "
                     "kanban_complete or kanban_block — protocol violation"
                 )
@@ -7206,6 +7422,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "pid": pid,
                     "claimer": row["claim_lock"],
                     "exit_code": code,
+                    "worker_exit_kind": kind,
+                    "worker_protocol_state": row["worker_protocol_state"] or "silent",
                 }
             else:
                 protocol_violation = False
@@ -7217,7 +7435,11 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     error_text = f"pid {pid} not alive"
                 event_kind = "crashed"
                 event_payload = {"pid": pid, "claimer": row["claim_lock"]}
-                if code is not None and kind != "unknown":
+                if kind:
+                    event_payload["worker_exit_kind"] = kind
+                if row["worker_protocol_state"]:
+                    event_payload["worker_protocol_state"] = row["worker_protocol_state"]
+                if code is not None and kind != "pid_not_alive":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
 
@@ -7971,7 +8193,7 @@ def dispatch_once(
                     break
                 if _pid == 0:
                     break
-                _record_worker_exit(_pid, _status)
+                _record_worker_exit(_pid, _status, conn)
         except Exception:
             pass
 
@@ -8529,6 +8751,89 @@ def _hermes_path_argv(path: str) -> list[str]:
     return [_absolute_hermes_path(path)]
 
 
+def _emit_worker_auto_heartbeat(
+    *,
+    task_id: str,
+    run_id: Optional[int],
+    claim_lock: Optional[str],
+    board: Optional[str],
+) -> bool:
+    with contextlib.closing(connect(board=board)) as hb_conn:
+        if claim_lock:
+            heartbeat_claim(hb_conn, task_id, claimer=claim_lock)
+        return heartbeat_worker(
+            hb_conn,
+            task_id,
+            note="auto worker heartbeat",
+            expected_run_id=run_id,
+        )
+
+
+def _worker_heartbeat_loop(
+    *,
+    task_id: str,
+    run_id: Optional[int],
+    claim_lock: Optional[str],
+    board: Optional[str],
+    worker_pid: int,
+    interval_seconds: float,
+    stop_event: threading.Event,
+    heartbeat_fn=None,
+    pid_alive_fn=None,
+) -> None:
+    heartbeat_fn = heartbeat_fn or _emit_worker_auto_heartbeat
+    pid_alive_fn = pid_alive_fn or _pid_alive
+    while not stop_event.wait(interval_seconds):
+        if not pid_alive_fn(worker_pid):
+            return
+        try:
+            heartbeat_fn(
+                task_id=task_id,
+                run_id=run_id,
+                claim_lock=claim_lock,
+                board=board,
+            )
+        except Exception:
+            _log.warning(
+                "kanban worker auto-heartbeat failed for %s pid=%s",
+                task_id,
+                worker_pid,
+                exc_info=True,
+            )
+
+
+def _start_worker_heartbeat_loop(
+    *,
+    task_id: str,
+    run_id: Optional[int],
+    claim_lock: Optional[str],
+    board: Optional[str],
+    worker_pid: int,
+    interval_seconds: Optional[float] = None,
+) -> threading.Thread:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_worker_heartbeat_loop,
+        kwargs={
+            "task_id": task_id,
+            "run_id": run_id,
+            "claim_lock": claim_lock,
+            "board": board,
+            "worker_pid": int(worker_pid),
+            "interval_seconds": (
+                float(interval_seconds)
+                if interval_seconds is not None
+                else float(_worker_heartbeat_interval_seconds())
+            ),
+            "stop_event": stop_event,
+        },
+        name=f"kanban-heartbeat-{task_id}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _resolve_hermes_argv() -> list[str]:
     """Resolve the ``hermes`` invocation as argv parts for ``Popen``.
 
@@ -8794,6 +9099,20 @@ def _default_spawn(
     # handle is kept alive by the child's inheritance.  The parent's
     # reference goes out of scope and is GC'd, but the OS-level FD stays
     # open in the child until the child exits.
+    try:
+        _start_worker_heartbeat_loop(
+            task_id=task.id,
+            run_id=task.current_run_id,
+            claim_lock=task.claim_lock,
+            board=resolved_board,
+            worker_pid=int(proc.pid),
+        )
+    except Exception:
+        _log.warning(
+            "kanban worker auto-heartbeat loop failed to start for %s",
+            task.id,
+            exc_info=True,
+        )
     return proc.pid
 
 
