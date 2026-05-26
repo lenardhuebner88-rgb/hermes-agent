@@ -7486,6 +7486,253 @@ def _record_spawn_failure(
     )
 
 
+def _gate_shadow_decisions_for_running(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+    stale_timeout_seconds: int,
+    failure_limit: int,
+) -> list:
+    """Build read-only shadow decisions for currently running task attempts."""
+    try:
+        from hermes_cli.control_plane.gate_decisions import (
+            TaskRunSnapshot,
+            TaskSnapshot,
+            decide_for_run,
+        )
+    except Exception:
+        return []
+
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    rows = conn.execute(
+        """
+        SELECT
+            t.id AS task_id,
+            t.status AS task_status,
+            t.claim_lock AS task_claim_lock,
+            t.claim_expires AS task_claim_expires,
+            t.worker_pid AS task_worker_pid,
+            t.last_heartbeat_at AS task_last_heartbeat_at,
+            t.started_at AS task_started_at,
+            t.current_run_id AS task_current_run_id,
+            t.max_runtime_seconds AS task_max_runtime_seconds,
+            t.consecutive_failures AS task_consecutive_failures,
+            t.max_retries AS task_max_retries,
+            t.assignee AS task_assignee,
+            t.completed_at AS task_completed_at,
+            t.body AS task_body,
+            r.id AS run_id,
+            r.status AS run_status,
+            r.claim_lock AS run_claim_lock,
+            r.claim_expires AS run_claim_expires,
+            r.worker_pid AS run_worker_pid,
+            r.max_runtime_seconds AS run_max_runtime_seconds,
+            r.last_heartbeat_at AS run_last_heartbeat_at,
+            r.started_at AS run_started_at,
+            r.ended_at AS run_ended_at,
+            r.outcome AS run_outcome,
+            r.summary AS run_summary,
+            r.metadata AS run_metadata,
+            r.error AS run_error
+        FROM tasks t
+        LEFT JOIN task_runs r ON r.id = t.current_run_id
+        WHERE t.status = 'running'
+          AND r.id IS NOT NULL
+          AND r.status = 'running'
+        ORDER BY t.id
+        """
+    ).fetchall()
+
+    decisions = []
+    for row in rows:
+        lock = row["run_claim_lock"] or row["task_claim_lock"] or ""
+        host_local = bool(lock.startswith(host_prefix))
+        worker_pid = (
+            row["run_worker_pid"]
+            if row["run_worker_pid"] is not None
+            else row["task_worker_pid"]
+        )
+        pid_alive = None
+        exit_kind = None
+        exit_code = None
+        if host_local and worker_pid is not None:
+            pid_alive = _pid_alive(int(worker_pid))
+            if pid_alive is False:
+                exit_kind, exit_code = _classify_worker_exit(int(worker_pid))
+
+        metadata = None
+        if row["run_metadata"]:
+            try:
+                metadata = json.loads(row["run_metadata"])
+            except Exception:
+                metadata = None
+
+        task_snapshot = TaskSnapshot(
+            id=row["task_id"],
+            status=row["task_status"],
+            claim_lock=row["task_claim_lock"],
+            claim_expires=row["task_claim_expires"],
+            worker_pid=row["task_worker_pid"],
+            last_heartbeat_at=row["task_last_heartbeat_at"],
+            started_at=row["task_started_at"],
+            current_run_id=row["task_current_run_id"],
+            max_runtime_seconds=row["task_max_runtime_seconds"],
+            consecutive_failures=int(row["task_consecutive_failures"] or 0),
+            max_retries=row["task_max_retries"],
+            assignee=row["task_assignee"],
+            completed_at=row["task_completed_at"],
+            body=row["task_body"],
+        )
+        run_snapshot = TaskRunSnapshot(
+            id=int(row["run_id"]),
+            task_id=row["task_id"],
+            status=row["run_status"],
+            claim_lock=row["run_claim_lock"],
+            claim_expires=row["run_claim_expires"],
+            worker_pid=row["run_worker_pid"],
+            max_runtime_seconds=row["run_max_runtime_seconds"],
+            last_heartbeat_at=row["run_last_heartbeat_at"],
+            started_at=row["run_started_at"],
+            ended_at=row["run_ended_at"],
+            outcome=row["run_outcome"],
+            summary=row["run_summary"],
+            metadata=metadata,
+            pid_alive=pid_alive,
+            exit_kind=exit_kind,
+            exit_code=exit_code,
+            host_local=host_local,
+        )
+        decisions.append(
+            decide_for_run(
+                run_snapshot,
+                task_snapshot,
+                now,
+                stale_timeout_seconds=stale_timeout_seconds,
+                failure_limit=failure_limit,
+            )
+        )
+    return decisions
+
+
+_GATE_DECISION_EVENT_ACTIONS = {
+    "claim_extended": "extend_stale_claim",
+    "reclaimed": "reclaim_stale",
+    "stale": "reclaim_stale",
+    "crashed": "classify_crash",
+    "protocol_violation": "classify_crash",
+    "timed_out": "enforce_timeout",
+    "gave_up": "gave_up",
+}
+
+_GATE_DECISION_EVENT_PRIORITY = {
+    "enforce_timeout": 50,
+    "classify_crash": 40,
+    "reclaim_stale": 30,
+    "extend_stale_claim": 20,
+    "gave_up": 10,
+}
+
+
+def _gate_actual_actions_since(
+    conn: sqlite3.Connection,
+    *,
+    event_watermark: int,
+    task_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task_id, run_id, kind, payload
+          FROM task_events
+         WHERE id > ?
+           AND task_id IN ({placeholders})
+           AND kind IN ({",".join("?" for _ in _GATE_DECISION_EVENT_ACTIONS)})
+         ORDER BY id ASC
+        """,
+        [event_watermark, *task_ids, *_GATE_DECISION_EVENT_ACTIONS.keys()],
+    ).fetchall()
+    actual: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        action = _GATE_DECISION_EVENT_ACTIONS.get(row["kind"])
+        if not action:
+            continue
+        current = actual.get(row["task_id"])
+        if current and _GATE_DECISION_EVENT_PRIORITY[current["action"]] > _GATE_DECISION_EVENT_PRIORITY[action]:
+            continue
+        payload = None
+        if row["payload"]:
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:
+                payload = None
+        actual[row["task_id"]] = {
+            "action": action,
+            "event_kind": row["kind"],
+            "run_id": row["run_id"],
+            "payload": payload,
+        }
+    return actual
+
+
+def _gate_shadow_matches_actual(shadow, actual: Optional[dict[str, Any]]) -> bool:
+    if actual is None:
+        return shadow.action in {"keep_running", "no_op"}
+    if shadow.action == "reclaim_stale":
+        return actual["action"] == "reclaim_stale"
+    if shadow.action == "classify_crash":
+        return actual["action"] == "classify_crash"
+    if shadow.action == "enforce_timeout":
+        return actual["action"] == "enforce_timeout"
+    if shadow.action == "extend_stale_claim":
+        return actual["action"] == "extend_stale_claim"
+    return shadow.action == actual["action"]
+
+
+def _emit_gate_decision_parity_divergences(
+    conn: sqlite3.Connection,
+    *,
+    shadow_decisions: list,
+    event_watermark: int,
+) -> int:
+    """Emit gate_decision_parity only for shadow/actual divergences."""
+    if not shadow_decisions:
+        return 0
+    task_ids = [d.task_id for d in shadow_decisions]
+    actual_by_task = _gate_actual_actions_since(
+        conn,
+        event_watermark=event_watermark,
+        task_ids=task_ids,
+    )
+    divergences = [
+        (decision, actual_by_task.get(decision.task_id))
+        for decision in shadow_decisions
+        if not _gate_shadow_matches_actual(decision, actual_by_task.get(decision.task_id))
+    ]
+    if not divergences:
+        return 0
+
+    emitted = 0
+    with write_txn(conn):
+        for decision, actual in divergences:
+            _append_event(
+                conn,
+                decision.task_id,
+                "gate_decision_parity",
+                {
+                    "run_id": decision.run_id,
+                    "ticker_decision": actual,
+                    "shadow_decision": decision.as_payload(),
+                    "match": False,
+                    "family": "running_lifecycle",
+                },
+                run_id=decision.run_id,
+            )
+            emitted += 1
+    return emitted
+
+
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     """Record the spawned child's pid + emit a ``spawned`` event.
 
@@ -7728,6 +7975,21 @@ def dispatch_once(
         except Exception:
             pass
 
+    try:
+        _gate_event_watermark = int(
+            conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
+        )
+        _gate_shadow_decisions = _gate_shadow_decisions_for_running(
+            conn,
+            now=int(time.time()),
+            stale_timeout_seconds=stale_timeout_seconds,
+            failure_limit=failure_limit,
+        )
+    except Exception:
+        _log.warning("gate decision shadow snapshot failed", exc_info=True)
+        _gate_event_watermark = 0
+        _gate_shadow_decisions = []
+
     result = DispatchResult()
     result.reclaimed = release_stale_claims(conn)
     result.stale = detect_stale_running(
@@ -7750,6 +8012,14 @@ def dispatch_once(
         _dispatch_review_required_handoffs(conn)
         _dispatch_standard_review_children(conn)
     result.promoted = recompute_ready(conn)
+    try:
+        _emit_gate_decision_parity_divergences(
+            conn,
+            shadow_decisions=_gate_shadow_decisions,
+            event_watermark=_gate_event_watermark,
+        )
+    except Exception:
+        _log.warning("gate decision shadow parity failed", exc_info=True)
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
