@@ -13972,7 +13972,9 @@ Examples:
 
     # Execute the command
     if hasattr(args, "func"):
-        args.func(args)
+        code = args.func(args)
+        if isinstance(code, int):
+            sys.exit(code)
     else:
         parser.print_help()
 
