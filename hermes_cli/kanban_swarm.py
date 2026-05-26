@@ -22,8 +22,16 @@ import sqlite3
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.templates.task_template_builder import build_task_template
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
+SWARM_ALLOWED_TOOLS = [
+    "kanban_show",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_comment",
+    "kanban_heartbeat",
+]
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,22 @@ def _swarm_context(root_id: str, goal: str) -> str:
     )
 
 
+def _scope_body(
+    profile: str,
+    body: str,
+    *,
+    title: str,
+    skills: Optional[Iterable[str]] = None,
+) -> str:
+    template = build_task_template(
+        profile,
+        {"version": 2, "allowed_tools": SWARM_ALLOWED_TOOLS},
+        body=body,
+        skills=list(skills or []),
+    )
+    return template.body_template
+
+
 def create_swarm(
     conn: sqlite3.Connection,
     *,
@@ -111,11 +135,16 @@ def create_swarm(
     root = kb.create_task(
         conn,
         title=root_title or f"Swarm: {goal.splitlines()[0][:80]}",
-        body=(
-            "Kanban Swarm v1 planning/root card. This card is completed "
-            "immediately so parallel workers can start while it remains the "
-            "shared blackboard and audit anchor.\n\n"
-            f"Goal:\n{goal}"
+        body=_scope_body(
+            created_by,
+            (
+                "Kanban Swarm v1 planning/root card. This card is completed "
+                "immediately so parallel workers can start while it remains the "
+                "shared blackboard and audit anchor.\n\n"
+                f"Goal:\n{goal}"
+            ),
+            title=root_title or f"Swarm: {goal.splitlines()[0][:80]}",
+            skills=["kanban-orchestrator"],
         ),
         assignee=created_by,
         created_by=created_by,
@@ -125,6 +154,7 @@ def create_swarm(
         workspace_kind=workspace_kind,
         workspace_path=workspace_path,
         skills=["kanban-orchestrator"],
+        internal_test_bypass_control_plane_gate=True,
     )
 
     # If idempotency returned an existing non-archived root, do not duplicate the
@@ -160,7 +190,12 @@ def create_swarm(
         worker_id = kb.create_task(
             conn,
             title=spec.title,
-            body=(spec.body or "") + context_suffix,
+            body=_scope_body(
+                spec.profile,
+                (spec.body or "") + context_suffix,
+                title=spec.title,
+                skills=spec.skills or None,
+            ),
             assignee=spec.profile,
             created_by=created_by,
             parents=[root],
@@ -182,7 +217,12 @@ def create_swarm(
     verifier = kb.create_task(
         conn,
         title=verifier_title,
-        body=verifier_body,
+        body=_scope_body(
+            verifier_assignee,
+            verifier_body,
+            title=verifier_title,
+            skills=["requesting-code-review"],
+        ),
         assignee=verifier_assignee,
         created_by=created_by,
         parents=worker_ids,
@@ -201,7 +241,12 @@ def create_swarm(
     synthesizer = kb.create_task(
         conn,
         title=synthesizer_title,
-        body=synthesizer_body,
+        body=_scope_body(
+            synthesizer_assignee,
+            synthesizer_body,
+            title=synthesizer_title,
+            skills=["avoid-ai-writing"],
+        ),
         assignee=synthesizer_assignee,
         created_by=created_by,
         parents=[verifier],

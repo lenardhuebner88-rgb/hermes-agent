@@ -825,6 +825,27 @@ def _handle_create(args: dict, **kw) -> str:
     gate_error, gate_audit = _coordinator_handoff_gate(args, assignee)
     if gate_error:
         return gate_error
+    scope_contract = args.get("scope_contract")
+    if scope_contract is not None:
+        if not isinstance(scope_contract, dict):
+            return tool_error("kanban_create: scope_contract must be an object")
+        try:
+            from hermes_cli.templates.task_template_builder import build_task_template
+
+            template = build_task_template(
+                str(assignee),
+                scope_contract,
+                report_contract_version=int(args.get("report_contract_version") or 1),
+                body=body or "",
+                allowed_tools=args.get("allowed_tools") or None,
+                forbidden_systems=args.get("forbidden_systems") or None,
+                skills=skills,
+            )
+        except (TypeError, ValueError) as exc:
+            return tool_error(f"kanban_create: {exc}")
+        body = template.body_template
+        if skills is None:
+            skills = template.skills or None
     try:
         kb, conn = _connect(board=board)
         try:
@@ -1516,6 +1537,34 @@ KANBAN_CREATE_SCHEMA = {
                     "a reviewer task. The names must match skills "
                     "installed on the assignee's profile."
                 ),
+            },
+            "scope_contract": {
+                "type": "object",
+                "description": (
+                    "Optional structured scope_contract. When provided, "
+                    "kanban_create renders the body through the shared "
+                    "TaskTemplate builder before insertion."
+                ),
+            },
+            "allowed_tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional override for template scope_contract.allowed_tools. "
+                    "Only used with scope_contract."
+                ),
+            },
+            "forbidden_systems": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional override for template scope_contract.forbidden_systems. "
+                    "Only used with scope_contract."
+                ),
+            },
+            "report_contract_version": {
+                "type": "integer",
+                "description": "Report contract version for template-authored scope bodies.",
             },
             "control_plane_gate": {
                 "type": "object",

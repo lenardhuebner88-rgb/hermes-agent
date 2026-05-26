@@ -386,6 +386,25 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
+    p_create.add_argument(
+        "--scope-contract-json",
+        default=None,
+        help="Optional JSON scope_contract object rendered through the shared task template builder",
+    )
+    p_create.add_argument("--allowed-tool", action="append", default=[],
+                          help="Override template scope_contract.allowed_tools (repeatable)")
+    p_create.add_argument("--forbidden-system", action="append", default=[],
+                          help="Override template scope_contract.forbidden_systems (repeatable)")
+    p_create.add_argument("--report-contract-version", type=int, default=1,
+                          help="Report contract version for template-authored scope bodies")
+
+    # --- validate-spec ---
+    p_validate_spec = sub.add_parser(
+        "validate-spec",
+        help="Read-only validate a task file or task id against Kanban scope/report policy",
+    )
+    p_validate_spec.add_argument("target", nargs="?", help="Markdown task file path or task id")
+    p_validate_spec.add_argument("--task-id", default=None, help="Force DB task-id mode")
 
     # --- swarm ---
     p_swarm = sub.add_parser(
@@ -1008,6 +1027,12 @@ def kanban_command(args: argparse.Namespace) -> int:
         os.environ["HERMES_KANBAN_BOARD"] = normed
         restore_board_env = True
 
+    if action == "validate-spec":
+        try:
+            return _cmd_validate_spec(args)
+        finally:
+            _restore_board_env()
+
     # Auto-initialize the DB before dispatching any subcommand. init_db
     # is idempotent, so running it every invocation is cheap (one
     # SELECT against sqlite_master when tables already exist) and
@@ -1025,6 +1050,7 @@ def kanban_command(args: argparse.Namespace) -> int:
     handlers = {
         "init":     _cmd_init,
         "create":   _cmd_create,
+        "validate-spec": _cmd_validate_spec,
         "swarm":    _cmd_swarm,
         "list":     _cmd_list,
         "ls":       _cmd_list,
@@ -1455,11 +1481,43 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    body = args.body
+    skills = getattr(args, "skills", None) or None
+    if getattr(args, "scope_contract_json", None):
+        if not args.assignee:
+            print("kanban: --scope-contract-json requires --assignee", file=sys.stderr)
+            return 2
+        try:
+            scope_contract = json.loads(args.scope_contract_json)
+        except json.JSONDecodeError as exc:
+            print(f"kanban: invalid --scope-contract-json: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(scope_contract, dict):
+            print("kanban: --scope-contract-json must decode to an object", file=sys.stderr)
+            return 2
+        try:
+            from hermes_cli.templates.task_template_builder import build_task_template
+
+            template = build_task_template(
+                args.assignee,
+                scope_contract,
+                report_contract_version=getattr(args, "report_contract_version", 1),
+                body=body or "",
+                allowed_tools=getattr(args, "allowed_tool", None) or None,
+                forbidden_systems=getattr(args, "forbidden_system", None) or None,
+                skills=skills,
+            )
+        except ValueError as exc:
+            print(f"kanban: {exc}", file=sys.stderr)
+            return 2
+        body = template.body_template
+        if skills is None:
+            skills = template.skills or None
     with kb.connect() as conn:
         task_id = kb.create_task(
             conn,
             title=args.title,
-            body=args.body,
+            body=body,
             assignee=args.assignee,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind,
@@ -1471,7 +1529,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             triage=triage,
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
-            skills=getattr(args, "skills", None) or None,
+            skills=skills,
             max_retries=max_retries,
             initial_status=getattr(args, "initial_status", "running"),
         )
@@ -1496,6 +1554,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             if not running and message:
                 print(f"\n⚠  {message}", file=sys.stderr)
     return 0
+
+
+def _cmd_validate_spec(args: argparse.Namespace) -> int:
+    from hermes_cli.cli.kanban_scope_lint import main as validate_spec_main
+
+    return validate_spec_main(args)
 
 
 def _cmd_swarm(args: argparse.Namespace) -> int:
