@@ -3935,10 +3935,13 @@ def kanban_completion_template(conn: sqlite3.Connection, task_id: str) -> dict[s
         }
 
     metadata: dict[str, Any] = {
+        "report_contract_version": 1,
         "scope_contract_read": scope_contract_read,
         "scope_contract_version": version,
         "scope_attestation": True,
         "forbidden_actions_taken": 0,
+        "verification_evidence": [],
+        "receipt_path": None,
     }
     if effective_toolsets is not None:
         metadata["effective_toolsets"] = effective_toolsets

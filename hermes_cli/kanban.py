@@ -755,6 +755,19 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="With --state-type: keep runs whose column equals this value",
     )
 
+    # --- report (read-only completed-run report contract) ---
+    p_report = sub.add_parser(
+        "report",
+        help="Show the normalized report contract for a completed task run",
+    )
+    p_report.add_argument("task_id")
+    p_report.add_argument("--json", action="store_true")
+    p_report.add_argument(
+        "--all",
+        action="store_true",
+        help="Show every completed run report instead of only the latest",
+    )
+
     # --- heartbeat (worker liveness signal) ---
     p_hb = sub.add_parser(
         "heartbeat",
@@ -989,6 +1002,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "stats":    _cmd_stats,
         "log":      _cmd_log,
         "runs":     _cmd_runs,
+        "report":   _cmd_report,
         "heartbeat": _cmd_heartbeat,
         "assignees": _cmd_assignees,
         "update-profile-model": _cmd_update_profile_model,
@@ -2603,6 +2617,48 @@ def _cmd_runs(args: argparse.Namespace) -> int:
             print(f"     → {summary}")
         if r.error:
             print(f"     ✖ {r.error[:100]}")
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Show the read-only report contract view for a completed task."""
+    from hermes_cli import kanban_report as kr
+
+    with kb.connect() as conn:
+        if kb.get_task(conn, args.task_id) is None:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 2
+        reports = kr.reports_for_task(conn, args.task_id)
+
+    if not reports:
+        print(f"(no completed run reports for {args.task_id})", file=sys.stderr)
+        return 1
+
+    selected: Any = reports if getattr(args, "all", False) else reports[-1]
+    if getattr(args, "json", False):
+        print(json.dumps(selected, indent=2, ensure_ascii=False, sort_keys=True))
+    else:
+        report = reports[-1]
+        if getattr(args, "all", False):
+            print(f"{len(reports)} completed report(s) for {args.task_id}:")
+            iterable = reports
+        else:
+            iterable = [report]
+        for item in iterable:
+            run = item["run"]
+            quality = item["quality"]
+            print(
+                f"Run #{run['id']} outcome={run['outcome']} "
+                f"contract={item['contract']['version']!r} "
+                f"quality={'ok' if quality['ok'] else 'missing'}"
+            )
+            if run.get("summary"):
+                print(f"  Summary: {str(run['summary']).splitlines()[0][:120]}")
+            if quality["missing"]:
+                print(f"  Missing: {', '.join(quality['missing'])}")
+            if quality["inconsistencies"]:
+                print(f"  Inconsistent: {', '.join(quality['inconsistencies'])}")
+
     return 0
 
 

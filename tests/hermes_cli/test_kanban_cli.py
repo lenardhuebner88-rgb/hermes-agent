@@ -13,6 +13,14 @@ from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 
 
+def _run_kanban_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", *argv])
+    return kc.kanban_command(args)
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -170,6 +178,60 @@ def test_run_slash_json_output(kanban_home):
     assert payload["title"] == "jsontask"
     assert payload["assignee"] == "alice"
     assert payload["status"] == "ready"
+
+
+def test_run_slash_report_json_shows_quality(kanban_home):
+    metadata = {
+        "report_contract_version": 1,
+        "verification_evidence": ["scripts/run_tests.sh tests/hermes_cli/test_kanban_cli.py"],
+        "receipt_reference": "vault/03-Agents/Hermes/receipts/demo.md",
+        "scope_contract_read": True,
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    }
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="report cli", assignee="alice")
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="completed with report",
+            metadata=metadata,
+        )
+
+    out = kc.run_slash(f"report {tid} --json")
+    payload = json.loads(out)
+
+    assert payload["task"]["id"] == tid
+    assert payload["contract"]["version"] == 1
+    assert payload["quality"]["missing"] == []
+
+
+def test_run_slash_report_missing_task_reports_error(kanban_home):
+    out = kc.run_slash("report t_missing --json")
+
+    assert "no such task: t_missing" in out
+
+
+def test_kanban_report_unknown_task(kanban_home, capsys):
+    code = _run_kanban_command(["report", "t_missing", "--json"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "no such task: t_missing" in captured.err
+
+
+def test_kanban_report_legacy_run_exits_0(kanban_home, capsys):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="legacy report", assignee="alice")
+        assert kb.complete_task(conn, tid, summary="legacy", metadata={})
+
+    code = _run_kanban_command(["report", tid, "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert payload["quality"]["missing"] != []
 
 
 def test_run_slash_dispatch_dry_run_counts(kanban_home):

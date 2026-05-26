@@ -1101,6 +1101,142 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _latest_completed_report(task, events, runs) -> Optional[dict]:
+    if _task_field(task, "status") != "done":
+        return None
+    completed = [
+        run for run in runs
+        if _task_field(run, "status") in ("done", "completed")
+    ]
+    if not completed:
+        return None
+    completed.sort(
+        key=lambda run: (
+            int(_task_field(run, "ended_at", 0) or 0),
+            int(_task_field(run, "id", 0) or 0),
+        )
+    )
+    try:
+        from hermes_cli import kanban_report as kr
+        return kr.normalize_run_report(task, completed[-1], events)
+    except Exception:
+        return None
+
+
+def _rule_missing_report_contract(task, events, runs, now, cfg) -> list[Diagnostic]:
+    report = _latest_completed_report(task, events, runs)
+    if not report or "report_contract_version" not in report.get("quality", {}).get("missing", []):
+        return []
+    run_id = report.get("run", {}).get("id")
+    return [Diagnostic(
+        kind="missing_report_contract",
+        severity="warning",
+        title="Completed run is missing report_contract_version",
+        detail=(
+            "The latest completed run has no Kanban report contract version. "
+            "Add report_contract_version=1 to completion metadata so report "
+            "consumers can distinguish old handoffs from contract-v1 reports."
+        ),
+        actions=[DiagnosticAction(
+            kind="cli_hint",
+            label=f"Inspect report: hermes kanban report {_task_field(task, 'id')}",
+            payload={"command": f"hermes kanban report {_task_field(task, 'id')} --json"},
+            suggested=True,
+        )],
+        first_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        last_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        count=1,
+        run_id=int(run_id) if run_id is not None else None,
+        data={"expected_version": 1},
+    )]
+
+
+def _rule_missing_verification_evidence(task, events, runs, now, cfg) -> list[Diagnostic]:
+    report = _latest_completed_report(task, events, runs)
+    if not report or "verification_evidence" not in report.get("quality", {}).get("missing", []):
+        return []
+    run_id = report.get("run", {}).get("id")
+    return [Diagnostic(
+        kind="missing_verification_evidence",
+        severity="error",
+        title="Completed run lacks verification evidence",
+        detail=(
+            "The latest completed run report does not include verification "
+            "evidence. Include verification_evidence or evidence_audited in "
+            "completion metadata so reviewers can see what was actually checked."
+        ),
+        actions=[DiagnosticAction(
+            kind="cli_hint",
+            label=f"Inspect report: hermes kanban report {_task_field(task, 'id')}",
+            payload={"command": f"hermes kanban report {_task_field(task, 'id')} --json"},
+            suggested=True,
+        )],
+        first_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        last_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        count=1,
+        run_id=int(run_id) if run_id is not None else None,
+    )]
+
+
+def _rule_missing_receipt_reference(task, events, runs, now, cfg) -> list[Diagnostic]:
+    report = _latest_completed_report(task, events, runs)
+    if not report or "receipt_reference" not in report.get("quality", {}).get("missing", []):
+        return []
+    run_id = report.get("run", {}).get("id")
+    return [Diagnostic(
+        kind="missing_receipt_reference",
+        severity="warning",
+        title="Completed run lacks a receipt reference",
+        detail=(
+            "The latest completed run report does not point to a receipt. "
+            "Include receipt_reference or receipt_path in completion metadata "
+            "so operators can trace the durable handoff artifact."
+        ),
+        actions=[DiagnosticAction(
+            kind="cli_hint",
+            label=f"Inspect report: hermes kanban report {_task_field(task, 'id')}",
+            payload={"command": f"hermes kanban report {_task_field(task, 'id')} --json"},
+            suggested=True,
+        )],
+        first_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        last_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        count=1,
+        run_id=int(run_id) if run_id is not None else None,
+    )]
+
+
+def _rule_inconsistent_scope_attestation(task, events, runs, now, cfg) -> list[Diagnostic]:
+    report = _latest_completed_report(task, events, runs)
+    inconsistencies = (
+        report.get("quality", {}).get("inconsistencies", [])
+        if report else []
+    )
+    if not inconsistencies:
+        return []
+    run_id = report.get("run", {}).get("id")
+    return [Diagnostic(
+        kind="inconsistent_scope_attestation",
+        severity="error",
+        title="Completed run has inconsistent scope attestation",
+        detail=(
+            "The latest completed run claims scope_attestation but its "
+            "supporting scope fields are incomplete or contradictory: "
+            + "; ".join(str(item) for item in inconsistencies)
+        ),
+        actions=[DiagnosticAction(
+            kind="cli_hint",
+            label=f"Inspect report: hermes kanban report {_task_field(task, 'id')}",
+            payload={"command": f"hermes kanban report {_task_field(task, 'id')} --json"},
+            suggested=True,
+        )],
+        first_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        last_seen_at=int(report.get("run", {}).get("ended_at") or now),
+        count=1,
+        run_id=int(run_id) if run_id is not None else None,
+        data={"inconsistencies": inconsistencies},
+    )]
+
+
 # Registry — order matters: rules higher on the list render first when
 # severity ties. Add new rules here.
 _RULES: list[RuleFn] = [
@@ -1114,6 +1250,10 @@ _RULES: list[RuleFn] = [
     _rule_stale_workspace,
     _rule_stuck_in_blocked,
     _rule_stranded_in_ready,
+    _rule_missing_report_contract,
+    _rule_missing_verification_evidence,
+    _rule_missing_receipt_reference,
+    _rule_inconsistent_scope_attestation,
 ]
 
 
@@ -1130,6 +1270,10 @@ DIAGNOSTIC_KINDS = (
     "stale_workspace",
     "stuck_in_blocked",
     "stranded_in_ready",
+    "missing_report_contract",
+    "missing_verification_evidence",
+    "missing_receipt_reference",
+    "inconsistent_scope_attestation",
 )
 
 

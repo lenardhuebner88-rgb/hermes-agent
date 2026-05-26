@@ -1399,6 +1399,17 @@ completion_policy:
         assert kb.get_task(conn, t).status == "done"
 
 
+def test_kanban_completion_template_emits_report_contract_v1_defaults(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="contract defaults", assignee="alice")
+        template = kb.kanban_completion_template(conn, t)
+
+    metadata = template["metadata"]
+    assert metadata["report_contract_version"] == 1
+    assert metadata["verification_evidence"] == []
+    assert metadata["receipt_path"] is None
+
+
 def _append_tool_call_evidence(home: Path, profile: str, session_id: str, *, path: str) -> None:
     from hermes_state import SessionDB
 

@@ -54,11 +54,14 @@ def _event(kind, ts=None, **payload):
     }
 
 
-def _run(outcome="completed", run_id=1, error=None):
+def _run(outcome="completed", run_id=1, error=None, metadata=None, ended_at=200, status=None):
     return {
         "id": run_id,
         "outcome": outcome,
         "error": error,
+        "status": status or ("done" if outcome == "completed" else "failed"),
+        "ended_at": ended_at,
+        "metadata": metadata,
     }
 
 
@@ -127,6 +130,74 @@ def test_prose_phantom_refs_clears_on_later_clean_edit():
     ]
     diags = kd.compute_task_diagnostics(task, events, [])
     assert diags == []
+
+
+def test_missing_report_contract_diagnostic_for_completed_run():
+    task = _task(status="done")
+    runs = [_run(metadata={}, status="completed")]
+
+    diags = kd.compute_task_diagnostics(task, [], runs, now=300)
+
+    missing = [d for d in diags if d.kind == "missing_report_contract"]
+    assert len(missing) == 1
+    assert missing[0].severity == "warning"
+    assert "missing_report_contract" in kd.DIAGNOSTIC_KINDS
+
+
+def test_missing_verification_evidence_severity_error_and_receipt_warning():
+    task = _task(status="done")
+    runs = [_run(metadata={
+        "report_contract_version": 1,
+        "scope_contract_read": True,
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    })]
+
+    diags = kd.compute_task_diagnostics(task, [], runs, now=300)
+    by_kind = {d.kind: d for d in diags}
+
+    assert by_kind["missing_verification_evidence"].severity == "error"
+    assert by_kind["missing_receipt_reference"].severity == "warning"
+
+
+def test_inconsistent_scope_attestation_diagnostic():
+    task = _task(status="done")
+    runs = [_run(metadata={
+        "report_contract_version": 1,
+        "verification_evidence": ["unit tests"],
+        "receipt_reference": "vault/receipt.md",
+        "scope_attestation": True,
+        "scope_contract_version": 1,
+        "forbidden_actions_taken": 1,
+    })]
+
+    diags = kd.compute_task_diagnostics(task, [], runs, now=300)
+
+    inconsistent = [d for d in diags if d.kind == "inconsistent_scope_attestation"]
+    assert len(inconsistent) == 1
+    assert inconsistent[0].severity == "error"
+
+
+def test_report_contract_diagnostics_stay_silent_for_full_report():
+    task = _task(status="done")
+    runs = [_run(metadata={
+        "report_contract_version": 1,
+        "verification_evidence": ["unit tests"],
+        "receipt_reference": "vault/receipt.md",
+        "scope_contract_read": True,
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    })]
+
+    diags = kd.compute_task_diagnostics(task, [], runs, now=300)
+    kinds = {d.kind for d in diags}
+
+    assert "missing_report_contract" not in kinds
+    assert "missing_verification_evidence" not in kinds
+    assert "missing_receipt_reference" not in kinds
+    assert "inconsistent_scope_attestation" not in kinds
 
 
 def test_repeated_failures_fires_at_threshold_on_spawn():

@@ -204,6 +204,9 @@ def test_completion_template_defaults_to_env_task_id(worker_env):
     assert d["mutated"] is False
     assert d["metadata"]["scope_attestation"] is True
     assert d["metadata"]["forbidden_actions_taken"] == 0
+    assert d["metadata"]["report_contract_version"] == 1
+    assert d["metadata"]["verification_evidence"] == []
+    assert d["metadata"]["receipt_path"] is None
 
 
 def test_show_explicit_task_id(worker_env):
