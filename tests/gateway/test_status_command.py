@@ -8,6 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
+
+
+@pytest.fixture(autouse=True)
+def _disable_runtime_footer(monkeypatch):
+    # Hub runtime_footer patch appends `\n\n<model>` to final responses when
+    # display.runtime_footer.enabled=true (the local Hub config default). These
+    # tests assert exact response text — pin the footer to empty so the assertion
+    # is stable in both isolation and shared-cache runs.
+    import gateway.runtime_footer as _rf
+    monkeypatch.setattr(_rf, "build_footer_line", lambda **_kw: "")
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 

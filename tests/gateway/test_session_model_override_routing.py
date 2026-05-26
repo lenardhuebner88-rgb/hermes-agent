@@ -204,6 +204,11 @@ fallback_providers:
     import hermes_cli.runtime_provider as runtime_provider
 
     monkeypatch.setattr(runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
+    # Hub profile_policy patch filters minimax entries out of default-profile
+    # fallback chains at runtime; bypass it here so this upstream regression
+    # test still exercises the fallback-resolution path.
+    from gateway import profile_policy as _pp
+    monkeypatch.setattr(_pp, "filter_default_gateway_fallbacks", lambda fb: fb)
 
     runner = _make_runner()
     model, runtime_kwargs = runner._resolve_session_agent_runtime(
