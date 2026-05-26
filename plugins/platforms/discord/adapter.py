@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -859,31 +859,13 @@ class DiscordAdapter(BasePlatformAdapter):
                         guild_id,
                     )
 
-            @self._client.event
-            async def on_socket_response(msg):
-                """Track every gateway frame.
-
-                op=11 is HEARTBEAT_ACK — the canonical liveness signal we
-                want to surface as heartbeat-age. op=0 (dispatch) and op=9
-                (invalid session) are the broader "gateway is alive and
-                talking to us" signals captured under last_gateway_event_*.
-                """
-                now_mono = time.monotonic()
-                now_iso = datetime.now(timezone.utc).isoformat()
-                adapter_self._last_gateway_event_monotonic = now_mono
-                adapter_self._last_gateway_event_at = now_iso
-                op = None
-                if isinstance(msg, dict):
-                    try:
-                        op = msg.get("op")
-                    except Exception as exc:  # pragma: no cover — defensive
-                        logger.warning(
-                            "discord on_socket_response: msg.get('op') failed: %s",
-                            exc,
-                        )
-                if op == 11:  # HEARTBEAT_ACK
-                    adapter_self._last_heartbeat_ack_monotonic = now_mono
-                    adapter_self._last_heartbeat_ack_at = now_iso
+            # NOTE: discord.py removed on_socket_response in 2.0. Heartbeat
+            # liveness is read directly from the library's KeepAliveHandler
+            # in runtime_health() below (perf_counter-based _last_ack). No
+            # event handler is registered for raw socket frames here — the
+            # equivalent on_socket_raw_receive only fires when the client is
+            # constructed with enable_debug_events=True, which would add
+            # per-frame dispatch overhead we don't need.
 
             # Register slash commands
             if self._slash_commands:
@@ -5052,18 +5034,46 @@ class DiscordAdapter(BasePlatformAdapter):
         else:
             latency_ms = None
 
-        heartbeat_age: Optional[float]
-        if self._last_heartbeat_ack_monotonic is not None:
-            heartbeat_age = max(0.0, now_mono - self._last_heartbeat_ack_monotonic)
-            heartbeat_age_rounded: Optional[float] = round(heartbeat_age, 1)
+        # Heartbeat-age via discord.py's KeepAliveHandler. on_socket_response
+        # was removed in discord.py 2.0 so the previous handler-based approach
+        # never fired in production. Read the keepalive's perf_counter _last_ack
+        # directly; gracefully degrade if the private attribute is unavailable
+        # on a future library version.
+        heartbeat_age: Optional[float] = None
+        heartbeat_age_rounded: Optional[float] = None
+        last_ack_perf: Optional[float] = None
+        try:
+            ws_obj = getattr(client, "ws", None) if client else None
+            keep_alive = getattr(ws_obj, "_keep_alive", None) if ws_obj else None
+            last_ack_perf = getattr(keep_alive, "_last_ack", None) if keep_alive else None
+        except Exception:  # pragma: no cover — defensive against private-attr churn
+            last_ack_perf = None
+        if isinstance(last_ack_perf, (int, float)) and math.isfinite(float(last_ack_perf)):
+            now_perf = time.perf_counter()
+            heartbeat_age = max(0.0, now_perf - float(last_ack_perf))
+            heartbeat_age_rounded = round(heartbeat_age, 1)
+            # Mirror into ISO-8601 string for the persisted snapshot. The wall-
+            # clock time minus the age gives a usable "last_heartbeat_ack_at".
+            self._last_heartbeat_ack_at = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=heartbeat_age)
+            ).isoformat()
+            self._last_heartbeat_ack_monotonic = now_mono - heartbeat_age
         else:
-            heartbeat_age = None
-            heartbeat_age_rounded = None
-        if self._last_gateway_event_monotonic is not None:
-            event_age = max(0.0, now_mono - self._last_gateway_event_monotonic)
-            event_age_rounded: Optional[float] = round(event_age, 1)
+            self._last_heartbeat_ack_at = None
+            self._last_heartbeat_ack_monotonic = None
+        # last_gateway_event_* is informational; without a per-frame event
+        # hook we approximate it from the heartbeat (gateway is alive iff
+        # the bot is connected and the keep-alive is acking).
+        event_age_rounded: Optional[float] = heartbeat_age_rounded
+        if heartbeat_age is not None:
+            self._last_gateway_event_at = self._last_heartbeat_ack_at
+            self._last_gateway_event_monotonic = (
+                self._last_heartbeat_ack_monotonic
+            )
         else:
-            event_age_rounded = None
+            self._last_gateway_event_at = None
+            self._last_gateway_event_monotonic = None
 
         if client is None or client.is_closed():
             status = "offline"

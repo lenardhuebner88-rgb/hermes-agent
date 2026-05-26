@@ -917,6 +917,25 @@ def _make_adapter_for_health():
     return DiscordAdapter(cfg)
 
 
+def _fake_client_with_heartbeat_age(latency_seconds, heartbeat_age_seconds=5.0,
+                                    *, closed=False, ready=True):
+    """Build a fake Discord client whose ws._keep_alive._last_ack is set so
+    that runtime_health() observes a heartbeat that is *heartbeat_age_seconds*
+    old (perf_counter-based, like the real library)."""
+    import time as _time
+    keep_alive = SimpleNamespace(
+        _last_ack=_time.perf_counter() - heartbeat_age_seconds,
+        latency=latency_seconds,
+    )
+    ws = SimpleNamespace(_keep_alive=keep_alive)
+    return SimpleNamespace(
+        is_closed=lambda: closed,
+        is_ready=lambda: ready,
+        latency=latency_seconds,
+        ws=ws,
+    )
+
+
 def test_runtime_health_initial_state_offline_when_no_client():
     adapter = _make_adapter_for_health()
     health = adapter.runtime_health()
@@ -928,37 +947,26 @@ def test_runtime_health_initial_state_offline_when_no_client():
 
 
 def test_runtime_health_reports_discord_lag_class_watch():
-    import time as _time
     adapter = _make_adapter_for_health()
-    adapter._client = SimpleNamespace(
-        is_closed=lambda: False, is_ready=lambda: True, latency=0.75,
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.75, heartbeat_age_seconds=35,
     )
     adapter._ready_event.set()
-    now = _time.monotonic()
-    adapter._last_heartbeat_ack_monotonic = now - 35
-    adapter._last_heartbeat_ack_at = "2026-05-26T20:00:00+00:00"
-    adapter._last_gateway_event_monotonic = now - 20
-    adapter._last_gateway_event_at = "2026-05-26T20:00:01+00:00"
 
     health = adapter.runtime_health()
     assert health["status"] == "online"
     assert health["latency_ms"] == 750
     assert 34 <= health["last_heartbeat_ack_age_seconds"] <= 36
-    assert 19 <= health["last_gateway_event_age_seconds"] <= 21
-    assert health["lag_class"] == "watch"
-    assert health["last_heartbeat_ack_at"] == "2026-05-26T20:00:00+00:00"
+    assert health["lag_class"] == "watch"  # latency >= WATCH_MS=500
+    assert isinstance(health["last_heartbeat_ack_at"], str)
 
 
 def test_runtime_health_lag_class_ok_for_low_latency():
-    import time as _time
     adapter = _make_adapter_for_health()
-    adapter._client = SimpleNamespace(
-        is_closed=lambda: False, is_ready=lambda: True, latency=0.05,
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=5,
     )
     adapter._ready_event.set()
-    now = _time.monotonic()
-    adapter._last_heartbeat_ack_monotonic = now - 5
-    adapter._last_gateway_event_monotonic = now - 5
     health = adapter.runtime_health()
     assert health["status"] == "online"
     assert health["latency_ms"] == 50
@@ -966,13 +974,11 @@ def test_runtime_health_lag_class_ok_for_low_latency():
 
 
 def test_runtime_health_lag_class_critical_for_high_latency():
-    import time as _time
     adapter = _make_adapter_for_health()
-    adapter._client = SimpleNamespace(
-        is_closed=lambda: False, is_ready=lambda: True, latency=1.5,
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=1.5, heartbeat_age_seconds=1,
     )
     adapter._ready_event.set()
-    adapter._last_heartbeat_ack_monotonic = _time.monotonic()
     health = adapter.runtime_health()
     assert health["latency_ms"] == 1500
     assert health["lag_class"] == "critical"
@@ -1014,16 +1020,12 @@ def test_heartbeat_fields_initialised_to_none_on_construction():
 
 
 def test_runtime_health_lag_class_critical_when_heartbeat_age_exceeds_threshold():
-    """Socket reports online + low latency but op=11 stopped 130s ago."""
-    import time as _time
+    """Socket reports online + low latency but ACK stopped >120s ago."""
     adapter = _make_adapter_for_health()
-    adapter._client = SimpleNamespace(
-        is_closed=lambda: False, is_ready=lambda: True, latency=0.05,
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=130,
     )
     adapter._ready_event.set()
-    now = _time.monotonic()
-    adapter._last_heartbeat_ack_monotonic = now - 130  # > 120s critical
-    adapter._last_gateway_event_monotonic = now - 130
     health = adapter.runtime_health()
     assert health["status"] == "online"
     assert health["latency_ms"] == 50  # cached, not the real signal
@@ -1032,15 +1034,11 @@ def test_runtime_health_lag_class_critical_when_heartbeat_age_exceeds_threshold(
 
 def test_runtime_health_lag_class_watch_when_heartbeat_age_in_watch_band():
     """One missed beat (~70s) is a soft signal."""
-    import time as _time
     adapter = _make_adapter_for_health()
-    adapter._client = SimpleNamespace(
-        is_closed=lambda: False, is_ready=lambda: True, latency=0.05,
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=70,
     )
     adapter._ready_event.set()
-    now = _time.monotonic()
-    adapter._last_heartbeat_ack_monotonic = now - 70  # > 60s, < 120s
-    adapter._last_gateway_event_monotonic = now - 70
     health = adapter.runtime_health()
     assert health["lag_class"] == "watch"
 
