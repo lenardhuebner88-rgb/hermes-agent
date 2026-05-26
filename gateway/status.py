@@ -611,6 +611,8 @@ def write_runtime_status(
                 platform_payload["health"] = json.loads(
                     json.dumps(platform_health, default=str)
                 )
+            else:
+                platform_payload["health"] = {"status": str(platform_health)}
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 

@@ -500,6 +500,42 @@ class TestGatewayRuntimeStatus:
             == "openrouter/anthropic/claude-3.5-sonnet"
         )
 
+    def test_write_runtime_status_records_platform_health(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        status.write_runtime_status(
+            platform="discord",
+            platform_state="connected",
+            platform_health={
+                "status": "online",
+                "websocket_connected": True,
+                "last_heartbeat_ack_age_seconds": 4.2,
+            },
+        )
+
+        payload = status.read_runtime_status()
+        health = payload["platforms"]["discord"]["health"]
+        assert health["status"] == "online"
+        assert health["websocket_connected"] is True
+        assert health["last_heartbeat_ack_age_seconds"] == 4.2
+
+    def test_write_runtime_status_clears_platform_health(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        status.write_runtime_status(
+            platform="discord",
+            platform_state="connected",
+            platform_health={"status": "online"},
+        )
+        status.write_runtime_status(
+            platform="discord",
+            platform_state="disconnected",
+            platform_health=None,
+        )
+
+        payload = status.read_runtime_status()
+        assert "health" not in payload["platforms"]["discord"]
+
 
 class TestTerminatePid:
     def test_force_uses_taskkill_on_windows(self, monkeypatch):

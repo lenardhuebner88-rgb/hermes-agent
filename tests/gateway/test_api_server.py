@@ -338,6 +338,53 @@ class TestAdapterInit:
         assert isinstance(agent, FakeAgent)
         assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
 
+    def test_create_agent_uses_api_server_model_override_only(self, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openai-codex",
+                "base_url": "https://codex.example.test",
+                "api_mode": "codex_responses",
+            },
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: {}),
+        )
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda **kwargs: {
+                "provider": kwargs["requested"],
+                "base_url": "https://api.minimax.io/anthropic",
+                "api_mode": "anthropic_messages",
+                "api_key": "sk-test",
+            },
+        )
+
+        adapter = APIServerAdapter(
+            PlatformConfig(enabled=True, extra={"model_name": "MiniMax-M2.7-highspeed"})
+        )
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        agent = adapter._create_agent(session_id="api-session")
+
+        assert isinstance(agent, FakeAgent)
+        assert captured["model"] == "MiniMax-M2.7-highspeed"
+        assert captured["provider"] == "minimax"
+        assert captured["api_mode"] == "anthropic_messages"
+        assert captured["base_url"] == "https://api.minimax.io/anthropic"
+
 
 # ---------------------------------------------------------------------------
 # Auth checking

@@ -729,6 +729,26 @@ def _home_thread_env_var(platform_name: str) -> str:
     return f"{_home_target_env_var(platform_name)}_THREAD_ID"
 
 
+_DEFAULT_KANBAN_DISCORD_NOTIFY_THREAD_ID = "1505596156405874909"
+
+
+def _kanban_discord_notify_thread_id() -> str:
+    """Return the dedicated Discord thread for Kanban terminal notifications.
+
+    Piet approved the current operator-visible target thread on 2026-05-17.
+    The env var keeps the local fix reversible without a code revert:
+    set ``HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID=off`` to fall back to the
+    original per-source channel/thread routing.
+    """
+    raw = os.environ.get(
+        "HERMES_KANBAN_DISCORD_NOTIFY_THREAD_ID",
+        _DEFAULT_KANBAN_DISCORD_NOTIFY_THREAD_ID,
+    ).strip()
+    if raw.lower() in {"", "0", "false", "no", "off", "none"}:
+        return ""
+    return raw
+
+
 def _restart_notification_pending() -> bool:
     """Return True when a /restart completion marker is waiting to be delivered."""
     return (_hermes_home / ".restart_notify.json").exists()
@@ -1672,6 +1692,7 @@ class GatewayRunner:
     _restart_task_started: bool = False
     _restart_detached: bool = False
     _restart_via_service: bool = False
+    _restart_after_idle: bool = False
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -1715,6 +1736,7 @@ class GatewayRunner:
         self._restart_task_started = False
         self._restart_detached = False
         self._restart_via_service = False
+        self._restart_after_idle = False
         self._stop_task: Optional[asyncio.Task] = None
         
         # Track running agents per session for interrupt support
@@ -2702,17 +2724,43 @@ class GatewayRunner:
         platform_state: Optional[str] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        platform_health: Optional[dict] = None,
     ) -> None:
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(
-                platform=platform,
-                platform_state=platform_state,
-                error_code=error_code,
-                error_message=error_message,
-            )
+            kwargs = {
+                "platform": platform,
+                "platform_state": platform_state,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
+            if platform_health is not None:
+                kwargs["platform_health"] = platform_health
+            write_runtime_status(**kwargs)
         except Exception:
             pass
+
+    def _adapter_runtime_health(
+        self,
+        adapter,
+        *,
+        fallback_status: str,
+        **extra,
+    ) -> dict:
+        health = {}
+        try:
+            health_fn = getattr(adapter, "runtime_health", None)
+            if callable(health_fn):
+                maybe_health = health_fn()
+                if isinstance(maybe_health, dict):
+                    health.update(maybe_health)
+        except Exception:
+            pass
+        health.setdefault("status", fallback_status)
+        for key, value in extra.items():
+            if value is not None:
+                health[key] = value
+        return health
 
     # ------------------------------------------------------------------
     # Per-platform circuit breaker (pause/resume) — used by the reconnect
@@ -2744,6 +2792,11 @@ class GatewayRunner:
                 platform_state="paused",
                 error_code=None,
                 error_message=info["pause_reason"],
+                platform_health={
+                    "status": "blocked",
+                    "reason": info["pause_reason"],
+                    "reconnect_attempts": info.get("attempts", 0),
+                },
             )
         except Exception:
             pass
@@ -2775,6 +2828,12 @@ class GatewayRunner:
                 platform_state="retrying",
                 error_code=None,
                 error_message=None,
+                platform_health={
+                    "status": "reconnecting",
+                    "reason": "manual resume queued",
+                    "reconnect_attempts": 0,
+                    "next_retry_seconds": 0,
+                },
             )
         except Exception:
             pass
@@ -3088,6 +3147,74 @@ class GatewayRunner:
         except Exception:
             return False
 
+    @staticmethod
+    def _redact_session_key_for_logs(session_key: str) -> str:
+        parsed = _parse_session_key(session_key)
+        if not parsed:
+            return "unknown-session"
+        platform = parsed.get("platform") or "unknown"
+        chat_type = parsed.get("chat_type") or "unknown"
+        chat_id = str(parsed.get("chat_id") or "")
+        suffix = chat_id[-4:] if chat_id else "?"
+        thread_suffix = ":thread" if parsed.get("thread_id") else ""
+        return f"{platform}:{chat_type}:…{suffix}{thread_suffix}"
+
+    def _active_agent_diagnostics(
+        self,
+        *,
+        now: Optional[float] = None,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        current = time.time() if now is None else float(now)
+        rows: list[dict[str, Any]] = []
+        for session_key, agent in self._snapshot_running_agents().items():
+            started = float(self._running_agents_ts.get(session_key, current))
+            elapsed = max(0, int(current - started))
+            rows.append(
+                {
+                    "session": self._redact_session_key_for_logs(session_key),
+                    "elapsed": elapsed,
+                    "state": "running",
+                    "session_id": str(getattr(agent, "session_id", "") or ""),
+                    "model": str(getattr(agent, "model", "") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["elapsed"], reverse=True)
+        return rows[: max(0, int(limit))]
+
+    @staticmethod
+    def _format_active_agent_diagnostics(rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "none"
+        parts: list[str] = []
+        for idx, row in enumerate(rows, 1):
+            sid = f" session_id={row['session_id']}" if row.get("session_id") else ""
+            model = f" model={row['model']}" if row.get("model") else ""
+            parts.append(
+                f"#{idx} session={row.get('session', 'unknown')} "
+                f"state={row.get('state', 'unknown')} elapsed={int(row.get('elapsed', 0))}s"
+                f"{sid}{model}"
+            )
+        return "; ".join(parts)
+
+    def _log_drain_agent_diagnostics(
+        self,
+        phase: str,
+        *,
+        timeout: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> None:
+        rows = self._active_agent_diagnostics(now=now)
+        formatted = self._format_active_agent_diagnostics(rows)
+        timeout_part = f" timeout={float(timeout):.1f}s" if timeout is not None else ""
+        log_fn = logger.warning if phase == "timeout" else logger.info
+        log_fn(
+            "Gateway restart drain %s active-agent diagnostics:%s %s",
+            phase,
+            timeout_part,
+            formatted,
+        )
+
     def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
@@ -3110,6 +3237,20 @@ class GatewayRunner:
                 session_key,
             )
             return True  # handled (silently dropped); do not fall through
+
+        # --- Draining / queued-restart cases (gateway restarting/stopping) ---
+        if self._restart_requested and not self._draining:
+            adapter = self.adapters.get(event.source.platform)
+            if not adapter:
+                return True
+            thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            await adapter._send_with_retry(
+                chat_id=event.source.chat_id,
+                content="⏳ Gateway restart is queued; current work will finish before restart. New input is paused.",
+                reply_to=event.message_id,
+                metadata=thread_meta,
+            )
+            return True
 
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -3771,16 +3912,38 @@ class GatewayRunner:
                 start_new_session=True,
             )
 
-    def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
+    def request_restart(
+        self,
+        *,
+        detached: bool = False,
+        via_service: bool = False,
+        after_idle: bool = False,
+    ) -> bool:
         if self._restart_task_started:
             return False
         self._restart_requested = True
         self._restart_detached = detached
         self._restart_via_service = via_service
+        self._restart_after_idle = after_idle
         self._restart_task_started = True
 
         async def _run_restart() -> None:
             await asyncio.sleep(0.05)
+            if after_idle:
+                logger.info(
+                    "Gateway restart queued until idle; active_agents=%d",
+                    self._running_agent_count(),
+                )
+                last_active_count: Optional[int] = None
+                last_status_at = 0.0
+                while self._running_agent_count() > 0:
+                    active_count = self._running_agent_count()
+                    now = asyncio.get_running_loop().time()
+                    if last_active_count != active_count or (now - last_status_at) >= 1.0:
+                        self._update_runtime_status("restart_queued")
+                        last_active_count = active_count
+                        last_status_at = now
+                    await asyncio.sleep(0.1)
             await self.stop(restart=True, detached_restart=detached, service_restart=via_service)
 
         task = asyncio.create_task(_run_restart())
@@ -4170,6 +4333,12 @@ class GatewayRunner:
                 platform_state="connecting",
                 error_code=None,
                 error_message=None,
+                platform_health={
+                    "status": "reconnecting",
+                    "reason": "connect in progress",
+                    "reconnect_attempts": 0,
+                    "next_retry_seconds": 0,
+                },
             )
             try:
                 success = await self._connect_adapter_with_timeout(adapter, platform)
@@ -4182,6 +4351,10 @@ class GatewayRunner:
                         platform_state="connected",
                         error_code=None,
                         error_message=None,
+                        platform_health=self._adapter_runtime_health(
+                            adapter,
+                            fallback_status="online",
+                        ),
                     )
                     logger.info("✓ %s connected", platform.value)
                 else:
@@ -4201,6 +4374,16 @@ class GatewayRunner:
                             platform_state="retrying" if adapter.fatal_error_retryable else "fatal",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message,
+                            platform_health={
+                                "status": (
+                                    "reconnecting"
+                                    if adapter.fatal_error_retryable
+                                    else "blocked"
+                                ),
+                                "reason": adapter.fatal_error_message,
+                                "reconnect_attempts": 1 if adapter.fatal_error_retryable else 0,
+                                "next_retry_seconds": 30 if adapter.fatal_error_retryable else None,
+                            },
                         )
                         target = (
                             startup_retryable_errors
@@ -4223,6 +4406,12 @@ class GatewayRunner:
                             platform_state="retrying",
                             error_code=None,
                             error_message="failed to connect",
+                            platform_health={
+                                "status": "reconnecting",
+                                "reason": "failed to connect",
+                                "reconnect_attempts": 1,
+                                "next_retry_seconds": 30,
+                            },
                         )
                         startup_retryable_errors.append(
                             f"{platform.value}: failed to connect"
@@ -5046,19 +5235,25 @@ class GatewayRunner:
                         else:
                             continue
                         metadata: dict[str, Any] = {}
-                        if sub.get("thread_id"):
-                            metadata["thread_id"] = sub["thread_id"]
+                        notify_thread_id = ""
+                        if platform_str == "discord":
+                            notify_thread_id = _kanban_discord_notify_thread_id()
+                        target_thread_id = notify_thread_id or (sub.get("thread_id") or "")
+                        if target_thread_id:
+                            metadata["thread_id"] = target_thread_id
                         sub_key = (
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
+                            send_result = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
                             )
+                            if send_result is not None and getattr(send_result, "success", True) is False:
+                                raise RuntimeError(getattr(send_result, "error", "send returned success=False"))
                             logger.debug(
-                                "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                "kanban notifier: delivered %s event for %s to %s/%s thread=%s on board %s",
+                                kind, sub["task_id"], platform_str, sub["chat_id"], target_thread_id or "-", board_slug,
                             )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
@@ -5787,6 +5982,10 @@ class GatewayRunner:
                             platform_state="connected",
                             error_code=None,
                             error_message=None,
+                            platform_health=self._adapter_runtime_health(
+                                adapter,
+                                fallback_status="online",
+                            ),
                         )
                         logger.info("✓ %s reconnected successfully", platform.value)
 
@@ -5803,6 +6002,11 @@ class GatewayRunner:
                             platform_state="fatal",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message,
+                            platform_health={
+                                "status": "blocked",
+                                "reason": adapter.fatal_error_message,
+                                "reconnect_attempts": attempt,
+                            },
                         )
                         logger.warning(
                             "Reconnect %s: non-retryable error (%s), removing from retry queue",
@@ -5810,13 +6014,22 @@ class GatewayRunner:
                         )
                         del self._failed_platforms[platform]
                     else:
+                        backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="retrying",
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message or "failed to reconnect",
+                            platform_health={
+                                "status": "reconnecting",
+                                "reason": (
+                                    adapter.fatal_error_message
+                                    or "failed to reconnect"
+                                ),
+                                "reconnect_attempts": attempt,
+                                "next_retry_seconds": backoff,
+                            },
                         )
-                        backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                         info["attempts"] = attempt
                         info["next_retry"] = time.monotonic() + backoff
                         logger.info(
@@ -5832,13 +6045,19 @@ class GatewayRunner:
                                 ),
                             )
                 except Exception as e:
+                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                     self._update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",
                         error_code=None,
                         error_message=str(e),
+                        platform_health={
+                            "status": "reconnecting",
+                            "reason": str(e),
+                            "reconnect_attempts": attempt,
+                            "next_retry_seconds": backoff,
+                        },
                     )
-                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
                     info["attempts"] = attempt
                     info["next_retry"] = time.monotonic() + backoff
                     logger.warning(
@@ -5945,6 +6164,7 @@ class GatewayRunner:
                     logger.debug("pre-drain mark_resume_pending failed for %s: %s", _sk, _e)
 
             _drain_started_at = time.monotonic()
+            self._log_drain_agent_diagnostics("start", timeout=timeout)
             active_agents, timed_out = await self._drain_active_agents(timeout)
             logger.info(
                 "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
@@ -5971,6 +6191,7 @@ class GatewayRunner:
                             )
 
             if timed_out:
+                self._log_drain_agent_diagnostics("timeout", timeout=timeout)
                 logger.warning(
                     "Gateway drain timed out after %.1fs with %d active agent(s); interrupting remaining work.",
                     timeout,
@@ -7813,6 +8034,9 @@ class GatewayRunner:
                 return self._telegram_topic_root_lobby_message()
             return None
 
+        if self._restart_requested and not self._draining:
+            return "⏳ Gateway restart is queued and is not accepting new work right now."
+
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
         # are numerous await points (hooks, vision enrichment, STT,
@@ -9641,6 +9865,10 @@ class GatewayRunner:
                     thread_id = str(getattr(source, "thread_id", "") or "")
                     user_id = str(getattr(source, "user_id", "") or "") or None
                     if platform_str and chat_id:
+                        notify_thread_id = (
+                            _kanban_discord_notify_thread_id()
+                            if platform_str == "discord" else ""
+                        )
                         def _sub():
                             from hermes_cli import kanban_db as _kb
                             conn = _kb.connect(board=requested_board)
@@ -9648,7 +9876,7 @@ class GatewayRunner:
                                 _kb.add_notify_sub(
                                     conn, task_id=task_id,
                                     platform=platform_str, chat_id=chat_id,
-                                    thread_id=thread_id or None,
+                                    thread_id=notify_thread_id or thread_id or None,
                                     user_id=user_id,
                                     notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
                                 )
@@ -10038,6 +10266,13 @@ class GatewayRunner:
             logger.debug("Failed to write restart dedup marker: %s", e)
 
         active_agents = self._running_agent_count()
+        args_text = event.get_command_args().strip()
+        try:
+            restart_args = shlex.split(args_text)
+        except ValueError:
+            restart_args = args_text.split()
+        force_restart = any(arg in ("--force", "-f") for arg in restart_args)
+        after_idle = active_agents > 0 and not force_restart
         # When running under a service manager (systemd/launchd) or inside a
         # Docker/Podman container, use the service restart path: exit with
         # code 75 so the service manager / container restart policy restarts
@@ -10047,10 +10282,15 @@ class GatewayRunner:
         _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
         _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
         if _under_service or _in_container:
-            self.request_restart(detached=False, via_service=True)
+            self.request_restart(detached=False, via_service=True, after_idle=after_idle)
         else:
-            self.request_restart(detached=True, via_service=False)
+            self.request_restart(detached=True, via_service=False, after_idle=after_idle)
         if active_agents:
+            if after_idle:
+                return (
+                    f"⏳ Restart queued; waiting for {active_agents} active agent(s) to finish. "
+                    "Use `/restart --force` to drain now and interrupt after timeout."
+                )
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
 

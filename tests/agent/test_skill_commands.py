@@ -718,6 +718,59 @@ class TestTemplateVarSubstitution:
         assert "${HERMES_SKILL_DIR}/scripts/foo.js" in msg
 
 
+class TestPreloadedSkillSharedRootFallback:
+    def test_profile_home_preload_resolves_trusted_shared_root_skill(self, tmp_path):
+        root = tmp_path / ".hermes"
+        profile_home = root / "profiles" / "reviewer"
+        profile_skills = profile_home / "skills"
+        shared_skills = root / "skills"
+        profile_skills.mkdir(parents=True)
+        shared_skills.mkdir(parents=True)
+        _make_skill(
+            shared_skills,
+            "kanban-reviewer",
+            body="Shared-root reviewer instructions.",
+            category="devops",
+        )
+
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", profile_skills),
+        ):
+            from agent.skill_utils import _external_dirs_cache_clear
+
+            _external_dirs_cache_clear()
+            prompt, loaded, missing = build_preloaded_skills_prompt(["kanban-reviewer"])
+
+        assert loaded == ["kanban-reviewer"]
+        assert missing == []
+        assert "Shared-root reviewer instructions" in prompt
+
+    def test_profile_home_preload_keeps_profile_local_override_first(self, tmp_path):
+        root = tmp_path / ".hermes"
+        profile_home = root / "profiles" / "reviewer"
+        profile_skills = profile_home / "skills"
+        shared_skills = root / "skills"
+        profile_skills.mkdir(parents=True)
+        shared_skills.mkdir(parents=True)
+        _make_skill(profile_skills, "kanban-reviewer", body="Profile-local reviewer instructions.")
+        _make_skill(shared_skills, "kanban-reviewer", body="Shared-root reviewer instructions.")
+
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", profile_skills),
+        ):
+            from agent.skill_utils import _external_dirs_cache_clear
+
+            _external_dirs_cache_clear()
+            prompt, loaded, missing = build_preloaded_skills_prompt(["kanban-reviewer"])
+
+        assert loaded == ["kanban-reviewer"]
+        assert missing == []
+        assert "Profile-local reviewer instructions" in prompt
+        assert "Shared-root reviewer instructions" not in prompt
+
+
 class TestInlineShellExpansion:
     """Inline ``!`cmd`` snippets in SKILL.md run before the agent sees the
     content — but only when the user has opted in via config."""

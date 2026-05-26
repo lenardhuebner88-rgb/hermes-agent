@@ -3839,6 +3839,53 @@ def _runtime_health_lines() -> list[str]:
     platforms = state.get("platforms", {}) or {}
 
     for platform, pdata in platforms.items():
+        health = pdata.get("health") if isinstance(pdata, dict) else None
+        if isinstance(health, dict):
+            status = str(health.get("status") or "").lower()
+            reason = str(health.get("reason") or "").strip()
+            reason_part = f" — {reason}" if reason else ""
+            if status == "online":
+                heartbeat_age = health.get("last_heartbeat_ack_age_seconds")
+                latency_ms = health.get("latency_ms")
+                lag = health.get("lag_class")
+                online_details: list[str] = []
+                if heartbeat_age is not None:
+                    try:
+                        online_details.append(f"last heartbeat {int(heartbeat_age)}s ago")
+                    except (TypeError, ValueError):
+                        pass
+                if isinstance(latency_ms, (int, float)):
+                    online_details.append(f"latency {int(latency_ms)}ms")
+                if isinstance(lag, str) and lag:
+                    online_details.append(f"lag {lag}")
+                suffix = f" ({', '.join(online_details)})" if online_details else ""
+                lines.append(f"✓ {platform}: online{suffix}")
+                continue
+            if status == "stale":
+                heartbeat_age = health.get("last_heartbeat_ack_age_seconds")
+                age_part = ""
+                if heartbeat_age is not None:
+                    try:
+                        age_part = f" (last heartbeat {int(heartbeat_age)}s ago)"
+                    except (TypeError, ValueError):
+                        age_part = ""
+                lines.append(f"⚠ {platform}: stale{reason_part}{age_part}")
+                continue
+            if status == "reconnecting":
+                detail_parts = []
+                attempts = health.get("reconnect_attempts")
+                next_retry = health.get("next_retry_seconds")
+                if attempts is not None:
+                    detail_parts.append(f"attempt {attempts}")
+                if next_retry is not None:
+                    detail_parts.append(f"next retry {next_retry}s")
+                suffix = f" ({', '.join(detail_parts)})" if detail_parts else ""
+                lines.append(f"⏳ {platform}: reconnecting{reason_part}{suffix}")
+                continue
+            if status == "blocked":
+                lines.append(f"⚠ {platform}: blocked{reason_part}")
+                continue
+
         if pdata.get("state") == "fatal":
             message = pdata.get("error_message") or "unknown error"
             lines.append(f"⚠ {platform}: {message}")

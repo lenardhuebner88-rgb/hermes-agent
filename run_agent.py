@@ -84,6 +84,117 @@ from agent.process_bootstrap import (
 from agent.iteration_budget import IterationBudget
 
 
+KANBAN_FINAL_RESPONSE_WITHOUT_TERMINAL_CALL = "worker-final-response-without-terminal-call"
+
+
+def _kanban_final_response_block_reason(final_response: str | None) -> str:
+    excerpt = (final_response or "").strip().replace("\n", " ")[:500]
+    reason = (
+        f"{KANBAN_FINAL_RESPONSE_WITHOUT_TERMINAL_CALL}: worker returned a "
+        "final response while its Kanban task was still running. Workers must "
+        "call kanban_complete or kanban_block before returning final prose."
+    )
+    if excerpt:
+        reason += f" Final response excerpt: {excerpt}"
+    return reason
+
+
+def _kanban_terminal_recovery_prompt(
+    final_response: str | None,
+    *,
+    task_id: str | None = None,
+) -> str:
+    """Build a bounded self-correction prompt for Kanban terminal calls."""
+    excerpt = (final_response or "").strip().replace("\n", " ")[:500]
+    task_clause = f" Task id: {task_id.strip()}." if task_id and task_id.strip() else ""
+    return (
+        "[System: You are running as a Kanban worker. Your previous response "
+        "was final prose, but this task is still running."
+        f"{task_clause} You must make exactly "
+        "one terminal Kanban tool call now: kanban_complete if the task is done, "
+        "or kanban_block if it is not done. Do not provide more final prose "
+        "before that terminal tool call. Previous prose excerpt: "
+        f"{excerpt or '(empty)'}]"
+    )
+
+
+def _kanban_task_still_running(kanban_task_id: str | None) -> bool:
+    """Return True when the current Kanban task is still in running state."""
+    task_id = (kanban_task_id or "").strip()
+    if not task_id:
+        return False
+    try:
+        from hermes_cli import kanban_db as kb
+    except Exception:
+        logger.warning("Could not import kanban_db for final-response guard", exc_info=True)
+        return False
+    try:
+        with kb.connect() as conn:
+            task = kb.get_task(conn, task_id)
+            return bool(task is not None and task.status == "running")
+    except Exception:
+        logger.warning(
+            "Failed to inspect Kanban task state for final-response guard: %s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _maybe_block_kanban_task_after_final_response(
+    kanban_task_id: str | None,
+    final_response: str | None,
+) -> bool:
+    """Fail closed when a Kanban worker returns prose without terminal call.
+
+    Returns True when this helper converted a still-running task to blocked.
+    Already terminal tasks (done/blocked/etc.) are left untouched so real
+    kanban_complete/kanban_block paths are never double-mutated.
+    """
+    task_id = (kanban_task_id or "").strip()
+    if not task_id:
+        return False
+    try:
+        from hermes_cli import kanban_db as kb
+    except Exception:
+        logger.warning("Could not import kanban_db for final-response guard", exc_info=True)
+        return False
+
+    raw_run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "").strip()
+    expected_run_id: int | None = None
+    if raw_run_id:
+        try:
+            expected_run_id = int(raw_run_id)
+        except ValueError:
+            expected_run_id = None
+
+    try:
+        with kb.connect() as conn:
+            task = kb.get_task(conn, task_id)
+            if task is None or task.status != "running":
+                return False
+            ok = kb.block_task(
+                conn,
+                task_id,
+                reason=_kanban_final_response_block_reason(final_response),
+                expected_run_id=expected_run_id,
+            )
+            if ok:
+                logger.warning(
+                    "Blocked Kanban task %s after final response without terminal call",
+                    task_id,
+                )
+            return bool(ok)
+    except Exception:
+        logger.warning(
+            "Failed to apply Kanban final-response terminal-call guard for task %s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+
+# Load .env from ~/.hermes/.env first, then project root as dev fallback.
+# User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.timeouts import (
     get_provider_request_timeout,

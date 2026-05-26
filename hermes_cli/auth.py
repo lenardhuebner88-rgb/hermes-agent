@@ -3195,6 +3195,12 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
         auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, "openai-codex")
     if not state:
+        # Profile processes should inherit global Codex auth when the profile
+        # has no local openai-codex state, matching other read-only auth paths.
+        global_state = _load_provider_state(_load_global_auth_store(), "openai-codex")
+        if global_state:
+            state = global_state
+    if not state:
         raise AuthError(
             "No Codex credentials stored. Run `hermes auth` to authenticate.",
             provider="openai-codex",

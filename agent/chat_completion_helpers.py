@@ -342,8 +342,15 @@ def interruptible_api_call(agent, api_kwargs: dict):
             break
 
         # Stale-call detector: kill the connection if no response
-        # arrives within the configured timeout.
-        if _elapsed > _stale_timeout:
+        # arrives within the configured timeout.  The Codex Responses path
+        # runs a real stream inside this non-streaming wrapper; for that path,
+        # treat fresh stream activity as progress and kill only on idle time
+        # (piet-fork v0.13 watchdog #6 + upstream silent-hang hint combined).
+        _idle_elapsed = time.time() - getattr(agent, "_last_activity_ts", _call_start)
+        _codex_stream_active = (
+            agent.api_mode == "codex_responses" and _idle_elapsed <= _stale_timeout
+        )
+        if _elapsed > _stale_timeout and not _codex_stream_active:
             _est_ctx = estimate_request_context_tokens(api_kwargs)
             _silent_hint: Optional[str] = None
             _hint_fn = getattr(agent, "_codex_silent_hang_hint", None)

@@ -3191,6 +3191,33 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
     return registered_names
 
 
+def _kanban_worker_allows_mcp_discovery() -> bool:
+    """Return whether the current context may start MCP discovery/lifecycle.
+
+    Kanban worker model schemas are already narrowed by
+    ``HERMES_KANBAN_EFFECTIVE_TOOLSETS`` in ``model_tools``. MCP is different
+    from ordinary in-process registry filtering because discovery can start
+    stdio/HTTP server lifecycles before schema filtering occurs. In worker
+    context, fail closed unless the validated effective allowlist explicitly
+    names at least one MCP tool (``mcp_*``).
+    """
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return True
+    raw = os.environ.get("HERMES_KANBAN_EFFECTIVE_TOOLSETS")
+    if raw is None:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return any(
+        isinstance(item, str) and item.strip().startswith("mcp_")
+        for item in parsed
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -3209,6 +3236,10 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     """
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping explicit MCP registration")
+        return []
+
+    if not _kanban_worker_allows_mcp_discovery():
+        logger.debug("Kanban worker effective tools do not allow MCP discovery -- skipping explicit MCP registration")
         return []
 
     if not servers:
@@ -3304,6 +3335,10 @@ def discover_mcp_tools() -> List[str]:
     """
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
+        return []
+
+    if not _kanban_worker_allows_mcp_discovery():
+        logger.debug("Kanban worker effective tools do not allow MCP discovery -- skipping MCP tool discovery")
         return []
 
     servers = _load_mcp_config()

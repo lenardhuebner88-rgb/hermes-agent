@@ -12,7 +12,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir, is_termux
+from hermes_constants import (
+    get_config_path,
+    get_default_hermes_root,
+    get_hermes_home,
+    get_skills_dir,
+    is_termux,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -324,14 +330,66 @@ def get_external_skills_dirs() -> List[Path]:
     return result
 
 
-def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+def get_trusted_shared_root_skills_dir(
+    local_skills_dir: Path | None = None,
+) -> Optional[Path]:
+    """Return the shared root skills dir for profile workers, if applicable.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    Profile workers run with ``HERMES_HOME=<root>/profiles/<profile>`` and
+    should first see their profile-local ``skills/`` overlay, then configured
+    external dirs, then the trusted shared root ``<root>/skills``.  This keeps
+    root skills as the SSoT without treating arbitrary paths as implicit
+    external skills.
     """
-    dirs = [get_skills_dir()]
+    hermes_home = get_hermes_home()
+    if hermes_home.parent.name != "profiles":
+        return None
+
+    shared = get_default_hermes_root() / "skills"
+    if not shared.is_dir():
+        return None
+
+    local = Path(local_skills_dir) if local_skills_dir is not None else get_skills_dir()
+    try:
+        if shared.resolve() == local.resolve():
+            return None
+    except OSError:
+        pass
+    return shared
+
+
+def get_all_skills_dirs(local_skills_dir: Path | None = None) -> List[Path]:
+    """Return skill search dirs in precedence order.
+
+    Order is profile/local ``skills/`` first, then configured
+    ``skills.external_dirs``, then the trusted shared root ``<root>/skills``
+    when running inside ``<root>/profiles/<profile>``.  The shared fallback is
+    intentionally profile-only and never replaces explicit external dirs.
+    """
+    local = Path(local_skills_dir) if local_skills_dir is not None else get_skills_dir()
+    dirs = [local]
     dirs.extend(get_external_skills_dirs())
+
+    shared = get_trusted_shared_root_skills_dir(local)
+    if shared is not None:
+        seen: Set[Path] = set()
+        unique: List[Path] = []
+        for d in dirs:
+            try:
+                key = d.resolve()
+            except OSError:
+                key = d
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(d)
+        try:
+            shared_key = shared.resolve()
+        except OSError:
+            shared_key = shared
+        if shared_key not in seen:
+            unique.append(shared)
+        dirs = unique
     return dirs
 
 

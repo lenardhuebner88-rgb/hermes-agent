@@ -870,6 +870,17 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = channel_prompts
                 if "gateway_restart_notification" in platform_cfg:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
+                if plat == Platform.API_SERVER:
+                    # API server historically accepted api_server.extra.model_name
+                    # (and some configs use api_server.model_name) but the
+                    # adapter only reads PlatformConfig.extra. Bridge that
+                    # surface-local value here without touching global
+                    # model.default used by other gateway surfaces.
+                    api_server_extra = platform_cfg.get("extra")
+                    if isinstance(api_server_extra, dict) and "model_name" in api_server_extra:
+                        bridged["model_name"] = api_server_extra["model_name"]
+                    elif "model_name" in platform_cfg:
+                        bridged["model_name"] = platform_cfg["model_name"]
                 enabled_was_explicit = "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
@@ -927,6 +938,95 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(ac, list):
                         ac = ",".join(str(v) for v in ac)
                     os.environ["SLACK_ALLOWED_CHANNELS"] = str(ac)
+
+            # Discord settings → env vars (env vars take precedence)
+            discord_cfg = yaml_cfg.get("discord", {})
+            if isinstance(discord_cfg, dict):
+                if "require_mention" in discord_cfg and not os.getenv("DISCORD_REQUIRE_MENTION"):
+                    os.environ["DISCORD_REQUIRE_MENTION"] = str(discord_cfg["require_mention"]).lower()
+                if "thread_require_mention" in discord_cfg and not os.getenv("DISCORD_THREAD_REQUIRE_MENTION"):
+                    os.environ["DISCORD_THREAD_REQUIRE_MENTION"] = str(discord_cfg["thread_require_mention"]).lower()
+                frc = discord_cfg.get("free_response_channels")
+                if frc is not None and not os.getenv("DISCORD_FREE_RESPONSE_CHANNELS"):
+                    if isinstance(frc, list):
+                        frc = ",".join(str(v) for v in frc)
+                    os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
+                if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
+                    os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+                if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
+                    os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
+                # ignored_channels: channels where bot never responds (even when mentioned)
+                ic = discord_cfg.get("ignored_channels")
+                if ic is not None and not os.getenv("DISCORD_IGNORED_CHANNELS"):
+                    if isinstance(ic, list):
+                        ic = ",".join(str(v) for v in ic)
+                    os.environ["DISCORD_IGNORED_CHANNELS"] = str(ic)
+                # allowed_channels: if set, bot ONLY responds in these channels (whitelist)
+                ac = discord_cfg.get("allowed_channels")
+                if ac is not None and not os.getenv("DISCORD_ALLOWED_CHANNELS"):
+                    if isinstance(ac, list):
+                        ac = ",".join(str(v) for v in ac)
+                    os.environ["DISCORD_ALLOWED_CHANNELS"] = str(ac)
+                # no_thread_channels: channels where bot responds directly without creating thread
+                ntc = discord_cfg.get("no_thread_channels")
+                if ntc is not None and not os.getenv("DISCORD_NO_THREAD_CHANNELS"):
+                    if isinstance(ntc, list):
+                        ntc = ",".join(str(v) for v in ntc)
+                    os.environ["DISCORD_NO_THREAD_CHANNELS"] = str(ntc)
+                # history_backfill: recover missed channel messages for shared sessions
+                # when require_mention is active.  Fetches messages between bot turns
+                # and prepends them to the user message for context.
+                if "history_backfill" in discord_cfg and not os.getenv("DISCORD_HISTORY_BACKFILL"):
+                    os.environ["DISCORD_HISTORY_BACKFILL"] = str(discord_cfg["history_backfill"]).lower()
+                hbl = discord_cfg.get("history_backfill_limit")
+                if hbl is not None and not os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT"):
+                    os.environ["DISCORD_HISTORY_BACKFILL_LIMIT"] = str(hbl)
+                # mention_required_channels: channels where bot demands an @-mention even
+                # when the global require_mention is false (Sprint 2P, 2026-05-16). Used
+                # to keep shared lanes (e.g. #hermes-koordinator) addressable only via
+                # explicit mention so Hub doesn't double-answer on every Human ping.
+                mrc = discord_cfg.get("mention_required_channels")
+                if mrc is not None and not os.getenv("DISCORD_MENTION_REQUIRED_CHANNELS"):
+                    if isinstance(mrc, list):
+                        mrc = ",".join(str(v) for v in mrc)
+                    os.environ["DISCORD_MENTION_REQUIRED_CHANNELS"] = str(mrc)
+                # inbound_stop_codes_csv: profile-specific Stop-Code-Inbound-Gate code list
+                # (Sprint 2-Main / T1, 2026-05-16). Bridges to the same env-var the
+                # Hub-side discord.py:782 already reads (HERMES_DISCORD_INBOUND_STOP_CODES);
+                # different profiles (Hub vs Coordinator) have different config.yaml
+                # files, so each process sets its own env at boot.  Coordinator profile
+                # ships with the §6.1 Outbound-Code list so it accepts the codes Hub
+                # sends towards it; the bare Default-Liste in discord.py remains the
+                # §6.2 Inbound-Code list used by Hub.
+                isc = discord_cfg.get("inbound_stop_codes_csv")
+                if isc is not None and not os.getenv("HERMES_DISCORD_INBOUND_STOP_CODES"):
+                    if isinstance(isc, list):
+                        isc = ",".join(str(v) for v in isc)
+                    os.environ["HERMES_DISCORD_INBOUND_STOP_CODES"] = str(isc)
+                # allow_mentions: granular control over what the bot can ping.
+                # Safe defaults (no @everyone/roles) are applied in the adapter;
+                # these YAML keys only override when set and let users opt back
+                # into unsafe modes (e.g. roles=true) if they actually want it.
+                allow_mentions_cfg = discord_cfg.get("allow_mentions")
+                if isinstance(allow_mentions_cfg, dict):
+                    for yaml_key, env_key in (
+                        ("everyone", "DISCORD_ALLOW_MENTION_EVERYONE"),
+                        ("roles", "DISCORD_ALLOW_MENTION_ROLES"),
+                        ("users", "DISCORD_ALLOW_MENTION_USERS"),
+                        ("replied_user", "DISCORD_ALLOW_MENTION_REPLIED_USER"),
+                    ):
+                        if yaml_key in allow_mentions_cfg and not os.getenv(env_key):
+                            os.environ[env_key] = str(allow_mentions_cfg[yaml_key]).lower()
+                # reply_to_mode: top-level preferred, falls back to extra.reply_to_mode
+                # YAML 1.1 parses bare 'off' as boolean False — coerce to string "off".
+                _discord_extra = discord_cfg.get("extra") if isinstance(discord_cfg.get("extra"), dict) else {}
+                _discord_rtm = (
+                    discord_cfg["reply_to_mode"] if "reply_to_mode" in discord_cfg
+                    else _discord_extra.get("reply_to_mode")
+                )
+                if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
+                    _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
+                    os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
 
             # Bridge top-level require_mention to Telegram when the telegram: section
             # does not already provide one.  Users often write "require_mention: true"

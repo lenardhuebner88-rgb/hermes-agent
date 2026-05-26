@@ -30,6 +30,35 @@ def test_local_only_helper_returns_true_for_local_env():
     assert fops._lsp_local_only() is True
 
 
+def test_local_only_helper_returns_false_for_default_gateway(monkeypatch, tmp_path):
+    from tools.environments.local import LocalEnvironment
+    from tools.file_operations import ShellFileOperations
+
+    root = tmp_path / ".hermes"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: root)
+
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    assert fops._lsp_local_only() is False
+
+
+def test_local_only_helper_allows_named_profile_gateway(monkeypatch, tmp_path):
+    from tools.environments.local import LocalEnvironment
+    from tools.file_operations import ShellFileOperations
+
+    root = tmp_path / ".hermes"
+    profile_home = root / "profiles" / "worker"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: profile_home)
+
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    assert fops._lsp_local_only() is True
+
+
 def test_local_only_helper_returns_false_for_non_local_env():
     """A mocked non-local env (Docker/Modal/SSH stand-in) returns False."""
     from tools.file_operations import ShellFileOperations

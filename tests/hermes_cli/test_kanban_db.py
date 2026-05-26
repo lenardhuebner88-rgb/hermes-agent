@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hermes_cli import kanban_db as kb
 
@@ -178,6 +180,94 @@ def test_create_task_unknown_parent_errors(kanban_home):
         kb.create_task(conn, title="orphan", parents=["t_ghost"])
 
 
+def test_terminalize_superseded_noop_marks_reviewer_done_and_records_metadata(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Obsolete reviewer", assignee="reviewer")
+
+        result = kb.terminalize_superseded_noop(
+            conn,
+            tid,
+            reason="coordinator finalization",
+            superseded_by="t_approved1",
+        )
+
+        assert result["ok"] is True
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "done"
+        assert task.current_run_id is None
+        assert task.result == "superseded/noop: coordinator finalization"
+        run = kb.latest_run(conn, tid)
+        assert run is not None
+        assert run.outcome == "completed"
+        assert run.metadata == {
+            "lifecycle_outcome": "superseded_noop",
+            "noop_reason": "coordinator finalization",
+            "superseded_by": "t_approved1",
+        }
+        events = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "superseded_noop_terminalized"
+        ]
+        assert len(events) == 1
+        assert events[0].payload is not None
+        assert events[0].payload["previous_status"] == "ready"
+
+
+def test_terminalize_superseded_noop_is_idempotent(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Obsolete reviewer", assignee="reviewer")
+
+        first = kb.terminalize_superseded_noop(
+            conn,
+            tid,
+            reason="coordinator finalization",
+            superseded_by="t_approved1",
+        )
+        second = kb.terminalize_superseded_noop(
+            conn,
+            tid,
+            reason="coordinator finalization",
+            superseded_by="t_approved1",
+        )
+
+        assert first["ok"] is True
+        assert second["ok"] is True
+        assert second["idempotent"] is True
+        events = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "superseded_noop_terminalized"
+        ]
+        assert len(events) == 1
+
+
+def test_terminalize_superseded_noop_refuses_running_reviewer(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Running reviewer", assignee="reviewer")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+
+        result = kb.terminalize_superseded_noop(
+            conn,
+            tid,
+            reason="coordinator finalization",
+            superseded_by="t_approved1",
+        )
+
+        assert result == {
+            "ok": False,
+            "task_id": tid,
+            "error": "unsupported_status",
+            "previous_status": "running",
+        }
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "running"
+        assert kb.active_run(conn, tid) is not None
+
+
 def test_workspace_kind_validation(kanban_home):
     with kb.connect() as conn, pytest.raises(ValueError, match="workspace_kind"):
         kb.create_task(conn, title="bad ws", workspace_kind="cloud")
@@ -210,6 +300,216 @@ def test_branch_name_requires_worktree_workspace(kanban_home):
             workspace_kind="scratch",
             branch_name="wt/bad",
         )
+
+
+# ---------------------------------------------------------------------------
+# Transactional profile model config primitive
+# ---------------------------------------------------------------------------
+
+
+def _write_profile_config(home: Path, profile: str, text: str) -> Path:
+    if profile == "default":
+        cfg = home / "config.yaml"
+    else:
+        cfg = home / "profiles" / profile / "config.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(text, encoding="utf-8")
+    return cfg
+
+
+def test_kanban_update_profile_model_success_receipt_and_allowed_keys(kanban_home):
+    cfg = _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  default: old-model\n  provider: old-provider\ntoolsets:\n  - kanban\n",
+    )
+
+    receipt = kb.kanban_update_profile_model("coder", "openai-codex", "gpt-5.5")
+    parsed = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+
+    assert parsed["model"] == {"default": "gpt-5.5", "provider": "openai-codex"}
+    assert parsed["toolsets"] == ["kanban"]
+    assert receipt["profile"] == "coder"
+    assert receipt["changed_file"] == str(cfg)
+    assert Path(receipt["backup_path"]).read_text(encoding="utf-8").startswith("model:\n")
+    assert receipt["pre_values"] == {
+        "model.default": "old-model",
+        "model.provider": "old-provider",
+    }
+    assert receipt["post_values"] == {
+        "model.default": "gpt-5.5",
+        "model.provider": "openai-codex",
+    }
+    assert receipt["changed_keys"] == ["model.default", "model.provider"]
+    assert receipt["parse_status"] == {"pre": "ok", "post": "ok"}
+    assert receipt["rollback_status"] == "not_needed"
+    assert "no_gateway_restart" in receipt["non_actions"]
+
+
+def test_kanban_update_profile_model_rejects_unknown_profile(kanban_home):
+    with pytest.raises(ValueError, match="does not exist"):
+        kb.kanban_update_profile_model("ghost", "openrouter", "model-x")
+
+
+def test_kanban_update_profile_model_rejects_symlinked_config_path(kanban_home, tmp_path):
+    profile_dir = kanban_home / "profiles" / "coder"
+    profile_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-config.yaml"
+    outside.write_text("model:\n  default: old\n  provider: old\n", encoding="utf-8")
+    (profile_dir / "config.yaml").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symlinked profile config"):
+        kb.kanban_update_profile_model("coder", "openrouter", "new-model")
+    assert outside.read_text(encoding="utf-8") == "model:\n  default: old\n  provider: old\n"
+
+
+def test_kanban_update_profile_model_invalid_yaml_preserves_file_and_writes_backup(kanban_home):
+    cfg = _write_profile_config(kanban_home, "coder", "model: [unterminated\n")
+
+    with pytest.raises(ValueError, match="failed to parse YAML"):
+        kb.kanban_update_profile_model("coder", "openrouter", "new-model")
+
+    assert cfg.read_text(encoding="utf-8") == "model: [unterminated\n"
+    backups = sorted(cfg.parent.glob("config.yaml.bak.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "model: [unterminated\n"
+
+
+def test_transactional_profile_config_update_rejects_unknown_key(kanban_home):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  default: old\n  provider: old\n",
+    )
+
+    with pytest.raises(ValueError, match="unsupported key"):
+        kb._transactional_update_profile_config(
+            "coder",
+            {"model.temperature": 0.2},
+            allowed_keys=kb.PROFILE_MODEL_CONFIG_KEYS,
+        )
+
+
+def test_kanban_update_profile_model_rolls_back_on_semantic_failure(kanban_home):
+    cfg = _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  default: old\n  provider: old\nextra: keep\n",
+    )
+
+    def fail_postcheck(_post_cfg):
+        raise ValueError("forced semantic failure")
+
+    with pytest.raises(RuntimeError, match="rolled_back"):
+        kb.kanban_update_profile_model(
+            "coder", "openrouter", "new-model", _postcheck=fail_postcheck
+        )
+
+    assert cfg.read_text(encoding="utf-8") == "model:\n  default: old\n  provider: old\nextra: keep\n"
+
+
+def _hub_plan_spec(workflow_id="wf-kernel-gate"):
+    return {
+        "workflow_id": workflow_id,
+        "source_role": "hub",
+        "goal": "enforce coordinator handoff gate in kernel",
+        "risk_class": "low",
+        "scope_contract": {
+            "version": 2,
+            "allowed_systems": ["hermes-agent", "hermes-kanban"],
+            "forbidden_systems": ["OpenClaw", "Atlas", "Mission-Control", "Telegram"],
+        },
+    }
+
+
+def _approved_reviewer_metadata(workflow_id="wf-kernel-gate"):
+    return {
+        "workflow_id": workflow_id,
+        "verdict": "APPROVED",
+        "evidence_audited": ["hub_plan_spec", "tests"],
+        "residual_risk": "none for hermes-only kernel gate test",
+        "scope_attestation": True,
+        "scope_contract_version": 2,
+        "forbidden_actions_taken": 0,
+    }
+
+
+def _control_plane_gate(**overrides):
+    hub_plan = _hub_plan_spec()
+    gate = {
+        "hub_plan_spec": hub_plan,
+        "reviewer_metadata": _approved_reviewer_metadata(),
+        "coordinator_plan_spec": {**hub_plan, "workflow_id": "wf-kernel-gate-coordinator"},
+        "mechanical_fields": ["workflow_id"],
+    }
+    gate.update(overrides)
+    return gate
+
+
+def test_create_coordinator_task_blocks_without_control_plane_gate(kanban_home):
+    with kb.connect() as conn, pytest.raises(ValueError, match="control_plane_gate"):
+        kb.create_task(conn, title="coordinator bypass", assignee="coordinator")
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+def test_create_coordinator_task_blocks_without_approved_reviewer_metadata(kanban_home):
+    rejected_gate = _control_plane_gate(
+        reviewer_metadata={**_approved_reviewer_metadata(), "verdict": "NEEDS_REVISION"}
+    )
+
+    with kb.connect() as conn, pytest.raises(ValueError, match="reviewer_verdict_not_approved"):
+        kb.create_task(
+            conn,
+            title="coordinator bypass",
+            assignee="coordinator",
+            control_plane_gate=rejected_gate,
+        )
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("goal", "expanded goal"),
+    ("risk_class", "medium"),
+    ("scope_contract", {"version": 2, "forbidden_systems": ["OpenClaw"]}),
+])
+def test_create_coordinator_task_blocks_substantive_plan_change(kanban_home, field, value):
+    changed = {**_hub_plan_spec(), field: value}
+
+    with kb.connect() as conn, pytest.raises(ValueError, match=field):
+        kb.create_task(
+            conn,
+            title="coordinator bypass",
+            assignee="coordinator",
+            control_plane_gate=_control_plane_gate(coordinator_plan_spec=changed),
+        )
+
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn, assignee="coordinator") == []
+
+
+def test_create_coordinator_task_accepts_mechanical_normalization_and_records_diffs(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="coordinator gated",
+            assignee="coordinator",
+            control_plane_gate=_control_plane_gate(),
+        )
+        task = kb.get_task(conn, tid)
+        comments = kb.list_comments(conn, tid)
+
+    assert task is not None
+    assert task.assignee == "coordinator"
+    assert len(comments) == 1
+    assert comments[0].author == "control-plane-gate"
+    payload = json.loads(comments[0].body)
+    assert payload["control_plane_gate"]["mechanical_diffs"] == {
+        "workflow_id": {"from": "wf-kernel-gate", "to": "wf-kernel-gate-coordinator"}
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1282,75 @@ def test_events_capture_lifecycle(kanban_home):
     assert "completed" in kinds
 
 
+def test_block_event_can_link_context_comment(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked context", assignee="a")
+        kb.claim_task(conn, t)
+        comment_id = kb.add_comment(
+            conn,
+            t,
+            "worker",
+            "Detailed blocker context: checked inputs A and B; need Piet to choose C.",
+        )
+
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Need Piet to choose C; see context comment.",
+            context_comment_id=comment_id,
+        )
+
+        blocked = [e for e in kb.list_events(conn, t) if e.kind == "blocked"][-1]
+
+    assert blocked.payload["reason"] == "Need Piet to choose C; see context comment."
+    assert blocked.payload["context_comment_id"] == comment_id
+    assert blocked.payload["context_snippet"].startswith("Detailed blocker context")
+
+
+def test_terminal_events_include_run_outcome_profile_and_handoff(kanban_home):
+    with kb.connect() as conn:
+        done_task = kb.create_task(conn, title="done", assignee="alice")
+        kb.claim_task(conn, done_task)
+        assert kb.complete_task(conn, done_task, summary="finished cleanly")
+        completed = [e for e in kb.list_events(conn, done_task) if e.kind == "completed"][-1]
+
+        blocked_task = kb.create_task(conn, title="blocked", assignee="bob")
+        kb.claim_task(conn, blocked_task)
+        assert kb.block_task(conn, blocked_task, reason="need decision")
+        blocked = [e for e in kb.list_events(conn, blocked_task) if e.kind == "blocked"][-1]
+
+    assert completed.run_id is not None
+    assert completed.payload["run_id"] == completed.run_id
+    assert completed.payload["outcome"] == "completed"
+    assert completed.payload["profile"] == "alice"
+    assert completed.payload["summary"] == "finished cleanly"
+    assert completed.payload["ended_at"] is not None
+
+    assert blocked.run_id is not None
+    assert blocked.payload["run_id"] == blocked.run_id
+    assert blocked.payload["outcome"] == "blocked"
+    assert blocked.payload["profile"] == "bob"
+    assert blocked.payload["summary"] == "need decision"
+    assert blocked.payload["ended_at"] is not None
+
+
+def test_spawn_failure_terminal_event_includes_error_and_outcome(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="spawn failure", assignee="coder")
+        kb.claim_task(conn, t)
+
+        kb._record_spawn_failure(conn, t, "No Codex credentials stored", failure_limit=3)
+
+        event = [e for e in kb.list_events(conn, t) if e.kind == "spawn_failed"][-1]
+
+    assert event.run_id is not None
+    assert event.payload["run_id"] == event.run_id
+    assert event.payload["outcome"] == "spawn_failed"
+    assert event.payload["profile"] == "coder"
+    assert event.payload["error"] == "No Codex credentials stored"
+    assert event.payload["ended_at"] is not None
+
+
 def test_worker_context_includes_parent_results_and_comments(kanban_home):
     with kb.connect() as conn:
         p = kb.create_task(conn, title="p")
@@ -993,6 +1362,302 @@ def test_worker_context_includes_parent_results_and_comments(kanban_home):
     assert "CLARIFICATION_MARKER" in ctx
     assert c in ctx
     assert "child" in ctx
+
+
+def test_complete_task_requires_scope_attestation_metadata_when_policy_enabled(kanban_home):
+    body = """
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="scoped", assignee="alice", body=body)
+        with pytest.raises(kb.ScopeAttestationError, match="scope attestation"):
+            kb.complete_task(conn, t, summary="done", metadata={})
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "completion_blocked_scope_attestation"]
+        assert events
+
+
+def test_complete_task_accepts_valid_scope_attestation_metadata(kanban_home):
+    body = """
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="scoped", assignee="alice", body=body)
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="done",
+            metadata={
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+            },
+        )
+        assert kb.get_task(conn, t).status == "done"
+
+
+def _append_tool_call_evidence(home: Path, profile: str, session_id: str, *, path: str) -> None:
+    from hermes_state import SessionDB
+
+    db = SessionDB(home / "profiles" / profile / "state.db")
+    db.create_session(session_id, source="cli")
+    db.append_message(
+        session_id,
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "call_search_receipts",
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "arguments": json.dumps({
+                        "path": path,
+                        "pattern": "*",
+                        "target": "files",
+                    }),
+                },
+            }
+        ],
+    )
+    db.append_message(
+        session_id,
+        role="tool",
+        tool_name="search_files",
+        tool_call_id="call_search_receipts",
+        content=json.dumps({"total_count": 1, "files": [f"{path.rstrip('/')}/receipt.md"]}),
+    )
+
+
+def _file_evidence_task_body(path: str) -> str:
+    return f"""
+scope_contract:
+  version: 2
+  allowed_tools: [kanban_show, search_files, kanban_complete, kanban_block]
+completion_policy:
+  require_scope_attestation: true
+  required_tool_evidence:
+    - tool: search_files
+      path: {path}
+      target: files
+      same_worker_session: true
+"""
+
+
+def _file_evidence_metadata(worker_session_id: str) -> dict:
+    return {
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+        "effective_toolsets": ["kanban_show", "search_files", "kanban_complete", "kanban_block"],
+        "worker_session_id": worker_session_id,
+    }
+
+
+def test_required_tool_evidence_profile_state_db_rejects_profile_path_traversal(kanban_home):
+    assert kb._profile_state_db_path("../alice") is None
+    assert kb._profile_state_db_path("alice/bob") is None
+    assert kb._profile_state_db_path(r"alice\bob") is None
+
+
+def test_complete_task_blocks_required_file_evidence_missing_from_worker_session(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "completion_blocked_missing_tool_evidence"]
+        assert events
+        assert events[-1].payload["worker_session_id"] == "worker-session"
+
+
+def test_complete_task_rejects_parent_session_file_evidence(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "parent-session", path=receipts)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_complete_task_accepts_same_worker_session_file_evidence(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "worker-session", path=receipts)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        assert kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+        assert kb.get_task(conn, t).status == "done"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "completion_required_tool_evidence_verified"]
+        assert events
+        assert events[-1].payload["worker_session_id"] == "worker-session"
+
+
+def test_complete_task_rejects_required_file_evidence_wrong_path(kanban_home):
+    receipts = "/home/piet/vault/03-Agents/Hermes/receipts/"
+    _append_tool_call_evidence(kanban_home, "alice", "worker-session", path="/home/piet/vault/03-Agents/Hermes/plans/")
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="file evidence", assignee="alice", body=_file_evidence_task_body(receipts))
+        with pytest.raises(kb.ScopeAttestationError, match="required_tool_evidence"):
+            kb.complete_task(conn, t, summary="done", metadata=_file_evidence_metadata("worker-session"))
+
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_scope_attestation_policy_uses_outer_contract_after_embedded_child_template(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+workflow_id: wf-test
+
+Reviewer task body template:
+---REVIEWER_BODY_START---
+scope_contract:
+  version: 2
+  assignee: reviewer
+  allowed_tools: [kanban_show, kanban_complete, kanban_block, kanban_comment]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+completion_policy:
+  require_scope_attestation: true
+---REVIEWER_BODY_END---
+
+scope_contract:
+  version: 2
+  assignee: coordinator
+  allowed_tools: [kanban_show, kanban_create, kanban_complete, kanban_block, kanban_comment]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+completion_policy:
+  require_scope_attestation: true
+"""
+    expected_tools = [
+        "kanban_show",
+        "kanban_create",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_comment",
+    ]
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="coordinator with embedded reviewer",
+            assignee="coordinator",
+            body=body,
+            internal_test_bypass_control_plane_gate=True,
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 43210)
+        assert [item[0] for item in res.spawned] == [t]
+
+        passed = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert passed[-1].payload["effective_toolsets"] == expected_tools
+
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="reviewer verdict collected",
+            metadata={
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+                "effective_toolsets": expected_tools,
+                "reviewer_verdict": {"verdict": "APPROVED"},
+            },
+        )
+        assert kb.get_task(conn, t).status == "done"
+
+
+def test_scope_attestation_policy_accepts_yaml_frontmatter(kanban_home):
+    body = """---
+completion_policy:
+  require_scope_attestation: true
+---
+
+Worker task body.
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="frontmatter scoped", assignee="alice", body=body)
+        with pytest.raises(kb.ScopeAttestationError):
+            kb.complete_task(conn, t, summary="done", metadata={})
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_scope_attestation_policy_accepts_fenced_yaml(kanban_home):
+    body = """Task contract:
+
+```yaml
+completion_policy:
+  require_scope_attestation: true
+scope_contract:
+  version: 2
+```
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="fenced scoped", assignee="alice", body=body)
+        with pytest.raises(kb.ScopeAttestationError):
+            kb.complete_task(conn, t, summary="done", metadata={})
+        assert kb._task_has_scope_contract_v2(body)
+
+
+def test_scope_attestation_policy_malformed_yaml_does_not_enforce_or_crash(kanban_home):
+    body = """
+completion_policy:
+  require_scope_attestation: [true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="malformed scoped", assignee="alice", body=body)
+        assert kb.complete_task(conn, t, summary="done", metadata={})
+        assert kb.get_task(conn, t).status == "done"
+
+
+def test_scope_attestation_policy_ignores_false_positive_inline_string(kanban_home):
+    body = "Please write about completion_policy: require_scope_attestation: true in the report."
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="false positive", assignee="alice", body=body)
+        assert kb.complete_task(conn, t, summary="done", metadata={})
+        assert kb.get_task(conn, t).status == "done"
+
+
+def test_scope_attestation_policy_respects_false_value(kanban_home):
+    body = """
+completion_policy:
+  require_scope_attestation: false
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="false policy", assignee="alice", body=body)
+        assert kb.complete_task(conn, t, summary="done", metadata={})
+        assert kb.get_task(conn, t).status == "done"
+
+
+def test_block_task_allows_admin_block_for_todo_and_triage(kanban_home):
+    with kb.connect() as conn:
+        triage = kb.create_task(conn, title="triage fixture", assignee="alice", triage=True)
+        todo = kb.create_task(conn, title="todo fixture", assignee="alice", parents=[triage])
+
+        assert kb.block_task(conn, triage, reason="superseded fixture")
+        assert kb.block_task(conn, todo, reason="superseded fixture")
+
+        assert kb.get_task(conn, triage).status == "blocked"
+        assert kb.get_task(conn, todo).status == "blocked"
+        for task_id in (triage, todo):
+            events = [e for e in kb.list_events(conn, task_id) if e.kind == "blocked"]
+            assert events
+            assert kb.latest_run(conn, task_id).outcome == "blocked"
+
+
+def test_block_task_with_expected_run_id_still_rejects_unclaimed_todo(kanban_home):
+    with kb.connect() as conn:
+        triage = kb.create_task(conn, title="parent", assignee="alice", triage=True)
+        todo = kb.create_task(conn, title="child", assignee="alice", parents=[triage])
+        assert not kb.block_task(conn, todo, reason="worker block", expected_run_id=12345)
+        assert kb.get_task(conn, todo).status == "todo"
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1753,685 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
+def test_dispatch_auto_continues_iteration_budget_block_once(
+    kanban_home, all_assignees_spawnable
+):
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="resume me", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        assert res.auto_continued == [t]
+        assert spawns == [t]
+        assert kb.get_task(conn, t).status == "running"
+
+        comments = kb.list_comments(conn, t)
+        assert len(comments) == 1
+        assert "Iteration budget exhausted (60/60)" in comments[0].body
+        assert "Resume from the previous worker checkpoint" in comments[0].body
+
+        events = kb.list_events(conn, t)
+        auto_event = next(
+            e for e in events if e.kind == "dispatch_auto_continued_iteration_budget"
+        )
+        assert auto_event.run_id == run.id
+        assert auto_event.payload["previous_run_id"] == run.id
+        assert auto_event.payload["continuation_index"] == 1
+        assert auto_event.payload["continuation_limit"] == 1
+        assert auto_event.payload["checkpoint_comment_id"] == comments[0].id
+
+
+
+def test_dispatch_creates_independent_reviewer_for_review_required_block(
+    kanban_home, all_assignees_spawnable
+):
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+        return 0
+
+    body = """
+scope_contract:
+  version: 2
+  assignee: coder
+  allowed_tools: [kanban_show, read_file, search_files, patch, write_file, kanban_comment, kanban_complete, kanban_block]
+  allowed_paths:
+    - /tmp/repo/**
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+completion_policy:
+  require_scope_attestation: true
+"""
+
+    with kb.connect() as conn:
+        source = kb.create_task(
+            conn,
+            title="implement feature",
+            assignee="coder",
+            body=body,
+            workspace_kind="dir",
+            workspace_path="/tmp/repo",
+        )
+        context_comment_id = kb.add_comment(
+            conn,
+            source,
+            "coder",
+            "review handoff context with diff/test evidence",
+        )
+        kb.claim_task(conn, source)
+        run = kb.active_run(conn, source)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            source,
+            reason="review-required: feature shipped",
+            expected_run_id=run.id,
+            context_comment_id=context_comment_id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        reviewers = [t for t in kb.list_tasks(conn, assignee="reviewer") if t.created_by == "dispatcher"]
+        assert len(reviewers) == 1
+        reviewer = reviewers[0]
+        assert res.spawned == [(reviewer.id, "reviewer", "/tmp/repo")]
+        assert spawns == [reviewer.id]
+        assert reviewer.workspace_kind == "dir"
+        assert reviewer.workspace_path == "/tmp/repo"
+        assert kb.parent_ids(conn, reviewer.id) == []
+        assert f"source_task: {source}" in (reviewer.body or "")
+        assert f"source_run_id: {run.id}" in (reviewer.body or "")
+        assert f"context_comment_id: {context_comment_id}" in (reviewer.body or "")
+        assert "source remains blocked pending explicit Coordinator/Admin finalization" in (
+            reviewer.body or ""
+        )
+
+        handoff_events = [
+            e
+            for e in kb.list_events(conn, source)
+            if e.kind == "dispatch_review_required_handoff_created"
+        ]
+        assert len(handoff_events) == 1
+        assert handoff_events[0].run_id == run.id
+        assert handoff_events[0].payload["source_task"] == source
+        assert handoff_events[0].payload["source_run_id"] == run.id
+        assert handoff_events[0].payload["context_comment_id"] == context_comment_id
+        assert handoff_events[0].payload["reviewer_task_id"] == reviewer.id
+        assert handoff_events[0].payload["blocked_source_parent_edge"] is False
+
+        source_comments = kb.list_comments(conn, source)
+        assert source_comments[-1].author == "kanban-dispatcher"
+        assert reviewer.id in source_comments[-1].body
+        assert "no auto-completion" in source_comments[-1].body
+
+        assert kb.complete_task(
+            conn,
+            reviewer.id,
+            summary="verdict: APPROVED",
+            metadata={
+                "scope_contract_read": True,
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+                "verdict": "APPROVED",
+                "blocking_findings": [],
+                "required_verification": [],
+                "evidence_audited": [source, reviewer.id],
+                "residual_risk": "local finalization remains explicit",
+                "effective_toolsets": [
+                    "skill_view",
+                    "kanban_show",
+                    "read_file",
+                    "search_files",
+                    "kanban_run_workspace_command",
+                    "kanban_comment",
+                    "kanban_complete",
+                    "kanban_block",
+                ],
+            },
+        )
+
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.get_task(conn, source).status == "blocked"
+
+
+
+def test_superseding_review_rewire_helper_is_explicit_and_audited(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="source waiting on old review", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+        kb.link_tasks(conn, old_review, source)
+
+        result = kb.rewire_superseding_review_parent(
+            conn,
+            source_task=source,
+            old_review_task=old_review,
+            new_review_task=new_review,
+            reason="NEEDS_REVISION fixed and re-reviewed",
+        )
+
+        assert result == {
+            "source_task": source,
+            "old_review_task": old_review,
+            "new_review_task": new_review,
+            "old_parent_removed": True,
+            "new_parent_added": True,
+            "reason": "NEEDS_REVISION fixed and re-reviewed",
+        }
+        assert kb.parent_ids(conn, source) == [new_review]
+        events = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "superseding_review_rewired"
+        ]
+        assert len(events) == 1
+        assert events[0].payload == result
+
+
+def test_superseding_review_rewire_is_noop_without_old_edge(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="source", assignee="coder")
+        old_review = kb.create_task(conn, title="old review", assignee="reviewer")
+        new_review = kb.create_task(conn, title="new review", assignee="reviewer")
+
+        result = kb.rewire_superseding_review_parent(
+            conn,
+            source_task=source,
+            old_review_task=old_review,
+            new_review_task=new_review,
+            reason="operator requested audit-only check",
+        )
+
+        assert result["old_parent_removed"] is False
+        assert result["new_parent_added"] is True
+        assert kb.parent_ids(conn, source) == [new_review]
+        event = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "superseding_review_rewired"
+        ][-1]
+        assert event.payload["old_parent_removed"] is False
+        assert event.payload["new_parent_added"] is True
+
+
+def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_blocked(kanban_home):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="implement lifecycle", assignee="coder")
+        kb.claim_task(conn, source)
+        run = kb.active_run(conn, source)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            source,
+            reason="review-required: implementation ready for verdict",
+            expected_run_id=run.id,
+        )
+        old_review = kb.create_task(conn, title="review implementation", assignee="reviewer")
+        reviewer_metadata = {
+            "verdict": "NEEDS_REVISION",
+            "blocking_findings": ["missing supersedes relation"],
+            "required_verification": ["pytest tests/hermes_cli/test_kanban_db.py -q"],
+            "evidence_audited": [source, old_review],
+            "residual_risk": "source must remain blocked until finalization gate",
+        }
+
+        first = kb.ensure_needs_revision_fix_task(
+            conn,
+            source_task=source,
+            review_task=old_review,
+            reviewer_metadata=reviewer_metadata,
+            reason="Reviewer requested deterministic fix",
+        )
+        second = kb.ensure_needs_revision_fix_task(
+            conn,
+            source_task=source,
+            review_task=old_review,
+            reviewer_metadata=reviewer_metadata,
+            reason="Reviewer requested deterministic fix",
+        )
+
+        assert second == first
+        fix = kb.get_task(conn, first["fix_task"])
+        assert fix is not None
+        assert fix.assignee == "coder"
+        assert fix.status == "ready"
+        assert kb.parent_ids(conn, fix.id) == []
+        assert "verdict: NEEDS_REVISION" in (fix.body or "")
+        assert "source remains blocked" in (fix.body or "")
+        assert kb.get_task(conn, source).status == "blocked"
+        events = [
+            e for e in kb.list_events(conn, source)
+            if e.kind == "needs_revision_fix_task_ensured"
+        ]
+        assert len(events) == 1
+        assert events[0].payload["source_task"] == source
+        assert events[0].payload["review_task"] == old_review
+        assert events[0].payload["fix_task"] == fix.id
+        assert events[0].payload["created"] is True
+
+
+
+def test_dispatch_iteration_budget_continuation_cap_blocks_loop(
+    kanban_home, all_assignees_spawnable
+):
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="bounded continuation", assignee="alice")
+        kb.claim_task(conn, t)
+        first_run = kb.active_run(conn, t)
+        assert first_run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+            expected_run_id=first_run.id,
+        )
+
+        first_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert first_dispatch.auto_continued == [t]
+        assert spawns == [t]
+
+        second_run = kb.active_run(conn, t)
+        assert second_run is not None
+        assert second_run.id != first_run.id
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+            expected_run_id=second_run.id,
+        )
+
+        second_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert second_dispatch.auto_continued == []
+        assert second_dispatch.continuation_capped == [t]
+        assert kb.get_task(conn, t).status == "blocked"
+        assert spawns == [t]
+
+        comments = kb.list_comments(conn, t)
+        assert len(comments) == 2
+        assert "Coordinator/Human review required" in comments[-1].body
+
+        events = kb.list_events(conn, t)
+        capped_event = next(
+            e for e in events if e.kind == "dispatch_iteration_budget_continuation_capped"
+        )
+        assert capped_event.run_id == second_run.id
+        assert capped_event.payload["previous_run_id"] == second_run.id
+        assert capped_event.payload["continuation_limit"] == 1
+
+        repeat_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert repeat_dispatch.continuation_capped == []
+        assert len(kb.list_comments(conn, t)) == 2
+        assert len(
+            [
+                e
+                for e in kb.list_events(conn, t)
+                if e.kind == "dispatch_iteration_budget_continuation_capped"
+            ]
+        ) == 1
+
+
+
+def test_dispatch_ignores_non_budget_blocks(kanban_home, all_assignees_spawnable):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs human", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Need a human decision on the rollout plan",
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
+def test_dispatch_does_not_auto_continue_substring_only_budget_mentions(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="human triage", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Need triage: prior run said Iteration budget exhausted (60/60), but this block is for policy approval",
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
+def test_dispatch_does_not_auto_continue_substring_neighbor_even_with_budget_marker(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="substring-neighbor", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations; awaiting policy approval"
+            ),
+            block_type="iteration_budget_exhausted",
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
+def test_dispatch_does_not_auto_continue_canonical_budget_reason_with_non_budget_block_type(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="canonical-non-budget-marker", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+            block_type="human_review_needed",
+            expected_run_id=run.id,
+        )
+
+        blocked = [e for e in kb.list_events(conn, t) if e.kind == "blocked"][-1]
+        assert blocked.payload.get("reason", "").startswith("Iteration budget exhausted")
+        assert blocked.payload.get("block_type") == "human_review_needed"
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
+def test_dispatch_does_not_auto_continue_review_required_budget_phrase(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review-needed", assignee="coder")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "review-required: Iteration budget exhausted (60/60) — "
+                "task could not complete within the allowed iterations"
+            ),
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert t not in [task_id for task_id, _assignee, _workspace in res.spawned]
+        assert [
+            e
+            for e in kb.list_events(conn, t)
+            if e.kind == "dispatch_auto_continued_iteration_budget"
+        ] == []
+        assert not any(
+            "dispatcher auto-continuation checkpoint" in c.body
+            for c in kb.list_comments(conn, t)
+        )
+
+
+def test_dispatch_does_not_auto_continue_budget_warning_strings(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="warning only", assignee="alice")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Iteration budget warning (60/60)",
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.list_comments(conn, t) == []
+
+
+
+def test_dispatch_does_not_reopen_budget_block_when_parents_are_undone(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        child = kb.create_task(
+            conn,
+            title="child",
+            assignee="bob",
+            parents=[parent],
+        )
+        archived = kb.create_task(conn, title="archived", assignee="carol")
+        assert kb.archive_task(conn, archived)
+
+        assert kb.get_task(conn, child).status == "todo"
+        assert kb.block_task(
+            conn,
+            child,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+
+        assert res.auto_continued == []
+        assert res.continuation_capped == []
+        assert kb.get_task(conn, child).status == "blocked"
+        assert kb.list_comments(conn, child) == []
+        assert kb.get_task(conn, archived).status == "archived"
+
+
+
+def test_dispatch_ignores_non_review_required_blocks(kanban_home, all_assignees_spawnable):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs human", assignee="coder")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Need a human decision on the rollout plan",
+            expected_run_id=run.id,
+        )
+
+        kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+
+        assert kb.list_tasks(conn, assignee="reviewer") == []
+        assert [
+            e for e in kb.list_events(conn, t) if e.kind == "dispatch_review_required_handoff_created"
+        ] == []
+
+
+
+def test_dispatch_review_required_handoff_is_idempotent_per_blocked_run(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="ship patch", assignee="coder")
+        kb.claim_task(conn, t)
+        run = kb.active_run(conn, t)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            t,
+            reason="review-required: patch shipped",
+            expected_run_id=run.id,
+        )
+
+        first = kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+        reviewers_after_first = [task.id for task in kb.list_tasks(conn, assignee="reviewer")]
+        comments_after_first = len(kb.list_comments(conn, t))
+
+        second = kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+        reviewers_after_second = [task.id for task in kb.list_tasks(conn, assignee="reviewer")]
+        handoff_events = [
+            e for e in kb.list_events(conn, t) if e.kind == "dispatch_review_required_handoff_created"
+        ]
+
+        assert len(first.spawned) == 1
+        assert second.spawned == []
+        assert reviewers_after_first == reviewers_after_second
+        assert len(reviewers_after_second) == 1
+        assert len(handoff_events) == 1
+        assert len(kb.list_comments(conn, t)) == comments_after_first
+
+
+
+def test_dispatch_review_required_handoff_ignores_reviewer_loops_and_embedded_marker(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        reviewer_source = kb.create_task(conn, title="reviewer task", assignee="reviewer")
+        kb.claim_task(conn, reviewer_source)
+        reviewer_run = kb.active_run(conn, reviewer_source)
+        assert reviewer_run is not None
+        assert kb.block_task(
+            conn,
+            reviewer_source,
+            reason="review-required: reviewer should not recurse",
+            expected_run_id=reviewer_run.id,
+        )
+
+        embedded = kb.create_task(conn, title="embedded marker", assignee="coder")
+        kb.claim_task(conn, embedded)
+        embedded_run = kb.active_run(conn, embedded)
+        assert embedded_run is not None
+        assert kb.block_task(
+            conn,
+            embedded,
+            reason="Need human choice before review-required: later follow-up",
+            expected_run_id=embedded_run.id,
+        )
+
+        kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+
+        reviewer_tasks = kb.list_tasks(conn, assignee="reviewer")
+        assert len(reviewer_tasks) == 1
+        assert reviewer_tasks[0].id == reviewer_source
+        assert [
+            e
+            for e in kb.list_events(conn, reviewer_source)
+            if e.kind == "dispatch_review_required_handoff_created"
+        ] == []
+        assert [
+            e for e in kb.list_events(conn, embedded) if e.kind == "dispatch_review_required_handoff_created"
+        ] == []
+
+
+
+def test_dispatch_review_required_handoff_leaves_parent_gated_legacy_reviewer_inert(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        source = kb.create_task(conn, title="coder task", assignee="coder")
+        legacy = kb.create_task(
+            conn,
+            title="legacy reviewer child",
+            assignee="reviewer",
+            parents=[source],
+        )
+        assert kb.get_task(conn, legacy).status == "todo"
+
+        kb.claim_task(conn, source)
+        run = kb.active_run(conn, source)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            source,
+            reason="review-required: ready for verdict",
+            expected_run_id=run.id,
+        )
+
+        kb.dispatch_once(conn, spawn_fn=lambda *_args: 0)
+
+        reviewer_tasks = [task for task in kb.list_tasks(conn, assignee="reviewer")]
+        independent = next(task for task in reviewer_tasks if task.id != legacy)
+        assert kb.get_task(conn, legacy).status == "todo"
+        assert kb.parent_ids(conn, independent.id) == []
+        handoff_event = [
+            e for e in kb.list_events(conn, source) if e.kind == "dispatch_review_required_handoff_created"
+        ][-1]
+        assert handoff_event.payload["legacy_reviewer_children"] == [legacy]
+        assert legacy in (independent.body or "")
+
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")
@@ -1161,6 +2505,738 @@ def test_dispatch_reclaims_stale_before_spawning(kanban_home):
         )
         res = kb.dispatch_once(conn, dry_run=True)
     assert res.reclaimed == 1
+
+
+def test_dispatch_blocks_unknown_force_loaded_skill_before_spawn(kanban_home, all_assignees_spawnable):
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="unknown skill",
+            assignee="alice",
+            skills=["definitely-missing-skill-for-test"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "unknown force-loaded skill" in (task.result or "")
+
+
+def _write_test_skill(profile_home: Path, skill_name: str) -> None:
+    skill_dir = profile_home / "skills" / "test" / skill_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(f"# {skill_name}\n", encoding="utf-8")
+
+
+def test_dispatch_force_skill_preflight_uses_target_profile_not_dispatcher_context(
+    kanban_home, monkeypatch
+):
+    """Coordinator-only skills must not satisfy a coder worker preflight."""
+    from hermes_cli import profiles
+
+    coordinator_home = profiles.create_profile("coordinator", no_alias=True)
+    profiles.create_profile("coder", no_alias=True)
+    _write_test_skill(coordinator_home, "family-organizer-agent-workflow")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    monkeypatch.setenv("HERMES_HOME", str(coordinator_home))
+    monkeypatch.setattr(
+        profiles,
+        "profile_exists",
+        lambda name: str(name).strip().lower() in {"coordinator", "coder"},
+    )
+    spawns = []
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="coordinator-only skill for coder",
+            assignee="coder",
+            skills=["family-organizer-agent-workflow"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, _workspace: spawns.append(task.id))
+        assert t in res.preflight_blocked
+        assert spawns == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert "family-organizer-agent-workflow" in (task.result or "")
+        assert kb.latest_run(conn, t) is None
+        event_kinds = [event.kind for event in kb.list_events(conn, t)]
+        assert "dispatch_preflight_unknown_skills" in event_kinds
+        assert "claimed" not in event_kinds
+        assert "spawned" not in event_kinds
+
+
+def test_dispatch_force_skill_preflight_allows_target_profile_skill_and_ignores_kanban_worker(
+    kanban_home, monkeypatch
+):
+    from hermes_cli import profiles
+
+    coder_home = profiles.create_profile("coder", no_alias=True)
+    _write_test_skill(coder_home, "target-only-skill")
+    monkeypatch.setattr(
+        profiles,
+        "profile_exists",
+        lambda name: str(name).strip().lower() == "coder",
+    )
+    spawns = []
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="target skill exists",
+            assignee="coder",
+            skills=["kanban-worker", "target-only-skill"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, _workspace: spawns.append(task.id))
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "running"
+
+
+def test_dispatch_preflight_blocks_scope_policy_without_scope_contract_v2(kanban_home, all_assignees_spawnable):
+    body = """
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing scope contract", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_dispatch_preflight_blocks_scope_contract_v2_without_core_forbidden_systems(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing forbidden systems", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "scope_contract.forbidden_systems is missing required entries" in (task.result or "")
+        assert "OpenClaw" in (task.result or "")
+        assert "Atlas" in (task.result or "")
+        assert "Mission-Control" in (task.result or "")
+        assert "Telegram" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_partial_core_forbidden_systems(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="partial forbidden systems", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "Mission-Control" in (task.result or "")
+        assert "Telegram" in (task.result or "")
+
+
+def test_dispatch_allows_scope_contract_v2_task_to_spawn(kanban_home, all_assignees_spawnable):
+    spawns = []
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+        return 123
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="scoped v2", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        assert kb.get_task(conn, t).status == "running"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert events
+        assert events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
+
+
+def test_dispatch_preflight_blocks_when_required_lifecycle_tool_missing(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing lifecycle tool", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "empty/incomplete effective runtime tools" in (task.result or "")
+        assert "kanban_block" in (task.result or "")
+
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_empty_toolset"]
+        assert events
+        payload = events[-1].payload
+        assert payload["task_id"] == t
+        assert payload["effective_toolsets"] == ["kanban_show", "kanban_complete"]
+        assert payload["required_lifecycle_tools"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
+        assert payload["skills_requested"] == []
+        assert payload["skill_resolution"] == {"status": "ok", "missing": []}
+        assert "kanban_block" in payload["failure_reason"]
+
+
+def test_dispatch_preflight_blocks_when_runtime_schema_missing_required_lifecycle_tool(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    from model_tools import _clear_tool_defs_cache
+    from tools.registry import invalidate_check_fn_cache, registry
+
+    entry = registry.get_entry("kanban_block")
+    assert entry is not None
+    original_check_fn = entry.check_fn
+    entry.check_fn = lambda: False
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    try:
+        spawns = []
+        with kb.connect() as conn:
+            t = kb.create_task(conn, title="runtime schema missing lifecycle tool", assignee="alice", body=body)
+            res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+            assert not spawns
+            assert t in res.preflight_blocked
+            task = kb.get_task(conn, t)
+            assert task.status == "blocked"
+            assert "runtime tool schema" in (task.result or "")
+            assert "kanban_block" in (task.result or "")
+
+            events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_empty_toolset"]
+            assert events
+            payload = events[-1].payload
+            assert payload["task_id"] == t
+            assert payload["declared_allowed_tools"] == [
+                "kanban_show",
+                "kanban_complete",
+                "kanban_block",
+            ]
+            assert payload["effective_toolsets"] == ["kanban_show", "kanban_complete"]
+            assert payload["required_lifecycle_tools"] == [
+                "kanban_show",
+                "kanban_complete",
+                "kanban_block",
+            ]
+            assert payload["skill_resolution"] == {"status": "ok", "missing": []}
+    finally:
+        entry.check_fn = original_check_fn
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+
+
+def test_dispatch_preflight_blocks_scope_contract_v2_without_allowed_tools(kanban_home, all_assignees_spawnable):
+    body = """
+scope_contract:
+  version: 2
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing allowed tools", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "allowed_tools is required" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_unknown_allowed_tool(kanban_home, all_assignees_spawnable):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - definitely_not_a_tool
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="unknown allowed tool", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "unknown allowed_tool: definitely_not_a_tool" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_broad_allowed_tool(kanban_home, all_assignees_spawnable):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - all
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="broad allowed tool", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda *_args: 123)
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "allowed_tool is too broad: all" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_toolset_like_allowed_tool_names(
+    kanban_home, all_assignees_spawnable
+):
+    toolset_like_names = [
+        "terminal",
+        "file",
+        "kanban",
+        "mcp",
+        "delegation",
+        "code_execution",
+        "memory",
+        "clarify",
+        "web",
+        "browser",
+        "tools",
+        "all_tools",
+        "all",
+        "any",
+        "*",
+    ]
+    spawns = []
+
+    with kb.connect() as conn:
+        task_ids = []
+        for name in toolset_like_names:
+            body = f"""
+scope_contract:
+  version: 2
+  allowed_tools:
+    - "{name}"
+completion_policy:
+  require_scope_attestation: true
+"""
+            task_ids.append(
+                kb.create_task(conn, title=f"broad allowed tool {name}", assignee="alice", body=body)
+            )
+
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+
+        assert not spawns
+        assert set(task_ids) <= set(res.preflight_blocked)
+        for task_id, name in zip(task_ids, toolset_like_names):
+            task = kb.get_task(conn, task_id)
+            assert task.status == "blocked"
+            assert f"allowed_tool is too broad: {name}" in (task.result or "")
+
+
+def test_dispatch_preflight_blocks_mixed_concrete_and_toolset_like_allowed_tools(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - terminal
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="mixed concrete and broad", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "allowed_tool is too broad: terminal" in (task.result or "")
+
+
+def test_dispatch_preflight_accepts_kanban_minimal_concrete_tool_names_only(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+    - kanban_comment
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="minimal concrete allowed tools", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+            "kanban_comment",
+        ]
+
+
+def test_dispatch_preflight_accepts_web_search_and_extract_as_concrete_tool_names(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - web_search
+    - web_extract
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    from model_tools import _clear_tool_defs_cache
+    from tools.registry import invalidate_check_fn_cache, registry
+
+    web_search_entry = registry.get_entry("web_search")
+    web_extract_entry = registry.get_entry("web_extract")
+    assert web_search_entry is not None
+    assert web_extract_entry is not None
+    original_search_check = web_search_entry.check_fn
+    original_extract_check = web_extract_entry.check_fn
+    web_search_entry.check_fn = lambda: True
+    web_extract_entry.check_fn = lambda: True
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    try:
+        spawns = []
+        with kb.connect() as conn:
+            t = kb.create_task(conn, title="concrete web tools", assignee="alice", body=body)
+            res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+            assert t not in res.preflight_blocked
+            assert spawns == [t]
+            task = kb.get_task(conn, t)
+            assert task is not None
+            assert task.status == "running"
+            events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+            assert events
+            assert events[-1].payload["effective_toolsets"] == [
+                "kanban_show",
+                "web_search",
+                "web_extract",
+                "kanban_complete",
+                "kanban_block",
+            ]
+    finally:
+        web_search_entry.check_fn = original_search_check
+        web_extract_entry.check_fn = original_extract_check
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+
+
+def test_dispatch_preflight_accepts_safe_workspace_runner_tool(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - write_file
+    - read_file
+    - kanban_run_workspace_command
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="safe runner", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert t not in res.preflight_blocked
+        assert spawns == [t]
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        events = [e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"]
+        assert events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "write_file",
+            "read_file",
+            "kanban_run_workspace_command",
+            "kanban_complete",
+            "kanban_block",
+        ]
+
+
+def test_validate_created_cards_dry_run_reports_verified_and_phantom_without_mutation(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        owned = kb.create_task(conn, title="owned", assignee="worker", created_by="alice")
+        foreign = kb.create_task(conn, title="foreign", assignee="worker", created_by="bob")
+        linked = kb.create_task(conn, title="linked", assignee="worker", created_by="dashboard")
+        kb.link_tasks(conn, parent, linked)
+        before = kb.get_task(conn, parent).status
+
+        result = kb.validate_created_cards(
+            conn,
+            parent,
+            [owned, foreign, linked, "t_deadbeef"],
+        )
+        after = kb.get_task(conn, parent).status
+        events = kb.list_events(conn, parent)
+
+    assert result == {
+        "ok": False,
+        "task_id": parent,
+        "claimed_cards": [owned, foreign, linked, "t_deadbeef"],
+        "verified_cards": [owned, linked],
+        "phantom_cards": [foreign, "t_deadbeef"],
+    }
+    assert after == before == "ready"
+    assert "completed" not in [e.kind for e in events]
+    assert "completion_blocked_hallucination" not in [e.kind for e in events]
+    assert "created_cards_validated" not in [e.kind for e in events]
+
+
+def test_complete_task_reuses_created_cards_validation_gate(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        owned = kb.create_task(conn, title="owned", assignee="worker", created_by="alice")
+        foreign = kb.create_task(conn, title="foreign", assignee="worker", created_by="bob")
+
+        dry_run = kb.validate_created_cards(conn, parent, [owned, foreign])
+        with pytest.raises(kb.HallucinatedCardsError) as err:
+            kb.complete_task(conn, parent, summary="done", created_cards=[owned, foreign])
+        parent_task = kb.get_task(conn, parent)
+        blocked = [
+            e for e in kb.list_events(conn, parent)
+            if e.kind == "completion_blocked_hallucination"
+        ][-1]
+
+    assert dry_run["verified_cards"] == [owned]
+    assert dry_run["phantom_cards"] == [foreign]
+    assert err.value.phantom == [foreign]
+    assert parent_task.status == "ready"
+    assert blocked.payload["verified_cards"] == dry_run["verified_cards"]
+    assert blocked.payload["phantom_cards"] == dry_run["phantom_cards"]
+
+
+def test_completion_attestation_requires_effective_toolsets_when_allowed_tools_declared(kanban_home):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="effective toolsets required", assignee="alice", body=body)
+        with pytest.raises(kb.ScopeAttestationError, match="effective_toolsets"):
+            kb.complete_task(
+                conn,
+                t,
+                summary="done",
+                metadata={
+                    "scope_contract_version": 2,
+                    "scope_attestation": True,
+                    "forbidden_actions_taken": 0,
+                },
+            )
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="done",
+            metadata={
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+                "effective_toolsets": ["kanban_show"],
+            },
+        )
+
+
+def test_completion_attestation_blocks_effective_toolsets_mismatch_after_dispatch_preflight(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="mismatched completion toolsets", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 123)
+        assert res.spawned and res.spawned[0][0] == t
+        preflight_events = [
+            e for e in kb.list_events(conn, t) if e.kind == "dispatch_preflight_passed"
+        ]
+        assert preflight_events[-1].payload["effective_toolsets"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
+
+        with pytest.raises(kb.ScopeAttestationError, match="effective_toolsets mismatch"):
+            kb.complete_task(
+                conn,
+                t,
+                summary="done",
+                metadata={
+                    "scope_contract_version": 2,
+                    "scope_attestation": True,
+                    "forbidden_actions_taken": 0,
+                    "effective_toolsets": ["kanban_show"],
+                },
+            )
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        block_events = [
+            e for e in kb.list_events(conn, t) if e.kind == "completion_blocked_scope_attestation"
+        ]
+        assert "effective_toolsets mismatch" in block_events[-1].payload["missing"]
+
+
+def test_completion_attestation_accepts_effective_toolsets_matching_dispatch_preflight(
+    kanban_home, all_assignees_spawnable
+):
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="matching completion toolsets", assignee="alice", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 123)
+        assert res.spawned and res.spawned[0][0] == t
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="done",
+            metadata={
+                "scope_contract_version": 2,
+                "scope_attestation": True,
+                "forbidden_actions_taken": 0,
+                "effective_toolsets": ["kanban_show", "kanban_complete", "kanban_block"],
+            },
+        )
+        completed_events = [e for e in kb.list_events(conn, t) if e.kind == "completed"]
+        assert completed_events
+        completed_runs = [r for r in kb.list_runs(conn, t) if r.outcome == "completed"]
+        assert completed_runs[-1].metadata["effective_toolsets"] == [
+            "kanban_show",
+            "kanban_complete",
+            "kanban_block",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1747,7 +3823,7 @@ def test_session_id_compose_with_tenant_filter(kanban_home):
 # where `kanban_db_path()` resolved to the active profile's HERMES_HOME.
 # ---------------------------------------------------------------------------
 
-class TestSharedBoardPaths:
+class TestPathResolutionAndWorkerEnv:
     """`kanban_home`/`kanban_db_path`/`workspaces_root`/`worker_log_path`
     must anchor at the **shared root**, not the active profile's HERMES_HOME."""
 
@@ -2013,6 +4089,46 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+        assert env["HERMES_KANBAN_WORKSPACE_KIND"] == "worktree"
+
+    def test_default_spawn_inherits_schema_audit_env_for_one_dispatch(
+        self, tmp_path, monkeypatch
+    ):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        self._set_home(monkeypatch, tmp_path, default_home)
+        monkeypatch.setenv("HERMES_KANBAN_SCHEMA_AUDIT", "1")
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["env"] = kwargs.get("env", {})
+                self.pid = 4242
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+        task = kb.Task(
+            id="t_schema_audit_env",
+            title="x",
+            body=None,
+            assignee="coder",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=None,
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+        )
+        kb._default_spawn(task, str(tmp_path / "ws"))
+
+        assert captured["env"]["HERMES_KANBAN_SCHEMA_AUDIT"] == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -3339,3 +5455,388 @@ def test_maybe_emit_scratch_tip_skips_non_scratch_workspaces(kanban_home, caplog
             ).fetchall()
             assert "tip_scratch_workspace" not in [e["kind"] for e in events]
 
+
+def test_dispatch_preflight_blocks_scope_v2_with_unknown_assignee(kanban_home, monkeypatch):
+    """Scope v2 task with unknown assignee must be blocked, not silently skipped.
+
+    Regression for autonomy-sprint 2026-05-08 finding: planner produced child
+    cards with assignees ``researcher``/``analyst``/``reviewer`` outside the
+    OS-spec ``{default|coder|admin}`` set. Old behavior silently skipped them,
+    leaving the chain stuck in ``ready`` forever.
+    """
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="planner-bug task", assignee="researcher", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.preflight_blocked
+        assert t not in res.skipped_nonspawnable
+        task = kb.get_task(conn, t)
+        assert task.status == "blocked"
+        assert "researcher" in (task.result or "")
+        assert "not a known Hermes profile" in (task.result or "")
+        events = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (t,)
+        ).fetchall()]
+        assert "dispatch_preflight_invalid_assignee" in events
+
+
+def test_dispatch_preflight_skips_unknown_assignee_without_scope_contract(kanban_home, monkeypatch):
+    """Tasks WITHOUT scope_contract keep human-lane skip behavior (regression guard).
+
+    Interactive Claude Code terminals (e.g. ``orion-cc``) and other
+    human-pulled lanes deliberately use assignees that don't map to
+    Hermes profiles. They must continue to be bucketed as
+    ``skipped_nonspawnable`` rather than blocked.
+    """
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = "Plain task body with no scope contract."
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="orion-cc lane task", assignee="orion-cc", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert not spawns
+        assert t in res.skipped_nonspawnable
+        assert t not in res.preflight_blocked
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"  # still ready, not blocked
+
+
+def test_dispatch_preflight_allows_known_profile_with_scope_v2(kanban_home, monkeypatch):
+    """Scope v2 task with valid assignee passes preflight and spawns."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name in {"default", "admin", "coder"})
+    body = """
+scope_contract:
+  version: 2
+  allowed_tools:
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+  forbidden_systems:
+    - OpenClaw
+    - Atlas
+    - Mission-Control
+    - Telegram
+completion_policy:
+  require_scope_attestation: true
+"""
+    spawns = []
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="valid-assignee task", assignee="admin", body=body)
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: spawns.append(task.id))
+        assert spawns == [t]
+        assert t not in res.preflight_blocked
+        assert t not in res.skipped_nonspawnable
+
+
+# ---------------------------------------------------------------------------
+# Review lane classification
+# ---------------------------------------------------------------------------
+
+class TestClassifyKanbanReviewLane:
+    """Tests for classify_kanban_review_lane()."""
+
+    def test_fastlane_default_for_plain_kanban_task(self):
+        """No critical/standard triggers → FASTLANE_KANBAN."""
+        result = kb.classify_kanban_review_lane(
+            title="Polish error messages in hub response",
+            body="Tweak wording in Hub responses.\nNo system-level changes.",
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"
+        assert result["risk"] == "low"
+        assert result["hub_coordinator_evidence_check_required"] is True
+        assert result["reviewer_a_required"] is False
+        assert result["reviewer_b_required"] is False
+        assert any("default" in reason for reason in result["reasons"])
+
+    def test_fastlane_explicit_request_kept(self):
+        """Explicit request keeps FASTLANE when no triggers fire."""
+        result = kb.classify_kanban_review_lane(
+            title="Refactor kanban tool handlers",
+            body="Extract shared logic from _handle_* functions.",
+            requested_lane="FASTLANE_KANBAN",
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"
+
+    def test_forbidden_systems_do_not_escalate_fastlane_scope_contract(self):
+        """Negative scope declarations must not trip critical text matching."""
+        body = """
+review_lane: FASTLANE_KANBAN
+scope_contract:
+  version: 2
+  allowed_systems: [hermes-agent, hermes-kanban]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+  anti_scope:
+    - keine OpenClaw-Touches
+    - keine Mission-Control-Mutation
+"""
+        result = kb.classify_kanban_review_lane(
+            title="Write scratchpad note",
+            body=body,
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"
+        assert "critical_allowed_system_or_text" not in result["escalation_triggers"]
+
+    def test_forbidden_systems_do_not_hide_standard_review_trigger(self):
+        """Structured negative scope keeps STANDARD triggers observable."""
+        body = """
+review_lane: STANDARD_REVIEW
+Diese Probe testet task-lifecycle semantics.
+scope_contract:
+  version: 2
+  allowed_systems: [hermes-agent, hermes-kanban]
+  forbidden_systems: [OpenClaw, Atlas, Mission-Control, Telegram]
+  anti_scope: [keine Mission-Control-Mutation]
+"""
+        result = kb.classify_kanban_review_lane(
+            title="Lane validation standard probe",
+            body=body,
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+        assert "critical_allowed_system_or_text" not in result["escalation_triggers"]
+
+    def test_standard_review_escalates_on_lifecycle_terms(self):
+        """Lifecycle / dispatcher semantics → STANDARD_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Extend task-lifecycle policy with retry semantics",
+            body="Add retry_after_seconds to completion_policy.\nDispatcher should handle retry dispatch.",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+        assert result["risk"] == "medium"
+        assert result["hub_coordinator_evidence_check_required"] is False
+        assert result["reviewer_a_required"] is False
+        assert result["reviewer_b_required"] is True
+
+    def test_standard_review_escalates_on_kanban_db_semantics(self):
+        """kanban-db-semantics in body → STANDARD_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Add computed status field",
+            body="Add a computed read-only field to the task schema.\nkanban-db-semantics change.",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+
+    def test_standard_review_explicit_request_escalates(self):
+        """Explicit STANDARD_REVIEW request is honored."""
+        result = kb.classify_kanban_review_lane(
+            title="Minor tweak to review trigger logic",
+            body="Small refactor in hub.",
+            requested_lane="STANDARD_REVIEW",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+
+    def test_critical_review_on_runtime_activation(self):
+        """Runtime activation term → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Activate gateway runtime on startup",
+            body="Add gateway-runtime activation in startup sequence.",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["risk"] == "high"
+        assert result["hub_coordinator_evidence_check_required"] is False
+        assert result["reviewer_a_required"] is True
+        assert result["reviewer_b_required"] is True
+
+    def test_critical_review_on_openclaw_path(self):
+        """OpenClaw path marker → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Update openclaw model catalog",
+            body="Add new model entry.",
+            changed_paths=["/home/piet/.openclaw/openclaw.json"],
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["risk"] == "high"
+
+    def test_critical_review_on_secrets_path(self):
+        """Secrets path → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Rotate Discord webhook token",
+            body="Update stored token.",
+            changed_paths=["/home/piet/.hermes/auth.json"],
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["risk"] == "high"
+
+    def test_critical_review_on_restart_deploy(self):
+        """Restart/deploy terms → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Restart openclaw-gateway after config change",
+            body="Restart the gateway service and smoke-test.",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+
+    def test_critical_review_on_mission_control_path(self):
+        """Mission Control path → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Update MC dispatch priority",
+            body="Change priority field in MC.",
+            changed_paths=["/home/piet/.openclaw/workspace/mission-control/src/dispatch.py"],
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+
+    def test_critical_review_on_telegram(self):
+        """Telegram term → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Add Telegram notification channel",
+            body="Wire up Telegram bot for alert delivery.",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+
+    def test_critical_review_on_atlas(self):
+        """Atlas term → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Hook Atlas executor into dispatch loop",
+            body="Add Atlas call in dispatcher.",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+
+    def test_explicit_lane_can_escalate_not_downgrade(self):
+        """Explicit FASTLANE cannot downgrade CRITICAL trigger to FASTLANE."""
+        result = kb.classify_kanban_review_lane(
+            title="Restart gateway with new config",
+            body="Restart openclaw-gateway.service",
+            requested_lane="FASTLANE_KANBAN",
+            changed_paths=["/home/piet/.openclaw/openclaw.json"],
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"  # escalation wins
+
+    def test_standard_alias_normalized(self):
+        """STANDARD alias → STANDARD_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Update dispatcher lifecycle",
+            body="Add dispatcher retry logic.",
+            requested_lane="STANDARD",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+
+    def test_fastlane_alias_normalized(self):
+        """FASTLANE alias → FASTLANE_KANBAN."""
+        result = kb.classify_kanban_review_lane(
+            title="Tweak error wording",
+            body="No system changes.",
+            requested_lane="FASTLANE",
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"
+
+    def test_invalid_requested_lane_falls_back_to_computed(self):
+        """Invalid lane name → falls back to computed lane."""
+        result = kb.classify_kanban_review_lane(
+            title="Refactor",
+            body="Small refactor.",
+            requested_lane="INVALID_LANE",
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"  # computed default
+
+    def test_fastlane_with_only_kanban_tool_changes(self):
+        """Kanban-only tool changes → FASTLANE_KANBAN."""
+        result = kb.classify_kanban_review_lane(
+            title="Add kanban_history tool",
+            body="Add new kanban tool for history browsing.\nallowed_tools: kanban_show, kanban_history.",
+            changed_paths=["/home/piet/.hermes/hermes-agent/tools/kanban_tools.py"],
+        )
+        # Tool changes in hermes-agent (not system paths) → not auto-escalated
+        assert result["lane"] == "FASTLANE_KANBAN"
+
+    def test_critical_trumps_standard_term(self):
+        """Critical triggers override standard terms."""
+        result = kb.classify_kanban_review_lane(
+            title="Restart Atlas after dispatcher change",
+            body="Dispatcher lifecycle update then restart Atlas.",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+
+    def test_plain_restart_or_deploy_words_do_not_force_critical(self):
+        """Plain words like restart/deploy in notes stay FASTLANE absent hard triggers."""
+        result = kb.classify_kanban_review_lane(
+            title="Document deploy notes for kanban workers",
+            body="Add restart checklist wording to docs; no service or runtime changes.",
+        )
+        assert result["lane"] == "FASTLANE_KANBAN"
+        assert result["reviewer_b_required"] is False
+        assert result["hub_coordinator_evidence_check_required"] is True
+
+    def test_policy_review_lane_standard_requires_reviewer_b(self):
+        """Structured body policy can request STANDARD_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Small wording tweak",
+            body="""
+review_lane: STANDARD_REVIEW
+summary: Small wording tweak, but request one reviewer.
+""",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+        assert result["reviewer_a_required"] is False
+        assert result["reviewer_b_required"] is True
+        assert result["hub_coordinator_evidence_check_required"] is False
+
+    def test_policy_review_lane_critical_requires_reviewer_a_and_b(self):
+        """Structured body policy can request CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Small wording tweak",
+            body="""
+review_lane: CRITICAL_REVIEW
+summary: Explicitly request critical review.
+""",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["reviewer_a_required"] is True
+        assert result["reviewer_b_required"] is True
+        assert result["hub_coordinator_evidence_check_required"] is False
+
+    def test_scope_contract_allowed_systems_restart_is_critical(self):
+        """Structured allowed_systems hard-trigger CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Scoped restart action",
+            body="""
+scope_contract:
+  allowed_systems:
+    - restart
+""",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["reviewer_a_required"] is True
+        assert result["reviewer_b_required"] is True
+
+    def test_critical_alias_normalized(self):
+        """CRITICAL alias → CRITICAL_REVIEW."""
+        result = kb.classify_kanban_review_lane(
+            title="Force strict review",
+            body="Small refactor.",
+            requested_lane="CRITICAL",
+        )
+        assert result["lane"] == "CRITICAL_REVIEW"
+        assert result["reviewer_a_required"] is True
+        assert result["reviewer_b_required"] is True
+
+    def test_explicit_fastlane_cannot_downgrade_standard_trigger(self):
+        """Explicit FASTLANE cannot downgrade STANDARD lifecycle semantics."""
+        result = kb.classify_kanban_review_lane(
+            title="Update dispatcher lifecycle",
+            body="Change lifecycle behavior for task-links.",
+            requested_lane="FASTLANE_KANBAN",
+        )
+        assert result["lane"] == "STANDARD_REVIEW"
+        assert result["reviewer_b_required"] is True
+
+    def test_empty_title_and_body_defaults_to_fastlane(self):
+        """No title/body → FASTLANE_KANBAN."""
+        result = kb.classify_kanban_review_lane(title="", body="")
+        assert result["lane"] == "FASTLANE_KANBAN"
+        assert result["risk"] == "low"
