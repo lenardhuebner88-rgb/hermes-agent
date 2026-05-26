@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -136,3 +137,82 @@ def test_reports_for_task_excludes_running(kanban_home):
         reports = kr.reports_for_task(conn, tid)
 
     assert [report["run"]["status"] for report in reports] == ["done"]
+
+
+def test_report_is_missing_accepts_contract_alias_paths(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="legacy alias", assignee="alice")
+        assert kb.complete_task(conn, tid, summary="legacy", metadata={})
+
+        report = kr.latest_report_for_task(conn, tid)
+
+    assert report is not None
+    assert kr.report_is_missing(report, "evidence.tests") is True
+    assert kr.report_is_missing(report, "evidence.receipt_path") is True
+    assert kr.report_is_missing(report, "scope.scope_attestation") is True
+    assert kr.report_is_missing(report, "report_contract_version") is True
+
+
+def test_reports_for_fleet_filters_since_cutoff(kanban_home):
+    now = int(time.time())
+    with kb.connect() as conn:
+        old_tid = kb.create_task(conn, title="old report", assignee="alice")
+        new_tid = kb.create_task(conn, title="new report", assignee="alice")
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, started_at, ended_at,
+                outcome, summary, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old_tid,
+                "alice",
+                "done",
+                now - 100000,
+                now - 90000,
+                "completed",
+                "old",
+                json.dumps({}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, started_at, ended_at,
+                outcome, summary, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_tid,
+                "alice",
+                "done",
+                now - 120,
+                now - 60,
+                "completed",
+                "new",
+                json.dumps({}),
+            ),
+        )
+        conn.commit()
+
+        reports = kr.reports_for_fleet(conn, since=now - 3600)
+
+    assert [report["task"]["id"] for report in reports] == [new_tid]
+
+
+def test_reports_for_fleet_filters_missing_alias_path(kanban_home):
+    with kb.connect() as conn:
+        complete_tid = kb.create_task(conn, title="complete report", assignee="alice")
+        missing_tid = kb.create_task(conn, title="missing report", assignee="alice")
+        assert kb.complete_task(
+            conn,
+            complete_tid,
+            summary="complete",
+            metadata=_full_report_metadata(),
+        )
+        assert kb.complete_task(conn, missing_tid, summary="missing", metadata={})
+
+        reports = kr.reports_for_fleet(conn, missing=["evidence.tests"])
+
+    assert [report["task"]["id"] for report in reports] == [missing_tid]

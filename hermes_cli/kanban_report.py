@@ -7,7 +7,7 @@ does not import completion validators.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from hermes_cli import kanban_db as kb
 
@@ -96,6 +96,10 @@ def _receipt_reference(metadata: Mapping[str, Any]) -> Any:
     )
 
 
+def _task_events_for_run(events: Optional[list[kb.Event]], run_id: Any) -> list[kb.Event]:
+    return [event for event in (events or []) if _field(event, "run_id") == run_id]
+
+
 def _scope_attestation(metadata: Mapping[str, Any]) -> dict[str, Any]:
     scope_attested = _truthy(metadata.get("scope_attestation"))
     version = _as_int(metadata.get("scope_contract_version"))
@@ -125,6 +129,53 @@ def _scope_attestation(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "consistent": not inconsistencies,
         "inconsistencies": inconsistencies,
     }
+
+
+_MISSING_ALIASES = {
+    "report_contract_version": "report_contract_version",
+    "contract.version": "report_contract_version",
+    "contract.report_contract_version": "report_contract_version",
+    "verification_evidence": "verification_evidence",
+    "evidence.tests": "verification_evidence",
+    "evidence.verification_evidence": "verification_evidence",
+    "receipt_reference": "receipt_reference",
+    "receipt_path": "receipt_reference",
+    "evidence.receipt_path": "receipt_reference",
+    "evidence.receipt_reference": "receipt_reference",
+    "scope_attestation": "scope_attestation",
+    "scope.scope_attestation": "scope_attestation",
+}
+
+
+def _path_value(report: Mapping[str, Any], path: str) -> Any:
+    current: Any = report
+    for part in path.split("."):
+        if isinstance(current, Mapping):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def report_is_missing(report: Mapping[str, Any], path: str) -> bool:
+    """Return True when ``path`` is absent from a normalized report.
+
+    Slice 4 accepts user-facing paths from the canonical contract
+    (``evidence.tests``) as aliases over the compact Slice-1 report shape
+    (``verification_evidence``).
+    """
+    normalized = _MISSING_ALIASES.get(path.strip(), path.strip())
+    quality = report.get("quality") if isinstance(report.get("quality"), Mapping) else {}
+    missing = set(quality.get("missing") or [])
+    if normalized in missing:
+        return True
+    if normalized == "report_contract_version":
+        value = _path_value(report, "contract.version")
+    elif normalized == "scope_attestation":
+        value = _path_value(report, "scope_attestation.present")
+    else:
+        value = _path_value(report, normalized)
+    return not _non_empty(value)
 
 
 def report_quality(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -187,8 +238,7 @@ def normalize_run_report(task: kb.Task, run: kb.Run, events: Optional[list[kb.Ev
                 "created_at": _field(event, "created_at"),
                 "run_id": _field(event, "run_id"),
             }
-            for event in (events or [])
-            if _field(event, "run_id") == _field(run, "id")
+            for event in _task_events_for_run(events, _field(run, "id"))
         ],
     }
     report["quality"] = report_quality(report)
@@ -208,6 +258,49 @@ def reports_for_task(conn: Any, task_id: str, *, include_incomplete: bool = Fals
         if not include_incomplete and status not in ("done", "completed"):
             continue
         reports.append(normalize_run_report(task, run, events))
+    return reports
+
+
+def reports_for_fleet(
+    conn: Any,
+    *,
+    since: Optional[int] = None,
+    missing: Optional[Sequence[str]] = None,
+) -> list[dict[str, Any]]:
+    """Return normalized reports across the board, oldest first.
+
+    ``since`` is a Unix timestamp cutoff matched against ``task_runs.ended_at``.
+    ``missing`` accepts one or more report paths; all paths must be missing for
+    a report to remain in the returned fleet view.
+    """
+    query = "SELECT * FROM task_runs WHERE status IN ('done', 'completed')"
+    params: list[Any] = []
+    if since is not None:
+        query += " AND ended_at IS NOT NULL AND ended_at >= ?"
+        params.append(int(since))
+    query += " ORDER BY COALESCE(ended_at, started_at, 0) ASC, id ASC"
+
+    tasks: dict[str, kb.Task] = {}
+    events: dict[str, list[kb.Event]] = {}
+    reports: list[dict[str, Any]] = []
+    missing_paths = [path for path in (missing or []) if str(path).strip()]
+
+    for row in conn.execute(query, params).fetchall():
+        run = kb.Run.from_row(row)
+        task = tasks.get(run.task_id)
+        if task is None:
+            task = kb.get_task(conn, run.task_id)
+            if task is None:
+                continue
+            tasks[run.task_id] = task
+        task_events = events.get(run.task_id)
+        if task_events is None:
+            task_events = kb.list_events(conn, run.task_id)
+            events[run.task_id] = task_events
+        report = normalize_run_report(task, run, task_events)
+        if missing_paths and not all(report_is_missing(report, path) for path in missing_paths):
+            continue
+        reports.append(report)
     return reports
 
 

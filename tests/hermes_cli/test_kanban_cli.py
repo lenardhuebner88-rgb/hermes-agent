@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -232,6 +233,89 @@ def test_kanban_report_legacy_run_exits_0(kanban_home, capsys):
     payload = json.loads(captured.out)
     assert code == 0
     assert payload["quality"]["missing"] != []
+
+
+def test_kanban_report_since_fleet_json_filters_by_ended_at(kanban_home, capsys):
+    now = int(time.time())
+    with kb.connect() as conn:
+        old_tid = kb.create_task(conn, title="old fleet report", assignee="alice")
+        new_tid = kb.create_task(conn, title="new fleet report", assignee="alice")
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, started_at, ended_at,
+                outcome, summary, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old_tid,
+                "alice",
+                "done",
+                now - 100000,
+                now - 90000,
+                "completed",
+                "old",
+                json.dumps({}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, started_at, ended_at,
+                outcome, summary, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_tid,
+                "alice",
+                "done",
+                now - 120,
+                now - 60,
+                "completed",
+                "new",
+                json.dumps({}),
+            ),
+        )
+        conn.commit()
+
+    code = _run_kanban_command(["report", "--since", "24h", "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert [report["task"]["id"] for report in payload] == [new_tid]
+
+
+def test_kanban_report_missing_fleet_json_filters_by_alias_path(kanban_home, capsys):
+    metadata = {
+        "report_contract_version": 1,
+        "verification_evidence": ["scripts/run_tests.sh tests/hermes_cli/test_kanban_cli.py"],
+        "receipt_reference": "vault/03-Agents/Hermes/receipts/demo.md",
+        "scope_contract_read": True,
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+    }
+    with kb.connect() as conn:
+        complete_tid = kb.create_task(conn, title="complete fleet report", assignee="alice")
+        missing_tid = kb.create_task(conn, title="missing fleet report", assignee="alice")
+        assert kb.complete_task(conn, complete_tid, summary="complete", metadata=metadata)
+        assert kb.complete_task(conn, missing_tid, summary="missing", metadata={})
+
+    code = _run_kanban_command(["report", "--missing", "evidence.tests", "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert [report["task"]["id"] for report in payload] == [missing_tid]
+
+
+def test_kanban_report_invalid_since_returns_exit_2(kanban_home, capsys):
+    code = _run_kanban_command(["report", "--since", "later", "--json"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "malformed duration" in captured.err
 
 
 def test_run_slash_dispatch_dry_run_counts(kanban_home):

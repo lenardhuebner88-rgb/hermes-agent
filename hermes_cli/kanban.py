@@ -760,12 +760,24 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "report",
         help="Show the normalized report contract for a completed task run",
     )
-    p_report.add_argument("task_id")
+    p_report.add_argument("task_id", nargs="?")
     p_report.add_argument("--json", action="store_true")
     p_report.add_argument(
         "--all",
         action="store_true",
         help="Show every completed run report instead of only the latest",
+    )
+    p_report.add_argument(
+        "--since",
+        metavar="DURATION",
+        help="Fleet mode: keep reports ended within this age (for example 24h)",
+    )
+    p_report.add_argument(
+        "--missing",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Fleet mode: keep reports missing this contract path (repeatable)",
     )
 
     # --- heartbeat (worker liveness signal) ---
@@ -2624,31 +2636,57 @@ def _cmd_report(args: argparse.Namespace) -> int:
     """Show the read-only report contract view for a completed task."""
     from hermes_cli import kanban_report as kr
 
-    with kb.connect() as conn:
-        if kb.get_task(conn, args.task_id) is None:
-            print(f"no such task: {args.task_id}", file=sys.stderr)
-            return 2
-        reports = kr.reports_for_task(conn, args.task_id)
+    try:
+        since_seconds = _parse_duration(getattr(args, "since", None))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    since_cutoff = int(time.time()) - since_seconds if since_seconds is not None else None
+    missing_paths = list(getattr(args, "missing", []) or [])
+    task_id = getattr(args, "task_id", None)
 
-    if not reports:
-        print(f"(no completed run reports for {args.task_id})", file=sys.stderr)
+    with kb.connect() as conn:
+        if task_id:
+            if kb.get_task(conn, task_id) is None:
+                print(f"no such task: {task_id}", file=sys.stderr)
+                return 2
+            reports = kr.reports_for_task(conn, task_id)
+        else:
+            reports = kr.reports_for_fleet(conn, since=since_cutoff, missing=missing_paths)
+
+    if task_id and (since_cutoff is not None or missing_paths):
+        if since_cutoff is not None:
+            reports = [
+                report for report in reports
+                if report["run"].get("ended_at") is not None
+                and int(report["run"]["ended_at"]) >= since_cutoff
+            ]
+        for path in missing_paths:
+            reports = [report for report in reports if kr.report_is_missing(report, path)]
+
+    if task_id and not reports:
+        print(f"(no completed run reports for {task_id})", file=sys.stderr)
         return 1
 
-    selected: Any = reports if getattr(args, "all", False) else reports[-1]
+    fleet_mode = not bool(task_id)
+    selected: Any = reports if fleet_mode or getattr(args, "all", False) else reports[-1]
     if getattr(args, "json", False):
         print(json.dumps(selected, indent=2, ensure_ascii=False, sort_keys=True))
     else:
-        report = reports[-1]
-        if getattr(args, "all", False):
-            print(f"{len(reports)} completed report(s) for {args.task_id}:")
+        if fleet_mode:
+            print(f"{len(reports)} matching completed report(s):")
+            iterable = reports
+        elif getattr(args, "all", False):
+            print(f"{len(reports)} completed report(s) for {task_id}:")
             iterable = reports
         else:
-            iterable = [report]
+            iterable = [reports[-1]]
         for item in iterable:
+            task = item["task"]
             run = item["run"]
             quality = item["quality"]
             print(
-                f"Run #{run['id']} outcome={run['outcome']} "
+                f"{task['id']} run #{run['id']} outcome={run['outcome']} "
                 f"contract={item['contract']['version']!r} "
                 f"quality={'ok' if quality['ok'] else 'missing'}"
             )
