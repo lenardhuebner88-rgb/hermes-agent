@@ -7125,14 +7125,32 @@ _STALE_HEARTBEAT_GAP_SECONDS = 2 * WORKER_HEARTBEAT_SEC
 
 
 def _worker_heartbeat_interval_seconds() -> int:
-    raw = os.environ.get("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", "").strip()
-    if raw:
+    """Resolve the worker auto-heartbeat cadence from the process environment.
+
+    Accepts two env-var names: the PlanSpec-documented rollback flag
+    ``HERMES_WORKER_HEARTBEAT_SEC`` and the original implementation name
+    ``HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS``. The PlanSpec name takes
+    precedence when both are set.
+
+    Return value semantics: ``0`` disables the auto-heartbeat loop entirely
+    (per the PlanSpec rollback contract); any positive int overrides the
+    default interval; unset or unparseable values fall back to
+    ``WORKER_HEARTBEAT_SEC``.
+    """
+    for env_name in (
+        "HERMES_WORKER_HEARTBEAT_SEC",
+        "HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS",
+    ):
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
         try:
             parsed = int(raw)
         except ValueError:
-            parsed = 0
-        if parsed > 0:
-            return parsed
+            return WORKER_HEARTBEAT_SEC
+        if parsed < 0:
+            return WORKER_HEARTBEAT_SEC
+        return parsed
     return WORKER_HEARTBEAT_SEC
 
 
@@ -8810,7 +8828,19 @@ def _start_worker_heartbeat_loop(
     board: Optional[str],
     worker_pid: int,
     interval_seconds: Optional[float] = None,
-) -> threading.Thread:
+) -> Optional[threading.Thread]:
+    resolved_interval = (
+        float(interval_seconds)
+        if interval_seconds is not None
+        else float(_worker_heartbeat_interval_seconds())
+    )
+    if resolved_interval <= 0:
+        _log.info(
+            "kanban worker auto-heartbeat disabled for %s (interval=%s)",
+            task_id,
+            resolved_interval,
+        )
+        return None
     stop_event = threading.Event()
     thread = threading.Thread(
         target=_worker_heartbeat_loop,
@@ -8820,11 +8850,7 @@ def _start_worker_heartbeat_loop(
             "claim_lock": claim_lock,
             "board": board,
             "worker_pid": int(worker_pid),
-            "interval_seconds": (
-                float(interval_seconds)
-                if interval_seconds is not None
-                else float(_worker_heartbeat_interval_seconds())
-            ),
+            "interval_seconds": resolved_interval,
             "stop_event": stop_event,
         },
         name=f"kanban-heartbeat-{task_id}",

@@ -453,5 +453,68 @@ def test_default_spawn_starts_nonblocking_heartbeat_loop(
 
 
 def test_worker_heartbeat_interval_honors_env_override(monkeypatch):
+    monkeypatch.delenv("HERMES_WORKER_HEARTBEAT_SEC", raising=False)
     monkeypatch.setenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", "3")
     assert kb._worker_heartbeat_interval_seconds() == 3
+
+
+def test_worker_heartbeat_interval_honors_planspec_alias(monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", raising=False)
+    monkeypatch.setenv("HERMES_WORKER_HEARTBEAT_SEC", "7")
+    assert kb._worker_heartbeat_interval_seconds() == 7
+
+
+def test_worker_heartbeat_planspec_name_takes_precedence(monkeypatch):
+    monkeypatch.setenv("HERMES_WORKER_HEARTBEAT_SEC", "11")
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", "22")
+    assert kb._worker_heartbeat_interval_seconds() == 11
+
+
+def test_worker_heartbeat_interval_zero_disables(monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", raising=False)
+    monkeypatch.setenv("HERMES_WORKER_HEARTBEAT_SEC", "0")
+    assert kb._worker_heartbeat_interval_seconds() == 0
+
+
+def test_worker_heartbeat_legacy_zero_also_disables(monkeypatch):
+    monkeypatch.delenv("HERMES_WORKER_HEARTBEAT_SEC", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", "0")
+    assert kb._worker_heartbeat_interval_seconds() == 0
+
+
+def test_worker_heartbeat_unset_returns_default(monkeypatch):
+    monkeypatch.delenv("HERMES_WORKER_HEARTBEAT_SEC", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", raising=False)
+    assert kb._worker_heartbeat_interval_seconds() == kb.WORKER_HEARTBEAT_SEC
+
+
+def test_start_worker_heartbeat_loop_skips_thread_when_disabled(monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", raising=False)
+    monkeypatch.setenv("HERMES_WORKER_HEARTBEAT_SEC", "0")
+    thread = kb._start_worker_heartbeat_loop(
+        task_id="t-disable",
+        run_id=1,
+        claim_lock="claim",
+        board=None,
+        worker_pid=99999,
+    )
+    assert thread is None
+
+
+def test_start_worker_heartbeat_loop_starts_thread_when_enabled(monkeypatch):
+    monkeypatch.delenv("HERMES_WORKER_HEARTBEAT_SEC", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_HEARTBEAT_SECONDS", raising=False)
+    thread = kb._start_worker_heartbeat_loop(
+        task_id="t-enable",
+        run_id=1,
+        claim_lock="claim",
+        board=None,
+        worker_pid=99999,
+        interval_seconds=3600,
+    )
+    try:
+        assert isinstance(thread, threading.Thread)
+        assert thread.is_alive()
+    finally:
+        if thread is not None:
+            thread.join(timeout=0.1)
