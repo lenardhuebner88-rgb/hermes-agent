@@ -2737,6 +2737,16 @@ def _cmd_report(args: argparse.Namespace) -> int:
     task_id = getattr(args, "task_id", None)
 
     with kb.connect() as conn:
+        if task_id == "worker-health":
+            report = kr.worker_health_report(
+                conn,
+                window_seconds=since_seconds or kr.WORKER_HEALTH_WINDOW_SECONDS,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
+            else:
+                print(kr.render_worker_health_report(report))
+            return 0
         if task_id:
             if kb.get_task(conn, task_id) is None:
                 print(f"no such task: {task_id}", file=sys.stderr)

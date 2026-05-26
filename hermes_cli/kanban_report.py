@@ -7,12 +7,22 @@ does not import completion validators.
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from hermes_cli import kanban_db as kb
 
 
 REPORT_CONTRACT_VERSION = 1
+WORKER_HEALTH_WINDOW_SECONDS = 30 * 86400
+
+_CRASH_EXIT_KINDS = {
+    "clean_exit_protocol_violation",
+    "nonzero_exit",
+    "signaled",
+    "pid_not_alive",
+}
 
 
 def _field(obj: Any, name: str, default: Any = None) -> Any:
@@ -308,3 +318,294 @@ def latest_report_for_task(conn: Any, task_id: str) -> Optional[dict[str, Any]]:
     """Return the latest completed report for a task, or None."""
     reports = reports_for_task(conn, task_id)
     return reports[-1] if reports else None
+
+
+def _row_dicts(rows: Iterable[Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+def _pct(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round((numerator / denominator) * 100.0, 1)
+
+
+def _iso_utc(ts: int) -> str:
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _md_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _running_age_bucket(age_seconds: int) -> str:
+    if age_seconds < 5 * 60:
+        return "<5m"
+    if age_seconds < 15 * 60:
+        return "5-15m"
+    if age_seconds < 60 * 60:
+        return "15-60m"
+    if age_seconds < 6 * 60 * 60:
+        return "1-6h"
+    if age_seconds < 24 * 60 * 60:
+        return "6-24h"
+    return ">24h"
+
+
+def worker_health_report(
+    conn: Any,
+    *,
+    now: Optional[int] = None,
+    window_seconds: int = WORKER_HEALTH_WINDOW_SECONDS,
+) -> dict[str, Any]:
+    """Return the read-only worker-health diagnostics report.
+
+    The default window is the Slice-2.3 contract: last 30 days. The report
+    intentionally uses aggregate SELECTs only; it does not mutate task state,
+    emit events, or call dispatcher helpers.
+    """
+    now_ts = int(now if now is not None else time.time())
+    window = int(window_seconds)
+    cutoff = now_ts - window
+    crash_kinds = tuple(sorted(_CRASH_EXIT_KINDS))
+    crash_placeholders = ",".join("?" for _ in crash_kinds)
+
+    crash_rows = _row_dicts(
+        conn.execute(
+            f"""
+            SELECT
+                COALESCE(profile, '(unknown)') AS profile,
+                COUNT(*) AS total_runs,
+                SUM(
+                    CASE
+                        WHEN status = 'crashed'
+                          OR outcome = 'crashed'
+                          OR worker_exit_kind IN ({crash_placeholders})
+                        THEN 1 ELSE 0
+                    END
+                ) AS crashed_runs
+              FROM task_runs
+             WHERE started_at >= ?
+             GROUP BY COALESCE(profile, '(unknown)')
+             ORDER BY
+                CAST(SUM(
+                    CASE
+                        WHEN status = 'crashed'
+                          OR outcome = 'crashed'
+                          OR worker_exit_kind IN ({crash_placeholders})
+                        THEN 1 ELSE 0
+                    END
+                ) AS REAL) / COUNT(*) DESC,
+                crashed_runs DESC,
+                profile ASC
+            """,
+            (*crash_kinds, cutoff, *crash_kinds),
+        ).fetchall()
+    )
+    for row in crash_rows:
+        row["total_runs"] = int(row["total_runs"] or 0)
+        row["crashed_runs"] = int(row["crashed_runs"] or 0)
+        row["crash_rate_pct"] = _pct(row["crashed_runs"], row["total_runs"])
+
+    fingerprint_rows = _row_dicts(
+        conn.execute(
+            """
+            SELECT
+                worker_failure_fingerprint AS fingerprint,
+                COUNT(*) AS count,
+                GROUP_CONCAT(DISTINCT COALESCE(profile, '(unknown)')) AS profiles
+              FROM task_runs
+             WHERE started_at >= ?
+               AND worker_failure_fingerprint IS NOT NULL
+               AND TRIM(worker_failure_fingerprint) != ''
+             GROUP BY worker_failure_fingerprint
+             ORDER BY count DESC, fingerprint ASC
+             LIMIT 5
+            """,
+            (cutoff,),
+        ).fetchall()
+    )
+    for row in fingerprint_rows:
+        row["count"] = int(row["count"] or 0)
+        row["profiles"] = ", ".join(
+            sorted(part for part in str(row.get("profiles") or "").split(",") if part)
+        )
+
+    protocol_rows = _row_dicts(
+        conn.execute(
+            """
+            SELECT
+                COALESCE(profile, '(unknown)') AS profile,
+                COUNT(*) AS violations
+              FROM task_runs
+             WHERE started_at >= ?
+               AND worker_exit_kind = 'clean_exit_protocol_violation'
+             GROUP BY COALESCE(profile, '(unknown)')
+             ORDER BY violations DESC, profile ASC
+            """,
+            (cutoff,),
+        ).fetchall()
+    )
+    for row in protocol_rows:
+        row["violations"] = int(row["violations"] or 0)
+    protocol_total = sum(row["violations"] for row in protocol_rows)
+
+    histogram_counts = {label: 0 for label in ("<5m", "5-15m", "15-60m", "1-6h", "6-24h", ">24h")}
+    running_rows = conn.execute(
+        """
+        SELECT started_at, last_heartbeat_at
+          FROM task_runs
+         WHERE status = 'running'
+           AND ended_at IS NULL
+        """
+    ).fetchall()
+    for row in running_rows:
+        reference = row["last_heartbeat_at"] if row["last_heartbeat_at"] is not None else row["started_at"]
+        if reference is None:
+            continue
+        histogram_counts[_running_age_bucket(max(0, now_ts - int(reference)))] += 1
+    stale_histogram = [
+        {"bucket": bucket, "running_runs": count}
+        for bucket, count in histogram_counts.items()
+    ]
+
+    coverage_row = conn.execute(
+        """
+        WITH window_runs AS (
+            SELECT id, task_id, last_heartbeat_at
+              FROM task_runs
+             WHERE started_at >= ?
+        ),
+        heartbeat_by_run AS (
+            SELECT DISTINCT run_id
+              FROM task_events
+             WHERE kind = 'heartbeat'
+               AND created_at >= ?
+               AND run_id IS NOT NULL
+        ),
+        heartbeat_by_task AS (
+            SELECT DISTINCT task_id
+              FROM task_events
+             WHERE kind = 'heartbeat'
+               AND created_at >= ?
+        )
+        SELECT
+            COUNT(*) AS total_runs,
+            SUM(
+                CASE
+                    WHEN window_runs.last_heartbeat_at IS NOT NULL
+                      OR heartbeat_by_run.run_id IS NOT NULL
+                      OR heartbeat_by_task.task_id IS NOT NULL
+                    THEN 1 ELSE 0
+                END
+            ) AS covered_runs
+          FROM window_runs
+          LEFT JOIN heartbeat_by_run ON heartbeat_by_run.run_id = window_runs.id
+          LEFT JOIN heartbeat_by_task ON heartbeat_by_task.task_id = window_runs.task_id
+        """,
+        (cutoff, cutoff, cutoff),
+    ).fetchone()
+    coverage_total = int((coverage_row or {})["total_runs"] or 0)
+    coverage_covered = int((coverage_row or {})["covered_runs"] or 0)
+
+    return {
+        "generated_at": _iso_utc(now_ts),
+        "window_seconds": window,
+        "cutoff": cutoff,
+        "cutoff_utc": _iso_utc(cutoff),
+        "crash_rate_by_profile": crash_rows,
+        "top_failure_fingerprints": fingerprint_rows,
+        "protocol_violations": {
+            "total": protocol_total,
+            "by_profile": protocol_rows,
+        },
+        "stale_age_histogram": stale_histogram,
+        "heartbeat_coverage": {
+            "covered_runs": coverage_covered,
+            "total_runs": coverage_total,
+            "ratio_pct": _pct(coverage_covered, coverage_total),
+        },
+    }
+
+
+def render_worker_health_report(report: Mapping[str, Any]) -> str:
+    """Render ``worker_health_report`` as Markdown."""
+    lines = [
+        "# Kanban Worker Health Report",
+        "",
+        f"Generated: {report['generated_at']}",
+        f"Window: last {int(report['window_seconds']) // 86400}d since {report['cutoff_utc']}",
+        "",
+        "## Crash rate by profile",
+        "",
+        "| Profile | Runs | Crashes | Crash rate |",
+        "|---|---:|---:|---:|",
+    ]
+    crash_rows = list(report.get("crash_rate_by_profile") or [])
+    if crash_rows:
+        for row in crash_rows:
+            lines.append(
+                f"| {_md_cell(row['profile'])} | {int(row['total_runs'])} | "
+                f"{int(row['crashed_runs'])} | {float(row['crash_rate_pct']):.1f}% |"
+            )
+    else:
+        lines.append("| _No runs in window_ | 0 | 0 | 0.0% |")
+
+    lines.extend([
+        "",
+        "## Top worker_failure_fingerprint clusters",
+        "",
+        "| Fingerprint | Count | Profiles |",
+        "|---|---:|---|",
+    ])
+    fingerprint_rows = list(report.get("top_failure_fingerprints") or [])
+    if fingerprint_rows:
+        for row in fingerprint_rows:
+            lines.append(
+                f"| {_md_cell(row['fingerprint'])} | {int(row['count'])} | "
+                f"{_md_cell(row.get('profiles', ''))} |"
+            )
+    else:
+        lines.append("| _No failure fingerprints in window_ | 0 |  |")
+
+    protocol = report.get("protocol_violations") or {}
+    lines.extend([
+        "",
+        "## Protocol violations",
+        "",
+        f"Total: {int(protocol.get('total') or 0)}",
+        "",
+        "| Profile | Violations |",
+        "|---|---:|",
+    ])
+    protocol_rows = list(protocol.get("by_profile") or [])
+    if protocol_rows:
+        for row in protocol_rows:
+            lines.append(f"| {_md_cell(row['profile'])} | {int(row['violations'])} |")
+    else:
+        lines.append("| _No protocol violations in window_ | 0 |")
+
+    lines.extend([
+        "",
+        "## Stale age histogram",
+        "",
+        "| Age since heartbeat/start | Running runs |",
+        "|---|---:|",
+    ])
+    for row in report.get("stale_age_histogram") or []:
+        lines.append(f"| {_md_cell(row['bucket'])} | {int(row['running_runs'])} |")
+
+    coverage = report.get("heartbeat_coverage") or {}
+    lines.extend([
+        "",
+        "## Heartbeat coverage",
+        "",
+        (
+            f"Runs with heartbeat: {int(coverage.get('covered_runs') or 0)} / "
+            f"{int(coverage.get('total_runs') or 0)} "
+            f"({float(coverage.get('ratio_pct') or 0.0):.1f}%)"
+        ),
+        "",
+    ])
+    return "\n".join(lines)
