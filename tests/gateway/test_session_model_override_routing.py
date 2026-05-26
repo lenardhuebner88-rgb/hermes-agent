@@ -63,6 +63,11 @@ def _make_runner():
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.hooks.loaded_hooks = []
+
+    async def _run_direct(func, *args):
+        return func(*args)
+
+    runner._run_in_executor_with_context = _run_direct
     return runner
 
 
@@ -265,4 +270,3 @@ fallback_providers:
     assert runtime_kwargs["api_key"] == "env-secret"
     assert runtime_kwargs["base_url"] == "https://fallback.example/v1"
     assert runtime_kwargs["model"] == "fallback-model"
-
