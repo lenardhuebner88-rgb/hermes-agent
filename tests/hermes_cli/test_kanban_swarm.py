@@ -1,4 +1,7 @@
 import json
+from pathlib import Path
+
+import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_swarm import (
@@ -7,6 +10,36 @@ from hermes_cli.kanban_swarm import (
     latest_blackboard,
     post_blackboard_update,
 )
+
+
+@pytest.fixture(autouse=True)
+def swarm_profiles(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    profiles = [
+        "a",
+        "b",
+        "orchestrator",
+        "researcher",
+        "researcher-a",
+        "researcher-b",
+        "reviewer",
+        "swarm-orchestrator",
+        "writer",
+    ]
+    for profile in profiles:
+        (home / "profiles" / profile / "skills").mkdir(parents=True, exist_ok=True)
+    for profile, skill in [
+        ("orchestrator", "kanban-orchestrator"),
+        ("swarm-orchestrator", "kanban-orchestrator"),
+        ("reviewer", "requesting-code-review"),
+        ("writer", "avoid-ai-writing"),
+    ]:
+        skill_dir = home / "profiles" / profile / "skills" / skill
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
 
 
 def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path):

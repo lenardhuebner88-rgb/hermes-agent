@@ -651,17 +651,62 @@ class CreateTaskBody(BaseModel):
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
+    scope_contract: Optional[dict[str, Any]] = None
+    allowed_tools: Optional[list[str]] = None
+    forbidden_systems: Optional[list[str]] = None
+    report_contract_version: int = 1
 
 
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
+    body = payload.body
+    skills = payload.skills
+    lint_payload: Optional[dict[str, Any]] = None
+    if payload.scope_contract is not None:
+        if not payload.assignee:
+            raise HTTPException(
+                status_code=400,
+                detail="scope_contract requires assignee",
+            )
+        try:
+            from hermes_cli.templates.task_template_builder import (
+                AuthoringLintError,
+                build_task_template,
+                format_authoring_lint_errors,
+                validate_authoring_template,
+            )
+
+            template = build_task_template(
+                payload.assignee,
+                payload.scope_contract,
+                report_contract_version=payload.report_contract_version,
+                body=body or "",
+                allowed_tools=payload.allowed_tools,
+                forbidden_systems=payload.forbidden_systems,
+                skills=skills,
+            )
+            lint_payload = validate_authoring_template(template, title=payload.title)
+        except AuthoringLintError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "authoring lint failed before create: "
+                    + format_authoring_lint_errors(exc.payload)
+                ),
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        body = template.body_template
+        if skills is None:
+            skills = template.skills or None
+
     conn = _conn(board=board)
     try:
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
-            body=payload.body,
+            body=body,
             assignee=payload.assignee,
             created_by="dashboard",
             workspace_kind=payload.workspace_kind,
@@ -672,10 +717,12 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             triage=payload.triage,
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
-            skills=payload.skills,
+            skills=skills,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
+        if lint_payload is not None and not lint_payload.get("ok"):
+            body["authoring_lint"] = lint_payload
         # Surface a dispatcher-presence warning so the UI can show a
         # banner when a `ready` task would otherwise sit idle because no
         # gateway is running (or dispatch_in_gateway=false). Only emit

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from typing import Any, Mapping
 
 
@@ -38,6 +39,20 @@ class TaskTemplate:
             "body": self.body_template,
             "skills": list(self.skills) or None,
         }
+
+
+class AuthoringLintError(ValueError):
+    """Raised when a template-authored task fails the authoring lint gate."""
+
+    def __init__(self, payload: dict[str, Any]):
+        self.payload = payload
+        codes = [
+            str(item.get("code"))
+            for item in payload.get("errors", [])
+            if item.get("code")
+        ]
+        detail = ", ".join(codes) if codes else "unknown_error"
+        super().__init__(f"authoring lint failed: {detail}")
 
 
 def _as_list(value: Any) -> list[str]:
@@ -130,3 +145,68 @@ def build_task_template(
         report_contract_version=version,
         body_template=body_template,
     )
+
+
+def authoring_lint_mode() -> str:
+    """Return the authoring lint mode from the process environment."""
+
+    mode = os.environ.get("HERMES_AUTHORING_LINT", "enforce").strip().lower()
+    if mode in {"warn", "warning"}:
+        return "warn"
+    return "enforce"
+
+
+def format_authoring_lint_errors(payload: Mapping[str, Any]) -> str:
+    errors = payload.get("errors") or []
+    if not errors:
+        return "unknown_error"
+    parts: list[str] = []
+    for item in errors:
+        if not isinstance(item, Mapping):
+            continue
+        code = str(item.get("code") or "error")
+        message = str(item.get("message") or "").strip()
+        parts.append(f"{code}: {message}" if message else code)
+    return "; ".join(parts) if parts else "unknown_error"
+
+
+def validate_authoring_template(
+    template: TaskTemplate,
+    *,
+    title: str | None = None,
+    unsafe: bool = False,
+) -> dict[str, Any]:
+    """Validate a freshly built task template before any tasks insert.
+
+    ``HERMES_AUTHORING_LINT=warn`` is the rollout rollback flag: diagnostics
+    are still produced but invalid templates do not block insertion. ``unsafe``
+    is reserved for explicit manual CLI operations.
+    """
+
+    if unsafe:
+        return {
+            "schema": "kanban.authoring_lint.v1",
+            "ok": True,
+            "mode": authoring_lint_mode(),
+            "bypassed": True,
+            "errors": [],
+            "warnings": [],
+        }
+
+    from hermes_cli.cli.kanban_scope_lint import TaskSpec, validate_task_spec
+
+    payload = validate_task_spec(
+        TaskSpec(
+            source="authoring",
+            task_id=None,
+            title=title,
+            body=template.body_template,
+            assignee=template.assignee,
+            skills=template.skills,
+        )
+    )
+    payload["mode"] = authoring_lint_mode()
+    payload["bypassed"] = False
+    if payload.get("ok") or payload["mode"] == "warn":
+        return payload
+    raise AuthoringLintError(payload)

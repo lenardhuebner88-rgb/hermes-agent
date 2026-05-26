@@ -830,7 +830,12 @@ def _handle_create(args: dict, **kw) -> str:
         if not isinstance(scope_contract, dict):
             return tool_error("kanban_create: scope_contract must be an object")
         try:
-            from hermes_cli.templates.task_template_builder import build_task_template
+            from hermes_cli.templates.task_template_builder import (
+                AuthoringLintError,
+                build_task_template,
+                format_authoring_lint_errors,
+                validate_authoring_template,
+            )
 
             template = build_task_template(
                 str(assignee),
@@ -841,8 +846,19 @@ def _handle_create(args: dict, **kw) -> str:
                 forbidden_systems=args.get("forbidden_systems") or None,
                 skills=skills,
             )
+            lint_payload = validate_authoring_template(template, title=str(title).strip())
+        except AuthoringLintError as exc:
+            return tool_error(
+                "kanban_create: authoring lint failed before create: "
+                + format_authoring_lint_errors(exc.payload)
+            )
         except (TypeError, ValueError) as exc:
             return tool_error(f"kanban_create: {exc}")
+        if not lint_payload.get("ok"):
+            logger.warning(
+                "kanban_create authoring lint warning before create: %s",
+                format_authoring_lint_errors(lint_payload),
+            )
         body = template.body_template
         if skills is None:
             skills = template.skills or None

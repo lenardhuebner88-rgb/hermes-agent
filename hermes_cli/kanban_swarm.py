@@ -22,7 +22,10 @@ import sqlite3
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.templates.task_template_builder import build_task_template
+from hermes_cli.templates.task_template_builder import (
+    build_task_template,
+    validate_authoring_template,
+)
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 SWARM_ALLOWED_TOOLS = [
@@ -95,6 +98,7 @@ def _scope_body(
         body=body,
         skills=list(skills or []),
     )
+    validate_authoring_template(template, title=title)
     return template.body_template
 
 

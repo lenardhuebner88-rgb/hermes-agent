@@ -397,6 +397,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Override template scope_contract.forbidden_systems (repeatable)")
     p_create.add_argument("--report-contract-version", type=int, default=1,
                           help="Report contract version for template-authored scope bodies")
+    p_create.add_argument("--unsafe", action="store_true",
+                          help="Manual ops override: bypass authoring lint for this create")
 
     # --- validate-spec ---
     p_validate_spec = sub.add_parser(
@@ -1496,7 +1498,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print("kanban: --scope-contract-json must decode to an object", file=sys.stderr)
             return 2
         try:
-            from hermes_cli.templates.task_template_builder import build_task_template
+            from hermes_cli.templates.task_template_builder import (
+                AuthoringLintError,
+                build_task_template,
+                format_authoring_lint_errors,
+                validate_authoring_template,
+            )
 
             template = build_task_template(
                 args.assignee,
@@ -1507,9 +1514,27 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 forbidden_systems=getattr(args, "forbidden_system", None) or None,
                 skills=skills,
             )
+            lint_payload = validate_authoring_template(
+                template,
+                title=args.title,
+                unsafe=bool(getattr(args, "unsafe", False)),
+            )
+        except AuthoringLintError as exc:
+            print(
+                "kanban: authoring lint failed before create: "
+                + format_authoring_lint_errors(exc.payload),
+                file=sys.stderr,
+            )
+            return 2
         except ValueError as exc:
             print(f"kanban: {exc}", file=sys.stderr)
             return 2
+        if not lint_payload.get("ok"):
+            print(
+                "kanban: authoring lint warning: "
+                + format_authoring_lint_errors(lint_payload),
+                file=sys.stderr,
+            )
         body = template.body_template
         if skills is None:
             skills = template.skills or None
