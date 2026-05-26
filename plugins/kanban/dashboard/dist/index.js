@@ -1453,6 +1453,101 @@
     );
   }
 
+  function reportQualityTitle(q) {
+    if (!q) return "No completed report yet.";
+    const bits = [];
+    if (q.missing_count) bits.push(`${q.missing_count} missing`);
+    if (q.inconsistency_count) bits.push(`${q.inconsistency_count} inconsistent`);
+    if (bits.length === 0) bits.push("Report Contract v1 clean");
+    if (q.run_id) bits.push(`run #${q.run_id}`);
+    return bits.join(" · ");
+  }
+
+  function ReportQualityChip(props) {
+    const q = props.quality;
+    if (!q) return null;
+    const ok = !!q.ok;
+    return h("span", {
+      className: cn(
+        "hermes-kanban-report-chip",
+        ok ? "hermes-kanban-report-chip--ok" : "hermes-kanban-report-chip--warn",
+      ),
+      title: reportQualityTitle(q),
+    }, ok ? "R ok" : `R ${q.missing_count + q.inconsistency_count}`);
+  }
+
+  function ReportContractSection(props) {
+    const { t } = useI18n();
+    const report = props.report;
+    if (!report) return null;
+    const q = report.quality || {};
+    const contract = report.contract || {};
+    const run = report.run || {};
+    const scope = report.scope_attestation || {};
+    const missing = q.missing || [];
+    const inconsistencies = q.inconsistencies || [];
+    const evidence = report.verification_evidence;
+    const evidenceItems = Array.isArray(evidence)
+      ? evidence
+      : (evidence ? [String(evidence)] : []);
+
+    return h("div", { className: "hermes-kanban-section hermes-kanban-report" },
+      h("div", { className: "hermes-kanban-section-head-row" },
+        h("span", { className: "hermes-kanban-section-head" },
+          tx(t, "reportContract", "Report Contract v1")),
+        h(ReportQualityChip, { quality: props.quality || {
+          ok: !!q.ok,
+          run_id: run.id,
+          missing_count: missing.length,
+          inconsistency_count: inconsistencies.length,
+        } }),
+      ),
+      h("div", { className: "hermes-kanban-report-grid" },
+        h("div", { className: "hermes-kanban-report-stat" },
+          h("span", { className: "hermes-kanban-report-label" }, "Run"),
+          h("span", { className: "hermes-kanban-report-value" },
+            run.id ? `#${run.id}` : "-")),
+        h("div", { className: "hermes-kanban-report-stat" },
+          h("span", { className: "hermes-kanban-report-label" }, "Contract"),
+          h("span", { className: "hermes-kanban-report-value" },
+            contract.version == null ? "-" : String(contract.version))),
+        h("div", { className: "hermes-kanban-report-stat" },
+          h("span", { className: "hermes-kanban-report-label" }, "Scope"),
+          h("span", { className: "hermes-kanban-report-value" },
+            scope.present ? (scope.consistent ? "clean" : "check") : "missing")),
+        h("div", { className: "hermes-kanban-report-stat" },
+          h("span", { className: "hermes-kanban-report-label" }, "Evidence"),
+          h("span", { className: "hermes-kanban-report-value" },
+            evidenceItems.length ? String(evidenceItems.length) : "-")),
+        h("div", { className: "hermes-kanban-report-stat" },
+          h("span", { className: "hermes-kanban-report-label" }, "Receipt"),
+          h("span", { className: "hermes-kanban-report-value" },
+            report.receipt_reference ? "yes" : "-")),
+      ),
+      missing.length || inconsistencies.length
+        ? h("div", { className: "hermes-kanban-report-flags" },
+            missing.map(function (m) {
+              return h("code", { key: "m:" + m, className: "hermes-kanban-report-flag" }, m);
+            }),
+            inconsistencies.map(function (m) {
+              return h("code", { key: "i:" + m, className: "hermes-kanban-report-flag" }, m);
+            }),
+          )
+        : null,
+      report.receipt_reference
+        ? h("code", { className: "hermes-kanban-report-receipt" },
+            report.receipt_reference)
+        : null,
+      evidenceItems.length
+        ? h("ul", { className: "hermes-kanban-report-evidence" },
+            evidenceItems.slice(0, 4).map(function (item, idx) {
+              return h("li", { key: idx }, String(item));
+            }),
+          )
+        : null,
+    );
+  }
+
     // -------------------------------------------------------------------------
   // Board switcher (multi-project)
   // -------------------------------------------------------------------------
@@ -2529,6 +2624,9 @@
                 }, t.warnings.highest_severity === "critical" ? "!!!" :
                    t.warnings.highest_severity === "error" ? "!!" : "⚠")
               : null,
+            t.report_quality
+              ? h(ReportQualityChip, { quality: t.report_quality })
+              : null,
             t.priority > 0
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
@@ -3012,6 +3110,10 @@
         onPatch: props.onPatch,
         onSpecify: props.onSpecify,
         onDecompose: props.onDecompose,
+      }),
+      h(ReportContractSection, {
+        report: props.data.latest_report,
+        quality: t.report_quality,
       }),
       h(DiagnosticsSection, {
         task: t,

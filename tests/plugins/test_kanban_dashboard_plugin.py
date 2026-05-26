@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_report as kr
 
 
 # ---------------------------------------------------------------------------
@@ -25,8 +26,8 @@ from hermes_cli import kanban_db as kb
 # ---------------------------------------------------------------------------
 
 
-def _load_plugin_router():
-    """Dynamically load plugins/kanban/dashboard/plugin_api.py and return its router."""
+def _load_plugin_module():
+    """Dynamically load plugins/kanban/dashboard/plugin_api.py."""
     repo_root = Path(__file__).resolve().parents[2]
     plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
@@ -38,7 +39,12 @@ def _load_plugin_router():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    return mod.router
+    return mod
+
+
+def _load_plugin_router():
+    """Dynamically load plugins/kanban/dashboard/plugin_api.py and return its router."""
+    return _load_plugin_module().router
 
 
 @pytest.fixture
@@ -57,6 +63,19 @@ def client(kanban_home):
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
     return TestClient(app)
+
+
+def _full_report_metadata() -> dict:
+    return {
+        "report_contract_version": kr.REPORT_CONTRACT_VERSION,
+        "verification_evidence": ["scripts/run_tests.sh tests/plugins/test_kanban_dashboard_plugin.py"],
+        "receipt_reference": "vault/03-Agents/Hermes/receipts/demo.md",
+        "scope_contract_read": True,
+        "scope_contract_version": 2,
+        "scope_attestation": True,
+        "forbidden_actions_taken": 0,
+        "effective_toolsets": ["kanban"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1192,82 @@ def test_task_detail_runs_empty_before_claim(client):
     r = client.post("/api/plugins/kanban/tasks", json={"title": "fresh"}).json()
     d = client.get(f"/api/plugins/kanban/tasks/{r['task']['id']}").json()
     assert d["runs"] == []
+    assert d["latest_report"] is None
+    assert d["task"]["report_quality"] is None
+
+
+def test_task_detail_includes_latest_report_contract(kanban_home):
+    """GET /tasks/:id carries the latest normalized Report Contract v1 view."""
+    api = _load_plugin_module()
+    created = api.create_task(api.CreateTaskBody(title="reportable"), board=None)
+    tid = created["task"]["id"]
+
+    conn = kb.connect()
+    try:
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            summary="done with evidence",
+            metadata=_full_report_metadata(),
+        )
+        run = kb.latest_run(conn, tid)
+    finally:
+        conn.close()
+
+    d = api.get_task(tid, board=None, run_state_type=None, run_state_name=None)
+
+    assert d["latest_report"]["contract"]["version"] == kr.REPORT_CONTRACT_VERSION
+    assert d["latest_report"]["quality"]["ok"] is True
+    assert d["latest_report"]["run"]["id"] == run.id
+    assert d["task"]["report_quality"] == {
+        "ok": True,
+        "run_id": run.id,
+        "contract_version": kr.REPORT_CONTRACT_VERSION,
+        "missing": [],
+        "missing_count": 0,
+        "inconsistencies": [],
+        "inconsistency_count": 0,
+        "verification_present": True,
+        "receipt_present": True,
+    }
+
+
+def test_board_cards_include_report_quality_summary(kanban_home):
+    api = _load_plugin_module()
+    clean = api.create_task(api.CreateTaskBody(title="clean report"), board=None)["task"]
+    legacy = api.create_task(api.CreateTaskBody(title="legacy report"), board=None)["task"]
+
+    conn = kb.connect()
+    try:
+        kb.complete_task(
+            conn,
+            clean["id"],
+            summary="clean",
+            metadata=_full_report_metadata(),
+        )
+        kb.complete_task(conn, legacy["id"], summary="legacy", metadata={})
+    finally:
+        conn.close()
+
+    data = api.get_board(
+        tenant=None,
+        include_archived=False,
+        board=None,
+        workflow_template_id=None,
+        current_step_key=None,
+    )
+    tasks = {t["id"]: t for col in data["columns"] for t in col["tasks"]}
+
+    assert tasks[clean["id"]]["report_quality"]["ok"] is True
+    assert tasks[clean["id"]]["report_quality"]["missing_count"] == 0
+    assert tasks[legacy["id"]]["report_quality"]["ok"] is False
+    assert tasks[legacy["id"]]["report_quality"]["missing"] == [
+        "report_contract_version",
+        "verification_evidence",
+        "receipt_reference",
+        "scope_attestation",
+    ]
 
 
 def test_patch_status_done_with_summary_and_metadata(client):
@@ -2195,3 +2290,17 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+def test_dashboard_report_contract_surface_exists():
+    """Dashboard cards and drawer must render Report Contract v1 state."""
+    repo_root = Path(__file__).resolve().parents[2]
+    js = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+
+    assert "function ReportQualityChip" in js
+    assert "function ReportContractSection" in js
+    assert "props.data.latest_report" in js
+    assert "t.report_quality" in js
+    assert "hermes-kanban-report-chip" in css
+    assert "hermes-kanban-report-grid" in css

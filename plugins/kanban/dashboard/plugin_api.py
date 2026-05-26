@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import kanban_report
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +207,88 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
         "metadata": r.metadata,
         "error": r.error,
     }
+
+
+def _compact_report_quality(report: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Small card-safe summary of the latest Report Contract v1 view."""
+    if not report:
+        return None
+    quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
+    contract = report.get("contract") if isinstance(report.get("contract"), dict) else {}
+    run = report.get("run") if isinstance(report.get("run"), dict) else {}
+    missing = list(quality.get("missing") or [])
+    inconsistencies = list(quality.get("inconsistencies") or [])
+    return {
+        "ok": bool(quality.get("ok")),
+        "run_id": run.get("id"),
+        "contract_version": contract.get("version"),
+        "missing": missing,
+        "missing_count": len(missing),
+        "inconsistencies": inconsistencies,
+        "inconsistency_count": len(inconsistencies),
+        "verification_present": bool(report.get("verification_evidence")),
+        "receipt_present": bool(report.get("receipt_reference")),
+    }
+
+
+def _latest_reports_for_tasks(
+    conn: sqlite3.Connection,
+    tasks: list[kanban_db.Task],
+) -> dict[str, dict[str, Any]]:
+    """Return latest normalized reports keyed by task id.
+
+    This avoids an N+1 report lookup on /board while reusing the Slice-1
+    normalizer for the published contract shape.
+    """
+    if not tasks:
+        return {}
+    task_by_id = {t.id: t for t in tasks}
+    ids = list(task_by_id)
+    placeholders = ",".join(["?"] * len(ids))
+
+    events_by_task: dict[str, list[kanban_db.Event]] = {tid: [] for tid in ids}
+    for event in conn.execute(
+        f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY created_at ASC, id ASC",
+        tuple(ids),
+    ).fetchall():
+        try:
+            payload = json.loads(event["payload"]) if event["payload"] else None
+        except Exception:
+            payload = None
+        events_by_task[event["task_id"]].append(
+            kanban_db.Event(
+                id=event["id"],
+                task_id=event["task_id"],
+                kind=event["kind"],
+                payload=payload,
+                created_at=event["created_at"],
+                run_id=(
+                    int(event["run_id"])
+                    if "run_id" in event.keys() and event["run_id"] is not None
+                    else None
+                ),
+            )
+        )
+
+    latest_runs: dict[str, kanban_db.Run] = {}
+    for row in conn.execute(
+        f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) "
+        "AND status IN ('done', 'completed') AND ended_at IS NOT NULL "
+        "ORDER BY ended_at ASC, id ASC",
+        tuple(ids),
+    ).fetchall():
+        latest_runs[row["task_id"]] = kanban_db.Run.from_row(row)
+
+    reports: dict[str, dict[str, Any]] = {}
+    for task_id, run in latest_runs.items():
+        task = task_by_id.get(task_id)
+        if task is not None:
+            reports[task_id] = kanban_report.normalize_run_report(
+                task,
+                run,
+                events_by_task.get(task_id, []),
+            )
+    return reports
 
 
 # Hallucination-warning event kinds — see complete_task() in kanban_db.py.
@@ -418,6 +501,7 @@ def get_board(
         # summary for the card badge (so cards don't carry the detail
         # text; the drawer fetches that via /tasks/:id or /diagnostics).
         diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
+        latest_reports = _latest_reports_for_tasks(conn, tasks)
 
         latest_event_id = conn.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
@@ -442,6 +526,7 @@ def get_board(
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
+            d["report_quality"] = _compact_report_quality(latest_reports.get(t.id))
             diags = diagnostics_per_task.get(t.id)
             if diags:
                 # Full list goes into the payload so the drawer can render
@@ -520,6 +605,8 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        latest_report = kanban_report.latest_report_for_task(conn, task_id)
+        task_d["report_quality"] = _compact_report_quality(latest_report)
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
         diags = _compute_task_diagnostics(conn, task_ids=[task_id])
@@ -541,6 +628,7 @@ def get_task(
                     state_name=run_state_name,
                 )
             ],
+            "latest_report": latest_report,
         }
     finally:
         conn.close()

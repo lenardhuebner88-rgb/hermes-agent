@@ -474,6 +474,69 @@
   color: var(--color-muted-foreground);
 }
 
+.hermes-kanban-report {
+  padding: 0.5rem 0.6rem;
+  background: color-mix(in srgb, var(--color-foreground) 3%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 0.25rem);
+}
+
+.hermes-kanban-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 0.35rem;
+}
+
+.hermes-kanban-report-stat {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.hermes-kanban-report-label {
+  font-size: 0.62rem;
+  color: var(--color-muted-foreground);
+  font-weight: 600;
+}
+
+.hermes-kanban-report-value {
+  font-size: 0.78rem;
+  color: var(--color-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+.hermes-kanban-report-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.hermes-kanban-report-flag {
+  font-size: 0.68rem;
+  padding: 0.08rem 0.3rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #d4b348 50%, var(--color-border));
+  color: var(--color-foreground);
+  background: color-mix(in srgb, #d4b348 12%, transparent) !important;
+}
+
+.hermes-kanban-report-receipt {
+  display: block;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+  color: var(--color-muted-foreground);
+}
+
+.hermes-kanban-report-evidence {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--color-foreground);
+}
+
 .hermes-kanban-pre {
   margin: 0;
   padding: 0.5rem 0.6rem;
@@ -1041,6 +1104,29 @@
   color: #ff9e3b;
   margin-left: 0.25rem;
   cursor: help;
+}
+
+.hermes-kanban-report-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 1.1rem;
+  padding: 0 0.32rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.62rem;
+  line-height: 1;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 600;
+  cursor: help;
+}
+.hermes-kanban-report-chip--ok {
+  color: #3fb97d;
+  background: color-mix(in srgb, #3fb97d 12%, transparent);
+}
+.hermes-kanban-report-chip--warn {
+  color: #d4b348;
+  background: color-mix(in srgb, #d4b348 14%, transparent);
 }
 
 /* Attention strip — collapsed state is a thin bar. */
