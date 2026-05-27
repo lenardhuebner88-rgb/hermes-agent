@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,17 @@ import pytest
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_daily_digest as kdd
 from hermes_cli import kanban_db as kb
+
+
+EXPECTED_NON_ACTIONS = [
+    "standard_kanban_cli_startup_may_init_or_migrate_db",
+    "no_task_changes",
+    "no_run_changes",
+    "no_event_changes",
+    "no_dispatch",
+    "no_cron_activation",
+    "no_delivery",
+]
 
 
 @pytest.fixture
@@ -56,7 +68,7 @@ def test_clean_db_returns_empty_valid_digest(kanban_home, tmp_path):
     assert digest["summary"]["highest_severity"] is None
     assert digest["groups"] == []
     assert digest["external_signals"] == []
-    assert digest["non_actions"] == ["no_dispatch", "no_cron_activation", "no_delivery"]
+    assert digest["non_actions"] == EXPECTED_NON_ACTIONS
 
 
 def test_groups_diagnostics_by_kind_and_severity_with_bounded_tasks(kanban_home, tmp_path):
@@ -131,12 +143,16 @@ def test_markdown_renderer_includes_summary_signals_and_non_actions(kanban_home,
     assert "Daily Monitoring Digest — ERROR" in rendered
     assert "missing_verification_evidence" in rendered
     assert "hub-memory-growth-alert" in rendered
+    assert "standard_kanban_cli_startup_may_init_or_migrate_db" in rendered
+    assert "no_task_changes" in rendered
+    assert "no_run_changes" in rendered
+    assert "no_event_changes" in rendered
     assert "no_dispatch" in rendered
     assert "no_cron_activation" in rendered
     assert "no_delivery" in rendered
 
 
-def test_cli_daily_digest_json_is_read_only(kanban_home, tmp_path, capsys):
+def test_cli_daily_digest_json_is_operationally_read_only(kanban_home, tmp_path, capsys):
     signals = tmp_path / "signals.jsonl"
     signals.write_text(
         json.dumps({"kind": "hub-memory-growth-alert", "ts": "2026-05-27T12:00:00Z"}) + "\n",
@@ -164,9 +180,33 @@ def test_cli_daily_digest_json_is_read_only(kanban_home, tmp_path, capsys):
     payload = json.loads(captured.out)
     assert payload["summary"]["diagnostics_total"] >= 1
     assert payload["summary"]["external_signals_total"] == 1
-    assert payload["non_actions"] == ["no_dispatch", "no_cron_activation", "no_delivery"]
+    assert payload["non_actions"] == EXPECTED_NON_ACTIONS
     with kb.connect() as conn:
         after_events = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
         after_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
     assert after_events == before_events
     assert after_runs == before_runs
+
+
+def test_cli_daily_digest_contract_allows_standard_auto_init_without_content_mutation(
+    tmp_path, monkeypatch, capsys
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+
+    code = _run_cli(["daily-digest", "--json", "--signal-path", str(tmp_path / "missing.jsonl")])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["summary"]["tasks_total"] == 0
+    assert payload["summary"]["diagnostics_total"] == 0
+    assert payload["non_actions"] == EXPECTED_NON_ACTIONS
+    assert (home / "kanban.db").exists()
+    with sqlite3.connect(home / "kanban.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0

@@ -216,3 +216,25 @@ def test_reports_for_fleet_filters_missing_alias_path(kanban_home):
         reports = kr.reports_for_fleet(conn, missing=["evidence.tests"])
 
     assert [report["task"]["id"] for report in reports] == [missing_tid]
+
+
+def test_malformed_json_string_metadata_degrades_to_missing_contract(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="malformed metadata", assignee="alice")
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, started_at, ended_at,
+                outcome, summary, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tid, "alice", "done", 10, 20, "completed", "bad metadata", "{not-json"),
+        )
+        conn.commit()
+
+        report = kr.latest_report_for_task(conn, tid)
+
+    assert report is not None
+    assert report["quality"]["ok"] is False
+    assert "report_contract_version" in report["quality"]["missing"]
+    assert "verification_evidence" in report["quality"]["missing"]

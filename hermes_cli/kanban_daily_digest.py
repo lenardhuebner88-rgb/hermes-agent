@@ -1,9 +1,11 @@
-"""Read-only daily monitoring digest for Hermes Kanban boards.
+"""Operationally read-only daily monitoring digest for Hermes Kanban boards.
 
 The module aggregates currently active kanban diagnostics plus optional
-JSONL signals written by local monitors.  It deliberately performs no writes:
-callers pass an already-open SQLite connection and the signal queue is only
-read, never truncated or acknowledged.
+JSONL signals written by local monitors.  The digest builder deliberately
+performs no task/run/event/dispatch/cron/delivery writes: callers pass an
+already-open SQLite connection and the signal queue is only read, never
+truncated or acknowledged.  The CLI command may still use the standard Kanban
+startup path, which initializes or migrates the local DB before the builder runs.
 """
 
 from __future__ import annotations
@@ -20,7 +22,15 @@ from hermes_cli import kanban_diagnostics as kd
 
 DEFAULT_WINDOW_SECONDS = 24 * 60 * 60
 DEFAULT_SIGNAL_PATH = Path.home() / ".hermes" / "state" / "daily_digest_signals.jsonl"
-NON_ACTIONS = ["no_dispatch", "no_cron_activation", "no_delivery"]
+NON_ACTIONS = [
+    "standard_kanban_cli_startup_may_init_or_migrate_db",
+    "no_task_changes",
+    "no_run_changes",
+    "no_event_changes",
+    "no_dispatch",
+    "no_cron_activation",
+    "no_delivery",
+]
 _SEVERITY_RANK = {name: idx for idx, name in enumerate(kd.SEVERITY_ORDER)}
 
 

@@ -553,10 +553,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit JSON instead of the default table",
     )
 
-    # --- daily-digest (read-only monitoring summary) ---
+    # --- daily-digest (non-dispatching monitoring summary) ---
     p_daily_digest = sub.add_parser(
         "daily-digest",
-        help="Read-only daily monitoring digest (no dispatch, cron, or delivery)",
+        help=(
+            "Daily monitoring digest (standard Kanban CLI startup may init/migrate "
+            "the DB; no dispatch, cron, delivery, tasks, runs, or events)"
+        ),
     )
     p_daily_digest.add_argument(
         "--since",
@@ -1980,7 +1983,12 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
 
 
 def _cmd_daily_digest(args: argparse.Namespace) -> int:
-    """Render a read-only daily monitoring digest for the current board."""
+    """Render an operationally read-only daily monitoring digest for the current board.
+
+    The normal Kanban CLI entrypoint initializes/migrates the local DB before
+    dispatching this handler.  This command's own contract is narrower: it does
+    not create/update tasks, runs, events, dispatch state, cron, or delivery.
+    """
     from hermes_cli import kanban_daily_digest as kdd
     from hermes_cli.config import load_config
 
