@@ -861,6 +861,98 @@ Isolation model:
 
 Full user-facing docs: `website/docs/user-guide/features/kanban.md`.
 
+### Profile Toolset Rules (worker contract)
+
+Any profile that is **dispatcher-reachable** (i.e. the dispatcher may spawn
+it as a Kanban worker) MUST keep the `kanban` toolset enabled.  Disabling
+`kanban` in `agent.disabled_toolsets` removes `kanban_complete` /
+`kanban_block` / `kanban_heartbeat` from the worker, which then returns a
+plain final response and the runtime check
+`worker-final-response-without-terminal-call` auto-blocks the task — a
+hard recovery situation that requires manual review.
+
+The `terminal` toolset MUST also stay enabled, because completion paths
+go through shell-style invocations.
+
+Read-only / verdict-only authority (e.g. `critic`, `reviewer`, `premium`)
+is enforced **in `SOUL.md`** via an explicit "VERDICT-ONLY MODE" section
+listing the allowed worker-side calls (`kanban_show`, `kanban_complete`,
+`kanban_block`, `kanban_heartbeat`, `kanban_comment`) and forbidden
+orchestrator-side calls (`kanban_create`, `kanban_link`,
+`kanban_assign`, `kanban_promote`, `kanban_unblock`, `kanban_list`,
+`kanban_specify`, `kanban_archive`).  **Never** remove `kanban` from
+`disabled_toolsets` as a substitute for the prompt-level restriction.
+
+### Worker-Steering via Comments (MANDATORY-prefix pattern)
+
+When the auto-decomposer creates kid tasks from a dashboard-created parent,
+its LLM pass sometimes waters down strict constraints in the parent body
+("CRITICAL: copy artifacts BEFORE complete" → "Preserve if implementation
+requires"). Workers read kanban **comments** as 1st-class briefing context
+on claim, separately from the body, so the reliable workaround is:
+
+1. After `kanban create-dashboard` + auto-decompose, inspect each kid
+   (`hermes kanban show <kid_id>`) and verify CRITICAL/MANDATORY/MUST/NEVER
+   lines from the parent are still in the kid body.
+2. For any kid where they are missing or paraphrased, append:
+   `hermes kanban comment <kid_id> "MANDATORY: <verbatim constraint with absolute paths>" --author user`
+3. Set comments **before** the dispatcher claims the kid (otherwise the
+   first run starts without the hint).
+4. Pre-create the persistence target (e.g. `mkdir -p ~/.hermes/reports/<sprint>/`)
+   so the worker has a guaranteed-existing absolute path to write into.
+
+This pattern is required until the decomposer's CRITICAL-preservation pass
+(`hermes_cli/kanban_decompose.py`) handles all phrasings reliably; the
+two are complementary belts-and-braces.
+
+### Sprint Closure Workflow
+
+For any decomposed sprint with 3+ kids, before completing the parent task
+run **`hermes kanban close-sprint <parent-id>`**.  The command enumerates
+done kids, aggregates their summaries / runtimes / `runs.metadata.artifacts`,
+and writes a structured `SPRINT CLOSURE` comment on the parent before
+calling `kanban_complete`.  The comment survives scratch-workspace cleanup
+and any future DB recovery, so a future `hermes kanban show <parent-id>`
+still reconstructs the full sprint story.
+
+`--auto-summary` lets the helper generate the one-paragraph overview via
+the auxiliary LLM client; otherwise pass `--comment <file>` to inject a
+hand-written closure.
+
+### Worker Artifact Preservation
+
+Scratch workspaces (`workspaces/<task_id>/`) are deleted by
+`_cleanup_workspace` on `kanban_complete` — by design, to keep disk usage
+bounded.  To survive completion, write the artifact path(s) into
+`runs.metadata.artifacts[]` **before** calling `kanban_complete`:
+
+```python
+# From worker code (Python, inside a kanban tool call):
+kanban_complete(
+    summary="...",
+    metadata={"artifacts": ["/abs/path/in/workspace/output.md"]},
+)
+```
+
+Any absolute path inside `artifacts[]` that points underneath the task's
+scratch workspace is auto-copied to
+`~/.hermes/reports/by-task/<task-id>/<basename>` immediately before the
+workspace is removed.  Empty `artifacts[]` → no preservation, full
+backwards compatibility.
+
+### CLI Flag Conventions
+
+The top-level `hermes` argparse uses `parse_known_args` so that
+sub-command flags don't collide with top-level flag names (`--reason`,
+`--model`, `--provider`, etc.).  Sub-command parsers see all remaining
+arguments — including ones whose names happen to match top-level flags.
+If you add a top-level flag, make sure its action and `nargs` are
+compatible with `parse_known_args` (no `required=True` that the user
+might satisfy positionally via the sub-command).  If a flag genuinely
+conflicts (same name, different semantics on top-level vs. sub-command),
+rename the sub-command flag with a sub-namespace prefix
+(`--kanban-foo`) and keep a deprecated alias if you must.
+
 ---
 
 ## Important Policies
