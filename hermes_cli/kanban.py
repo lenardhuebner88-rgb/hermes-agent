@@ -800,6 +800,76 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit machine-readable JSON result",
     )
 
+    p_close_sprint = sub.add_parser(
+        "close-sprint",
+        help=(
+            "Aggregate kid receipts into a SPRINT CLOSURE comment on the "
+            "parent, then complete the parent (recommended for any "
+            "decomposed sprint with 3+ kids)"
+        ),
+    )
+    p_close_sprint.add_argument("task_id", help="Parent task id to close")
+    p_close_sprint.add_argument(
+        "--auto-summary",
+        action="store_true",
+        help=(
+            "Generate the 2–3 sentence overview via the auxiliary LLM. "
+            "Falls back to a deterministic kid-count line when the aux "
+            "client is unavailable."
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--comment",
+        dest="comment_file",
+        default=None,
+        help=(
+            "Read the SPRINT CLOSURE comment body from FILE instead of "
+            "auto-assembling it (or '-' for stdin). Mutually exclusive "
+            "with --auto-summary; the override is used verbatim."
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--result",
+        default=None,
+        help=(
+            "Result text recorded on the parent task on completion "
+            "(default: 'Sprint deliverable complete')"
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--summary",
+        default=None,
+        help=(
+            "Override the run-summary that lands on the parent's "
+            "completion record (default: first non-empty line of the "
+            "closure comment)"
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--allow-open-kids",
+        action="store_true",
+        help=(
+            "Skip the safety check that every kid must already be "
+            "terminal (done/archived). Use ONLY when the closure is "
+            "intentional with open kids — the comment will record their "
+            "open status."
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print the assembled closure-comment body to stdout but "
+            "neither store it nor complete the parent"
+        ),
+    )
+    p_close_sprint.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        help="Emit machine-readable JSON outcome",
+    )
+
     p_archive = sub.add_parser("archive", help="Archive one or more tasks")
     p_archive.add_argument("task_ids", nargs="*",
                            help="Task ids to archive (default mode)")
@@ -1201,6 +1271,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "schedule": _cmd_schedule,
         "unblock":  _cmd_unblock,
         "promote":  _cmd_promote,
+        "close-sprint": _cmd_close_sprint,
         "archive":  _cmd_archive,
         "tail":     _cmd_tail,
         "dispatch": _cmd_dispatch,
@@ -2669,6 +2740,96 @@ def _cmd_promote(args: argparse.Namespace) -> int:
         else:
             print(f"cannot promote {r['task_id']}: {r['error']}", file=sys.stderr)
     return 0 if not failed else 1
+
+
+def _cmd_close_sprint(args: argparse.Namespace) -> int:
+    """Aggregate kid receipts into a SPRINT CLOSURE comment and complete
+    the parent.  See ``hermes_cli/kanban_close_sprint.py`` for shape.
+    """
+    from hermes_cli import kanban_close_sprint as kcs
+
+    if args.auto_summary and args.comment_file:
+        print(
+            "kanban close-sprint: --auto-summary and --comment are mutually "
+            "exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
+    comment_override: Optional[str] = None
+    if args.comment_file:
+        try:
+            comment_override = kcs.read_comment_file(args.comment_file)
+        except OSError as exc:
+            print(f"kanban close-sprint: cannot read --comment file: {exc}",
+                  file=sys.stderr)
+            return 2
+
+    audit_author = _profile_author()
+    as_json = bool(getattr(args, "json", False))
+
+    if args.dry_run:
+        with kb.connect() as conn:
+            parent = kb.get_task(conn, args.task_id)
+            if parent is None:
+                print(f"kanban close-sprint: unknown task {args.task_id}",
+                      file=sys.stderr)
+                return 1
+            if comment_override is not None:
+                body = comment_override
+                kids = [kcs._kid_receipt(conn, k)
+                        for k in kb.child_ids(conn, args.task_id)]
+            else:
+                body, kids = kcs.build_closure_comment(
+                    conn, args.task_id, auto_summary=args.auto_summary,
+                )
+        if as_json:
+            print(json.dumps({
+                "task_id": args.task_id,
+                "dry_run": True,
+                "comment_body": body,
+                "kid_count": len(kids),
+            }, indent=2, ensure_ascii=False))
+        else:
+            print(body)
+        return 0
+
+    with kb.connect() as conn:
+        outcome = kcs.close_sprint(
+            conn,
+            args.task_id,
+            auto_summary=args.auto_summary,
+            comment_override=comment_override,
+            author=audit_author,
+            result=args.result,
+            summary_override=args.summary,
+            require_kids_done=not args.allow_open_kids,
+        )
+
+    if as_json:
+        payload = {
+            "task_id": outcome.parent_id,
+            "ok": outcome.ok,
+            "reason": outcome.reason,
+            "completed": outcome.completed,
+            "comment_id": outcome.comment_id,
+            "kid_count": len(outcome.kid_receipts or []),
+            "comment_body": outcome.comment_body,
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if outcome.ok and outcome.completed else 1
+
+    if not outcome.ok:
+        print(f"kanban close-sprint: {outcome.reason}", file=sys.stderr)
+        return 1
+
+    status_tag = "completed" if outcome.completed else "comment-only"
+    print(
+        f"Closed sprint {outcome.parent_id} "
+        f"(comment_id={outcome.comment_id}, {status_tag}, "
+        f"kids={len(outcome.kid_receipts or [])})"
+    )
+    return 0 if outcome.completed else 1
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
