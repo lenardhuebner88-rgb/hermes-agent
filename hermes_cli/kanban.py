@@ -768,6 +768,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Audit-trail reason (recorded on the task_events row)",
     )
     p_promote.add_argument(
+        "--reason",
+        dest="reason_flag",
+        default=None,
+        help=(
+            "Audit-trail reason flag (alternative to the positional form, "
+            "for callers that prefer named args; takes precedence over the "
+            "positional reason when both are provided)"
+        ),
+    )
+    p_promote.add_argument(
         "--ids",
         nargs="+",
         default=None,
@@ -2607,7 +2617,11 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason_flag = getattr(args, "reason_flag", None)
+    if reason_flag:
+        reason = str(reason_flag).strip() or None
+    else:
+        reason = " ".join(args.reason).strip() if args.reason else None
     author = _profile_author()
     as_json = getattr(args, "json", False)
     extra_ids = list(getattr(args, "ids", None) or [])

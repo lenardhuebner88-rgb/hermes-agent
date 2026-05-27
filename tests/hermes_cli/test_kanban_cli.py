@@ -671,3 +671,133 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# Flag-parsing hardening (2026-05-27 hardening sprint, TASK 2)
+#
+# Memory note `hermes-cli-flag-parsing` documented that
+# `hermes kanban promote <id> --reason "text"` failed with
+# "unrecognized arguments: --reason ..." because the subparser only
+# accepted `reason` as a positional. Users frequently reach for the
+# `--reason` flag form (it's the convention in `kanban reclaim` and
+# `kanban reassign`); the missing flag on `promote` was a footgun.
+# ---------------------------------------------------------------------------
+
+
+def _parse_kanban(argv: list[str]) -> argparse.Namespace:
+    """Parse a `kanban <verb> ...` argv list via the real top-level
+    parser shape, without executing the command. Returns the namespace
+    so tests can assert flag wiring.
+    """
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    return parser.parse_args(["kanban", *argv])
+
+
+def test_promote_accepts_reason_as_flag():
+    """The `--reason` flag on `kanban promote` must parse without error
+    and route to a distinct dest (`reason_flag`) so it does not collide
+    with the historical positional `reason` nargs='*'.
+    """
+    ns = _parse_kanban(["promote", "t_abc", "--reason", "manual recovery"])
+    assert ns.task_id == "t_abc"
+    assert ns.reason_flag == "manual recovery"
+    # Positional `reason` stays empty when the flag form is used.
+    assert ns.reason == []
+
+
+def test_promote_positional_reason_still_supported():
+    """Backwards-compat: the historical positional `reason` form must
+    keep working. Both single-word and multi-word reasons.
+    """
+    ns = _parse_kanban(["promote", "t_abc", "single"])
+    assert ns.reason == ["single"]
+    assert ns.reason_flag is None
+
+    ns = _parse_kanban(["promote", "t_abc", "multi", "word", "reason"])
+    assert ns.reason == ["multi", "word", "reason"]
+    assert ns.reason_flag is None
+
+
+def test_promote_flag_takes_precedence_over_positional(kanban_home, capsys):
+    """When both `--reason FOO` and positional `bar baz` are passed, the
+    flag wins. (Belt-and-braces: argparse can sometimes leave the
+    positional list populated alongside the flag.)
+    """
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+
+    ns = argparse.Namespace(
+        task_id=child,
+        reason=["positional", "wins?"],
+        reason_flag="flag wins",
+        ids=None,
+        force=False,
+        dry_run=False,
+        json=False,
+    )
+    rc = kc._cmd_promote(ns)
+    assert rc == 0
+
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'promoted_manual'",
+            (child,),
+        ).fetchone()
+    assert row is not None
+    assert json.loads(row["payload"])["reason"] == "flag wins"
+
+
+def test_promote_reason_flag_recorded_in_audit(kanban_home):
+    """End-to-end via _cmd_promote: --reason value lands verbatim in
+    task_events `promoted_manual` payload (the acceptance criterion
+    from the hardening-sprint spec).
+    """
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+
+    ns = argparse.Namespace(
+        task_id=child,
+        reason=[],
+        reason_flag="hardening-sprint test reason",
+        ids=None,
+        force=False,
+        dry_run=False,
+        json=False,
+    )
+    rc = kc._cmd_promote(ns)
+    assert rc == 0
+
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'promoted_manual'",
+            (child,),
+        ).fetchone()
+    assert row is not None
+    assert (
+        json.loads(row["payload"])["reason"]
+        == "hardening-sprint test reason"
+    )
+
+
+def test_comment_flags_still_distinct_from_promote_reason():
+    """Regression guard: `kanban comment` uses `--author` and `--max-len`,
+    not `--reason`. Make sure they keep parsing (memory note
+    explicitly called these out as not-conflicting).
+    """
+    ns = _parse_kanban([
+        "comment", "t_abc", "text body",
+        "--author", "user", "--max-len", "100",
+    ])
+    assert ns.task_id == "t_abc"
+    assert ns.text == ["text body"]
+    assert ns.author == "user"
+    assert ns.max_len == 100
