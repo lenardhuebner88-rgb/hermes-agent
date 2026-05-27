@@ -448,6 +448,105 @@ def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(mon
     assert response.output[0].content[0].text == "create fallback ok"
 
 
+def test_run_codex_stream_falls_back_when_sdk_stream_is_none(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    calls = {"stream": 0, "create": 0}
+
+    class _NoneStreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_stream(**kwargs):
+        calls["stream"] += 1
+        return _NoneStreamContext()
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        assert kwargs.get("stream") is True
+        return _codex_message_response("none stream fallback ok")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=_fake_create,
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert calls["stream"] == 2
+    assert calls["create"] == 1
+    assert response.output[0].content[0].text == "none stream fallback ok"
+
+
+def test_run_codex_stream_raises_transport_error_when_both_stream_paths_are_none(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    calls = {"stream": 0, "create": 0}
+
+    class _NoneStreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_stream(**kwargs):
+        calls["stream"] += 1
+        return _NoneStreamContext()
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        raise TypeError("'NoneType' object is not iterable")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=_fake_create,
+        )
+    )
+
+    with pytest.raises(ConnectionError, match="stream parser returned non-iterable None"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls["stream"] == 2
+    assert calls["create"] == 1
+
+
+def test_run_codex_stream_raises_transport_error_when_create_response_output_is_none(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    calls = {"stream": 0, "create": 0}
+
+    class _NoneStreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_stream(**kwargs):
+        calls["stream"] += 1
+        return _NoneStreamContext()
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        return SimpleNamespace(output=None)
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=_fake_create,
+        )
+    )
+
+    with pytest.raises(ConnectionError, match="response.output=None"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls["stream"] == 2
+    assert calls["create"] == 1
+
+
 def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     agent = _build_agent(monkeypatch)
     calls = {"stream": 0, "create": 0}

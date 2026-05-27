@@ -335,8 +335,40 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 )
                 return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             raise
+        except TypeError as exc:
+            err_text = str(exc)
+            none_not_iterable = "NoneType" in err_text and "not iterable" in err_text
+            if none_not_iterable and attempt < max_stream_retries:
+                logger.debug(
+                    "Codex Responses stream returned non-iterable None "
+                    "(attempt %s/%s); retrying. %s err=%s",
+                    attempt + 1,
+                    max_stream_retries + 1,
+                    agent._client_log_context(),
+                    err_text,
+                )
+                continue
+            if none_not_iterable:
+                logger.warning(
+                    "Codex Responses stream returned non-iterable None; "
+                    "falling back to create(stream=True). %s err=%s",
+                    agent._client_log_context(),
+                    err_text,
+                )
+                return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+            raise
 
 
+
+def _is_none_not_iterable_type_error(exc: BaseException) -> bool:
+    err_text = str(exc)
+    return "NoneType" in err_text and "not iterable" in err_text
+
+
+def _codex_none_stream_transport_error(exc: BaseException) -> ConnectionError:
+    error = ConnectionError("Codex Responses stream parser returned non-iterable None")
+    error.__cause__ = exc
+    return error
 
 def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None):
     """Fallback path for stream completion edge cases on Codex-style Responses backends."""
@@ -344,11 +376,20 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     fallback_kwargs = dict(api_kwargs)
     fallback_kwargs["stream"] = True
     fallback_kwargs = agent._get_transport().preflight_kwargs(fallback_kwargs, allow_stream=True)
-    stream_or_response = active_client.responses.create(**fallback_kwargs)
+    try:
+        stream_or_response = active_client.responses.create(**fallback_kwargs)
+    except TypeError as exc:
+        if _is_none_not_iterable_type_error(exc):
+            raise _codex_none_stream_transport_error(exc)
+        raise
 
     # Compatibility shim for mocks or providers that still return a concrete response.
     if hasattr(stream_or_response, "output"):
+        if getattr(stream_or_response, "output", None) is None:
+            raise ConnectionError("Codex Responses create(stream=True) returned response.output=None")
         return stream_or_response
+    if stream_or_response is None:
+        raise ConnectionError("Codex Responses create(stream=True) returned None")
     if not hasattr(stream_or_response, "__iter__"):
         return stream_or_response
 
@@ -356,7 +397,14 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     collected_output_items: list = []
     collected_text_deltas: list = []
     try:
-        for event in stream_or_response:
+        try:
+            event_iter = iter(stream_or_response)
+        except TypeError as exc:
+            if _is_none_not_iterable_type_error(exc):
+                raise _codex_none_stream_transport_error(exc)
+            raise
+
+        for event in event_iter:
             agent._touch_activity("receiving stream response")
             event_type = getattr(event, "type", None)
             if not event_type and isinstance(event, dict):
@@ -433,6 +481,10 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                             len(collected_text_deltas), len(assembled),
                         )
                 return terminal_response
+    except TypeError as exc:
+        if _is_none_not_iterable_type_error(exc):
+            raise _codex_none_stream_transport_error(exc)
+        raise
     finally:
         close_fn = getattr(stream_or_response, "close", None)
         if callable(close_fn):
