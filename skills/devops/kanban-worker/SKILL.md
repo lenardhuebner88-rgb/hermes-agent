@@ -189,3 +189,60 @@ Every tool has a CLI equivalent for human operators and scripts:
 - etc.
 
 Use the tools from inside an agent; the CLI exists for the human at the terminal.
+
+## Sandboxing kanban side-effects in worker-spawned scripts (HERMES_SANDBOX_MODE)
+
+**Warning:** A worker process inherits `HERMES_KANBAN_DB` and
+`HERMES_KANBAN_BOARD` from the dispatcher, both pinned to the LIVE
+production board. Any helper script you launch (sample-builder, fixture
+generator, test harness, etc.) that calls
+`hermes kanban create` / `kanban_db.create_task()` will land rows on the
+LIVE board unless you explicitly opt into sandbox mode.
+
+This is the **live-DB-leak footgun**: a coder run on 2026-05-27 created
+3 accidental tasks (`t_5d4138fe`, `t_632b8e1b`, `t_63f39a2f`) on the
+production board from a sample-builder script. The self-recovery worked
+but the pattern is dangerous in autonomy.
+
+### The fix: opt into HERMES_SANDBOX_MODE=1
+
+In any shell script that calls `hermes kanban <write-verb>`:
+
+```bash
+#!/usr/bin/env bash
+export HERMES_SANDBOX_MODE=1
+# Now `hermes kanban create / promote / complete / link / ...` writes
+# go to `${HERMES_HOME}/.kanban-sandbox/default.db` instead of the
+# live `${HERMES_HOME}/kanban.db`.
+hermes kanban create "smoke-test task" --body "sandbox"
+hermes kanban list   # shows the sandbox board
+```
+
+Equivalent in a Python sub-process:
+
+```python
+import os, subprocess
+env = {**os.environ, "HERMES_SANDBOX_MODE": "1"}
+subprocess.run(
+    ["hermes", "kanban", "create", "smoke", "--body", "sandbox"],
+    env=env, check=True,
+)
+```
+
+`HERMES_SANDBOX_MODE=1`:
+- redirects `kanban_db_path()` → `${HERMES_HOME}/.kanban-sandbox/<board>.db`
+- redirects `workspaces_root()` → `${HERMES_HOME}/.kanban-sandbox/workspaces/`
+- **takes precedence over `HERMES_KANBAN_DB`** (so it survives the
+  dispatcher's worker-env injection)
+- ignores `HERMES_KANBAN_BOARD` (uses sandbox-local "default" board)
+
+When you're done, wipe the sandbox to start fresh:
+
+```bash
+rm -rf "${HERMES_HOME}/.kanban-sandbox"
+```
+
+**Inverse rule:** if you genuinely need a worker script to mutate the
+LIVE board (rare, usually a coordinator-style helper), call the tool
+directly via `kanban_create(...)` — that is the documented audited
+path. Don't shell out from inside a worker to mutate the live board.
