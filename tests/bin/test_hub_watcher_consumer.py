@@ -153,9 +153,41 @@ def test_dry_run_has_no_side_effects_but_apply_appends_marker_and_state(tmp_path
 
     applied = mod.run_once(pending_path=pending, policy_path=tmp_path / "missing.yaml", state_path=state, db_path=tmp_path / "missing.db", apply=True)
     assert applied["decisions_count"] == 1
+    assert "vault_stub_writes" not in applied
+    assert not (tmp_path / "03-Agents" / "Hermes" / "_proposed").exists()
     rows = [json.loads(line) for line in pending.read_text().splitlines() if line.strip()]
     assert len(rows) == 2
     assert rows[-1]["processed_ref"] == rec["ts"]
     assert state.exists()
     assert mod.LOG_FILE.exists()
     assert mod.LOG_FILE.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_apply_writes_phase2_stub_only_to_explicit_tmp_vault_root(tmp_path, monkeypatch):
+    mod = _load_mod(tmp_path, monkeypatch)
+    pending = tmp_path / "pending.jsonl"
+    state = tmp_path / "state.json"
+    vault_root = tmp_path / "vault"
+    rec = {"ts": _ts(), "task_id": "T-Stub/1", "notifier_profile": "coordinator:hub-plan-ready", "to_event_id": 42}
+    _write_jsonl(pending, [rec])
+
+    applied = mod.run_once(
+        pending_path=pending,
+        policy_path=tmp_path / "missing.yaml",
+        state_path=state,
+        db_path=tmp_path / "missing.db",
+        apply=True,
+        vault_root=vault_root,
+    )
+
+    assert applied["decisions_count"] == 1
+    assert applied["decisions"][0]["action"] == "evidence_stub_later"
+    stub_writes = applied["vault_stub_writes"]
+    assert len(stub_writes) == 1
+    stub_path = Path(stub_writes[0]["path"])
+    assert stub_path.is_relative_to(vault_root)
+    assert stub_path.exists()
+    content = stub_path.read_text(encoding="utf-8")
+    assert "consumer_phase: phase2-stub" in content
+    assert "T-Stub/1" in content
+    assert "does not dispatch, send Discord, mutate Kanban" in content
