@@ -240,14 +240,19 @@ def _log_wal_fallback_once(db_label: str, exc: Exception) -> None:
         if db_label in _wal_fallback_warned_paths:
             return
         _wal_fallback_warned_paths.add(db_label)
+    sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
+    sqlite_errorname = getattr(exc, "sqlite_errorname", None)
     logger.warning(
-        "%s: WAL journal_mode unsupported on this filesystem (%s) — "
+        "%s: WAL journal_mode unsupported on this filesystem (%s; "
+        "sqlite_errorcode=%r sqlite_errorname=%r) — "
         "falling back to journal_mode=DELETE (slower rollback-journal "
         "mode; reduces concurrency but works on NFS/SMB/FUSE). See "
         "https://www.sqlite.org/wal.html for details. This warning "
         "fires once per process per database.",
         db_label,
         exc,
+        sqlite_errorcode,
+        sqlite_errorname,
     )
 
 SCHEMA_SQL = """

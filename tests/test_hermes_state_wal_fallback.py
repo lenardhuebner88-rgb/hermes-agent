@@ -31,14 +31,25 @@ from hermes_state import (
 # directly (``'sqlite3.Connection' object attribute 'execute' is read-only``).
 # A factory-built subclass lets us intercept journal_mode=WAL per-test with
 # its own mutable counter, avoiding the xdist-parallel class-state race.
-def _make_blocking_factory(reason: str, attempt_counter: list):
+def _make_blocking_factory(
+    reason: str,
+    attempt_counter: list,
+    *,
+    sqlite_errorcode=None,
+    sqlite_errorname=None,
+):
     """Return a sqlite3.Connection subclass that raises on PRAGMA journal_mode=WAL."""
 
     class _WalBlockingConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):  # type: ignore[override]
             if "journal_mode=wal" in sql.lower().replace(" ", ""):
                 attempt_counter[0] += 1
-                raise sqlite3.OperationalError(reason)
+                exc = sqlite3.OperationalError(reason)
+                if sqlite_errorcode is not None:
+                    exc.sqlite_errorcode = sqlite_errorcode
+                if sqlite_errorname is not None:
+                    exc.sqlite_errorname = sqlite_errorname
+                raise exc
             return super().execute(sql, *args, **kwargs)
 
     return _WalBlockingConnection
@@ -51,7 +62,14 @@ def _open_blocking(path, reason="locking protocol", **kwargs):
     times WAL was attempted.
     """
     attempts = [0]
-    factory = _make_blocking_factory(reason, attempts)
+    sqlite_errorcode = kwargs.pop("sqlite_errorcode", None)
+    sqlite_errorname = kwargs.pop("sqlite_errorname", None)
+    factory = _make_blocking_factory(
+        reason,
+        attempts,
+        sqlite_errorcode=sqlite_errorcode,
+        sqlite_errorname=sqlite_errorname,
+    )
     return sqlite3.connect(str(path), factory=factory, **kwargs), attempts
 
 
@@ -94,6 +112,8 @@ class TestApplyWalWithFallback:
         assert "test.db" in msg
         assert "journal_mode=DELETE" in msg
         assert "locking protocol" in msg
+        assert "sqlite_errorcode=" in msg
+        assert "sqlite_errorname=" in msg
 
         # Post-fallback the DB is still usable for real writes
         conn.execute("CREATE TABLE t (x INTEGER)")
@@ -110,13 +130,21 @@ class TestApplyWalWithFallback:
         assert mode == "delete"
         conn.close()
 
-    def test_falls_back_on_disk_io_error(self, tmp_path):
-        """Flaky network FS → disk I/O error → still fall back."""
+    def test_falls_back_on_disk_io_error(self, tmp_path, caplog):
+        """Flaky network FS → disk I/O error → still fall back and logs sqlite code."""
         conn, _ = _open_blocking(
-            tmp_path / "flaky.db", reason="disk I/O error", isolation_level=None
+            tmp_path / "flaky.db",
+            reason="disk I/O error",
+            sqlite_errorcode=266,
+            sqlite_errorname="SQLITE_IOERR_READ",
+            isolation_level=None,
         )
-        mode = apply_wal_with_fallback(conn)
+        with caplog.at_level("WARNING", logger="hermes_state"):
+            mode = apply_wal_with_fallback(conn, db_label="flaky.db")
         assert mode == "delete"
+        msg = next(r.getMessage() for r in caplog.records if "flaky.db" in r.getMessage())
+        assert "sqlite_errorcode=266" in msg
+        assert "sqlite_errorname='SQLITE_IOERR_READ'" in msg
         conn.close()
 
     def test_reraises_unrelated_operational_error(self, tmp_path):
