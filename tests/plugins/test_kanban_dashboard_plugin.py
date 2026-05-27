@@ -1832,6 +1832,7 @@ def test_board_warnings_cleared_after_clean_completion(client):
         ok = kb.complete_task(
             conn, parent,
             summary="retry without phantom",
+            metadata=_full_report_metadata(),
             created_cards=[real],
         )
         assert ok is True
@@ -2042,7 +2043,12 @@ def test_diagnostics_endpoint_severity_filter(client):
         # Phantom id must be valid hex — the prose scanner regex
         # requires ``t_[a-f0-9]{8,}``.
         p1 = kb.create_task(conn, title="prose", assignee="a")
-        kb.complete_task(conn, p1, summary="mentioned t_deadbeef1234")
+        kb.complete_task(
+            conn,
+            p1,
+            summary="mentioned t_deadbeef1234",
+            metadata=_full_report_metadata(),
+        )
         # An error-severity diagnostic (spawn failures) on another.
         # Keep this below critical severity (failure_threshold * 2).
         p2 = kb.create_task(conn, title="spawn", assignee="b")

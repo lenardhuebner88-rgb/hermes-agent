@@ -354,6 +354,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
     p_create.add_argument("--triage", action="store_true",
                           help="Park in triage — a specifier will flesh out the spec and promote to todo")
+    p_create.add_argument("--raw-create", action="store_true",
+                          help="Mark this as raw intake: lint before create and route invalid runnable work to triage")
     p_create.add_argument("--idempotency-key", default=None,
                           help="Dedup key. If a non-archived task with this key exists, "
                                "its id is returned instead of creating a duplicate.")
@@ -549,6 +551,33 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_worker_exits.add_argument(
         "--json", action="store_true",
         help="Emit JSON instead of the default table",
+    )
+
+    # --- daily-digest (read-only monitoring summary) ---
+    p_daily_digest = sub.add_parser(
+        "daily-digest",
+        help="Read-only daily monitoring digest (no dispatch, cron, or delivery)",
+    )
+    p_daily_digest.add_argument(
+        "--since",
+        default=24 * 3600,
+        type=_parse_since_seconds,
+        help="Lookback window for external signals (default: 24h; accepts s/m/h/d/w)",
+    )
+    p_daily_digest.add_argument(
+        "--signal-path",
+        default=None,
+        help="Optional JSONL signal queue path to read without consuming",
+    )
+    p_daily_digest.add_argument(
+        "--max-tasks-per-group",
+        type=int,
+        default=5,
+        help="Maximum task rows rendered per diagnostic group (default: 5)",
+    )
+    p_daily_digest.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of Markdown",
     )
 
     # --- runtime-truth (read-only live-state snapshot) ---
@@ -1082,6 +1111,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "reassign": _cmd_reassign,
         "diagnostics": _cmd_diagnostics,
         "diag":     _cmd_diagnostics,
+        "daily-digest": _cmd_daily_digest,
         "runtime-truth": _cmd_runtime_truth,
         "link":     _cmd_link,
         "unlink":   _cmd_unlink,
@@ -1506,6 +1536,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return 2
     body = args.body
     skills = getattr(args, "skills", None) or None
+    raw_lint_route = None
     if getattr(args, "scope_contract_json", None):
         if not args.assignee:
             print("kanban: --scope-contract-json requires --assignee", file=sys.stderr)
@@ -1559,6 +1590,33 @@ def _cmd_create(args: argparse.Namespace) -> int:
         body = template.body_template
         if skills is None:
             skills = template.skills or None
+    else:
+        if getattr(args, "raw_create", False):
+            from hermes_cli.templates.task_template_builder import lint_raw_create_route
+
+            raw_lint_route = lint_raw_create_route(
+                title=args.title,
+                body=body or "",
+                assignee=args.assignee,
+                skills=skills,
+                triage=triage,
+                unsafe=bool(getattr(args, "unsafe", False)),
+            )
+            if raw_lint_route.routed_to_triage:
+                triage = True
+                print(
+                    "kanban: raw authoring lint failed; routed task to triage: "
+                    "missing/invalid scope contract for runnable assigned work",
+                    file=sys.stderr,
+                )
+            elif raw_lint_route.lint_payload.get("mode") == "warn" and not raw_lint_route.lint_payload.get("ok"):
+                from hermes_cli.templates.task_template_builder import format_authoring_lint_errors
+
+                print(
+                    "kanban: raw authoring lint warning: "
+                    + format_authoring_lint_errors(raw_lint_route.lint_payload),
+                    file=sys.stderr,
+                )
     with kb.connect() as conn:
         task_id = kb.create_task(
             conn,
@@ -1581,7 +1639,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
-        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+        payload = _task_to_dict(task)
+        if raw_lint_route is not None and not raw_lint_route.lint_payload.get("ok"):
+            payload["raw_authoring_lint"] = {
+                "routed_to_triage": raw_lint_route.routed_to_triage,
+                "reason": raw_lint_route.reason,
+                "payload": raw_lint_route.lint_payload,
+            }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(
             f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'}, "
@@ -1911,6 +1976,40 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
         f"{profile or '(unassigned)'}"
         + (" (claim reclaimed)" if getattr(args, "reclaim", False) else "")
     )
+    return 0
+
+
+def _cmd_daily_digest(args: argparse.Namespace) -> int:
+    """Render a read-only daily monitoring digest for the current board."""
+    from hermes_cli import kanban_daily_digest as kdd
+    from hermes_cli.config import load_config
+
+    now = int(time.time())
+    since_seconds = int(getattr(args, "since", 24 * 3600))
+    signal_path_raw = getattr(args, "signal_path", None)
+    signal_path = Path(signal_path_raw).expanduser() if signal_path_raw else None
+    diag_config = None
+    try:
+        from hermes_cli import kanban_diagnostics as kd
+
+        diag_config = kd.config_from_runtime_config(load_config())
+    except Exception:
+        diag_config = None
+
+    with kb.connect() as conn:
+        digest = kdd.build_daily_digest(
+            conn,
+            board=kb.get_current_board(),
+            since_ts=now - since_seconds,
+            now_ts=now,
+            signal_path=signal_path,
+            max_tasks_per_group=getattr(args, "max_tasks_per_group", 5),
+            config=diag_config,
+        )
+    if getattr(args, "json", False):
+        print(json.dumps(digest, indent=2, ensure_ascii=False))
+    else:
+        print(kdd.render_daily_digest_markdown(digest), end="")
     return 0
 
 

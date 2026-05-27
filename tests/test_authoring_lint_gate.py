@@ -44,6 +44,12 @@ def _task_count() -> int:
         return conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
 
 
+def _single_task_row() -> dict:
+    with kb.connect() as conn:
+        row = conn.execute("SELECT id, title, status, assignee FROM tasks").fetchone()
+    return dict(row)
+
+
 def _run_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="hermes")
     sub = parser.add_subparsers(dest="command")
@@ -88,6 +94,53 @@ def test_cli_valid_template_creates_normally(kanban_home):
 
     assert code == 0
     assert _task_count() == 1
+
+
+def test_cli_raw_assigned_create_routes_to_triage_before_dispatch(kanban_home, capsys):
+    code = _run_cli(
+        [
+            "create",
+            "raw cli",
+            "--assignee",
+            "coder",
+            "--body",
+            "Do scoped work, but no scope contract yet.",
+            "--raw-create",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "raw authoring lint failed; routed task to triage" in captured.err
+    data = json.loads(captured.out)
+    assert data["status"] == "triage"
+    assert data["raw_authoring_lint"]["routed_to_triage"] is True
+    assert data["raw_authoring_lint"]["payload"]["ok"] is False
+    assert _single_task_row()["status"] == "triage"
+
+
+def test_cli_raw_create_warn_mode_keeps_ready_for_rollback(kanban_home, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_AUTHORING_LINT", "warn")
+    code = _run_cli(
+        [
+            "create",
+            "raw warn cli",
+            "--assignee",
+            "coder",
+            "--body",
+            "No scope contract yet.",
+            "--raw-create",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "raw authoring lint warning" in captured.err
+    data = json.loads(captured.out)
+    assert data["status"] == "ready"
+    assert data["raw_authoring_lint"]["routed_to_triage"] is False
 
 
 def test_cli_unsafe_override_confirms_manual_bypass(kanban_home):
@@ -158,6 +211,23 @@ def test_tool_valid_template_creates_normally(kanban_home):
     data = json.loads(out)
     assert data["ok"] is True
     assert _task_count() == 1
+
+
+def test_tool_raw_assigned_create_routes_to_triage_before_dispatch(kanban_home):
+    out = kanban_tools._handle_create(
+        {
+            "title": "raw tool",
+            "assignee": "coder",
+            "body": "Do scoped work, but no scope contract yet.",
+            "raw_create": True,
+        }
+    )
+
+    data = json.loads(out)
+    assert data["ok"] is True
+    assert data["status"] == "triage"
+    assert data["raw_authoring_lint"]["routed_to_triage"] is True
+    assert _single_task_row()["status"] == "triage"
 
 
 def test_swarm_invalid_root_template_aborts_before_insert(kanban_home):
@@ -232,3 +302,23 @@ def test_dashboard_valid_template_creates_normally(kanban_home):
     assert response.status_code == 200, response.text
     assert response.json()["task"]["title"] == "good dashboard"
     assert _task_count() == 1
+
+
+def test_dashboard_raw_assigned_create_routes_to_triage_before_dispatch(kanban_home):
+    client = _dashboard_client()
+
+    response = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "raw dashboard",
+            "assignee": "coder",
+            "body": "Do scoped work, but no scope contract yet.",
+            "raw_create": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["task"]["status"] == "triage"
+    assert data["raw_authoring_lint"]["routed_to_triage"] is True
+    assert _single_task_row()["status"] == "triage"

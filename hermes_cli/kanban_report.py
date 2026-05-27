@@ -7,6 +7,7 @@ does not import completion validators.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -69,7 +70,15 @@ def _non_empty(value: Any) -> bool:
 
 def _metadata(run: Any) -> dict[str, Any]:
     meta = _field(run, "metadata")
-    return dict(meta) if isinstance(meta, Mapping) else {}
+    if isinstance(meta, Mapping):
+        return dict(meta)
+    if isinstance(meta, str) and meta.strip():
+        try:
+            parsed = json.loads(meta)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
 
 
 def _first_present(metadata: Mapping[str, Any], keys: Iterable[str]) -> Any:

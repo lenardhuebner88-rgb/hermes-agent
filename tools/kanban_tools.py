@@ -826,6 +826,7 @@ def _handle_create(args: dict, **kw) -> str:
     if gate_error:
         return gate_error
     scope_contract = args.get("scope_contract")
+    raw_lint_route = None
     if scope_contract is not None:
         if not isinstance(scope_contract, dict):
             return tool_error("kanban_create: scope_contract must be an object")
@@ -862,6 +863,19 @@ def _handle_create(args: dict, **kw) -> str:
         body = template.body_template
         if skills is None:
             skills = template.skills or None
+    else:
+        if bool(args.get("raw_create") or args.get("raw")):
+            from hermes_cli.templates.task_template_builder import lint_raw_create_route
+
+            raw_lint_route = lint_raw_create_route(
+                title=str(title).strip(),
+                body=body or "",
+                assignee=str(assignee) if assignee else None,
+                skills=list(skills) if isinstance(skills, (list, tuple)) else None,
+                triage=triage,
+            )
+            if raw_lint_route.routed_to_triage:
+                triage = True
     try:
         kb, conn = _connect(board=board)
         try:
@@ -894,6 +908,12 @@ def _handle_create(args: dict, **kw) -> str:
             }
             if gate_audit is not None:
                 response["control_plane_gate"] = gate_audit
+            if raw_lint_route is not None and not raw_lint_route.lint_payload.get("ok"):
+                response["raw_authoring_lint"] = {
+                    "routed_to_triage": raw_lint_route.routed_to_triage,
+                    "reason": raw_lint_route.reason,
+                    "payload": raw_lint_route.lint_payload,
+                }
             return _ok(**response)
         finally:
             conn.close()
@@ -1512,6 +1532,14 @@ KANBAN_CREATE_SCHEMA = {
                     "If true, task lands in 'triage' instead of 'todo' "
                     "— a specifier profile is expected to flesh out "
                     "the body before work starts."
+                ),
+            },
+            "raw_create": {
+                "type": "boolean",
+                "description": (
+                    "Mark this as raw intake. When true and no scope_contract "
+                    "is provided, kanban_create lints the raw body and routes "
+                    "invalid runnable assigned work to triage before insertion."
                 ),
             },
             "idempotency_key": {

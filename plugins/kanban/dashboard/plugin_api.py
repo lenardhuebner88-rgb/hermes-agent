@@ -655,6 +655,7 @@ class CreateTaskBody(BaseModel):
     allowed_tools: Optional[list[str]] = None
     forbidden_systems: Optional[list[str]] = None
     report_contract_version: int = 1
+    raw_create: bool = False
 
 
 @router.post("/tasks")
@@ -662,7 +663,9 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     body = payload.body
     skills = payload.skills
+    triage = payload.triage
     lint_payload: Optional[dict[str, Any]] = None
+    raw_lint_route = None
     if payload.scope_contract is not None:
         if not payload.assignee:
             raise HTTPException(
@@ -700,6 +703,19 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
         body = template.body_template
         if skills is None:
             skills = template.skills or None
+    else:
+        if payload.raw_create:
+            from hermes_cli.templates.task_template_builder import lint_raw_create_route
+
+            raw_lint_route = lint_raw_create_route(
+                title=payload.title,
+                body=body or "",
+                assignee=payload.assignee,
+                skills=skills,
+                triage=triage,
+            )
+            if raw_lint_route.routed_to_triage:
+                triage = True
 
     conn = _conn(board=board)
     try:
@@ -714,7 +730,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             tenant=payload.tenant,
             priority=payload.priority,
             parents=payload.parents,
-            triage=payload.triage,
+            triage=triage,
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=skills,
@@ -723,6 +739,12 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
         if lint_payload is not None and not lint_payload.get("ok"):
             body["authoring_lint"] = lint_payload
+        if raw_lint_route is not None and not raw_lint_route.lint_payload.get("ok"):
+            body["raw_authoring_lint"] = {
+                "routed_to_triage": raw_lint_route.routed_to_triage,
+                "reason": raw_lint_route.reason,
+                "payload": raw_lint_route.lint_payload,
+            }
         # Surface a dispatcher-presence warning so the UI can show a
         # banner when a `ready` task would otherwise sit idle because no
         # gateway is running (or dispatch_in_gateway=false). Only emit

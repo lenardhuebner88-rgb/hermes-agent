@@ -41,6 +41,16 @@ class TaskTemplate:
         }
 
 
+@dataclass(frozen=True)
+class RawCreateLintRoute:
+    """Lint decision for create calls that did not use the template builder."""
+
+    lint_payload: dict[str, Any]
+    triage: bool
+    routed_to_triage: bool
+    reason: str | None = None
+
+
 class AuthoringLintError(ValueError):
     """Raised when a template-authored task fails the authoring lint gate."""
 
@@ -210,3 +220,50 @@ def validate_authoring_template(
     if payload.get("ok") or payload["mode"] == "warn":
         return payload
     raise AuthoringLintError(payload)
+
+
+def lint_raw_create_route(
+    *,
+    title: str | None,
+    body: str | None,
+    assignee: str | None,
+    skills: list[str] | None,
+    triage: bool = False,
+    unsafe: bool = False,
+) -> RawCreateLintRoute:
+    """Lint non-template creates and route unsafe runnable work to triage.
+
+    Raw creates are still allowed for quick capture, but an assigned task without
+    a valid scope contract must not become immediately dispatchable by default.
+    Invalid raw specs are parked in ``triage`` for specification instead of
+    entering ``ready``. ``HERMES_AUTHORING_LINT=warn`` and explicit ``unsafe``
+    preserve the rollback/manual-bypass behavior used by the template gate.
+    """
+
+    from hermes_cli.cli.kanban_scope_lint import TaskSpec, validate_task_spec
+
+    payload = validate_task_spec(
+        TaskSpec(
+            source="authoring_raw",
+            task_id=None,
+            title=title,
+            body=body or "",
+            assignee=assignee,
+            skills=skills or [],
+        )
+    )
+    payload["mode"] = authoring_lint_mode()
+    payload["bypassed"] = bool(unsafe)
+    should_route = (
+        not payload.get("ok")
+        and not triage
+        and bool(assignee)
+        and not unsafe
+        and payload["mode"] != "warn"
+    )
+    return RawCreateLintRoute(
+        lint_payload=payload,
+        triage=True if should_route else triage,
+        routed_to_triage=should_route,
+        reason="raw_authoring_lint_failed" if should_route else None,
+    )
