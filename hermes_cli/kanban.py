@@ -583,6 +583,69 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit JSON instead of Markdown",
     )
 
+    # --- report-discord (combined human + structured report) ---
+    p_report_discord = sub.add_parser(
+        "report-discord",
+        help="Render a Discord-ready Kanban report with kanban-report-v1 JSON",
+    )
+    p_report_discord.add_argument("--title", default=None, help="Human report title")
+    p_report_discord.add_argument(
+        "--summary",
+        default=None,
+        help="Override the generated one-sentence report summary",
+    )
+    p_report_discord.add_argument(
+        "--scope-description",
+        default=None,
+        help="Scope label shown in the header and structured payload",
+    )
+    p_report_discord.add_argument(
+        "--root-task",
+        default=None,
+        help="Limit report to one root task plus its direct parents/children",
+    )
+    p_report_discord.add_argument(
+        "--status",
+        action="append",
+        default=None,
+        help="Only include this task status (repeatable)",
+    )
+    p_report_discord.add_argument(
+        "--include-archived",
+        action="store_true",
+        help="Include archived tasks in the report scope",
+    )
+    p_report_discord.add_argument(
+        "--generated-at",
+        default=None,
+        help="Override generated_at timestamp (ISO-8601; tests/receipts only)",
+    )
+    p_report_discord.add_argument(
+        "--json", action="store_true",
+        help="Emit only the structured kanban-report-v1 JSON payload",
+    )
+    p_report_discord.add_argument(
+        "--chunks",
+        action="store_true",
+        help="Emit JSON containing Discord message chunks instead of one Markdown report",
+    )
+    p_report_discord.add_argument(
+        "--soft-cap",
+        type=int,
+        default=1800,
+        help="Soft character cap per Discord chunk when --chunks is used (default: 1800)",
+    )
+    p_report_discord.add_argument(
+        "--artifact-path",
+        default=None,
+        help="Full-report artifact path/URL to mention in split output",
+    )
+    p_report_discord.add_argument(
+        "--output",
+        default=None,
+        help="Write the complete Markdown report to this path while printing the selected output",
+    )
+
     # --- runtime-truth (read-only live-state snapshot) ---
     p_runtime_truth = sub.add_parser(
         "runtime-truth",
@@ -1115,6 +1178,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "diagnostics": _cmd_diagnostics,
         "diag":     _cmd_diagnostics,
         "daily-digest": _cmd_daily_digest,
+        "report-discord": _cmd_report_discord,
         "runtime-truth": _cmd_runtime_truth,
         "link":     _cmd_link,
         "unlink":   _cmd_unlink,
@@ -2018,6 +2082,62 @@ def _cmd_daily_digest(args: argparse.Namespace) -> int:
         print(json.dumps(digest, indent=2, ensure_ascii=False))
     else:
         print(kdd.render_daily_digest_markdown(digest), end="")
+    return 0
+
+
+def _cmd_report_discord(args: argparse.Namespace) -> int:
+    """Render a read-only Discord report with a kanban-report-v1 JSON block."""
+    from hermes_cli import kanban_discord_report as kdr
+
+    statuses: list[str] = []
+    for raw in getattr(args, "status", None) or []:
+        statuses.extend(part.strip() for part in str(raw).split(",") if part.strip())
+    with kb.connect() as conn:
+        report = kdr.build_discord_report(
+            conn,
+            board=kb.get_current_board(),
+            generated_at=getattr(args, "generated_at", None),
+            report_title=getattr(args, "title", None),
+            scope_description=getattr(args, "scope_description", None),
+            root_task_id=getattr(args, "root_task", None),
+            included_statuses=statuses or None,
+            include_archived=bool(getattr(args, "include_archived", False)),
+            summary=getattr(args, "summary", None),
+        )
+
+    full_markdown = kdr.render_discord_report_markdown(report)
+    output_path_raw = getattr(args, "output", None)
+    if output_path_raw:
+        output_path = Path(output_path_raw).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(full_markdown, encoding="utf-8")
+
+    if getattr(args, "json", False):
+        print(json.dumps(report["structured"], indent=2, ensure_ascii=False))
+        return 0
+
+    if getattr(args, "chunks", False):
+        chunks = kdr.split_discord_report(
+            report,
+            soft_cap=getattr(args, "soft_cap", 1800),
+            artifact_path=getattr(args, "artifact_path", None) or output_path_raw,
+        )
+        print(
+            json.dumps(
+                {
+                    "contract_version": 1,
+                    "soft_cap": int(getattr(args, "soft_cap", 1800)),
+                    "chunk_count": len(chunks),
+                    "chunks": chunks,
+                    "artifact_path": getattr(args, "artifact_path", None) or output_path_raw,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    print(full_markdown, end="")
     return 0
 
 
