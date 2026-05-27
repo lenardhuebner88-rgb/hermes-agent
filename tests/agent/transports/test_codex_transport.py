@@ -91,6 +91,56 @@ class TestCodexBuildKwargs:
         )
         assert kw.get("prompt_cache_key") == "test-session-123"
 
+    def test_cron_session_id_strips_timestamp_for_cache_key(self, transport):
+        """Cron session ids are ``cron_{job_id}_{YYYYMMDD_HHMMSS}`` (see
+        cron/scheduler.py). The timestamp must be stripped from
+        ``prompt_cache_key`` so successive runs of the same job hit the
+        OpenAI prompt cache. Without this, the ~21k-token system prompt is
+        re-billed at the uncached rate on every cron tick."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.5", messages=messages, tools=[],
+            session_id="cron_bf56b17edd1a_20260527_082953",
+        )
+        assert kw.get("prompt_cache_key") == "cron_bf56b17edd1a"
+
+    def test_cron_session_id_keeps_trace_headers_unique(self, transport):
+        """Only ``prompt_cache_key`` gets the stable form. The session_id
+        and x-client-request-id headers must keep the full timestamped id
+        so OpenAI's request logs and our own correlation stay per-request
+        unique."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.5", messages=messages, tools=[],
+            session_id="cron_bf56b17edd1a_20260527_082953",
+            is_codex_backend=True,
+        )
+        headers = kw.get("extra_headers", {})
+        assert kw["prompt_cache_key"] == "cron_bf56b17edd1a"
+        assert headers.get("session_id") == "cron_bf56b17edd1a_20260527_082953"
+        assert headers.get("x-client-request-id") == "cron_bf56b17edd1a_20260527_082953"
+
+    def test_cron_jobid_with_digits_not_truncated(self, transport):
+        """Job ids are hex (may include digits) — the strip pattern must
+        only match the 8+6-digit timestamp tail, not eat into the id."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.5", messages=messages, tools=[],
+            session_id="cron_784cc5959be9_20260527_183040",
+        )
+        assert kw.get("prompt_cache_key") == "cron_784cc5959be9"
+
+    def test_non_cron_session_id_unchanged(self, transport):
+        """Chat session ids (timestamp + random hex) must pass through
+        unchanged — those sessions already cache correctly via per-session
+        prefix sharing across turns."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.5", messages=messages, tools=[],
+            session_id="20260527_185131_e7ffe2a5",
+        )
+        assert kw.get("prompt_cache_key") == "20260527_185131_e7ffe2a5"
+
     def test_github_responses_no_cache_key(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
