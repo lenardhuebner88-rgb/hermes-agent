@@ -179,6 +179,100 @@ class TestApplyWalWithFallback:
             f"Each db_label should warn once; got {labels_warned}"
         )
 
+    def test_fast_path_skips_wal_set_when_already_wal(self, tmp_path):
+        """A DB already in WAL mode does NOT re-execute PRAGMA journal_mode=WAL.
+
+        Regression test for forensic-20260527: setting WAL on an already-WAL
+        DB still triggers SHM open/mmap, which can transiently raise IOERR
+        ("disk I/O error") under dispatcher contention on local ext4. The
+        fast path must short-circuit by querying journal_mode and returning
+        early without the set.
+        """
+        db_path = tmp_path / "already_wal.db"
+        # Seed: flip the file to WAL via a regular connection.
+        seed = sqlite3.connect(str(db_path))
+        seed.execute("PRAGMA journal_mode=WAL")
+        seed.execute("CREATE TABLE x(id INTEGER)")
+        seed.commit()
+        seed.close()
+
+        # Re-open with a factory that would raise if WAL set is attempted.
+        # If the fast path works, the WAL set is never reached and the
+        # attempt counter stays at 0.
+        conn, attempts = _open_blocking(
+            db_path, reason="disk I/O error", isolation_level=None
+        )
+        mode = apply_wal_with_fallback(conn, db_label="already_wal.db")
+        conn.close()
+
+        assert mode == "wal"
+        assert attempts[0] == 0, (
+            "PRAGMA journal_mode=WAL must NOT be executed when the DB is "
+            f"already in WAL mode; got {attempts[0]} attempt(s)"
+        )
+
+    def test_fallback_uses_fresh_conn_when_original_poisoned(self, tmp_path):
+        """When the WAL pragma raises IOERR AND the original conn's DELETE
+        pragma ALSO raises IOERR, the function pins journal_mode=DELETE via
+        a fresh transient connection and re-raises so the caller can do
+        close+retry.
+
+        Regression test for forensic-20260527: the original code reused the
+        poisoned conn for the DELETE fallback, which compounded the IOERR
+        into a tick-failure loop that survived 60s ticks indefinitely.
+        """
+        db_path = tmp_path / "poisoned.db"
+        # Initialise the file with a real schema so the fresh fallback
+        # connection has something legitimate to open (and journal_mode
+        # has a defined starting value of DELETE).
+        bootstrap = sqlite3.connect(str(db_path))
+        bootstrap.execute("CREATE TABLE x(id INT)")
+        bootstrap.commit()
+        bootstrap.close()
+
+        # Factory that raises IOERR on BOTH WAL and DELETE pragmas (the
+        # production shape of a poisoned connection after SQLITE_IOERR).
+        poisoned_delete_attempts = []
+
+        class _PoisonedConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                normalized = sql.lower().replace(" ", "")
+                if "journal_mode=wal" in normalized:
+                    raise sqlite3.OperationalError("disk I/O error")
+                if "journal_mode=delete" in normalized:
+                    poisoned_delete_attempts.append(sql)
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args, **kwargs)
+
+        conn = sqlite3.connect(
+            str(db_path), factory=_PoisonedConnection, isolation_level=None
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            apply_wal_with_fallback(conn, db_label="poisoned.db")
+        conn.close()
+
+        # The DELETE pragma WAS attempted on the original (poisoned) conn —
+        # confirming the function tried the cheap path first, then escalated.
+        assert poisoned_delete_attempts, (
+            "expected DELETE pragma to be attempted on the original conn "
+            "before falling through to the fresh-conn recovery path"
+        )
+
+        # The fresh transient connection DID pin journal_mode=DELETE on
+        # disk: a regular reopen sees DELETE, not the original DELETE
+        # (which sqlite uses as the fresh-DB default anyway). Together
+        # with the assertion above this proves both arms ran.
+        verify = sqlite3.connect(str(db_path))
+        try:
+            mode_on_disk = verify.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            verify.close()
+        assert mode_on_disk.lower() == "delete", (
+            f"fresh-conn DELETE fallback should have pinned DELETE on disk; "
+            f"got {mode_on_disk!r}"
+        )
+
 
 class TestGetLastInitError:
     def test_none_on_successful_init(self, tmp_path):

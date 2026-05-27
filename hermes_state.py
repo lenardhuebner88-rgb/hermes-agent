@@ -147,7 +147,34 @@ def apply_wal_with_fallback(
 
     Shared by :class:`SessionDB` and ``hermes_cli.kanban_db.connect`` so
     both databases get identical fallback behavior.
+
+    Fast path: when the DB is already in WAL mode, query ``PRAGMA
+    journal_mode`` and return early without re-issuing
+    ``PRAGMA journal_mode=WAL``. Re-setting WAL on an already-WAL DB
+    still triggers SHM open/mmap, which can transiently raise
+    ``SQLITE_IOERR_SHM*`` (stringified as "disk I/O error" by the Python
+    binding) under dispatcher load on local ext4. See
+    ``~/.hermes/reports/forensic-20260527/stale-fd-bug-analysis.md``.
+
+    Poisoned-connection recovery: when ``PRAGMA journal_mode=WAL``
+    raises ``IOERR``, the original connection is commonly left in a
+    state where subsequent pragmas also raise. The fallback first
+    tries ``PRAGMA journal_mode=DELETE`` on the same connection (the
+    NFS/SMB/FUSE happy path) and, if that also raises, opens a fresh
+    transient connection to pin ``journal_mode=DELETE`` on disk before
+    re-raising so the caller can close+retry on its next tick instead
+    of getting stuck in a 60s tick-failure loop.
     """
+    # Fast path: query journal_mode first; if already WAL the set would
+    # be a no-op functionally but still touches SHM, which is where the
+    # local-ext4 IOERR comes from.
+    try:
+        current_row = conn.execute("PRAGMA journal_mode").fetchone()
+    except sqlite3.OperationalError:
+        current_row = None
+    if current_row and (current_row[0] or "").lower() == "wal":
+        return "wal"
+
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         return "wal"
@@ -157,8 +184,49 @@ def apply_wal_with_fallback(
             # Unrelated OperationalError — don't silently swallow.
             raise
         _log_wal_fallback_once(db_label, exc)
-        conn.execute("PRAGMA journal_mode=DELETE")
-        return "delete"
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+            return "delete"
+        except sqlite3.OperationalError:
+            # Original conn is poisoned (typical post-IOERR on local fs).
+            # Pin journal_mode=DELETE via a fresh transient connection so
+            # the on-disk state is consistent for the next caller, then
+            # re-raise the IOERR so this conn is closed and the dispatcher
+            # retries on its next tick.
+            path = _path_from_connection(conn)
+            if path is not None:
+                try:
+                    fb = sqlite3.connect(path, timeout=5, isolation_level=None)
+                    try:
+                        fb.execute("PRAGMA journal_mode=DELETE")
+                    finally:
+                        fb.close()
+                except sqlite3.OperationalError:
+                    pass  # ignore; will re-raise the original IOERR
+            raise
+
+
+def _path_from_connection(conn: sqlite3.Connection) -> Optional[str]:
+    """Return the on-disk path the connection's main DB is attached to.
+
+    Uses ``PRAGMA database_list``, which is safe to call on autocommit
+    connections and returns ``(seq, name, file)`` rows. Returns ``None``
+    if the main DB is in-memory or the pragma itself raises — callers
+    fall through to re-raising whatever error led them here.
+    """
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.OperationalError:
+        return None
+    for row in rows:
+        try:
+            name = row[1]
+            file_ = row[2]
+        except (IndexError, TypeError):
+            continue
+        if name == "main" and file_:
+            return file_
+    return None
 
 
 def _log_wal_fallback_once(db_label: str, exc: Exception) -> None:

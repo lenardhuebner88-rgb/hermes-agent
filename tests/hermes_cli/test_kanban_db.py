@@ -4235,8 +4235,24 @@ def test_connect_falls_back_to_delete_on_locking_protocol(kanban_home, caplog):
     import sqlite3 as _sqlite3
     from unittest.mock import patch as _patch
 
-    # Clear module cache so a fresh connect() is attempted
+    # The kanban_home fixture's init_db() leaves the DB in WAL mode.
+    # apply_wal_with_fallback's fast path (forensic-20260527) would
+    # then short-circuit before reaching the set — which is correct
+    # for that scenario but bypasses what this test is here to check.
+    # Reset journal_mode to the fresh-NFS shape (DELETE) so the next
+    # connect actually attempts the WAL set under the patched factory.
+    _kanban_path = kb.kanban_db_path()
+    _reset_conn = _sqlite3.connect(str(_kanban_path))
+    try:
+        _reset_conn.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        _reset_conn.close()
+
+    # Clear module + dedup caches so a fresh connect() is attempted
+    # and the WAL-fallback warning is not suppressed by a prior test.
     kb._INITIALIZED_PATHS.clear()
+    import hermes_state as _hs
+    _hs._wal_fallback_warned_paths.clear()
 
     real_connect = _sqlite3.connect
 
