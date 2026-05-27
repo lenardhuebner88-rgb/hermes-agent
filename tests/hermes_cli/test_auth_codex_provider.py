@@ -94,7 +94,7 @@ def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, mo
 
     called = {"count": 0}
 
-    def _fake_refresh(tokens, timeout_seconds):
+    def _fake_refresh(tokens, timeout_seconds, **_kwargs):
         called["count"] += 1
         return {"access_token": "access-new", "refresh_token": "refresh-new"}
 
@@ -113,7 +113,7 @@ def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
 
     called = {"count": 0}
 
-    def _fake_refresh(tokens, timeout_seconds):
+    def _fake_refresh(tokens, timeout_seconds, **_kwargs):
         called["count"] += 1
         return {"access_token": "access-forced", "refresh_token": "refresh-new"}
 
@@ -351,3 +351,184 @@ def test_login_openai_codex_force_new_login_skips_existing_reuse_prompt(monkeypa
 
     assert called["device_login"] == 1
     assert called["tokens"]["access_token"] == "fresh-at"
+
+
+# ---------------------------------------------------------------------------
+# Codex CLI co-existence — adopt fresher tokens, recover from refresh_token_reused
+# ---------------------------------------------------------------------------
+
+
+def _write_codex_cli_auth(codex_home: Path, *, access_token: str, refresh_token: str, last_refresh: str) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(json.dumps({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "id_token": "id",
+            "account_id": "acct",
+        },
+        "last_refresh": last_refresh,
+    }))
+
+
+def test_refresh_adopts_codex_cli_tokens_when_cli_is_strictly_newer(tmp_path, monkeypatch):
+    """When the Codex CLI has rotated its refresh token after Hermes' last
+    refresh, Hermes must adopt instead of calling the upstream endpoint —
+    otherwise it burns its (now-stale) refresh token and gets a
+    refresh_token_reused error back."""
+    from hermes_cli.auth import _refresh_codex_auth_tokens
+
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    _setup_hermes_auth(hermes_home)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    # CLI tokens are NEWER and not expiring
+    fresh_jwt = _jwt_with_exp(int(time.time()) + 3600)
+    _write_codex_cli_auth(
+        codex_home,
+        access_token=fresh_jwt,
+        refresh_token="cli-rt-NEW",
+        last_refresh="2099-01-01T00:00:00Z",
+    )
+
+    refresh_called = {"count": 0}
+
+    def _should_not_be_called(*a, **kw):
+        refresh_called["count"] += 1
+        raise AssertionError("refresh_codex_oauth_pure should NOT be called when CLI is fresher")
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _should_not_be_called)
+
+    result = _refresh_codex_auth_tokens(
+        {"access_token": "expiring-hermes-at", "refresh_token": "old-hermes-rt"},
+        timeout_seconds=5.0,
+        current_last_refresh="2026-02-26T00:00:00Z",
+    )
+
+    assert refresh_called["count"] == 0
+    assert result["access_token"] == fresh_jwt
+    assert result["refresh_token"] == "cli-rt-NEW"
+    # Hermes auth store should now hold the CLI tokens.
+    persisted = _read_codex_tokens()
+    assert persisted["tokens"]["refresh_token"] == "cli-rt-NEW"
+    assert persisted["last_refresh"] == "2099-01-01T00:00:00Z"
+
+
+def test_refresh_ignores_codex_cli_when_cli_is_older(tmp_path, monkeypatch):
+    """When the CLI is older (e.g. user hasn't run codex recently) the
+    refresh must fall through to the upstream endpoint as before."""
+    from hermes_cli.auth import _refresh_codex_auth_tokens
+
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    _setup_hermes_auth(hermes_home)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    stale_jwt = _jwt_with_exp(int(time.time()) + 3600)
+    _write_codex_cli_auth(
+        codex_home,
+        access_token=stale_jwt,
+        refresh_token="cli-rt-OLD",
+        last_refresh="2020-01-01T00:00:00Z",
+    )
+
+    refresh_called = {"count": 0}
+
+    def _fake_refresh(access_token, refresh_token, *, timeout_seconds):
+        refresh_called["count"] += 1
+        return {"access_token": "hermes-at-NEW", "refresh_token": "hermes-rt-NEW"}
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _fake_refresh)
+
+    # Hermes' own access token is still live, so neither "cli is newer" nor
+    # "hermes is expiring" trigger adoption — upstream refresh runs.
+    hermes_live_jwt = _jwt_with_exp(int(time.time()) + 3600)
+    result = _refresh_codex_auth_tokens(
+        {"access_token": hermes_live_jwt, "refresh_token": "hermes-rt-CURRENT"},
+        timeout_seconds=5.0,
+        current_last_refresh="2026-02-26T00:00:00Z",
+    )
+
+    assert refresh_called["count"] == 1
+    assert result["refresh_token"] == "hermes-rt-NEW"
+
+
+def test_refresh_recovers_from_refresh_token_reused_via_cli_adoption(tmp_path, monkeypatch):
+    """Real-world scenario: Codex CLI refreshed in parallel after Hermes
+    decided to refresh. Hermes' upstream call gets refresh_token_reused.
+    Hermes must then re-check ~/.codex/auth.json — if it now holds the
+    post-rotation tokens, adopt them rather than forcing re-login."""
+    from hermes_cli.auth import _refresh_codex_auth_tokens
+
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    _setup_hermes_auth(hermes_home)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    # Initially: no CLI tokens (so first adoption check returns None and
+    # upstream refresh runs). After upstream fails with refresh_token_reused,
+    # the CLI file appears with newer tokens — recovery should adopt.
+    def _refresh_with_simulated_concurrent_cli(access_token, refresh_token, *, timeout_seconds):
+        # Simulate: CLI rotated its token AFTER we already read ours but
+        # BEFORE our upstream call landed. CLI now has the new pair.
+        post_rotation_jwt = _jwt_with_exp(int(time.time()) + 3600)
+        _write_codex_cli_auth(
+            codex_home,
+            access_token=post_rotation_jwt,
+            refresh_token="cli-rt-AFTER-ROTATION",
+            last_refresh="2099-06-15T12:00:00Z",
+        )
+        raise AuthError(
+            "Codex refresh token was already consumed",
+            provider="openai-codex",
+            code="refresh_token_reused",
+            relogin_required=True,
+        )
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _refresh_with_simulated_concurrent_cli)
+
+    result = _refresh_codex_auth_tokens(
+        {"access_token": "hermes-stale-at", "refresh_token": "hermes-stale-rt"},
+        timeout_seconds=5.0,
+        current_last_refresh="2026-02-26T00:00:00Z",
+    )
+
+    assert result["refresh_token"] == "cli-rt-AFTER-ROTATION"
+    persisted = _read_codex_tokens()
+    assert persisted["tokens"]["refresh_token"] == "cli-rt-AFTER-ROTATION"
+    assert persisted["last_refresh"] == "2099-06-15T12:00:00Z"
+
+
+def test_refresh_token_reused_without_cli_fresh_tokens_still_raises(tmp_path, monkeypatch):
+    """If refresh_token_reused fires AND no fresher CLI tokens are available,
+    the original AuthError must propagate so the operator is asked to re-login."""
+    from hermes_cli.auth import _refresh_codex_auth_tokens
+
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    _setup_hermes_auth(hermes_home)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))  # empty dir, no CLI file
+
+    def _refresh_fails(access_token, refresh_token, *, timeout_seconds):
+        raise AuthError(
+            "Codex refresh token was already consumed",
+            provider="openai-codex",
+            code="refresh_token_reused",
+            relogin_required=True,
+        )
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _refresh_fails)
+
+    with pytest.raises(AuthError) as exc:
+        _refresh_codex_auth_tokens(
+            {"access_token": "hermes-stale-at", "refresh_token": "hermes-stale-rt"},
+            timeout_seconds=5.0,
+            current_last_refresh="2026-02-26T00:00:00Z",
+        )
+    assert exc.value.code == "refresh_token_reused"

@@ -3355,19 +3355,144 @@ def refresh_codex_oauth_pure(
     return updated
 
 
+def _read_codex_cli_auth_payload() -> Optional[Dict[str, Any]]:
+    """Read the raw ``~/.codex/auth.json`` payload, or ``None`` if missing/invalid.
+
+    Unlike :func:`_import_codex_cli_tokens` this surfaces both the tokens
+    AND the ``last_refresh`` timestamp so callers can decide whether the
+    CLI side is fresher than Hermes' own store.  Expired tokens are NOT
+    rejected here — that decision belongs to the caller.
+    """
+    codex_home = os.getenv("CODEX_HOME", "").strip()
+    if not codex_home:
+        codex_home = str(Path.home() / ".codex")
+    auth_path = Path(codex_home).expanduser() / "auth.json"
+    if not auth_path.is_file():
+        return None
+    try:
+        payload = json.loads(auth_path.read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    if not isinstance(tokens.get("access_token"), str) or not tokens["access_token"].strip():
+        return None
+    if not isinstance(tokens.get("refresh_token"), str) or not tokens["refresh_token"].strip():
+        return None
+    return payload
+
+
+def _codex_cli_tokens_are_fresher(
+    hermes_last_refresh: Optional[str],
+    hermes_access_token: str,
+) -> Optional[Dict[str, Any]]:
+    """Return Codex-CLI tokens iff they look strictly fresher than Hermes' own.
+
+    Returns the CLI ``tokens`` dict + ``last_refresh`` string when:
+
+    * ``~/.codex/auth.json`` exists with valid token shape, AND
+    * either the CLI ``last_refresh`` is newer than Hermes'
+      ``last_refresh``, OR Hermes' access token is already expiring while
+      the CLI's is still live.
+
+    Returns ``None`` otherwise (no adoption needed).  The function never
+    writes — adoption is the caller's responsibility via
+    :func:`_save_codex_tokens`.
+    """
+    payload = _read_codex_cli_auth_payload()
+    if payload is None:
+        return None
+    cli_tokens = dict(payload["tokens"])
+    cli_last_refresh = payload.get("last_refresh")
+    if not isinstance(cli_last_refresh, str):
+        cli_last_refresh = ""
+
+    cli_access = str(cli_tokens.get("access_token", "") or "").strip()
+    cli_is_live = bool(cli_access) and not _codex_access_token_is_expiring(cli_access, 0)
+    if not cli_is_live:
+        return None
+
+    hermes_is_expiring = (
+        bool(hermes_access_token)
+        and _codex_access_token_is_expiring(hermes_access_token, 0)
+    )
+
+    cli_is_strictly_newer = False
+    if cli_last_refresh and isinstance(hermes_last_refresh, str) and hermes_last_refresh:
+        cli_is_strictly_newer = cli_last_refresh > hermes_last_refresh
+    elif cli_last_refresh and not hermes_last_refresh:
+        cli_is_strictly_newer = True
+
+    if cli_is_strictly_newer or hermes_is_expiring:
+        return {"tokens": cli_tokens, "last_refresh": cli_last_refresh}
+    return None
+
+
 def _refresh_codex_auth_tokens(
     tokens: Dict[str, str],
     timeout_seconds: float,
+    *,
+    current_last_refresh: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Refresh Codex access token using the refresh token.
-    
-    Saves the new tokens to Hermes auth store automatically.
+    """Refresh Codex access token, preferring ~/.codex/auth.json when fresher.
+
+    Order of operations:
+
+    1. Check whether ``~/.codex/auth.json`` already holds a strictly fresher
+       (or live-while-ours-is-expired) token.  Adopt it — this avoids
+       consuming our refresh token at all when the Codex CLI has already
+       rotated it, which would race the CLI back into a
+       ``refresh_token_reused`` lockout on the next CLI call.
+    2. Otherwise call the upstream refresh endpoint.
+    3. If upstream refresh fails with ``refresh_token_reused`` (a sibling
+       Codex CLI / VS Code Extension already burned the token), check the
+       CLI file once more — if it now holds the post-rotation tokens,
+       adopt them so Hermes recovers without forcing the operator to
+       re-login.
+
+    Saves to Hermes auth store on success.
     """
-    refreshed = refresh_codex_oauth_pure(
+    adopted = _codex_cli_tokens_are_fresher(
+        current_last_refresh,
         str(tokens.get("access_token", "") or ""),
-        str(tokens.get("refresh_token", "") or ""),
-        timeout_seconds=timeout_seconds,
     )
+    if adopted is not None:
+        logger.info(
+            "Codex auth: adopting fresher tokens from ~/.codex/auth.json "
+            "(hermes_last_refresh=%r cli_last_refresh=%r)",
+            current_last_refresh, adopted.get("last_refresh"),
+        )
+        _save_codex_tokens(adopted["tokens"], last_refresh=adopted["last_refresh"] or None)
+        return adopted["tokens"]
+
+    try:
+        refreshed = refresh_codex_oauth_pure(
+            str(tokens.get("access_token", "") or ""),
+            str(tokens.get("refresh_token", "") or ""),
+            timeout_seconds=timeout_seconds,
+        )
+    except AuthError as exc:
+        if getattr(exc, "code", "") != "refresh_token_reused":
+            raise
+        # Sibling client already rotated — try one more CLI-file adoption
+        # before surfacing the relogin requirement to the user.
+        adopted_after = _codex_cli_tokens_are_fresher(
+            current_last_refresh,
+            str(tokens.get("access_token", "") or ""),
+        )
+        if adopted_after is None:
+            raise
+        logger.warning(
+            "Codex auth: refresh_token_reused recovered by adopting "
+            "~/.codex/auth.json tokens (cli_last_refresh=%r)",
+            adopted_after.get("last_refresh"),
+        )
+        _save_codex_tokens(adopted_after["tokens"], last_refresh=adopted_after["last_refresh"] or None)
+        return adopted_after["tokens"]
+
     updated_tokens = dict(tokens)
     updated_tokens["access_token"] = refreshed["access_token"]
     updated_tokens["refresh_token"] = refreshed["refresh_token"]
@@ -3437,7 +3562,14 @@ def resolve_codex_runtime_credentials(
                 should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
 
             if should_refresh:
-                tokens = _refresh_codex_auth_tokens(tokens, refresh_timeout_seconds)
+                tokens = _refresh_codex_auth_tokens(
+                    tokens,
+                    refresh_timeout_seconds,
+                    current_last_refresh=data.get("last_refresh"),
+                )
+                # Re-read after potential CLI-adoption to pick up the new
+                # last_refresh stamp written by _save_codex_tokens.
+                data = _read_codex_tokens(_lock=False)
                 access_token = str(tokens.get("access_token", "") or "").strip()
 
     base_url = (
