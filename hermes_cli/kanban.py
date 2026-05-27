@@ -551,6 +551,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit JSON instead of the default table",
     )
 
+    # --- runtime-truth (read-only live-state snapshot) ---
+    p_runtime_truth = sub.add_parser(
+        "runtime-truth",
+        help="Read-only Git/process/config/scheduler/DB truth snapshot",
+    )
+    runtime_truth_format = p_runtime_truth.add_mutually_exclusive_group()
+    runtime_truth_format.add_argument(
+        "--json", action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    runtime_truth_format.add_argument(
+        "--markdown", action="store_true",
+        help="Emit operator-readable Markdown (default)",
+    )
+
     # --- link / unlink ---
     p_link = sub.add_parser("link", help="Add a parent->child dependency")
     p_link.add_argument("parent_id")
@@ -1034,6 +1049,11 @@ def kanban_command(args: argparse.Namespace) -> int:
             return _cmd_validate_spec(args)
         finally:
             _restore_board_env()
+    if action == "runtime-truth":
+        try:
+            return _cmd_runtime_truth(args)
+        finally:
+            _restore_board_env()
 
     # Auto-initialize the DB before dispatching any subcommand. init_db
     # is idempotent, so running it every invocation is cheap (one
@@ -1062,6 +1082,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "reassign": _cmd_reassign,
         "diagnostics": _cmd_diagnostics,
         "diag":     _cmd_diagnostics,
+        "runtime-truth": _cmd_runtime_truth,
         "link":     _cmd_link,
         "unlink":   _cmd_unlink,
         "claim":    _cmd_claim,
@@ -1890,6 +1911,18 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
         f"{profile or '(unassigned)'}"
         + (" (claim reclaimed)" if getattr(args, "reclaim", False) else "")
     )
+    return 0
+
+
+def _cmd_runtime_truth(args: argparse.Namespace) -> int:
+    """Render a read-only runtime truth snapshot for the current board."""
+    from hermes_cli import kanban_runtime_truth as krt
+
+    report = krt.build_runtime_truth(board=kb.get_current_board())
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(krt.render_runtime_truth_markdown(report), end="")
     return 0
 
 
