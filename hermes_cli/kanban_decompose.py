@@ -90,6 +90,30 @@ Rules:
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
 
+CRITICAL: Constraint preservation (non-negotiable).
+  - Any line in the original task body starting with
+    `CRITICAL:`, `MANDATORY:`, `MUST:`, or `NEVER:` MUST be
+    reproduced VERBATIM in every kid task body whose scope touches
+    that constraint. Do NOT paraphrase, do NOT summarize, do NOT
+    soften the wording ("if implementation requires", "when
+    appropriate", "ideally" are all FORBIDDEN softeners for these
+    lines).
+  - If only one kid touches the scope, the verbatim line goes in
+    that one kid. If multiple kids touch the scope, the verbatim
+    line goes in every one of them.
+  - Any absolute filesystem path (anything starting with `/` or
+    `~/`) mentioned in the parent body MUST appear verbatim in at
+    least one kid body that uses that path. Do NOT abbreviate
+    `~/.hermes/reports/<sprint>/` to "reports directory" — keep the
+    full absolute path.
+  - Any task id (`t_` followed by 8 hex chars, or a similar
+    canonical id form mentioned in the body) referenced in the
+    parent body MUST appear verbatim in at least one kid body when
+    the work depends on or refers to that task.
+  - These preservation rules are stricter than the general
+    "rephrase for clarity" license you have on the rest of the
+    body. Constraints LOSE their meaning when they are paraphrased.
+
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
 
@@ -247,6 +271,148 @@ def _format_roster(roster: list[dict]) -> str:
         tag = "" if entry["has_description"] else " ⚠ undescribed"
         lines.append(f"  - {entry['name']}{tag}: {entry['description']}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Constraint-preservation validator
+# ---------------------------------------------------------------------------
+#
+# The LLM is told (in _SYSTEM_PROMPT) to reproduce CRITICAL:/MANDATORY:/
+# MUST:/NEVER: lines and absolute paths/task ids verbatim from the parent
+# body in the kid bodies that touch that scope. Even with a strong
+# prompt the model can drop or paraphrase them under pressure (see
+# `feedback_hermes_kanban_mandatory_comment_pattern`). This module
+# post-validates the LLM's output and logs a warning so the operator
+# notices BEFORE the kids get claimed by the dispatcher.
+#
+# We don't auto-reject the decomposition — the workaround is for the
+# operator to fix the kid via `kanban comment <kid_id> "MANDATORY: ..."`
+# before the worker claims the kid (see AGENTS.md "Worker-Steering via
+# Comments"). Warning-only is the right severity here.
+
+_CONSTRAINT_PREFIXES: tuple[str, ...] = ("CRITICAL:", "MANDATORY:", "MUST:", "NEVER:")
+
+# Absolute filesystem paths: starts with `/` or `~/`, not part of a URL.
+# Match at least 4 chars after the leading marker so we don't grab "/" alone.
+_ABS_PATH_RE = re.compile(r"(?<![:/\w])(?:~/|/)(?:[\w.\-/]+)")
+
+# Canonical kanban task ids: `t_` + at least 6 hex chars.
+_TASK_ID_RE = re.compile(r"\bt_[0-9a-f]{6,}\b")
+
+
+def _collect_constraint_lines(body: str) -> list[str]:
+    """Return CRITICAL/MANDATORY/MUST/NEVER lines from ``body``, verbatim."""
+    if not body:
+        return []
+    found: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        # Match the prefix at line start (ignore leading bullets / numbering).
+        # Allow `- CRITICAL: ...` and `1. CRITICAL: ...` as well as bare.
+        bare = stripped.lstrip("-*•+0123456789. \t")
+        for prefix in _CONSTRAINT_PREFIXES:
+            if bare.startswith(prefix):
+                found.append(stripped)
+                break
+    return found
+
+
+def _collect_absolute_paths(body: str) -> list[str]:
+    """Return absolute filesystem paths mentioned in ``body``."""
+    if not body:
+        return []
+    seen: list[str] = []
+    in_seen: set[str] = set()
+    for match in _ABS_PATH_RE.findall(body):
+        # Heuristic: ignore short hits ("/", "/a") and very-likely URLs
+        # ("//example.com" was already excluded by the negative lookbehind).
+        if len(match) < 4:
+            continue
+        if match not in in_seen:
+            in_seen.add(match)
+            seen.append(match)
+    return seen
+
+
+def _collect_task_ids(body: str) -> list[str]:
+    """Return canonical kanban task ids mentioned in ``body``."""
+    if not body:
+        return []
+    seen: list[str] = []
+    in_seen: set[str] = set()
+    for match in _TASK_ID_RE.findall(body):
+        if match not in in_seen:
+            in_seen.add(match)
+            seen.append(match)
+    return seen
+
+
+@dataclass
+class ConstraintPreservationReport:
+    """What the validator found.
+
+    Fields list the parent-body items that did NOT survive into any kid:
+
+    - ``missing_constraints``: CRITICAL/MANDATORY/MUST/NEVER lines absent
+      from every kid body.
+    - ``missing_paths``: absolute filesystem paths absent from every kid.
+    - ``missing_task_ids``: canonical ``t_…`` ids absent from every kid.
+
+    ``ok`` is True when all three are empty.
+    """
+
+    missing_constraints: list[str]
+    missing_paths: list[str]
+    missing_task_ids: list[str]
+
+    @property
+    def ok(self) -> bool:
+        return not (
+            self.missing_constraints
+            or self.missing_paths
+            or self.missing_task_ids
+        )
+
+
+def validate_constraint_preservation(
+    parent_body: str,
+    kids: list[dict],
+) -> ConstraintPreservationReport:
+    """Check that critical lines and absolute paths/ids from ``parent_body``
+    survived verbatim into at least one of the ``kids``' bodies.
+
+    ``kids`` is a list of dicts shaped like the decomposer output:
+    ``{"title": ..., "body": ..., ...}``.
+
+    Pure-function, no side effects. Callers wire logging.
+    """
+    constraints = _collect_constraint_lines(parent_body)
+    paths = _collect_absolute_paths(parent_body)
+    task_ids = _collect_task_ids(parent_body)
+    if not (constraints or paths or task_ids):
+        return ConstraintPreservationReport([], [], [])
+
+    kid_bodies: list[str] = []
+    for kid in kids:
+        body = kid.get("body") if isinstance(kid, dict) else None
+        kid_bodies.append(body if isinstance(body, str) else "")
+
+    def _missing_from_all_kids(needle: str) -> bool:
+        if not needle:
+            return False
+        return all(needle not in body for body in kid_bodies)
+
+    missing_constraints = [
+        line for line in constraints if _missing_from_all_kids(line)
+    ]
+    missing_paths = [p for p in paths if _missing_from_all_kids(p)]
+    missing_task_ids = [t for t in task_ids if _missing_from_all_kids(t)]
+
+    return ConstraintPreservationReport(
+        missing_constraints=missing_constraints,
+        missing_paths=missing_paths,
+        missing_task_ids=missing_task_ids,
+    )
 
 
 def _normalize_assignee_choice(
@@ -437,6 +603,38 @@ def decompose_task(
             "assignee": chosen,
             "parents": clean_parents,
         })
+
+    # Post-validate that the LLM preserved CRITICAL: / MANDATORY: lines and
+    # absolute paths / task ids from the parent body. Warn (not block) so
+    # the operator can act via `kanban comment <kid_id> "MANDATORY: ..."`.
+    preservation = validate_constraint_preservation(task.body or "", children)
+    if not preservation.ok:
+        if preservation.missing_constraints:
+            logger.warning(
+                "decompose: task %s — %d CRITICAL/MANDATORY/MUST/NEVER line(s) "
+                "from parent body did NOT survive into any kid; set MANDATORY "
+                "comments via `kanban comment <kid_id> ... --author user` "
+                "before the dispatcher claims them. Missing: %r",
+                task_id,
+                len(preservation.missing_constraints),
+                preservation.missing_constraints,
+            )
+        if preservation.missing_paths:
+            logger.warning(
+                "decompose: task %s — %d absolute path(s) from parent body "
+                "did NOT survive into any kid: %r",
+                task_id,
+                len(preservation.missing_paths),
+                preservation.missing_paths,
+            )
+        if preservation.missing_task_ids:
+            logger.warning(
+                "decompose: task %s — %d task id(s) from parent body did "
+                "NOT survive into any kid: %r",
+                task_id,
+                len(preservation.missing_task_ids),
+                preservation.missing_task_ids,
+            )
 
     try:
         with kb.connect() as conn:

@@ -347,3 +347,227 @@ def test_decompose_no_aux_client_configured(kanban_home):
 
     assert outcome.ok is False
     assert "no auxiliary client" in outcome.reason
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: / MANDATORY: / absolute-path / task-id preservation
+# (Hardening sprint 2026-05-27 TASK 4)
+#
+# The decomposer's LLM pass has historically watered down strict
+# constraints in the parent body. The system-prompt now mandates verbatim
+# preservation and a post-validator warns when the LLM still drops them.
+# These tests pin both the prompt anchor and the validator behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_decompose_prompt_mentions_critical_preservation():
+    """Anchor test: the decomposer's system prompt must instruct the
+    LLM to preserve CRITICAL / MANDATORY / MUST / NEVER lines and
+    absolute paths verbatim. If this assertion breaks, double-check
+    that the rewrite still carries the constraint-preservation rule —
+    the rule is load-bearing for hardening-20260527 TASK 4.
+    """
+    assert "CRITICAL:" in decomp._SYSTEM_PROMPT
+    assert "MANDATORY:" in decomp._SYSTEM_PROMPT
+    assert "VERBATIM" in decomp._SYSTEM_PROMPT.upper()
+    assert "absolute filesystem path" in decomp._SYSTEM_PROMPT.lower()
+
+
+def test_validator_passes_when_critical_line_in_one_kid():
+    parent_body = (
+        "Build the thing.\n"
+        "CRITICAL: copy all artifacts to /home/piet/.hermes/reports/sprint/ "
+        "BEFORE kanban_complete\n"
+    )
+    kids = [
+        {"title": "research", "body": "look it up"},
+        {
+            "title": "build",
+            "body": (
+                "Code the thing.\n"
+                "CRITICAL: copy all artifacts to "
+                "/home/piet/.hermes/reports/sprint/ BEFORE kanban_complete"
+            ),
+        },
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is True
+    assert report.missing_constraints == []
+    assert report.missing_paths == []
+
+
+def test_validator_flags_missing_critical_line():
+    """The 2026-05-27 Discord-Report-Sprint failure case: parent had a
+    CRITICAL: artifact-copy line, kids paraphrased it away. The
+    validator must report the original line as missing.
+    """
+    parent_body = (
+        "CRITICAL: copy all artifacts to ~/.hermes/reports/discord-report-sprint/ "
+        "BEFORE kanban_complete\n"
+    )
+    kids = [
+        {
+            "title": "build",
+            "body": "Preserve or copy artifacts if implementation requires.",
+        },
+        {
+            "title": "review",
+            "body": "Verify completeness.",
+        },
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is False
+    assert len(report.missing_constraints) == 1
+    assert (
+        "discord-report-sprint" in report.missing_constraints[0]
+    )
+    # Path is also missing (paraphrased).
+    assert any(
+        "discord-report-sprint" in p
+        for p in report.missing_paths
+    )
+
+
+def test_validator_flags_missing_absolute_path():
+    parent_body = (
+        "Write the receipt to /tmp/test-sprint/foo.txt before completing.\n"
+    )
+    kids = [
+        {"title": "kid", "body": "Write the receipt to the sprint dir."},
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is False
+    assert report.missing_paths == ["/tmp/test-sprint/foo.txt"]
+
+
+def test_validator_flags_missing_task_id():
+    parent_body = (
+        "Continue work on t_d8b446b9 — fix the reviewer block.\n"
+    )
+    kids = [
+        {"title": "kid", "body": "Continue work on the parent sprint task."},
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is False
+    assert report.missing_task_ids == ["t_d8b446b9"]
+
+
+def test_validator_ok_when_one_kid_has_path_and_id():
+    """A single kid carrying the path + id is sufficient. The rule is
+    "at least one kid", not "every kid".
+    """
+    parent_body = (
+        "Continue on t_d8b446b9. Output goes to /tmp/test-sprint/foo.txt.\n"
+    )
+    kids = [
+        {"title": "research", "body": "scout the codebase"},
+        {
+            "title": "implement",
+            "body": "Continue on t_d8b446b9 and write /tmp/test-sprint/foo.txt.",
+        },
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is True
+
+
+def test_validator_handles_empty_parent_body():
+    report = decomp.validate_constraint_preservation(
+        "",
+        [{"title": "k", "body": "noop"}],
+    )
+    assert report.ok is True
+
+
+def test_validator_handles_mandatory_must_never_prefixes():
+    parent_body = (
+        "MANDATORY: keep things in sandbox mode\n"
+        "MUST: run tests\n"
+        "NEVER: touch production\n"
+    )
+    kids_drop_all = [
+        {"title": "k", "body": "do the work carefully"},
+    ]
+    report = decomp.validate_constraint_preservation(parent_body, kids_drop_all)
+    assert {line.split(":", 1)[0] for line in report.missing_constraints} == {
+        "MANDATORY", "MUST", "NEVER",
+    }
+
+
+def test_validator_critical_line_with_leading_bullet():
+    """Bulleted constraint lines must still be recognised — the
+    decomposer sometimes sees the body as a bulleted list and the
+    preservation rule applies regardless of bullet style.
+    """
+    parent_body = (
+        "- CRITICAL: do not rename module foo.py\n"
+    )
+    kids = [
+        {"title": "k", "body": "do not rename module foo.py"},
+    ]
+    # Verbatim CRITICAL line is not in the kid — must report missing.
+    report = decomp.validate_constraint_preservation(parent_body, kids)
+    assert report.ok is False
+    assert any(
+        line.endswith("CRITICAL: do not rename module foo.py")
+        for line in report.missing_constraints
+    )
+
+
+def test_decompose_logs_warning_when_critical_not_preserved(kanban_home, caplog):
+    """End-to-end: a parent task with CRITICAL: + absolute path; the
+    LLM response strips both. The validator must log a warning during
+    decompose_task that mentions "MANDATORY comments".
+    """
+    parent_body = (
+        "Plan the sprint.\n"
+        "CRITICAL: copy artifacts to /tmp/hsv1/out.md BEFORE kanban_complete\n"
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="sprint plan",
+            body=parent_body,
+            triage=True,
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "split it",
+        "tasks": [
+            {
+                "title": "research",
+                "body": "Scout the area.",
+                "assignee": "researcher",
+                "parents": [],
+            },
+            {
+                "title": "implement",
+                "body": "Write the code and verify outputs.",
+                "assignee": "engineer",
+                "parents": [0],
+            },
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "researcher", "engineer"])
+    for p in patches:
+        p.start()
+    try:
+        with caplog.at_level("WARNING", logger="hermes_cli.kanban_decompose"):
+            with _patch_aux_client(llm_payload), _patch_extra_body():
+                outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is True
+    assert outcome.fanout is True
+
+    # The validator must have logged both warnings.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("MANDATORY" in m and "CRITICAL" in m.upper() for m in messages), (
+        "expected validator to warn about missing CRITICAL line; got: %r" % messages
+    )
+    assert any("/tmp/hsv1/out.md" in m for m in messages), (
+        "expected validator to warn about missing absolute path; got: %r" % messages
+    )
