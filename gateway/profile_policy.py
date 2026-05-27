@@ -255,10 +255,17 @@ def filter_default_gateway_fallbacks(
 
     * ``fallback_providers`` — ``list[dict]``
     * legacy ``fallback_model`` — single ``dict``
+
+    Operator opt-out: setting ``HERMES_HUB_ALLOW_MINIMAX_FALLBACK=1`` keeps
+    Minimax entries in the chain even at the HUB.  Use when the HUB primary
+    needs a safety net (e.g. ChatGPT-OAuth outages on ``gpt-5.x``).
     """
     if not is_default_hermes_profile_home(
         default_root=default_root, hermes_home=hermes_home
     ):
+        return raw
+
+    if os.environ.get("HERMES_HUB_ALLOW_MINIMAX_FALLBACK", "").strip() in {"1", "true", "yes"}:
         return raw
 
     if raw is None:
@@ -308,6 +315,12 @@ def collect_profile_policy_findings(
     if not is_default_hermes_profile_home(
         default_root=default_root, hermes_home=hermes_home
     ):
+        return []
+
+    # Operator opt-in keeps Minimax entries at the HUB — suppress the
+    # "will be filtered" finding so the start-up log is honest about
+    # what actually happens at runtime.
+    if os.environ.get("HERMES_HUB_ALLOW_MINIMAX_FALLBACK", "").strip() in {"1", "true", "yes"}:
         return []
 
     findings: list[dict[str, Any]] = []
