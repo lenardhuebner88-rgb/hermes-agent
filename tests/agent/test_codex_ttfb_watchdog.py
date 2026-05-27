@@ -140,6 +140,51 @@ def test_ttfb_does_not_kill_when_events_flow(tmp_path, monkeypatch):
     assert "codex_ttfb_kill" not in closes
 
 
+def test_ttfb_does_not_emit_status_on_kill(tmp_path, monkeypatch):
+    """TTFB-kill must NOT push a Discord-visible status update — the per-hit
+    warning floods the user surface even when the conversation_loop retry
+    succeeds. Final user-facing failure is handled by the retry loop's
+    max-retries-exhausted emit, not by the watchdog."""
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
+
+    emitted: list = []
+    monkeypatch.setattr(agent, "_emit_status", lambda *a, **k: emitted.append(a))
+
+    closes: list = []
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
+    monkeypatch.setattr(
+        agent, "_abort_request_openai_client",
+        lambda c, reason=None: closes.append(reason),
+    )
+    monkeypatch.setattr(
+        agent, "_close_request_openai_client",
+        lambda c, reason=None: closes.append(reason),
+    )
+
+    stop = {"flag": False}
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 30
+        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+
+    try:
+        with pytest.raises(TimeoutError):
+            h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": "hi"})
+        # Watchdog killed the connection but stayed silent on the user surface.
+        assert "codex_ttfb_kill" in closes
+        assert emitted == [], f"watchdog leaked emit_status calls: {emitted}"
+    finally:
+        stop["flag"] = True
+
+
 def test_ttfb_disabled_via_env_zero(tmp_path, monkeypatch):
     """Setting HERMES_CODEX_TTFB_TIMEOUT_SECONDS=0 disables the TTFB watchdog;
     a no-event stall then falls through to the (here, 60s) stale timeout, so a

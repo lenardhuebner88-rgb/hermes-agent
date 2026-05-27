@@ -320,11 +320,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 "loop can reconnect.",
                 _elapsed, _ttfb_timeout, api_kwargs.get("model", "unknown"),
             )
-            agent._emit_status(
-                f"⚠️ No first byte from provider in {int(_elapsed)}s "
-                f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
-                f"Reconnecting."
-            )
+            # Do not _emit_status here: TTFB hits are usually transient and
+            # auto-recovered by the conversation_loop retry budget (default
+            # max_retries=3). Emitting per-hit floods Discord with warnings
+            # even when the next attempt succeeds. The user-facing notice now
+            # only fires from conversation_loop on actual max-retries-exhausted
+            # failure ("Max retries (N) exhausted — trying fallback").
             try:
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:
