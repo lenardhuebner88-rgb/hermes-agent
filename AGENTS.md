@@ -940,6 +940,43 @@ scratch workspace is auto-copied to
 workspace is removed.  Empty `artifacts[]` → no preservation, full
 backwards compatibility.
 
+### Iteration Budget Tuning
+
+Three layers govern how many tool-calling iterations a Kanban worker
+gets:
+
+1. **Profile default** — `agent.max_turns` in
+   `~/.hermes/profiles/<profile>/config.yaml`. The dispatcher injects
+   this into the worker's CLI as the iteration cap. Reasonable
+   per-profile floors after 2026-05-27 tuning: `coder: 90`,
+   `coordinator: 90`, `reviewer: 60`, `critic: 60`, `research: 60`.
+2. **Per-task override** — `hermes kanban create --max-iterations N`
+   stores the value on `tasks.max_iterations` and the dispatcher
+   exports `HERMES_MAX_ITERATIONS=N` into the worker env. Use this
+   for one-off audit-class or deep-investigation tasks that need
+   more headroom than the profile floor, without touching the
+   profile config (which is a global change requiring a restart).
+3. **Dispatcher continuation cap** —
+   `DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT` in
+   `hermes_cli/kanban_db.py`. When a worker hits its iteration cap
+   and blocks with `iteration_budget_exhausted`, the dispatcher
+   auto-resumes the task with a continuation comment up to this
+   many times before the hard cap fires. The default is 3 (bumped
+   2026-05-27 from 1, which reproducibly stranded audit-class
+   tasks; see `feedback_hermes_iteration_budget_cap.md`).
+
+Guidance:
+- For ad-hoc one-off audits, prefer `--max-iterations`. The override
+  travels with the row, survives restarts, and doesn't shift the
+  global default upward.
+- For a whole profile that consistently needs more budget, edit
+  `~/.hermes/profiles/<profile>/config.yaml` and restart the gateway
+  service for that profile.
+- Higher caps are not free: they raise per-task cost and wall-clock
+  upper-bound. `tasks.max_runtime_seconds` remains the hard
+  wall-clock stop, and the consecutive-failures circuit breaker
+  still trips at `kanban.failure_limit` (default 2).
+
 ### CLI Flag Conventions
 
 The top-level `hermes` argparse uses `parse_known_args` so that

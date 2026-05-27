@@ -1805,7 +1805,13 @@ def test_dispatch_auto_continues_iteration_budget_block_once(
         assert auto_event.run_id == run.id
         assert auto_event.payload["previous_run_id"] == run.id
         assert auto_event.payload["continuation_index"] == 1
-        assert auto_event.payload["continuation_limit"] == 1
+        # Pinned to the module constant: hardening-sprint TASK 8 bumped
+        # the default from 1 to 3 so audit-class tasks get more
+        # retry-chunks before the hard cap fires.
+        assert (
+            auto_event.payload["continuation_limit"]
+            == kb.DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT
+        )
         assert auto_event.payload["checkpoint_comment_id"] == comments[0].id
 
 
@@ -2041,64 +2047,73 @@ def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_bl
 def test_dispatch_iteration_budget_continuation_cap_blocks_loop(
     kanban_home, all_assignees_spawnable
 ):
+    """Loops auto-continue up to LIMIT and then asserts the cap fires.
+    Hardening-sprint TASK 8 raised the production default from 1 to 3
+    (see `tests/hermes_cli/test_kanban_iteration_budget.py` for the
+    invariant pin). This test is independent of the exact value and
+    just exercises N auto-continues + 1 cap.
+    """
+    limit = kb.DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT
+
     spawns = []
 
     def fake_spawn(task, workspace):
         spawns.append(task.id)
 
+    def _exhaust_active_run(conn, task_id):
+        run = kb.active_run(conn, task_id)
+        assert run is not None
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason=(
+                "Iteration budget exhausted (60/60) — task could not complete "
+                "within the allowed iterations"
+            ),
+            expected_run_id=run.id,
+        )
+        return run
+
     with kb.connect() as conn:
         t = kb.create_task(conn, title="bounded continuation", assignee="alice")
         kb.claim_task(conn, t)
-        first_run = kb.active_run(conn, t)
-        assert first_run is not None
-        assert kb.block_task(
-            conn,
-            t,
-            reason=(
-                "Iteration budget exhausted (60/60) — task could not complete "
-                "within the allowed iterations"
-            ),
-            expected_run_id=first_run.id,
-        )
+        first_run = _exhaust_active_run(conn, t)
 
-        first_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        assert first_dispatch.auto_continued == [t]
-        assert spawns == [t]
+        # Drive `limit` successful auto-continues.
+        last_run = first_run
+        for i in range(limit):
+            dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+            assert dispatch.auto_continued == [t], (
+                f"continuation {i + 1} of {limit} should auto-continue"
+            )
+            new_run = _exhaust_active_run(conn, t)
+            assert new_run.id != last_run.id
+            last_run = new_run
 
-        second_run = kb.active_run(conn, t)
-        assert second_run is not None
-        assert second_run.id != first_run.id
-        assert kb.block_task(
-            conn,
-            t,
-            reason=(
-                "Iteration budget exhausted (60/60) — task could not complete "
-                "within the allowed iterations"
-            ),
-            expected_run_id=second_run.id,
-        )
-
-        second_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        assert second_dispatch.auto_continued == []
-        assert second_dispatch.continuation_capped == [t]
+        # Next dispatcher tick must cap, not continue further.
+        capped_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert capped_dispatch.auto_continued == []
+        assert capped_dispatch.continuation_capped == [t]
         assert kb.get_task(conn, t).status == "blocked"
-        assert spawns == [t]
+        assert spawns == [t] * limit
 
         comments = kb.list_comments(conn, t)
-        assert len(comments) == 2
+        # `limit` checkpoint comments + 1 cap-explanation comment.
+        assert len(comments) == limit + 1
         assert "Coordinator/Human review required" in comments[-1].body
 
         events = kb.list_events(conn, t)
         capped_event = next(
             e for e in events if e.kind == "dispatch_iteration_budget_continuation_capped"
         )
-        assert capped_event.run_id == second_run.id
-        assert capped_event.payload["previous_run_id"] == second_run.id
-        assert capped_event.payload["continuation_limit"] == 1
+        assert capped_event.run_id == last_run.id
+        assert capped_event.payload["previous_run_id"] == last_run.id
+        assert capped_event.payload["continuation_limit"] == limit
 
+        # Repeating the dispatcher tick after the cap is a no-op.
         repeat_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn)
         assert repeat_dispatch.continuation_capped == []
-        assert len(kb.list_comments(conn, t)) == 2
+        assert len(kb.list_comments(conn, t)) == limit + 1
         assert len(
             [
                 e

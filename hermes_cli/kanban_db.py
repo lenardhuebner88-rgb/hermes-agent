@@ -713,6 +713,11 @@ class Task:
     # ``kanban.failure_limit`` config, and then to ``DEFAULT_FAILURE_LIMIT``.
     # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
     max_retries: Optional[int] = None
+    # Per-task override for the worker's tool-calling iteration budget.
+    # When set, the dispatcher injects ``HERMES_MAX_ITERATIONS=N`` into
+    # the worker env. NULL = fall through to the profile's
+    # ``agent.max_turns`` config (or the global default).
+    max_iterations: Optional[int] = None
     # Originating chat/agent session id, when the task was created from
     # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
     # tasks created from the CLI, the dashboard, or any path that doesn't
@@ -784,6 +789,9 @@ class Task:
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
+            ),
+            max_iterations=(
+                row["max_iterations"] if "max_iterations" in keys else None
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
@@ -919,6 +927,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
+    -- Per-task override for the worker's tool-calling iteration budget
+    -- (i.e. `--max-iterations` / `HERMES_MAX_ITERATIONS`). When set,
+    -- the dispatcher injects ``HERMES_MAX_ITERATIONS=N`` into the
+    -- worker env so the LLM agent loop allows up to N tool-calling
+    -- rounds before the iteration-budget guard fires.  NULL (the
+    -- common case) falls through to the profile's ``agent.max_turns``
+    -- config.  Added 2026-05-27 for hardening sprint TASK 8
+    -- (audit-class tasks reproducibly hit the 30-turn profile default).
+    max_iterations       INTEGER,
     -- Originating chat/agent session id when the task was created from
     -- inside an agent loop that propagated ``HERMES_SESSION_ID``. NULL
     -- for tasks created from the CLI, dashboard, or any path that doesn't
@@ -1406,6 +1423,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # they were getting before the column existed).
         _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
 
+    if "max_iterations" not in cols:
+        # Per-task override for the worker's tool-calling iteration
+        # budget. NULL = fall through to the profile's `agent.max_turns`
+        # config (or the global default 90). Added 2026-05-27 for
+        # hardening-sprint TASK 8.
+        _add_column_if_missing(
+            conn, "tasks", "max_iterations", "max_iterations INTEGER"
+        )
+
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
@@ -1693,6 +1719,7 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    max_iterations: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
@@ -1867,8 +1894,8 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, max_iterations, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1887,6 +1914,7 @@ def create_task(
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
+                        int(max_iterations) if max_iterations is not None else None,
                         session_id,
                     ),
                 )
@@ -6046,7 +6074,15 @@ def _block_dispatch_preflight(
         return True
 
 
-DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 1
+DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
+# Continuation cap (number of dispatcher-driven retry chunks after the
+# first iteration-budget-exhausted block). Bumped from 1 to 3 on
+# 2026-05-27 (hardening-sprint TASK 8): the previous "one retry" cap
+# reproducibly blocked audit-class tasks (MC-Audit-Sprint 21:16Z
+# t_440c967d coordinator 30/30, t_9caa1873 critic). Plus the per-task
+# `max_runtime_seconds` remains the hard wall-clock stop, so runaway
+# risk is still bounded.
+# See `feedback_hermes_iteration_budget_cap.md`.
 _ITERATION_BUDGET_BLOCK_TYPE = "iteration_budget_exhausted"
 _ITERATION_BUDGET_GUARD_REASON_RE = re.compile(
     r"^\s*iteration budget exhausted\s*\(\d+\s*/\s*\d+\)\s*[—-]\s*"
@@ -9203,6 +9239,13 @@ def _default_spawn(
     # but unusual symlink / Docker layouts are caught here too.
     env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
+    # Per-task iteration-budget override. The worker's `cli.py` reads
+    # `HERMES_MAX_ITERATIONS` and uses it instead of `agent.max_turns`
+    # from the profile config. NULL on the task = inherit the profile
+    # default; only export when explicitly set. See
+    # `feedback_hermes_iteration_budget_cap.md`.
+    if getattr(task, "max_iterations", None) is not None:
+        env["HERMES_MAX_ITERATIONS"] = str(task.max_iterations)
     # Board slug — the final defense-in-depth pin. If the worker ever
     # resolves kanban paths without the DB / workspaces env vars, the
     # board slug still forces it to the right directory.
