@@ -2458,6 +2458,57 @@ def test_dispatch_review_required_handoff_leaves_parent_gated_legacy_reviewer_in
 
 
 
+def test_standard_auto_reviewer_child_does_not_force_optional_skill(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Auto Reviewer-B children must spawn from the reviewer profile alone.
+
+    The dispatcher can run from a different HERMES_HOME than the target reviewer
+    profile; forcing the optional kanban-reviewer skill caused valid auto-review
+    children to fail closed in preflight even though the reviewer profile itself
+    was spawnable.
+    """
+    spawns = []
+
+    def fake_spawn(task, workspace, *args):
+        spawns.append(task.id)
+        return 4242
+
+    with kb.connect() as conn:
+        source = kb.create_task(
+            conn,
+            title="Update kanban dispatcher task-lifecycle policy",
+            assignee="coder",
+            body="Dispatcher lifecycle semantics require STANDARD_REVIEW.",
+        )
+        kb.claim_task(conn, source)
+        run = kb.active_run(conn, source)
+        assert run is not None
+        assert kb.complete_task(
+            conn,
+            source,
+            summary="Completed lifecycle change.",
+            metadata={"changed_files": ["hermes_cli/kanban_db.py"]},
+            expected_run_id=run.id,
+        )
+
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        reviewer_tasks = [task for task in kb.list_tasks(conn, assignee="reviewer")]
+        assert len(reviewer_tasks) == 1
+        reviewer = reviewer_tasks[0]
+        assert reviewer.skills == []
+        assert reviewer.id in spawns
+        spawned_ids = [item[0] if isinstance(item, tuple) else item.id for item in res.spawned]
+        assert reviewer.id in spawned_ids
+        assert reviewer.id not in res.preflight_blocked
+        assert kb.get_task(conn, reviewer.id).status == "running"
+        event_kinds = [event.kind for event in kb.list_events(conn, reviewer.id)]
+        assert "dispatch_preflight_unknown_skills" not in event_kinds
+        source_events = [event.kind for event in kb.list_events(conn, source)]
+        assert "dispatch_auto_reviewer_child_created" in source_events
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")

@@ -6681,7 +6681,12 @@ def _dispatch_standard_review_children(conn: sqlite3.Connection) -> list[str]:
             priority=source_task.priority,
             parents=[source_task.id],
             idempotency_key=f"auto-reviewer:{source_task.id}:{run.id}",
-            skills=["kanban-reviewer"],
+            # Reviewer workers already receive their role/profile instructions.
+            # Do not force-load the optional kanban-reviewer skill here: gateway
+            # dispatch may run from a different HERMES_HOME than the target
+            # reviewer profile, and force-skill preflight should not turn an
+            # otherwise valid auto-review child into a persistent ready/block loop.
+            skills=[],
             max_runtime_seconds=_AUTO_REVIEWER_MAX_RUNTIME_SECONDS,
             max_retries=_AUTO_REVIEWER_MAX_RETRIES,
         )
