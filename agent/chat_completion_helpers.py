@@ -344,6 +344,15 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 )
                 _ttfb_timeout = _ttfb_cap
 
+    # User-facing emit on each no-byte TTFB kill is opt-out via
+    # HERMES_CODEX_TTFB_EMIT_PER_HIT=0: default preserves the actionable
+    # silent-hang hint behavior, while operators running with a healthy
+    # retry budget can defer user notification to the exhausted-retries path.
+    # The file logger.warning remains unconditional for diagnostics.
+    _ttfb_emit_per_hit = os.environ.get(
+        "HERMES_CODEX_TTFB_EMIT_PER_HIT", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
     _codex_idle_enabled = _codex_watchdog_enabled
     _codex_idle_timeout = _env_float(
         "HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS",
@@ -402,18 +411,19 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 "loop can reconnect.",
                 _elapsed, _ttfb_timeout, api_kwargs.get("model", "unknown"),
             )
-            if _silent_hint:
-                agent._emit_status(
-                    f"⚠️ No first byte from provider in {int(_elapsed)}s "
-                    f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Reconnecting. {_silent_hint}"
-                )
-            else:
-                agent._emit_status(
-                    f"⚠️ No first byte from provider in {int(_elapsed)}s "
-                    f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Reconnecting."
-                )
+            if _ttfb_emit_per_hit:
+                if _silent_hint:
+                    agent._emit_status(
+                        f"⚠️ No first byte from provider in {int(_elapsed)}s "
+                        f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
+                        f"Reconnecting. {_silent_hint}"
+                    )
+                else:
+                    agent._emit_status(
+                        f"⚠️ No first byte from provider in {int(_elapsed)}s "
+                        f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
+                        f"Reconnecting."
+                    )
             try:
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:
