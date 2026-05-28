@@ -1335,59 +1335,6 @@ def init_db(
     return path
 
 
-def open_keepalive(
-    db_path: Optional[Path] = None,
-    *,
-    board: Optional[str] = None,
-) -> Optional[sqlite3.Connection]:
-    """Return a process-lifetime *idle* connection that keeps the WAL sidecars hot.
-
-    In WAL mode SQLite tears down the ``-wal``/``-shm`` sidecar files when the
-    *last* connection closes. The kanban dispatcher (every 60s, conn closed in a
-    ``finally``) plus the ``*/2`` cron jobs open and close short-lived
-    connections, so the live count repeatedly drops to zero. When a new opener
-    races a closer's checkpoint/``-shm`` recreation across processes, the reader
-    transiently observes ``database disk image is malformed`` / ``disk I/O
-    error`` on a perfectly healthy DB (2026-05-28 incident).
-
-    Holding one connection open for the whole process lifetime prevents that
-    teardown, so concurrent short-lived openers never hit the recreation race.
-
-    The returned connection MUST stay idle: it is in autocommit mode and a
-    single throwaway ``SELECT 1`` materializes ``-shm`` without leaving a read
-    transaction open. A lingering read transaction would pin the WAL snapshot
-    and prevent checkpoints from truncating it (unbounded WAL growth), so the
-    caller must never run queries on it — just hold it and ``close()`` at
-    shutdown. ``check_same_thread=False`` because it is held across the gateway's
-    thread-pool ticks but never touched after creation.
-
-    Returns ``None`` (best-effort) when the DB file does not exist yet, so a
-    keepalive never accidentally creates an empty competing DB.
-    """
-    if db_path is not None:
-        path = db_path
-    else:
-        path = kanban_db_path(board=board)
-    try:
-        if not path.exists() or path.stat().st_size == 0:
-            return None
-    except OSError:
-        return None
-    _guard_existing_db_is_healthy(path)
-    conn = sqlite3.connect(
-        str(path), isolation_level=None, timeout=30, check_same_thread=False
-    )
-    try:
-        from hermes_state import apply_wal_with_fallback
-
-        apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name}) keepalive")
-        conn.execute("SELECT 1").fetchone()  # materialize -shm; autocommit → no snapshot pin
-    except Exception:
-        conn.close()
-        raise
-    return conn
-
-
 def _add_column_if_missing(
     conn: sqlite3.Connection, table: str, column: str, ddl: str
 ) -> bool:

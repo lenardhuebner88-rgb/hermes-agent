@@ -1725,7 +1725,6 @@ class GatewayRunner:
         )
         self.delivery_router = DeliveryRouter(self.config)
         self._running = False
-        self._kanban_keepalive = None
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
         self._exit_cleanly = False
@@ -4588,24 +4587,6 @@ class GatewayRunner:
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
-        # Hold one process-lifetime idle connection to the kanban DB so SQLite
-        # never tears down the -wal/-shm sidecars between the short-lived
-        # open/close cycles of the dispatcher + */2 cron jobs. That cross-process
-        # teardown race surfaced transient "database disk image is malformed"
-        # reads on a healthy DB (2026-05-28 incident). Profile-agnostic: the hub
-        # runs the */2 kanban crons without dispatching, so this is NOT gated on
-        # kanban.dispatch_in_gateway. Best-effort — never block startup.
-        try:
-            from hermes_cli import kanban_db as _kb
-
-            self._kanban_keepalive = _kb.open_keepalive()
-            if self._kanban_keepalive is not None:
-                logger.info(
-                    "kanban: holding keepalive connection (keeps -wal/-shm hot)"
-                )
-        except Exception as exc:
-            logger.debug("kanban keepalive not acquired: %s", exc)
-
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
@@ -6154,15 +6135,6 @@ class GatewayRunner:
 
             self._running = False
             self._draining = True
-
-            # Release the kanban keepalive so the -wal/-shm can be checkpointed
-            # and cleaned up on a clean shutdown/restart.
-            if getattr(self, "_kanban_keepalive", None) is not None:
-                try:
-                    self._kanban_keepalive.close()
-                except Exception:
-                    pass
-                self._kanban_keepalive = None
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
