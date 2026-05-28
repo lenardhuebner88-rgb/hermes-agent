@@ -1534,7 +1534,11 @@ def test_home_subscribe_creates_notify_sub_row(client, with_home_channels):
     """POST .../home-subscribe/telegram writes a kanban_notify_subs row
     keyed to the telegram home's (chat_id, thread_id)."""
     from hermes_cli import kanban_db as kb
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    # notify_home=False: isolate the explicit home-subscribe endpoint from the
+    # FU-3 subscribe-on-create default (which would pre-seed telegram+discord).
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
 
     r = client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     assert r.status_code == 200
@@ -1555,7 +1559,9 @@ def test_home_subscribe_creates_notify_sub_row(client, with_home_channels):
 def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(client, with_home_channels):
     """After subscribe, the GET endpoint reports subscribed=true for that
     platform and false for the others."""
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
 
     r = client.get(f"/api/plugins/kanban/home-channels?task_id={t['id']}")
@@ -1566,7 +1572,9 @@ def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(client, with_hom
 def test_home_subscribe_is_idempotent(client, with_home_channels):
     """Re-subscribing keeps a single row at the DB layer."""
     from hermes_cli import kanban_db as kb
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
@@ -1580,7 +1588,9 @@ def test_home_subscribe_is_idempotent(client, with_home_channels):
 def test_home_subscribe_backfills_owner_on_legacy_row(client, with_home_channels):
     """Re-subscribing should backfill notifier ownership on ownerless rows."""
     from hermes_cli import kanban_db as kb
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
 
     conn = kb.connect()
     try:
@@ -1623,7 +1633,9 @@ def test_home_subscribe_unknown_task_returns_404(client, with_home_channels):
 def test_home_unsubscribe_removes_notify_sub_row(client, with_home_channels):
     """DELETE .../home-subscribe/telegram removes the matching row."""
     from hermes_cli import kanban_db as kb
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     r = client.delete(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     assert r.status_code == 200
@@ -1638,7 +1650,9 @@ def test_home_unsubscribe_removes_notify_sub_row(client, with_home_channels):
 def test_home_subscribe_multiple_platforms_independent(client, with_home_channels):
     """Subscribing on telegram does not affect discord and vice versa."""
     from hermes_cli import kanban_db as kb
-    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "x", "notify_home": False},
+    ).json()["task"]
 
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
     client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/discord")
@@ -2195,3 +2209,67 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+# ---------------------------------------------------------------------------
+# FU-3: subscribe-on-create routes dashboard-created tasks to home channels
+# ---------------------------------------------------------------------------
+
+_FAKE_HOME = [{"platform": "telegram", "chat_id": "home-1", "thread_id": "", "name": "Home"}]
+
+
+def test_create_task_subscribes_to_home_channel(client, monkeypatch):
+    """A dashboard-created task is auto-subscribed to every configured home
+    channel, so its terminal state (and its decompose children's, via H1
+    inheritance) reaches the home channel without a manual notify-subscribe.
+    """
+    import gateway.config as gwc
+    monkeypatch.setattr(gwc, "configured_home_channels", lambda: list(_FAKE_HOME))
+
+    task = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "ship a feature"},
+    ).json()["task"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, task["id"])
+    finally:
+        conn.close()
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "home-1"
+
+
+def test_create_task_notify_home_false_skips_subscription(client, monkeypatch):
+    """notify_home=False opts out of the home subscription (bulk/scripted use)."""
+    import gateway.config as gwc
+    monkeypatch.setattr(gwc, "configured_home_channels", lambda: list(_FAKE_HOME))
+
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "no ping please", "notify_home": False},
+    ).json()["task"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, task["id"])
+    finally:
+        conn.close()
+    assert subs == []
+
+
+def test_create_task_no_home_channels_is_noop(client, monkeypatch):
+    """No configured home channel -> create still succeeds, just no sub."""
+    import gateway.config as gwc
+    monkeypatch.setattr(gwc, "configured_home_channels", lambda: [])
+
+    task = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "homeless"},
+    ).json()["task"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, task["id"])
+    finally:
+        conn.close()
+    assert subs == []

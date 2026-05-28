@@ -4532,3 +4532,46 @@ def test_dispatch_once_stale_disabled_when_timeout_zero(kanban_home, monkeypatch
         )
         assert res.stale == [], "stale_timeout_seconds=0 should disable detection"
         assert kb.get_task(conn, t).status == "running"
+
+
+# ---------------------------------------------------------------------------
+# FU-3: CLI `kanban create` subscribes the new task to home channels
+# ---------------------------------------------------------------------------
+
+def _created_id(out: str) -> str:
+    return out.split("Created ", 1)[1].split()[0]
+
+
+def test_cli_create_subscribes_to_home_channel(kanban_home, monkeypatch):
+    """`hermes kanban create` auto-subscribes the task to every configured
+    home channel so its terminal state reaches the home channel without a
+    manual notify-subscribe (and feeds H1 inheritance for decompose children).
+    """
+    import gateway.config as gwc
+    monkeypatch.setattr(
+        gwc, "configured_home_channels",
+        lambda: [{"platform": "telegram", "chat_id": "home-1", "thread_id": "", "name": "Home"}],
+    )
+    out = run_slash("create 'ship a feature'")
+    tid = _created_id(out)
+
+    with kb.connect_closing() as conn:
+        subs = kb.list_notify_subs(conn, tid)
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "home-1"
+
+
+def test_cli_create_no_notify_home_skips_subscription(kanban_home, monkeypatch):
+    """--no-notify-home opts out of the home subscription."""
+    import gateway.config as gwc
+    monkeypatch.setattr(
+        gwc, "configured_home_channels",
+        lambda: [{"platform": "telegram", "chat_id": "home-1", "thread_id": "", "name": "Home"}],
+    )
+    out = run_slash("create 'no ping' --no-notify-home")
+    tid = _created_id(out)
+
+    with kb.connect_closing() as conn:
+        subs = kb.list_notify_subs(conn, tid)
+    assert subs == []

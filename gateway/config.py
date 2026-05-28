@@ -681,6 +681,36 @@ class GatewayConfig:
         return "public"
 
 
+def configured_home_channels() -> list[dict]:
+    """Return every platform that has a home_channel set, fully hydrated.
+
+    Reads the live ``GatewayConfig`` so env-var overlays (``TELEGRAM_HOME_CHANNEL``
+    etc.) are honored alongside config.yaml. Returns platforms in a stable
+    (alphabetical) order and drops platforms without a home.
+
+    Shared single source of truth for "where do home-routed notifications go":
+    the dashboard API and the CLI both use it so subscribe-on-create routes to
+    the same channels as the dashboard ``subscribe_home`` endpoint.
+    """
+    try:
+        cfg = load_gateway_config()
+    except Exception:
+        return []
+    result: list[dict] = []
+    for platform, pcfg in cfg.platforms.items():
+        if not pcfg or not pcfg.home_channel:
+            continue
+        hc = pcfg.home_channel
+        result.append({
+            "platform": platform.value,
+            "chat_id": hc.chat_id,
+            "thread_id": hc.thread_id or "",
+            "name": hc.name or "Home",
+        })
+    result.sort(key=lambda r: r["platform"])
+    return result
+
+
 def load_gateway_config() -> GatewayConfig:
     """
     Load gateway configuration from multiple sources.

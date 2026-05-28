@@ -563,6 +563,11 @@ class CreateTaskBody(BaseModel):
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
+    # Subscribe the new task to every configured home channel so its terminal
+    # state (and, via H1 inheritance, its decompose children's) reaches the
+    # team's home channel without a manual notify-subscribe. Opt-out for
+    # bulk/scripted creation that doesn't want the notification.
+    notify_home: bool = True
 
 
 @router.post("/tasks")
@@ -586,6 +591,21 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
         )
+        # Subscribe-on-create: route terminal-state notifications for this task
+        # to every configured home channel (same target as the subscribe_home
+        # endpoint). Without this, dashboard-created roots stay unsubscribed and
+        # H1 inheritance has no source sub to propagate to decompose children.
+        # Idempotent (PK collision); no home channels configured -> no-op.
+        if payload.notify_home:
+            for home in _configured_home_channels():
+                kanban_db.add_notify_sub(
+                    conn,
+                    task_id=task_id,
+                    platform=home["platform"],
+                    chat_id=home["chat_id"],
+                    thread_id=home["thread_id"] or None,
+                    notifier_profile=_active_profile_name(),
+                )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
         # Surface a dispatcher-presence warning so the UI can show a
@@ -1491,32 +1511,15 @@ def get_config():
 def _configured_home_channels() -> list[dict]:
     """Return every platform that has a home_channel set, fully hydrated.
 
-    Reads the live GatewayConfig so env-var overlays (``TELEGRAM_HOME_CHANNEL``
-    etc.) are honored alongside config.yaml. Returns platforms in a stable
-    order and drops platforms without a home.
+    Thin delegate to :func:`gateway.config.configured_home_channels` — the
+    shared single source of truth so the dashboard, the CLI subscribe-on-create
+    path, and this module all resolve the same home channels.
     """
     try:
-        from gateway.config import load_gateway_config
+        from gateway.config import configured_home_channels
     except Exception:
         return []
-    try:
-        gw_cfg = load_gateway_config()
-    except Exception:
-        return []
-    result: list[dict] = []
-    for platform, pcfg in gw_cfg.platforms.items():
-        if not pcfg or not pcfg.home_channel:
-            continue
-        hc = pcfg.home_channel
-        result.append({
-            "platform": platform.value,
-            "chat_id": hc.chat_id,
-            "thread_id": hc.thread_id or "",
-            "name": hc.name or "Home",
-        })
-    # Stable order for deterministic UI — platform name alphabetical.
-    result.sort(key=lambda r: r["platform"])
-    return result
+    return configured_home_channels()
 
 
 def _active_profile_name() -> str:

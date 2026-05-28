@@ -368,6 +368,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
+    p_create.add_argument("--no-notify-home", action="store_true",
+                          help="Do not subscribe the new task to the configured "
+                               "home channels. By default a CLI-created task is "
+                               "subscribed so its terminal state (and its "
+                               "decompose children's, via inheritance) reaches "
+                               "the home channel without a manual notify-subscribe.")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1512,6 +1518,27 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_continuations=max_continuations,
             initial_status=getattr(args, "initial_status", "running"),
         )
+        # Subscribe-on-create: route this task's terminal-state notifications
+        # to every configured home channel (same target as the dashboard
+        # subscribe_home endpoint), so a CLI-created root — and its decompose
+        # children, via inheritance — reaches the home channel without a manual
+        # notify-subscribe. Idempotent; no home channels -> no-op; opt out with
+        # --no-notify-home.
+        if not getattr(args, "no_notify_home", False):
+            try:
+                from gateway.config import configured_home_channels
+                homes = configured_home_channels()
+            except Exception:
+                homes = []
+            for home in homes:
+                kb.add_notify_sub(
+                    conn,
+                    task_id=task_id,
+                    platform=home["platform"],
+                    chat_id=home["chat_id"],
+                    thread_id=home["thread_id"] or None,
+                    notifier_profile=_profile_author(),
+                )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
