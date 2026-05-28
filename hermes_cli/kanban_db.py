@@ -340,11 +340,57 @@ def board_exists(board: Optional[str] = None) -> bool:
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
 
+def _sandbox_mode_enabled() -> bool:
+    """Return True when ``HERMES_SANDBOX_MODE`` is set to a truthy value.
+
+    Truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
+    Anything else (including ``0`` / empty / unset) is False.
+
+    When enabled, :func:`kanban_db_path` and :func:`workspaces_root`
+    redirect to ephemeral per-``HERMES_HOME`` sandbox paths so that
+    scripts running inside a worker (which inherit live
+    ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_BOARD`` env vars from the
+    dispatcher) do not accidentally write tasks/workspaces into the
+    production board. See feedback memory
+    ``hermes-worker-env-live-db-leak`` for the incident that motivated
+    this knob.
+    """
+    raw = os.environ.get("HERMES_SANDBOX_MODE", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _sandbox_db_path(board: Optional[str] = None) -> Path:
+    """Sandbox DB path for the current HERMES_HOME.
+
+    Lives at ``<root>/.kanban-sandbox/<slug>.db`` (hidden directory so
+    it sorts away from real kanban data, and distinct file per board
+    so a "default" sandbox doesn't shadow other-board test runs).
+
+    The inherited ``HERMES_KANBAN_BOARD`` env var is intentionally
+    ignored when ``board`` is None — sandbox mode is opt-in isolation,
+    so it must not silently pull in the live-board name. The default
+    sandbox board is :data:`DEFAULT_BOARD`.
+    """
+    slug = _normalize_board_slug(board) or DEFAULT_BOARD
+    sandbox_root = kanban_home() / ".kanban-sandbox"
+    return sandbox_root / f"{slug}.db"
+
+
+def _sandbox_workspaces_root() -> Path:
+    """Sandbox workspaces root for the current HERMES_HOME."""
+    return kanban_home() / ".kanban-sandbox" / "workspaces"
+
+
 def kanban_db_path(board: Optional[str] = None) -> Path:
     """Return the path to the ``kanban.db`` for ``board``.
 
     Resolution (highest precedence first):
 
+    0. ``HERMES_SANDBOX_MODE=1`` → ephemeral
+       ``<root>/.kanban-sandbox/<slug>.db``. Wins over ``HERMES_KANBAN_DB``
+       so scripts running inside a worker can opt out of the inherited
+       live-board env vars without unsetting them. See
+       :func:`_sandbox_mode_enabled`.
     1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
        back-compat and for the dispatcher→worker handoff (defense in
        depth: dispatcher injects this into worker env so workers are
@@ -354,6 +400,8 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
        Other boards → ``<root>/kanban/boards/<slug>/kanban.db``.
     """
+    if _sandbox_mode_enabled():
+        return _sandbox_db_path(board)
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
@@ -375,7 +423,13 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     ``default`` keeps the legacy path ``<root>/kanban/workspaces/`` so
     that existing scratch workspaces from before the boards feature are
     preserved. Other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
+
+    When ``HERMES_SANDBOX_MODE=1`` is set the workspaces root is
+    redirected to ``<root>/.kanban-sandbox/workspaces/`` so that
+    sandboxed scripts don't pollute the production workspaces tree.
     """
+    if _sandbox_mode_enabled():
+        return _sandbox_workspaces_root()
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
         return Path(override).expanduser()
