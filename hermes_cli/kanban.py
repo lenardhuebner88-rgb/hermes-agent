@@ -75,6 +75,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
         "max_retries": t.max_retries,
+        "max_iterations": t.max_iterations,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
@@ -341,6 +342,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "two retries. Omit to use the dispatcher's "
                                "kanban.failure_limit config "
                                f"(default {kb.DEFAULT_FAILURE_LIMIT}).")
+    p_create.add_argument("--max-iterations", type=int, default=None,
+                          metavar="N",
+                          help="Per-task override for the worker's tool-"
+                               "calling iteration budget. The dispatcher "
+                               "injects HERMES_MAX_ITERATIONS=N into the "
+                               "worker env so the LLM agent loop allows up "
+                               "to N tool-calling rounds before the "
+                               "iteration-budget guard fires. Omit to use "
+                               "the profile's agent.max_turns default. "
+                               "Useful for audit-class tasks that need more "
+                               "headroom than the profile default.")
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",
@@ -1455,6 +1467,13 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    max_iterations = getattr(args, "max_iterations", None)
+    if max_iterations is not None and max_iterations < 1:
+        print(
+            f"kanban: --max-iterations must be >= 1 (got {max_iterations})",
+            file=sys.stderr,
+        )
+        return 2
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1473,6 +1492,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
             max_retries=max_retries,
+            max_iterations=max_iterations,
             initial_status=getattr(args, "initial_status", "running"),
         )
         task = kb.get_task(conn, task_id)
