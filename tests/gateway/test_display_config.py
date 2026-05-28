@@ -179,10 +179,18 @@ class TestYAMLNormalisation:
 class TestPlatformDefaults:
     """Built-in defaults reflect platform capability tiers."""
 
-    def test_high_tier_platforms(self):
-        """Discord defaults to 'all'; Telegram defaults quiet for mobile."""
+    def test_high_tier_platforms(self, tmp_path, monkeypatch):
+        """Discord defaults to 'all'; Telegram defaults quiet for mobile.
+
+        Pinned to a non-HUB HERMES_HOME so the HUB-aware Discord layer
+        (``_HUB_DISCORD_DEFAULTS``) stays inactive and the Tier-High default
+        ``"all"`` for Discord remains observable.
+        """
         from gateway.display_config import resolve_display_setting
 
+        profile_home = tmp_path / "profiles" / "any"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
         # Telegram: tier_high transport, but quiet mobile default.
         assert resolve_display_setting({}, "telegram", "tool_progress") == "off"
         # Discord: pure tier_high.
@@ -437,3 +445,76 @@ class TestCleanupProgress:
                 }
             }
             assert resolve_display_setting(config, "telegram", "cleanup_progress") is True, val
+
+
+class TestHubAwareDiscordDefaults:
+    """Phase 4 — HUB-aware Discord defaults injected between hierarchy
+    level 3 (global ``display.<key>``) and level 4 (``_PLATFORM_DEFAULTS``).
+    """
+
+    def test_hub_default_discord_tool_progress_is_new(self, tmp_path, monkeypatch):
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert resolve_display_setting({}, "discord", "tool_progress") == "new"
+
+    def test_hub_default_discord_tool_preview_length_matches_tier_high(
+        self, tmp_path, monkeypatch
+    ):
+        """Review-Finding #9: HUB default must not exceed the Tier-High
+        default — otherwise the 'quieter Discord at HUB' framing turns into
+        netto louder messages."""
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert resolve_display_setting({}, "discord", "tool_preview_length") == 40
+
+    def test_named_profile_discord_keeps_tier_high(self, tmp_path, monkeypatch):
+        from gateway.display_config import resolve_display_setting
+
+        profile_home = tmp_path / "profiles" / "coder"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        assert resolve_display_setting({}, "discord", "tool_progress") == "all"
+
+    def test_worktree_discord_keeps_tier_high(self, tmp_path, monkeypatch):
+        from gateway.display_config import resolve_display_setting
+
+        worktree_home = tmp_path / "worktrees" / "fix-branch"
+        worktree_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(worktree_home))
+        assert resolve_display_setting({}, "discord", "tool_progress") == "all"
+
+    def test_hub_default_explicit_platform_override_wins(
+        self, tmp_path, monkeypatch
+    ):
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        cfg = {"display": {"platforms": {"discord": {"tool_progress": "verbose"}}}}
+        assert resolve_display_setting(cfg, "discord", "tool_progress") == "verbose"
+
+    def test_hub_default_global_user_override_wins(self, tmp_path, monkeypatch):
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        cfg = {"display": {"tool_progress": "off"}}
+        assert resolve_display_setting(cfg, "discord", "tool_progress") == "off"
+
+    def test_hub_default_telegram_unaffected(self, tmp_path, monkeypatch):
+        """Telegram is not in _HUB_DISCORD_DEFAULTS, so the HUB layer is
+        bypassed and the platform default applies (mobile-first ``off``)."""
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert resolve_display_setting({}, "telegram", "tool_progress") == "off"
+
+    def test_hub_default_does_not_apply_unrelated_keys_for_discord(
+        self, tmp_path, monkeypatch
+    ):
+        """show_reasoning is NOT in _HUB_DISCORD_DEFAULTS, so the HUB layer
+        is bypassed and Tier-High default (False) applies as usual."""
+        from gateway.display_config import resolve_display_setting
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert resolve_display_setting({}, "discord", "show_reasoning") is False

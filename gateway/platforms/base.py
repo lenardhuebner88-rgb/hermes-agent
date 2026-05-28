@@ -1691,7 +1691,22 @@ class BasePlatformAdapter(ABC):
         Logging every failure would spam the log on reconnect loops, so this
         surfaces the first failure per (platform, context) at warning level and
         downgrades subsequent failures to debug.
+
+        Adapters that implement ``runtime_health()`` (currently Discord) have
+        the result attached as the ``platform_health`` kwarg via duck-typing.
+        Adapters without that method are unaffected.
         """
+        if "platform_health" not in kwargs and hasattr(self, "runtime_health"):
+            try:
+                health = self.runtime_health()  # type: ignore[attr-defined]
+                if health is not None:
+                    kwargs["platform_health"] = health
+            except Exception as exc:
+                logger.warning(
+                    "runtime_health() failed for %s: %s",
+                    self.platform.value,
+                    exc,
+                )
         try:
             from gateway.status import write_runtime_status
             write_runtime_status(platform=self.platform.value, **kwargs)

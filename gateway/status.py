@@ -511,6 +511,8 @@ def write_runtime_status(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    platform_health: Any = _UNSET,
+    token_usage: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
@@ -532,6 +534,65 @@ def write_runtime_status(
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
 
+    if token_usage is not _UNSET:
+        if token_usage is None:
+            payload.pop("token_usage", None)
+        elif isinstance(token_usage, dict):
+            from gateway.profile_policy import (
+                current_pressure_watch_pct,
+                current_pressure_critical_pct,
+                current_pressure_floor_tokens,
+            )
+            PRESSURE_WATCH_PCT = current_pressure_watch_pct()
+            PRESSURE_CRITICAL_PCT = current_pressure_critical_pct()
+            PRESSURE_FLOOR_TOKENS = current_pressure_floor_tokens()
+            # Defensive snapshot — non-serialisable values degrade to str().
+            usage = json.loads(json.dumps(token_usage, default=str))
+            try:
+                last_prompt = int(usage.get("last_prompt_tokens") or 0)
+            except (TypeError, ValueError):
+                last_prompt = 0
+            try:
+                context_length = int(usage.get("context_length") or 0)
+            except (TypeError, ValueError):
+                context_length = 0
+            pressure_pct: Optional[int] = 0
+            pressure_class: str
+            if context_length > 0:
+                pressure_pct = max(
+                    0, min(100, round(last_prompt / context_length * 100))
+                )
+                if last_prompt < PRESSURE_FLOOR_TOKENS:
+                    pressure_class = "ok"
+                elif pressure_pct >= PRESSURE_CRITICAL_PCT:
+                    pressure_class = "critical"
+                elif pressure_pct >= PRESSURE_WATCH_PCT:
+                    pressure_class = "watch"
+                else:
+                    pressure_class = "ok"
+            else:
+                # Review-Finding #7: when context_length is unknown (0), we
+                # cannot compute pressure_pct. Falling back to 'ok' falsely
+                # reassures the operator even if last_prompt is enormous.
+                # Surface 'unknown' so the CLI can render it accordingly.
+                pressure_pct = None
+                if last_prompt < PRESSURE_FLOOR_TOKENS:
+                    pressure_class = "ok"
+                else:
+                    pressure_class = "unknown"
+            usage["pressure_pct"] = pressure_pct
+            usage["pressure_class"] = pressure_class
+            # Review-Finding #14: stamp updated_at so the CLI can detect
+            # stale token_usage records (e.g. yesterday's 'critical' read
+            # this morning) and the snapshot doesn't masquerade as live.
+            usage["updated_at"] = _utc_now_iso()
+            # Review-Finding #15: ensure the model field is always a string
+            # so non-serialisable ModelConfig-like objects don't surface as
+            # '<Object 0x…>' in the persisted file and in CLI output.
+            if "model" in usage and usage["model"] is not None:
+                usage["model"] = str(usage["model"])
+            payload["token_usage"] = usage
+
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})
         if platform_state is not _UNSET:
@@ -540,6 +601,16 @@ def write_runtime_status(
             platform_payload["error_code"] = error_code
         if error_message is not _UNSET:
             platform_payload["error_message"] = error_message
+        if platform_health is not _UNSET:
+            if platform_health is None:
+                platform_payload.pop("health", None)
+            elif isinstance(platform_health, dict):
+                # Snapshot via JSON round-trip so callers can't mutate the
+                # stored dict after the fact.  Non-serialisable values
+                # degrade to str().
+                platform_payload["health"] = json.loads(
+                    json.dumps(platform_health, default=str)
+                )
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 
