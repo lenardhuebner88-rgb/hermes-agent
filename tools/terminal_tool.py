@@ -37,6 +37,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import time
 import threading
 import atexit
@@ -247,6 +248,154 @@ def _reset_cached_sudo_passwords() -> None:
     """
     with _sudo_password_cache_lock:
         _sudo_password_cache.clear()
+
+
+# =============================================================================
+# HUB/DEFAULT heavy-workload guard
+# =============================================================================
+#
+# At the default Hermes home the gateway is the durable Discord/Telegram/Slack
+# messaging surface.  Long-running Python test/lint/typecheck suites starve
+# the gateway's event loop and the host's CPU/memory budget.  Named profiles
+# (``<root>/profiles/<x>``) and worktrees (``<root>/worktrees/<x>``) carry
+# heavier workloads by design — the guard is silent for them.
+
+# Token-parser approach: regexes alone can't reliably skip leading wrappers
+# (nohup, env VAR=x, time, xargs), versioned interpreters (python3.11), runner
+# subcommands (uv run pytest), or recurse into bash -c '<inner>' / subshells.
+_HEAVY_COMMAND_BASENAMES = frozenset({
+    "pytest", "ruff", "mypy", "pyright", "tox", "nox", "coverage",
+})
+_HEAVY_PYTHON_MODULES = frozenset({
+    "pytest", "coverage", "ruff", "mypy", "pyright",
+})
+_HEAVY_RUNNER_PREFIXES = frozenset({"uv", "pdm", "hatch", "poetry"})
+_WORKLOAD_WRAPPER_TOKENS = frozenset({
+    "nohup", "time", "xargs", "stdbuf", "ionice", "nice",
+})
+_PYTHON_INTERPRETER_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Splits a command line into "executable segments" so that each clause of
+# `cd /tmp && pytest`, `$(pytest)`, `(pytest)`, `echo;pytest` is inspected
+# independently. Order matters: keep `$(` and `\`` before single chars.
+_SEGMENT_SPLIT_RE = re.compile(r"\$\(|`+|[;&|()]+")
+
+
+def _segment_starts_heavy_workload(tokens: list[str]) -> bool:
+    """Return True when *tokens* (a shell-split segment) leads with a
+    heavy-workload invocation, allowing for leading wrappers and env assigns.
+    """
+    # Strip leading wrapper tokens and inline env-var assignments
+    while tokens:
+        head = tokens[0]
+        if head in _WORKLOAD_WRAPPER_TOKENS:
+            tokens = tokens[1:]
+            continue
+        if _ENV_ASSIGNMENT_RE.match(head):
+            tokens = tokens[1:]
+            continue
+        if head == "env":
+            tokens = tokens[1:]
+            while tokens and _ENV_ASSIGNMENT_RE.match(tokens[0]):
+                tokens = tokens[1:]
+            continue
+        break
+    if not tokens:
+        return False
+    head_basename = tokens[0].rsplit("/", 1)[-1]
+    if head_basename in _HEAVY_COMMAND_BASENAMES:
+        return True
+    # python[3[.X]] -m <module>
+    if _PYTHON_INTERPRETER_RE.match(head_basename):
+        for i, tok in enumerate(tokens[1:], start=1):
+            if tok == "-m" and i + 1 < len(tokens):
+                module = tokens[i + 1].split(".")[0]
+                return module in _HEAVY_PYTHON_MODULES
+        return False
+    # uv | pdm | hatch | poetry run <heavy-cmd>
+    if (
+        head_basename in _HEAVY_RUNNER_PREFIXES
+        and len(tokens) >= 3
+        and tokens[1] == "run"
+    ):
+        return (
+            tokens[2].rsplit("/", 1)[-1].split(".")[0] in _HEAVY_COMMAND_BASENAMES
+        )
+    # bash/sh/zsh -c '<inner>' — recurse into the inner command string
+    if head_basename in ("bash", "sh", "zsh") and len(tokens) >= 3 and tokens[1] == "-c":
+        inner = " ".join(tokens[2:]).strip()
+        return _command_contains_heavy_workload(inner) is not None
+    return False
+
+
+def _command_contains_heavy_workload(command: str) -> str | None:
+    """Return the heavy-workload label for *command*, or ``None`` if clean.
+
+    Splits on shell separators and subshell delimiters, then tokenises each
+    segment via :mod:`shlex` so that quoted args and basename-only matches
+    work without false-positives on path arguments containing ``pytest``.
+    """
+    for segment in _SEGMENT_SPLIT_RE.split(command):
+        seg = segment.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg, posix=True)
+        except ValueError:
+            tokens = seg.split()
+        if _segment_starts_heavy_workload(tokens):
+            return "test/lint/typecheck"
+    return None
+
+
+def _default_gateway_local_workload_guard(
+    command: str,
+    *,
+    background: bool = False,
+    env_type: str = "local",
+) -> str | None:
+    """Return a refusal message when the command must be blocked at HUB.
+
+    Triggers iff ALL of:
+      • HERMES_GATEWAY_SESSION is enabled (running inside the gateway)
+      • ``env_type`` is ``"local"`` (sandboxed env_types route through a
+        remote host and don't compete with the gateway)
+      • ``background`` is False (background jobs can be triaged via
+        ``process('poll')`` without blocking the turn)
+      • the runtime is bound to the *default* Hermes home — named
+        profiles and worktrees fall through to the regular execution
+        path.
+      • the command matches a known heavy-workload pattern.
+
+    Returns ``None`` when the guard does not fire.
+    """
+    if background:
+        return None
+    if env_type != "local":
+        return None
+    if not env_var_enabled("HERMES_GATEWAY_SESSION"):
+        return None
+
+    try:
+        from gateway.profile_policy import is_default_hermes_profile_home
+        if not is_default_hermes_profile_home():
+            return None
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "profile_policy unavailable for workload guard: %s", exc
+        )
+        return None
+
+    label = _command_contains_heavy_workload(command)
+    if label:
+        return (
+            f"Default Hermes gateway profile refuses heavy {label} workloads. "
+            "Switch to a named profile (e.g. coder, reviewer, research) or "
+            "run inside a worktree under ~/.hermes/worktrees/ to execute "
+            "this command."
+        )
+    return None
+
 
 # =============================================================================
 # Dangerous Command Approval System
@@ -1783,6 +1932,21 @@ def terminal_tool(
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
         if not force:
+            # HUB/DEFAULT heavy-workload refusal — runs before approval so
+            # operators can't accidentally bypass it via "yes" on a generic
+            # dangerous-command prompt. Silently a no-op for non-HUB homes,
+            # background jobs, non-local env_types, or commands outside the
+            # heavy-workload set.
+            workload_refusal = _default_gateway_local_workload_guard(
+                command, background=background, env_type=env_type,
+            )
+            if workload_refusal:
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": workload_refusal,
+                    "status": "blocked",
+                }, ensure_ascii=False)
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)

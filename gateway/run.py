@@ -1120,6 +1120,14 @@ def _try_resolve_fallback_provider() -> dict | None:
         with open(cfg_path, encoding="utf-8") as _f:
             cfg = _y.safe_load(_f) or {}
         fb_list = get_fallback_chain(cfg)
+        try:
+            from gateway.profile_policy import filter_default_gateway_fallbacks
+            fb_list = filter_default_gateway_fallbacks(fb_list)
+        except Exception as exc:
+            logger.warning(
+                "profile_policy fallback filter failed in _try_resolve_fallback_provider: %s",
+                exc,
+            )
         if not fb_list:
             return None
         for entry in fb_list:
@@ -3031,6 +3039,14 @@ class GatewayRunner:
                     cfg = _y.safe_load(_f) or {}
                 fb = get_fallback_chain(cfg)
                 if fb:
+                    try:
+                        from gateway.profile_policy import filter_default_gateway_fallbacks
+                        fb = filter_default_gateway_fallbacks(fb)
+                    except Exception as exc:
+                        logger.warning(
+                            "profile_policy fallback filter failed in _load_fallback_model: %s",
+                            exc,
+                        )
                     return fb
         except Exception:
             pass
@@ -3951,6 +3967,20 @@ class GatewayRunner:
             write_runtime_status(gateway_state="starting", exit_reason=None)
         except Exception:
             pass
+
+        # One-shot HUB/DEFAULT profile-policy diagnostic at gateway start.
+        # Worktrees and named profiles are silent here by contract.
+        try:
+            from gateway.profile_policy import collect_profile_policy_findings
+            _policy_cfg = _load_gateway_config()
+            for _finding in collect_profile_policy_findings(_policy_cfg):
+                logger.warning(
+                    "profile_policy: %s [%s]",
+                    _finding.get("message", ""),
+                    _finding.get("code", ""),
+                )
+        except Exception as exc:
+            logger.warning("profile_policy findings unavailable: %s", exc)
 
         # Log any active supply-chain security advisories. Operators see this
         # in gateway.log and `hermes status` surfaces it; we do NOT block
@@ -17244,6 +17274,31 @@ class GatewayRunner:
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+
+            # Token-pressure persistence is scoped to HUB/DEFAULT only —
+            # named profiles and worktrees keep their existing telemetry
+            # surface (Review-Finding #3: previous version persisted in
+            # every profile, violating the documented scope).
+            try:
+                from gateway.profile_policy import is_default_hermes_profile_home
+                _persist_token_usage = is_default_hermes_profile_home()
+            except Exception:
+                _persist_token_usage = False
+
+            if _persist_token_usage:
+                try:
+                    from gateway.status import write_runtime_status
+                    write_runtime_status(token_usage={
+                        "last_prompt_tokens": _last_prompt_toks,
+                        "input_tokens": _input_toks,
+                        "output_tokens": _output_toks,
+                        "context_length": _context_length,
+                        "model": _resolved_model,
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "write_runtime_status(token_usage) failed (post-run): %s", exc
+                    )
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
