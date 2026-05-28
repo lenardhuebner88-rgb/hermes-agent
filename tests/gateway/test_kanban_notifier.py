@@ -278,3 +278,68 @@ def test_notifier_delivers_decompose_child_terminal_state(tmp_path, monkeypatch)
     assert sent["chat_id"] == "chat-1"
     assert child in sent["text"]
     assert "blocked" in sent["text"].lower()
+
+
+@pytest.mark.parametrize("gw_profile,expect_sends", [("coordinator", 1), ("reviewer", 0)])
+def test_decompose_child_inherited_sub_respects_notifier_profile_ownership(
+    tmp_path, monkeypatch, gw_profile, expect_sends
+):
+    """FU-1/FU-2: a decompose-child inherits the root's notifier_profile verbatim,
+    and the real watcher only delivers when the gateway's own profile matches that
+    inherited owner_profile (coordinator) — a foreign-profile gateway (reviewer)
+    skips the inherited sub via the owner_profile ownership gate in gateway/run.py.
+
+    Extends test_notifier_delivers_decompose_child_terminal_state (which covers the
+    profile-less sub) with the profile-routing dimension that the live delivery path
+    actually exercises.
+    """
+    db_path = tmp_path / "owned.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship a feature", triage=True)
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="telegram",
+            chat_id="chat-1",
+            notifier_profile="coordinator",
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "build it", "assignee": "engineer", "parents": []}],
+            author="decomposer",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+        child = child_ids[0]
+        # FU-2 white-box: the inherited sub carries the root's owner profile verbatim.
+        inherited = kb.list_notify_subs(conn, child)
+        assert len(inherited) == 1
+        assert inherited[0]["notifier_profile"] == "coordinator"
+        # Parentless child was promoted ready -> drive it to a terminal block.
+        assert kb.get_task(conn, child).status == "ready"
+        assert kb.block_task(conn, child, reason="needs human input")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    # Critical: _make_runner does not set this; the watcher would otherwise fall
+    # back to self._active_profile_name(). A truthy value pins the gateway's
+    # profile deterministically so the ownership gate is what's under test.
+    runner._kanban_notifier_profile = gw_profile
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == expect_sends, (
+        f"gateway profile {gw_profile!r} vs inherited owner 'coordinator' should "
+        f"yield {expect_sends} deliveries; got {len(adapter.sent)}"
+    )
+    if expect_sends:
+        sent = adapter.sent[0]
+        assert sent["chat_id"] == "chat-1"
+        assert child in sent["text"]
+        assert "blocked" in sent["text"].lower()
