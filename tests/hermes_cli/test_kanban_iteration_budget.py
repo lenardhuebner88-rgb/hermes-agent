@@ -317,3 +317,63 @@ def test_worker_cmd_passes_max_turns_flag(kanban_home, monkeypatch):
         task2 = kb.get_task(conn, tid2)
     kb._default_spawn(task2, "/tmp/ws", board="default")
     assert "--max-turns" not in captured["cmd"]
+
+
+@pytest.mark.xfail(
+    reason="WI-6: dispatcher places `-m <model_override>` BEFORE `chat`, but "
+    "`--model` is also a chat-subparser flag (default=None) so the subparser "
+    "default clobbers the top-level value -> per-task model_override never "
+    "reaches the worker. Same bug-class as the max_iterations shadow. Fix = put "
+    "`-m` after `chat` (see opus48-hardening-followup-plan-20260528.md WI-6); "
+    "then remove this xfail.",
+    strict=True,
+)
+def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
+    """End-to-end repro: parse the dispatcher's worker argv with the REAL
+    top-level parser and assert the per-task model override survives. Currently
+    RED (argparse yields model=None); flips to XPASS once WI-6 lands.
+    """
+    captured: dict[str, object] = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 12345
+
+        def wait(self, *a, **kw):
+            return 0
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(kanban_home),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.normalize_profile_name",
+        lambda name: name,
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="model-override", assignee="coder",
+            model_override="gpt-5.5-codex",
+        )
+        task = kb.get_task(conn, tid)
+    kb._default_spawn(task, "/tmp/ws", board="default")
+
+    # Reconstruct the argv argparse actually sees: drop the executable (cmd[0])
+    # and the `-p <profile>` pair (consumed pre-argparse by the profile override
+    # handler), then parse with the real top-level parser.
+    argv = list(captured["cmd"][1:])
+    if "-p" in argv:
+        i = argv.index("-p")
+        del argv[i:i + 2]
+
+    from hermes_cli._parser import build_top_level_parser
+    parser, _subparsers, _chat = build_top_level_parser()
+    ns = parser.parse_args(argv)
+    assert ns.command == "chat"
+    assert ns.model == "gpt-5.5-codex", (
+        f"model_override lost: args.model={ns.model!r}; worker argv={argv}"
+    )
