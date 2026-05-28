@@ -160,6 +160,46 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
 })
 
 
+def _extra_allowed_hosts() -> frozenset:
+    """Operator-declared hostnames that bypass the loopback Host guard.
+
+    The DNS-rebinding guard only accepts loopback Host headers by default.
+    When the dashboard is reached through a tailnet-private reverse proxy
+    (e.g. Tailscale Serve, which preserves the inbound Host), the Host is
+    the operator's own declared hostname — trusted config, not an
+    attacker-controlled name. Sourced from ``dashboard.public_url`` and the
+    ``HERMES_DASHBOARD_ALLOWED_HOSTS`` env (comma-separated). Returns
+    lowercased hostnames with any port stripped.
+    """
+    from urllib.parse import urlparse
+
+    def _strip_port(value: str) -> str:
+        v = value.strip().lower()
+        if not v:
+            return ""
+        if v.startswith("["):  # bracketed IPv6
+            close = v.find("]")
+            return v[1:close] if close != -1 else v.strip("[]")
+        return v.rsplit(":", 1)[0] if ":" in v else v
+
+    hosts: set = set()
+    try:
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+        pu = resolve_public_url()
+        if pu:
+            parsed = urlparse(pu if "://" in pu else f"https://{pu}")
+            if parsed.hostname:
+                hosts.add(parsed.hostname.lower())
+    except Exception:
+        pass
+    for part in os.environ.get("HERMES_DASHBOARD_ALLOWED_HOSTS", "").split(","):
+        stripped = _strip_port(part)
+        if stripped:
+            hosts.add(stripped)
+    return frozenset(hosts)
+
+
 def should_require_auth(host: str, allow_public: bool) -> bool:
     """Return True iff the dashboard OAuth auth gate must be active.
 
@@ -176,12 +216,19 @@ def should_require_auth(host: str, allow_public: bool) -> bool:
     return (host not in _LOOPBACK_HOST_VALUES) and (not allow_public)
 
 
-def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+def _is_accepted_host(
+    host_header: str,
+    bound_host: str,
+    extra_allowed: frozenset = frozenset(),
+) -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - Any host in ``extra_allowed`` (operator-declared via public_url /
+      HERMES_DASHBOARD_ALLOWED_HOSTS — e.g. a tailnet hostname fronted by
+      a private reverse proxy)
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
@@ -204,6 +251,11 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     else:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
+
+    # Operator-declared hostnames (public_url / allowlist env) are trusted
+    # regardless of the bound interface — they front a private proxy.
+    if host_only in extra_allowed:
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -237,7 +289,8 @@ async def host_header_middleware(request: Request, call_next):
     bound_host = getattr(app.state, "bound_host", None)
     if bound_host:
         host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
+        extra_allowed = getattr(app.state, "extra_allowed_hosts", frozenset())
+        if not _is_accepted_host(host_header, bound_host, extra_allowed):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -4909,6 +4962,7 @@ def start_server(
     # PTY child uses to publish events to the dashboard sidebar.
     app.state.bound_host = host
     app.state.bound_port = port
+    app.state.extra_allowed_hosts = _extra_allowed_hosts()
 
     if open_browser:
         import webbrowser

@@ -741,9 +741,13 @@ class Task:
     # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
     max_retries: Optional[int] = None
     # Per-task override for the worker's tool-calling iteration budget.
-    # When set, the dispatcher injects ``HERMES_MAX_ITERATIONS=N`` into
-    # the worker env. NULL = fall through to the profile's
+    # When set, the dispatcher passes ``--max-turns N`` on the worker's
+    # ``chat`` argv — the authoritative, top-precedence path that beats the
+    # profile's ``agent.max_turns`` — and also injects
+    # ``HERMES_MAX_ITERATIONS=N`` into the worker env (a shadowed fallback;
+    # see _default_spawn). NULL = fall through to the profile's
     # ``agent.max_turns`` config (or the global default).
+    # Name matches the ``--max-iterations`` CLI flag on ``kanban create``.
     max_iterations: Optional[int] = None
     # Bounded auto-continuation policy for explicit iteration-budget exhaustion.
     continuation_count: int = 0
@@ -6360,6 +6364,15 @@ def _default_spawn(
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+    # Per-task iteration-budget override (env-var leg). NOTE: this env var
+    # is SHADOWED in production — the worker resolves max_turns as
+    # "CLI arg > config > env > default" (cli.py:3052) and load_cli_config
+    # always injects agent.max_turns, so config wins over this var. The
+    # AUTHORITATIVE override is the `--max-turns` chat flag appended to the
+    # worker argv below (the top-precedence CLI-arg branch). The env var is
+    # kept for consistency, diagnostics, and any consumer that bypasses
+    # load_cli_config. NULL on the task = inherit the profile default.
+    # See feedback_hermes_iteration_budget_cap.md.
     if task.max_iterations is not None:
         env["HERMES_MAX_ITERATIONS"] = str(int(task.max_iterations))
     terminal_timeout = _worker_terminal_timeout_env(
@@ -6382,13 +6395,6 @@ def _default_spawn(
     # but unusual symlink / Docker layouts are caught here too.
     env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
-    # Per-task iteration-budget override. The worker's `cli.py` reads
-    # `HERMES_MAX_ITERATIONS` and uses it instead of `agent.max_turns`
-    # from the profile config. NULL on the task = inherit the profile
-    # default; only export when explicitly set. See
-    # `feedback_hermes_iteration_budget_cap.md`.
-    if getattr(task, "max_iterations", None) is not None:
-        env["HERMES_MAX_ITERATIONS"] = str(task.max_iterations)
     # Board slug — the final defense-in-depth pin. If the worker ever
     # resolves kanban paths without the DB / workspaces env vars, the
     # board slug still forces it to the right directory.
@@ -6438,10 +6444,17 @@ def _default_spawn(
                 cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
-    cmd.extend([
-        "chat",
-        "-q", prompt,
-    ])
+    cmd.append("chat")
+    # Per-task iteration-budget override routed through the top-precedence
+    # CLI-arg path: `--max-turns N` maps to HermesCLI(max_turns=N), which
+    # wins over the profile's agent.max_turns (cli.py:3053) — unlike the
+    # HERMES_MAX_ITERATIONS env var, which the profile config shadows. This
+    # is what actually lets audit-class tasks exceed the profile default.
+    # `--max-turns` is a chat-subcommand flag (hermes_cli/_parser.py), so it
+    # must come after `chat` in the argv.
+    if task.max_iterations is not None:
+        cmd.extend(["--max-turns", str(int(task.max_iterations))])
+    cmd.extend(["-q", prompt])
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

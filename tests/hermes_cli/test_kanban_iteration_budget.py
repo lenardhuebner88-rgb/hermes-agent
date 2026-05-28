@@ -253,3 +253,127 @@ def test_worker_env_injects_hermes_max_iterations(kanban_home, monkeypatch):
         task2 = kb.get_task(conn, tid2)
     kb._default_spawn(task2, "/tmp/ws", board="default")
     assert "HERMES_MAX_ITERATIONS" not in captured["env"]
+
+
+def test_worker_cmd_passes_max_turns_flag(kanban_home, monkeypatch):
+    """Per-task max_iterations must reach the worker as a ``--max-turns N``
+    chat flag, not just the ``HERMES_MAX_ITERATIONS`` env var.
+
+    The env var ALONE is a no-op in production: the worker resolves
+    max_turns as "CLI arg > config > env > default" (cli.py:3052) and
+    ``load_cli_config`` always injects ``agent.max_turns=90``, so config
+    shadows the env var. The ``--max-turns`` chat flag hits the
+    top-precedence CLI-arg branch (cli.py:3053) and actually beats the
+    profile default — the whole point of the per-task override for
+    audit-class tasks. Regression guard for the post-rebaseline gap where
+    only the (shadowed) env var was injected.
+    """
+    captured: dict[str, object] = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["env"] = dict(env or {})
+            self.pid = 12345
+
+        def wait(self, *a, **kw):
+            return 0
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(kanban_home),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.normalize_profile_name",
+        lambda name: name,
+    )
+
+    # With per-task override: `--max-turns 150` must appear as a chat flag.
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="audit", assignee="coder", max_iterations=150,
+        )
+        task = kb.get_task(conn, tid)
+    kb._default_spawn(task, "/tmp/ws", board="default")
+    cmd = captured["cmd"]
+    assert "chat" in cmd, f"worker cmd has no chat subcommand: {cmd}"
+    assert "--max-turns" in cmd, f"worker cmd missing --max-turns: {cmd}"
+    flag_idx = cmd.index("--max-turns")
+    assert cmd[flag_idx + 1] == "150", f"--max-turns value wrong: {cmd}"
+    # Must be a chat-subcommand arg (after `chat`) so argparse routes it to
+    # chat_parser.max_turns -> HermesCLI(max_turns=...), the branch that
+    # outranks agent.max_turns from the profile config.
+    assert flag_idx > cmd.index("chat"), f"--max-turns placed before chat: {cmd}"
+    # Env var still injected for consistency / non-load_cli_config consumers.
+    assert captured["env"].get("HERMES_MAX_ITERATIONS") == "150"
+
+    captured.clear()
+
+    # Without per-task override: no --max-turns flag (inherit profile default).
+    with kb.connect() as conn:
+        tid2 = kb.create_task(conn, title="default-budget", assignee="coder")
+        task2 = kb.get_task(conn, tid2)
+    kb._default_spawn(task2, "/tmp/ws", board="default")
+    assert "--max-turns" not in captured["cmd"]
+
+
+@pytest.mark.xfail(
+    reason="WI-6: dispatcher places `-m <model_override>` BEFORE `chat`, but "
+    "`--model` is also a chat-subparser flag (default=None) so the subparser "
+    "default clobbers the top-level value -> per-task model_override never "
+    "reaches the worker. Same bug-class as the max_iterations shadow. Fix = put "
+    "`-m` after `chat` (see opus48-hardening-followup-plan-20260528.md WI-6); "
+    "then remove this xfail.",
+    strict=True,
+)
+def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
+    """End-to-end repro: parse the dispatcher's worker argv with the REAL
+    top-level parser and assert the per-task model override survives. Currently
+    RED (argparse yields model=None); flips to XPASS once WI-6 lands.
+    """
+    captured: dict[str, object] = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 12345
+
+        def wait(self, *a, **kw):
+            return 0
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(kanban_home),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.normalize_profile_name",
+        lambda name: name,
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="model-override", assignee="coder",
+            model_override="gpt-5.5-codex",
+        )
+        task = kb.get_task(conn, tid)
+    kb._default_spawn(task, "/tmp/ws", board="default")
+
+    # Reconstruct the argv argparse actually sees: drop the executable (cmd[0])
+    # and the `-p <profile>` pair (consumed pre-argparse by the profile override
+    # handler), then parse with the real top-level parser.
+    argv = list(captured["cmd"][1:])
+    if "-p" in argv:
+        i = argv.index("-p")
+        del argv[i:i + 2]
+
+    from hermes_cli._parser import build_top_level_parser
+    parser, _subparsers, _chat = build_top_level_parser()
+    ns = parser.parse_args(argv)
+    assert ns.command == "chat"
+    assert ns.model == "gpt-5.5-codex", (
+        f"model_override lost: args.model={ns.model!r}; worker argv={argv}"
+    )

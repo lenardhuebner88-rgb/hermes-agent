@@ -76,6 +76,32 @@ class TestMaxTurnsResolution:
         cli_obj = _make_cli(env_overrides={"HERMES_MAX_ITERATIONS": "42"})
         assert cli_obj.max_turns == 42
 
+    def test_explicit_max_turns_beats_config_agent_max_turns(self):
+        """CLI arg (e.g. the kanban dispatcher's per-task `--max-turns`)
+        must override a profile's agent.max_turns. The per-task
+        iteration-budget feature relies on this precedence: the
+        HERMES_MAX_ITERATIONS env var alone is shadowed by config, so the
+        dispatcher passes `--max-turns N` which routes here as the CLI-arg
+        and wins. Pins the "CLI arg > config" contract.
+        """
+        cli_obj = _make_cli(
+            max_turns=150,
+            config_overrides={"agent": {"max_turns": 90}},
+        )
+        assert cli_obj.max_turns == 150
+
+    def test_env_var_max_turns_is_shadowed_by_config(self):
+        """Inverse guard / 60-vs-500 regression: when config sets
+        agent.max_turns, it outranks HERMES_MAX_ITERATIONS (env). This is
+        the deliberate precedence that makes the env-var leg insufficient
+        for the per-task override and necessitates the --max-turns flag.
+        """
+        cli_obj = _make_cli(
+            env_overrides={"HERMES_MAX_ITERATIONS": "150"},
+            config_overrides={"agent": {"max_turns": 90}},
+        )
+        assert cli_obj.max_turns == 90
+
     def test_invalid_env_var_max_turns_falls_back_to_default(self):
         """Invalid env values should not crash CLI init."""
         cli_obj = _make_cli(env_overrides={"HERMES_MAX_ITERATIONS": "not-a-number"})
