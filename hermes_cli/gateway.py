@@ -3842,6 +3842,26 @@ def _runtime_health_lines() -> list[str]:
         if pdata.get("state") == "fatal":
             message = pdata.get("error_message") or "unknown error"
             lines.append(f"⚠ {platform}: {message}")
+            continue
+        health = pdata.get("health") or {}
+        if not isinstance(health, dict):
+            continue
+        hstatus = health.get("status")
+        if not hstatus:
+            continue
+        details: list[str] = []
+        age = health.get("last_heartbeat_ack_age_seconds")
+        if isinstance(age, (int, float)):
+            details.append(f"last heartbeat {int(age)}s ago")
+        latency_ms = health.get("latency_ms")
+        if isinstance(latency_ms, (int, float)):
+            details.append(f"latency {int(latency_ms)}ms")
+        lag = health.get("lag_class")
+        if isinstance(lag, str) and lag:
+            details.append(f"lag {lag}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        marker = "✓" if hstatus == "online" else "⚠"
+        lines.append(f"{marker} {platform}: {hstatus}{suffix}")
 
     if gateway_state == "startup_failed" and exit_reason:
         lines.append(f"⚠ Last startup issue: {exit_reason}")
@@ -3852,7 +3872,56 @@ def _runtime_health_lines() -> list[str]:
     elif gateway_state == "stopped" and exit_reason:
         lines.append(f"⚠ Last shutdown reason: {exit_reason}")
 
+    token_usage = state.get("token_usage") or {}
+    if isinstance(token_usage, dict):
+        pressure_class = token_usage.get("pressure_class")
+        pressure_pct = token_usage.get("pressure_pct")
+        model = token_usage.get("model") or "unknown model"
+        updated_at = token_usage.get("updated_at")
+        # Review-Finding from Angle D: isinstance(bool, (int, float)) is True
+        # in Python — explicitly reject bool so a stray True/False doesn't
+        # render as '1% of context'.
+        pct_is_number = (
+            isinstance(pressure_pct, (int, float))
+            and not isinstance(pressure_pct, bool)
+        )
+        # Review-Finding #14: surface staleness so an overnight snapshot
+        # doesn't masquerade as a live read.
+        stale_suffix = _token_usage_stale_suffix(updated_at)
+        if pressure_class == "unknown":
+            lines.append(
+                f"Token pressure: unknown (context length not reported) "
+                f"on {model}{stale_suffix}"
+            )
+        elif pressure_class and pct_is_number:
+            lines.append(
+                f"Token pressure: {pressure_class} {int(pressure_pct)}%"
+                f" of context on {model}{stale_suffix}"
+            )
+
     return lines
+
+
+def _token_usage_stale_suffix(updated_at) -> str:
+    """Return ' (stale ...m)' when the token_usage snapshot is older than
+    the freshness window, else an empty string."""
+    if not isinstance(updated_at, str) or not updated_at:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        # Accept both 'Z' and explicit offset forms.
+        normalised = updated_at.replace("Z", "+00:00")
+        ts = datetime.fromisoformat(normalised)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = (datetime.now(tz=timezone.utc) - ts).total_seconds()
+    except Exception:
+        return ""
+    if age < 300:  # 5 minutes: still live
+        return ""
+    if age < 3600:
+        return f" (stale {int(age // 60)}m)"
+    return f" (stale {int(age // 3600)}h)"
 
 
 def _setup_standard_platform(platform: dict):
