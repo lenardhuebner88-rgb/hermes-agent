@@ -76,6 +76,9 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "skills": list(t.skills) if t.skills else [],
         "max_retries": t.max_retries,
         "max_iterations": t.max_iterations,
+        "continuation_count": t.continuation_count,
+        "max_continuations": t.max_continuations,
+        "last_continuation_reason": t.last_continuation_reason,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
@@ -353,6 +356,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "the profile's agent.max_turns default. "
                                "Useful for audit-class tasks that need more "
                                "headroom than the profile default.")
+    p_create.add_argument("--max-continuations", type=int, default=None,
+                          metavar="N",
+                          help="Per-task cap for auto-continuation after a "
+                               "worker explicitly reports iteration-budget "
+                               "exhaustion. 0 disables auto-continuation for "
+                               "this task; omit to use the code default.")
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",
@@ -1474,6 +1483,13 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    max_continuations = getattr(args, "max_continuations", None)
+    if max_continuations is not None and max_continuations < 0:
+        print(
+            f"kanban: --max-continuations must be >= 0 (got {max_continuations})",
+            file=sys.stderr,
+        )
+        return 2
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1493,6 +1509,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             skills=getattr(args, "skills", None) or None,
             max_retries=max_retries,
             max_iterations=max_iterations,
+            max_continuations=max_continuations,
             initial_status=getattr(args, "initial_status", "running"),
         )
         task = kb.get_task(conn, task_id)

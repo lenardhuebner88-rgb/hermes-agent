@@ -600,6 +600,62 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         return tool_error(f"kanban_heartbeat: {e}")
 
 
+def _handle_continue(args: dict, **kw) -> str:
+    """Close the current run as iteration-budget exhausted and requeue/block."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    summary = args.get("summary")
+    if not summary or not str(summary).strip():
+        return tool_error(
+            "summary is required — explain what was completed and where the "
+            "next run should continue"
+        )
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return tool_error(
+            f"metadata must be an object/dict, got {type(metadata).__name__}"
+        )
+    metadata = _stamp_worker_session_metadata(tid, metadata)
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.record_iteration_budget_exhausted(
+                conn,
+                tid,
+                summary=str(summary),
+                metadata=metadata,
+                expected_run_id=_worker_run_id(tid),
+            )
+            if not ok:
+                return tool_error(
+                    f"could not continue {tid} (unknown id, not running, or run guard mismatch)"
+                )
+            task = kb.get_task(conn, tid)
+            run = kb.latest_run(conn, tid)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                status=task.status if task else None,
+                continuation_count=(
+                    task.continuation_count if task else None
+                ),
+            )
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_continue: {e}")
+    except Exception as e:
+        logger.exception("kanban_continue failed")
+        return tool_error(f"kanban_continue: {e}")
+
+
 def _handle_comment(args: dict, **kw) -> str:
     """Append a comment to a task's thread."""
     tid = args.get("task_id")
@@ -1016,6 +1072,46 @@ KANBAN_HEARTBEAT_SCHEMA = {
     },
 }
 
+KANBAN_CONTINUE_SCHEMA = {
+    "name": "kanban_continue",
+    "description": (
+        "Report that your current worker run exhausted its tool-calling "
+        "iteration budget before the task was complete. Hermes closes the "
+        "current run as iteration_budget_exhausted and either requeues the "
+        "task for a bounded continuation or blocks it when the task's "
+        "continuation cap is exhausted/disabled. Use only for genuine "
+        "iteration-budget exhaustion; use kanban_complete when done or "
+        "kanban_block for human-input blockers."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Required handoff for the next continuation run: what "
+                    "you completed, key evidence, and exactly where to resume."
+                ),
+            },
+            "metadata": {
+                "type": "object",
+                "description": (
+                    "Optional structured facts for the next run, e.g. "
+                    "{\"next_step\": \"run focused pytest\", "
+                    "\"changed_files\": [...]}."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["summary"],
+    },
+}
+
+
 KANBAN_COMMENT_SCHEMA = {
     "name": "kanban_comment",
     "description": (
@@ -1258,6 +1354,15 @@ registry.register(
     handler=_handle_heartbeat,
     check_fn=_check_kanban_mode,
     emoji="💓",
+)
+
+registry.register(
+    name="kanban_continue",
+    toolset="kanban",
+    schema=KANBAN_CONTINUE_SCHEMA,
+    handler=_handle_continue,
+    check_fn=_check_kanban_mode,
+    emoji="▶",
 )
 
 registry.register(
