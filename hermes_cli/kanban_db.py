@@ -3360,6 +3360,102 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return False
 
 
+def _preserve_scratch_artifacts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    workspace_path: Path,
+) -> list[str]:
+    """Copy artifacts under ``workspace_path`` to a persistent location
+    BEFORE the workspace dir gets removed.
+
+    Reads the latest run's ``metadata.artifacts[]`` for ``task_id``;
+    for each absolute path that lives underneath ``workspace_path``,
+    copies it to ``~/.hermes/reports/by-task/<task_id>/<basename>``.
+    Best-effort: any per-file failure is logged at debug level and
+    skipped, never raising — preservation MUST NOT block completion.
+
+    Empty/missing ``artifacts[]`` is the no-op default. This matches
+    the existing per-run metadata channel workers already write, so
+    opt-in artifact preservation is a small additive contract.
+
+    Returns the list of basenames that were preserved (for tests +
+    logging). Empty list means nothing to do.
+    """
+    try:
+        runs = list_runs(conn, task_id, include_active=False)
+    except Exception as exc:
+        _log.debug("preserve-artifacts %s: list_runs failed: %s", task_id, exc)
+        return []
+    if not runs:
+        return []
+    last = runs[-1]
+    if not isinstance(last.metadata, dict):
+        return []
+    raw = last.metadata.get("artifacts")
+    if not isinstance(raw, list) or not raw:
+        return []
+
+    try:
+        workspace_resolved = workspace_path.resolve()
+    except OSError as exc:
+        _log.debug("preserve-artifacts %s: resolve workspace failed: %s",
+                   task_id, exc)
+        return []
+
+    dest_root = kanban_home() / "reports" / "by-task" / task_id
+    preserved: list[str] = []
+    import shutil
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            continue
+        src = Path(entry).expanduser()
+        if not src.is_absolute():
+            # Skip relative paths — the contract is "absolute path
+            # inside the workspace". Non-absolute entries are typically
+            # informational (e.g. "test_foo.py" or a label) and have no
+            # filesystem meaning here.
+            continue
+        try:
+            src_resolved = src.resolve()
+        except OSError as exc:
+            _log.debug("preserve-artifacts %s: resolve %s failed: %s",
+                       task_id, src, exc)
+            continue
+        # Containment: only copy artifacts that sit under the scratch
+        # workspace. Other paths the worker named (e.g. files it wrote
+        # to ~/.hermes/reports/ already, or system files) are either
+        # already persistent or out of scope for auto-copy.
+        try:
+            src_resolved.relative_to(workspace_resolved)
+        except ValueError:
+            continue
+        if not src_resolved.exists():
+            _log.debug("preserve-artifacts %s: declared artifact missing: %s",
+                       task_id, src_resolved)
+            continue
+        try:
+            dest_root.mkdir(parents=True, exist_ok=True)
+            dest = dest_root / src_resolved.name
+            if src_resolved.is_dir():
+                shutil.copytree(src_resolved, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src_resolved, dest)
+            preserved.append(src_resolved.name)
+        except (OSError, shutil.Error) as exc:
+            _log.warning(
+                "preserve-artifacts %s: copy %s -> %s failed: %s",
+                task_id, src_resolved, dest_root, exc,
+            )
+            continue
+    if preserved:
+        _log.info(
+            "preserve-artifacts %s: copied %d artifact(s) to %s before "
+            "scratch cleanup: %s",
+            task_id, len(preserved), dest_root, preserved,
+        )
+    return preserved
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
 
@@ -3367,6 +3463,13 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     Best-effort — any error is swallowed so cleanup never blocks task completion.
     Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
     are intentionally preserved.
+
+    Before ``shutil.rmtree`` the scratch dir, runs.metadata.artifacts[]
+    paths underneath it are auto-copied to
+    ``~/.hermes/reports/by-task/<task_id>/<basename>`` via
+    :func:`_preserve_scratch_artifacts`. Workers opt in by writing the
+    absolute paths into the existing per-run ``metadata.artifacts``
+    array before calling ``kanban_complete``.
     """
     try:
         row = conn.execute(
@@ -3388,6 +3491,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # completion would unconditionally ``shutil.rmtree`` that path
             # and silently delete the user's source data.
             if _is_managed_scratch_path(wp):
+                # Persist declared artifacts BEFORE rmtree.
+                _preserve_scratch_artifacts(conn, task_id, wp)
                 shutil.rmtree(wp, ignore_errors=True)
                 _log.debug("Removed scratch workspace: %s", wp)
             else:
