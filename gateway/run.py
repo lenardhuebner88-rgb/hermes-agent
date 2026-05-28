@@ -1122,7 +1122,7 @@ def _try_resolve_fallback_provider() -> dict | None:
         fb_list = get_fallback_chain(cfg)
         try:
             from gateway.profile_policy import filter_default_gateway_fallbacks
-            fb_list = filter_default_gateway_fallbacks(fb_list)
+            fb_list = filter_default_gateway_fallbacks(fb_list, hermes_home=_hermes_home)
         except Exception as exc:
             logger.warning(
                 "profile_policy fallback filter failed in _try_resolve_fallback_provider: %s",
@@ -3041,7 +3041,7 @@ class GatewayRunner:
                 if fb:
                     try:
                         from gateway.profile_policy import filter_default_gateway_fallbacks
-                        fb = filter_default_gateway_fallbacks(fb)
+                        fb = filter_default_gateway_fallbacks(fb, hermes_home=_hermes_home)
                     except Exception as exc:
                         logger.warning(
                             "profile_policy fallback filter failed in _load_fallback_model: %s",
