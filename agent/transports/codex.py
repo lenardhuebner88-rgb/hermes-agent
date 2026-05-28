@@ -5,10 +5,26 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
+
+# Cron session ids are built as ``cron_{job_id}_{YYYYMMDD_HHMMSS}`` in
+# cron/scheduler.py. The timestamp suffix makes every invocation a fresh
+# cache scope for OpenAI's prompt cache, so the ~21k-token system prompt
+# is re-billed at the uncached rate on every cron tick. _stable_cache_key
+# strips the suffix so successive runs of the same job share cache.
+_CRON_TIMESTAMP_SUFFIX = re.compile(r"^(cron_.+)_\d{8}_\d{6}$")
+
+
+def _stable_cache_key(session_id: Optional[str]) -> Optional[str]:
+    """Derive a prompt_cache_key that survives across cron invocations."""
+    if not session_id:
+        return session_id
+    m = _CRON_TIMESTAMP_SUFFIX.match(session_id)
+    return m.group(1) if m else session_id
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -153,10 +169,11 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["parallel_tool_calls"] = True
 
         session_id = params.get("session_id")
+        cache_key = _stable_cache_key(session_id)
         # xAI Responses takes prompt_cache_key in extra_body (set further
         # down); GitHub Models opts out of cache-key routing entirely.
-        if not is_github_responses and not is_xai_responses and session_id:
-            kwargs["prompt_cache_key"] = session_id
+        if not is_github_responses and not is_xai_responses and cache_key:
+            kwargs["prompt_cache_key"] = cache_key
 
         if reasoning_enabled and is_xai_responses:
             from agent.model_metadata import grok_supports_reasoning_effort
@@ -218,9 +235,12 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs.pop("timeout", None)
 
         if is_codex_backend:
-            prompt_cache_key = kwargs.get("prompt_cache_key")
-            cache_scope_id = str(prompt_cache_key or session_id or "").strip()
-            if cache_scope_id:
+            # Trace headers must stay per-request unique so OpenAI's
+            # server-side logs and our log correlation can distinguish
+            # individual calls. Only prompt_cache_key gets the stable
+            # cron-stripped form (see _stable_cache_key above).
+            trace_id = str(session_id or kwargs.get("prompt_cache_key") or "").strip()
+            if trace_id:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}
                 if isinstance(existing_extra_headers, dict):
@@ -231,8 +251,8 @@ class ResponsesApiTransport(ProviderTransport):
                             if key and value is not None
                         }
                     )
-                merged_extra_headers["session_id"] = cache_scope_id
-                merged_extra_headers["x-client-request-id"] = cache_scope_id
+                merged_extra_headers["session_id"] = trace_id
+                merged_extra_headers["x-client-request-id"] = trace_id
                 kwargs["extra_headers"] = merged_extra_headers
 
         max_tokens = params.get("max_tokens")
