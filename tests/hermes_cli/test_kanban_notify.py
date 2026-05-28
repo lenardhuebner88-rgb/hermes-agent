@@ -734,3 +734,72 @@ def test_decompose_without_root_sub_leaves_children_unsubscribed(kanban_home):
     assert child_ids is not None
     with kb.connect() as conn:
         assert kb.list_notify_subs(conn, child_ids[0]) == []
+
+
+# ---------------------------------------------------------------------------
+# H1b (FU-4): a task created under an explicit parent inherits the parent's sub
+# ---------------------------------------------------------------------------
+
+def test_create_with_parent_inherits_parent_notify_sub(kanban_home):
+    """create_task(parents=[p]) copies p's notify-sub onto the child verbatim
+    (so the parent's watcher hears the child's terminal state), with a fresh
+    cursor. Covers the swarm/coordinator-tool/CLI/dashboard create-with-parent
+    paths that all route through create_task.
+    """
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent feature")
+        kb.add_notify_sub(
+            conn,
+            task_id=parent,
+            platform="discord",
+            chat_id="chan-7",
+            thread_id="thr-3",
+            user_id="user-9",
+            notifier_profile="coordinator",
+        )
+        child = kb.create_task(conn, title="child task", parents=[parent])
+
+    with kb.connect() as conn:
+        subs = kb.list_notify_subs(conn, child)
+    assert len(subs) == 1
+    s = subs[0]
+    assert s["platform"] == "discord"
+    assert s["chat_id"] == "chan-7"
+    assert s["thread_id"] == "thr-3"
+    assert s["user_id"] == "user-9"
+    assert s["notifier_profile"] == "coordinator"
+    assert s["last_event_id"] == 0  # fresh cursor: child's own events deliver
+
+
+def test_create_with_unsubscribed_parent_leaves_child_unsubscribed(kanban_home):
+    """Parent without a sub → child gets no spurious sub."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="unwatched parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, child) == []
+
+
+def test_create_without_parent_does_not_subscribe(kanban_home):
+    """No parents → create_task adds no notify-sub (H1b is parent-gated)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="lonely task")
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, tid) == []
+
+
+def test_create_with_multiple_parents_inherits_only_subscribed_ones(kanban_home):
+    """With several parents, the child inherits each parent's sub; an
+    unsubscribed parent contributes nothing. Distinct chats → distinct rows.
+    """
+    with kb.connect() as conn:
+        p_sub = kb.create_task(conn, title="subscribed parent")
+        p_nosub = kb.create_task(conn, title="silent parent")
+        kb.add_notify_sub(conn, task_id=p_sub, platform="telegram", chat_id="chat-A")
+        child = kb.create_task(conn, title="multi-parent child", parents=[p_sub, p_nosub])
+
+    with kb.connect() as conn:
+        subs = kb.list_notify_subs(conn, child)
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "chat-A"

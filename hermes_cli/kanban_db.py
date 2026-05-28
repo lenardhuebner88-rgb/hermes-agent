@@ -2112,6 +2112,19 @@ def create_task(
                         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                         (pid, task_id),
                     )
+                    # H1b: a task created under an explicit parent inherits that
+                    # parent's notify-subscription (only when the parent has
+                    # one), so the parent's watcher hears this child's terminal
+                    # state without a manual notify-subscribe. Same write_txn,
+                    # idempotent (PK collision). Decompose creates children
+                    # without ``parents=`` (and does its own inheritance), and
+                    # manual ``link_tasks`` goes through a different path, so
+                    # neither double-inherits here.
+                    if conn.execute(
+                        "SELECT 1 FROM kanban_notify_subs WHERE task_id = ? LIMIT 1",
+                        (pid,),
+                    ).fetchone():
+                        _inherit_notify_subs(conn, pid, task_id, now=now)
                 _append_event(
                     conn,
                     task_id,
