@@ -5429,6 +5429,69 @@ def test_locked_healthy_db_does_not_classify_as_corrupt(tmp_path, monkeypatch):
     assert "still here" in titles
 
 
+class _MalformedProbe:
+    """Stand-in connection whose integrity probe always reports malformed."""
+
+    def execute(self, *_a, **_k):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    def close(self):
+        pass
+
+
+def test_guard_reprobes_transient_malformed_then_recovers(tmp_path, monkeypatch):
+    """A one-shot 'database disk image is malformed' that clears on the next
+    probe must NOT quarantine a healthy DB.
+
+    Reproduces the 2026-05-28 storm: under multi-process WAL/SHM coordination
+    the integrity probe occasionally read a torn page and the guard copied the
+    whole DB to a ``.corrupt`` backup (377 files / 940 MB) and killed the
+    dispatcher, even though ``integrity_check`` passed moments later.
+    """
+    db_path = tmp_path / "kanban.db"
+    kb.init_db(db_path=db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def flaky_connect(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _MalformedProbe()  # transient torn read on first probe only
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb.sqlite3, "connect", flaky_connect)
+
+    # Must return cleanly — no exception, no quarantine.
+    kb._guard_existing_db_is_healthy(db_path, attempts=3, backoff_s=0)
+
+    assert calls["n"] >= 2, "guard did not re-probe after a transient malformed read"
+    assert list(tmp_path.glob("*.corrupt.*")) == [], "transient blip must not back up the DB"
+
+
+def test_guard_quarantines_persistent_malformed(tmp_path, monkeypatch):
+    """If every re-probe still reports malformed, the guard must still
+    quarantine (backup + raise) — retries cannot mask real corruption."""
+    db_path = tmp_path / "kanban.db"
+    kb.init_db(db_path=db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    calls = {"n": 0}
+
+    def always_malformed(*_args, **_kwargs):
+        calls["n"] += 1
+        return _MalformedProbe()
+
+    monkeypatch.setattr(kb.sqlite3, "connect", always_malformed)
+
+    with pytest.raises(kb.KanbanDbCorruptError):
+        kb._guard_existing_db_is_healthy(db_path, attempts=3, backoff_s=0)
+
+    assert calls["n"] == 3, "guard should re-probe exactly `attempts` times before quarantining"
+    assert list(tmp_path.glob("*.corrupt.*")), "persistent corruption must still produce a backup"
+
+
 def test_init_db_allows_missing_then_healthy(tmp_path):
     db_path = tmp_path / "fresh.db"
     assert not db_path.exists()

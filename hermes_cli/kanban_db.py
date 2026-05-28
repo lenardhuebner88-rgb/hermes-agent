@@ -1155,7 +1155,12 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     return candidate
 
 
-def _guard_existing_db_is_healthy(path: Path) -> None:
+def _guard_existing_db_is_healthy(
+    path: Path,
+    *,
+    attempts: int = 3,
+    backoff_s: float = 0.15,
+) -> None:
     """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
 
     Opens the probe in read/write mode so SQLite can recover or
@@ -1168,6 +1173,13 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     Transient lock/busy errors (``sqlite3.OperationalError``) are NOT
     treated as corruption; they propagate raw so the caller sees a
     normal lock failure and no spurious ``.corrupt`` backup is made.
+
+    A ``database disk image is malformed`` / non-ok integrity result is
+    re-probed up to ``attempts`` times on a fresh connection (small
+    growing ``backoff_s``) before it is believed. Under multi-process
+    WAL/SHM coordination a page can be read torn mid-checkpoint and
+    surface a transient malformed read that clears on the next open; only
+    a result that persists across every attempt is quarantined.
 
     No-op for missing files, zero-byte files (treated as fresh), and
     paths already proven healthy this process (cache hit).
@@ -1194,21 +1206,34 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     if str(resolved) in _INITIALIZED_PATHS:
         return
     reason: Optional[str] = None
-    try:
-        probe = sqlite3.connect(str(resolved), timeout=5, isolation_level=None)
+    for attempt in range(1, max(1, attempts) + 1):
+        reason = None
         try:
-            row = probe.execute("PRAGMA integrity_check").fetchone()
-        finally:
-            probe.close()
-        if not row or (row[0] or "").lower() != "ok":
-            reason = f"integrity_check returned {row[0] if row else '<no row>'!r}"
-    except sqlite3.OperationalError:
-        # Lock contention, busy, transient IO — not corruption. Let it propagate.
-        raise
-    except sqlite3.DatabaseError as exc:
-        reason = f"sqlite refused to open file: {exc}"
-    if reason is None:
-        return
+            probe = sqlite3.connect(str(resolved), timeout=5, isolation_level=None)
+            try:
+                row = probe.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                probe.close()
+            if not row or (row[0] or "").lower() != "ok":
+                reason = f"integrity_check returned {row[0] if row else '<no row>'!r}"
+        except sqlite3.OperationalError:
+            # Lock contention, busy, transient IO — not corruption. Let it propagate.
+            raise
+        except sqlite3.DatabaseError as exc:
+            reason = f"sqlite refused to open file: {exc}"
+        if reason is None:
+            if attempt > 1:
+                _log.warning(
+                    "kanban.db (%s) integrity probe recovered on attempt %d/%d; "
+                    "earlier read was a transient bad image, not quarantining.",
+                    resolved.name,
+                    attempt,
+                    max(1, attempts),
+                )
+            return
+        if attempt < max(1, attempts):
+            time.sleep(backoff_s * attempt)
+    # Reason persisted across every attempt → treat as real corruption.
     backup = _backup_corrupt_db(resolved)
     raise KanbanDbCorruptError(resolved, backup, reason)
 
