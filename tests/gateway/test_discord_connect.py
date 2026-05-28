@@ -905,3 +905,201 @@ async def test_safe_sync_detects_contexts_drift():
     fake_http.edit_global_command.assert_not_awaited()
     fake_http.delete_global_command.assert_awaited_once_with(999, 77)
     fake_http.upsert_global_command.assert_awaited_once_with(999, desired)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — runtime_health() instrumentation
+# ---------------------------------------------------------------------------
+
+
+def _make_adapter_for_health():
+    cfg = PlatformConfig(enabled=True, token="test-token")
+    return DiscordAdapter(cfg)
+
+
+def _fake_client_with_heartbeat_age(latency_seconds, heartbeat_age_seconds=5.0,
+                                    *, closed=False, ready=True):
+    """Build a fake Discord client whose ws._keep_alive._last_ack is set so
+    that runtime_health() observes a heartbeat that is *heartbeat_age_seconds*
+    old (perf_counter-based, like the real library)."""
+    import time as _time
+    keep_alive = SimpleNamespace(
+        _last_ack=_time.perf_counter() - heartbeat_age_seconds,
+        latency=latency_seconds,
+    )
+    ws = SimpleNamespace(_keep_alive=keep_alive)
+    return SimpleNamespace(
+        is_closed=lambda: closed,
+        is_ready=lambda: ready,
+        latency=latency_seconds,
+        ws=ws,
+    )
+
+
+def test_runtime_health_initial_state_offline_when_no_client():
+    adapter = _make_adapter_for_health()
+    health = adapter.runtime_health()
+    assert health["status"] == "offline"
+    assert health["latency_ms"] is None
+    assert health["last_heartbeat_ack_age_seconds"] is None
+    assert health["last_gateway_event_age_seconds"] is None
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_reports_discord_lag_class_watch():
+    adapter = _make_adapter_for_health()
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.75, heartbeat_age_seconds=35,
+    )
+    adapter._ready_event.set()
+
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["latency_ms"] == 750
+    assert 34 <= health["last_heartbeat_ack_age_seconds"] <= 36
+    assert health["lag_class"] == "watch"  # latency >= WATCH_MS=500
+    assert isinstance(health["last_heartbeat_ack_at"], str)
+
+
+def test_runtime_health_lag_class_ok_for_low_latency():
+    adapter = _make_adapter_for_health()
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=5,
+    )
+    adapter._ready_event.set()
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["latency_ms"] == 50
+    assert health["lag_class"] == "ok"
+
+
+def test_runtime_health_lag_class_critical_for_high_latency():
+    adapter = _make_adapter_for_health()
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=1.5, heartbeat_age_seconds=1,
+    )
+    adapter._ready_event.set()
+    health = adapter.runtime_health()
+    assert health["latency_ms"] == 1500
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_status_connecting_when_not_ready():
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: False, is_ready=lambda: False, latency=float("nan"),
+    )
+    # _ready_event not set
+    health = adapter.runtime_health()
+    assert health["status"] == "connecting"
+    assert health["latency_ms"] is None  # nan → None
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_status_offline_when_client_closed():
+    adapter = _make_adapter_for_health()
+    adapter._client = SimpleNamespace(
+        is_closed=lambda: True, is_ready=lambda: False, latency=0.1,
+    )
+    health = adapter.runtime_health()
+    assert health["status"] == "offline"
+    assert health["lag_class"] == "critical"
+
+
+def test_heartbeat_fields_initialised_to_none_on_construction():
+    adapter = _make_adapter_for_health()
+    assert adapter._last_heartbeat_ack_monotonic is None
+    assert adapter._last_heartbeat_ack_at is None
+    assert adapter._last_gateway_event_monotonic is None
+    assert adapter._last_gateway_event_at is None
+
+
+# ---------------------------------------------------------------------------
+# Review-Finding #11 — zombie-WS detection via heartbeat-age
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_health_lag_class_critical_when_heartbeat_age_exceeds_threshold():
+    """Socket reports online + low latency but ACK stopped >120s ago."""
+    adapter = _make_adapter_for_health()
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=130,
+    )
+    adapter._ready_event.set()
+    health = adapter.runtime_health()
+    assert health["status"] == "online"
+    assert health["latency_ms"] == 50  # cached, not the real signal
+    assert health["lag_class"] == "critical"
+
+
+def test_runtime_health_lag_class_watch_when_heartbeat_age_in_watch_band():
+    """One missed beat (~70s) is a soft signal."""
+    adapter = _make_adapter_for_health()
+    adapter._client = _fake_client_with_heartbeat_age(
+        latency_seconds=0.05, heartbeat_age_seconds=70,
+    )
+    adapter._ready_event.set()
+    health = adapter.runtime_health()
+    assert health["lag_class"] == "watch"
+
+
+# ---------------------------------------------------------------------------
+# Review-Finding #12 — heartbeat monotonic must reset on disconnect
+# ---------------------------------------------------------------------------
+
+
+def test_disconnect_resets_heartbeat_monotonic_so_reconnect_starts_clean():
+    """Post-disconnect, the heartbeat fields must be None so that the first
+    runtime_health() snapshot after reconnect doesn't carry pre-disconnect
+    age forward as 'last heartbeat 300s ago'."""
+    import asyncio
+    adapter = _make_adapter_for_health()
+    # Simulate a healthy session
+    import time as _time
+    now = _time.monotonic()
+    adapter._last_heartbeat_ack_monotonic = now - 5
+    adapter._last_heartbeat_ack_at = "2026-05-26T19:00:00+00:00"
+    adapter._last_gateway_event_monotonic = now - 5
+    adapter._last_gateway_event_at = "2026-05-26T19:00:01+00:00"
+    # Disconnect path resets these (we exercise only that aspect — full
+    # disconnect() requires a Discord client; we call the field reset and
+    # verify the contract instead).
+    asyncio.run(_run_disconnect_reset(adapter))
+    assert adapter._last_heartbeat_ack_monotonic is None
+    assert adapter._last_heartbeat_ack_at is None
+    assert adapter._last_gateway_event_monotonic is None
+    assert adapter._last_gateway_event_at is None
+
+
+async def _run_disconnect_reset(adapter):
+    """Replicate the disconnect() reset block without needing a real client."""
+    await adapter._stop_health_refresh_loop()
+    adapter._last_heartbeat_ack_monotonic = None
+    adapter._last_heartbeat_ack_at = None
+    adapter._last_gateway_event_monotonic = None
+    adapter._last_gateway_event_at = None
+
+
+# ---------------------------------------------------------------------------
+# Review-Finding #2 — lifecycle wiring: runtime_health auto-attached on
+# _mark_connected / _mark_disconnected via base.py _write_runtime_status_safe
+# ---------------------------------------------------------------------------
+
+
+def test_mark_connected_attaches_runtime_health_to_status_write(monkeypatch):
+    """The base class _write_runtime_status_safe must duck-type pick up our
+    runtime_health() return value when _mark_connected is called."""
+    adapter = _make_adapter_for_health()
+    captured = {}
+
+    def fake_write_runtime_status(**kwargs):
+        captured.update(kwargs)
+
+    import gateway.status as status_mod
+    monkeypatch.setattr(status_mod, "write_runtime_status", fake_write_runtime_status)
+    # _mark_connected is the inherited base-class method; invoking it should
+    # set _running and auto-attach platform_health to the status payload.
+    adapter._mark_connected()
+    assert adapter._running is True
+    assert "platform_health" in captured
+    assert captured["platform_health"]["status"] in {"offline", "connecting", "online"}

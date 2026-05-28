@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import struct
 import subprocess
@@ -20,6 +21,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -581,6 +583,13 @@ class DiscordAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
+        # Heartbeat / gateway-event freshness tracking (Phase 3). Populated
+        # via on_socket_response — None means we have not yet observed an
+        # ack / gateway event in this process.
+        self._last_heartbeat_ack_monotonic: Optional[float] = None
+        self._last_heartbeat_ack_at: Optional[str] = None
+        self._last_gateway_event_monotonic: Optional[float] = None
+        self._last_gateway_event_at: Optional[str] = None
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
@@ -609,6 +618,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        # Periodic refresh of platform_health into gateway_state.json so the
+        # heartbeat-age field doesn't go stale during long uninterrupted
+        # sessions. Started after _mark_connected, cancelled on disconnect.
+        self._health_refresh_task: Optional[asyncio.Task] = None
         # Dedup cache: prevents duplicate bot responses when Discord
         # RESUME replays events after reconnects.
         self._dedup = MessageDeduplicator()
@@ -880,6 +893,14 @@ class DiscordAdapter(BasePlatformAdapter):
                         guild_id,
                     )
 
+            # NOTE: discord.py removed on_socket_response in 2.0. Heartbeat
+            # liveness is read directly from the library's KeepAliveHandler
+            # in runtime_health() below (perf_counter-based _last_ack). No
+            # event handler is registered for raw socket frames here — the
+            # equivalent on_socket_raw_receive only fires when the client is
+            # constructed with enable_debug_events=True, which would add
+            # per-frame dispatch overhead we don't need.
+
             # Register slash commands
             if self._slash_commands:
                 self._register_slash_commands()
@@ -890,7 +911,12 @@ class DiscordAdapter(BasePlatformAdapter):
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
 
-            self._running = True
+            # Mark connected via the base lifecycle hook so runtime_health()
+            # is auto-attached to the persisted gateway_state.json snapshot.
+            self._mark_connected()
+            # Start periodic health refresh so heartbeat-age stays fresh in
+            # gateway_state.json even when no lifecycle event fires for hours.
+            self._start_health_refresh_loop()
             return True
 
         except asyncio.TimeoutError:
@@ -924,7 +950,19 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        self._running = False
+        await self._stop_health_refresh_loop()
+
+        # Reset heartbeat freshness markers so runtime_health() on the next
+        # reconnect does not report the pre-disconnect age while the socket
+        # is online but no op=11 has arrived yet (Review-Finding #12).
+        self._last_heartbeat_ack_monotonic = None
+        self._last_heartbeat_ack_at = None
+        self._last_gateway_event_monotonic = None
+        self._last_gateway_event_at = None
+
+        # Mark disconnected via the base lifecycle hook so the offline state
+        # plus a final runtime_health snapshot land in gateway_state.json.
+        self._mark_disconnected()
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
@@ -4958,6 +4996,164 @@ class DiscordAdapter(BasePlatformAdapter):
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
+
+    _HEALTH_REFRESH_INTERVAL_SECONDS = 30.0
+
+    def _start_health_refresh_loop(self) -> None:
+        existing = self._health_refresh_task
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._health_refresh_task = asyncio.create_task(
+                self._health_refresh_loop()
+            )
+        except RuntimeError:  # no running event loop (tests calling _mark_connected directly)
+            self._health_refresh_task = None
+
+    async def _stop_health_refresh_loop(self) -> None:
+        task = self._health_refresh_task
+        self._health_refresh_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _health_refresh_loop(self) -> None:
+        try:
+            while self._running:
+                await asyncio.sleep(self._HEALTH_REFRESH_INTERVAL_SECONDS)
+                if not self._running:
+                    return
+                try:
+                    self._write_runtime_status_safe(
+                        "health_refresh", platform_state="connected",
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.debug("discord health refresh failed: %s", exc)
+        except asyncio.CancelledError:
+            raise
+
+    def runtime_health(self) -> Dict[str, Any]:
+        """Return a snapshot of Discord-gateway health for ``hermes gateway status``.
+
+        Fields:
+            status              "online" | "connecting" | "offline"
+            latency_ms          Heartbeat round-trip in milliseconds (None if N/A)
+            last_heartbeat_ack_age_seconds   Age of last op=11 frame (None if never)
+            last_heartbeat_ack_at            ISO-8601 timestamp of last op=11
+            last_gateway_event_age_seconds   Age of last gateway frame (any op)
+            last_gateway_event_at            ISO-8601 timestamp of last frame
+            lag_class           "ok" | "watch" | "critical"
+        """
+        from gateway.profile_policy import (
+            current_discord_lag_watch_ms,
+            current_discord_lag_critical_ms,
+            current_discord_heartbeat_age_watch_seconds,
+            current_discord_heartbeat_age_critical_seconds,
+        )
+        DISCORD_LAG_WATCH_MS = current_discord_lag_watch_ms()
+        DISCORD_LAG_CRITICAL_MS = current_discord_lag_critical_ms()
+        DISCORD_HEARTBEAT_AGE_WATCH_SECONDS = (
+            current_discord_heartbeat_age_watch_seconds()
+        )
+        DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS = (
+            current_discord_heartbeat_age_critical_seconds()
+        )
+
+        now_mono = time.monotonic()
+        client = self._client
+
+        latency_ms: Optional[int]
+        latency_raw = getattr(client, "latency", None) if client else None
+        if isinstance(latency_raw, (int, float)) and math.isfinite(float(latency_raw)):
+            latency_ms = round(float(latency_raw) * 1000)
+        else:
+            latency_ms = None
+
+        # Heartbeat-age via discord.py's KeepAliveHandler. on_socket_response
+        # was removed in discord.py 2.0 so the previous handler-based approach
+        # never fired in production. Read the keepalive's perf_counter _last_ack
+        # directly; gracefully degrade if the private attribute is unavailable
+        # on a future library version.
+        heartbeat_age: Optional[float] = None
+        heartbeat_age_rounded: Optional[float] = None
+        last_ack_perf: Optional[float] = None
+        try:
+            ws_obj = getattr(client, "ws", None) if client else None
+            keep_alive = getattr(ws_obj, "_keep_alive", None) if ws_obj else None
+            last_ack_perf = getattr(keep_alive, "_last_ack", None) if keep_alive else None
+        except Exception:  # pragma: no cover — defensive against private-attr churn
+            last_ack_perf = None
+        if isinstance(last_ack_perf, (int, float)) and math.isfinite(float(last_ack_perf)):
+            now_perf = time.perf_counter()
+            heartbeat_age = max(0.0, now_perf - float(last_ack_perf))
+            heartbeat_age_rounded = round(heartbeat_age, 1)
+            # Mirror into ISO-8601 string for the persisted snapshot. The wall-
+            # clock time minus the age gives a usable "last_heartbeat_ack_at".
+            self._last_heartbeat_ack_at = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=heartbeat_age)
+            ).isoformat()
+            self._last_heartbeat_ack_monotonic = now_mono - heartbeat_age
+        else:
+            self._last_heartbeat_ack_at = None
+            self._last_heartbeat_ack_monotonic = None
+        # last_gateway_event_* is informational; without a per-frame event
+        # hook we approximate it from the heartbeat (gateway is alive iff
+        # the bot is connected and the keep-alive is acking).
+        event_age_rounded: Optional[float] = heartbeat_age_rounded
+        if heartbeat_age is not None:
+            self._last_gateway_event_at = self._last_heartbeat_ack_at
+            self._last_gateway_event_monotonic = (
+                self._last_heartbeat_ack_monotonic
+            )
+        else:
+            self._last_gateway_event_at = None
+            self._last_gateway_event_monotonic = None
+
+        if client is None or client.is_closed():
+            status = "offline"
+        elif not self._ready_event.is_set():
+            status = "connecting"
+        else:
+            status = "online"
+
+        # Zombie-WS detection (Review-Finding #11): when the socket is "online"
+        # but op=11 frames have stopped arriving, client.latency keeps reporting
+        # the last cached round-trip while heartbeat-age grows unbounded. Fold
+        # heartbeat-age into lag_class with seconds-scale thresholds (the
+        # heartbeat interval is ~41s — millisecond thresholds would false-fire).
+        if status in {"offline", "connecting"}:
+            lag_class = "critical"
+        elif (
+            heartbeat_age is not None
+            and heartbeat_age >= DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS
+        ):
+            lag_class = "critical"
+        elif latency_ms is not None and latency_ms >= DISCORD_LAG_CRITICAL_MS:
+            lag_class = "critical"
+        elif (
+            heartbeat_age is not None
+            and heartbeat_age >= DISCORD_HEARTBEAT_AGE_WATCH_SECONDS
+        ):
+            lag_class = "watch"
+        elif latency_ms is not None and latency_ms >= DISCORD_LAG_WATCH_MS:
+            lag_class = "watch"
+        else:
+            lag_class = "ok"
+
+        return {
+            "status": status,
+            "latency_ms": latency_ms,
+            "last_heartbeat_ack_age_seconds": heartbeat_age_rounded,
+            "last_heartbeat_ack_at": self._last_heartbeat_ack_at,
+            "last_gateway_event_age_seconds": event_age_rounded,
+            "last_gateway_event_at": self._last_gateway_event_at,
+            "lag_class": lag_class,
+        }
 
 
 # ---------------------------------------------------------------------------
