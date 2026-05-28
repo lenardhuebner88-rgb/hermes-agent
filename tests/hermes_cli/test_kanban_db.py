@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import json
 import os
 import sqlite3
@@ -5490,6 +5491,56 @@ def test_guard_quarantines_persistent_malformed(tmp_path, monkeypatch):
 
     assert calls["n"] == 3, "guard should re-probe exactly `attempts` times before quarantining"
     assert list(tmp_path.glob("*.corrupt.*")), "persistent corruption must still produce a backup"
+
+
+# ---------------------------------------------------------------------------
+# Keep-alive connection (WAL -shm churn race fix, 2026-05-28)
+# ---------------------------------------------------------------------------
+
+def test_open_keepalive_holds_shm_and_stays_idle(tmp_path):
+    """A held keepalive materializes -shm and keeps the DB hot + usable by
+    other short-lived connections."""
+    db_path = tmp_path / "kanban.db"
+    kb.init_db(db_path=db_path)
+
+    ka = kb.open_keepalive(db_path=db_path)
+    assert ka is not None
+    try:
+        assert (tmp_path / "kanban.db-shm").exists()
+        with contextlib.closing(kb.connect(db_path=db_path)) as conn:
+            kb.create_task(conn, title="hot")
+        with contextlib.closing(kb.connect(db_path=db_path)) as conn:
+            titles = [t.title for t in kb.list_tasks(conn)]
+        assert "hot" in titles
+        assert ka.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert ka.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        ka.close()
+
+
+def test_open_keepalive_does_not_pin_wal_checkpoint(tmp_path):
+    """The idle keepalive must NOT hold a read snapshot: a TRUNCATE checkpoint
+    must still succeed (busy=0), otherwise the WAL would grow unbounded."""
+    db_path = tmp_path / "kanban.db"
+    kb.init_db(db_path=db_path)
+
+    ka = kb.open_keepalive(db_path=db_path)
+    assert ka is not None
+    try:
+        with contextlib.closing(kb.connect(db_path=db_path)) as conn:
+            for i in range(50):
+                kb.create_task(conn, title=f"t{i}")
+            busy, _log, _ckpt = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        assert busy == 0, "keepalive pinned the WAL — checkpoint was blocked"
+    finally:
+        ka.close()
+
+
+def test_open_keepalive_missing_db_returns_none_without_creating(tmp_path):
+    """Best-effort: no DB file yet → return None and do NOT create one."""
+    db_path = tmp_path / "absent.db"
+    assert kb.open_keepalive(db_path=db_path) is None
+    assert not db_path.exists()
 
 
 def test_init_db_allows_missing_then_healthy(tmp_path):
