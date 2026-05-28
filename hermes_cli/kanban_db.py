@@ -143,6 +143,11 @@ def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
 # during the launch window.
 DEFAULT_CRASH_GRACE_SECONDS = 30
 
+# First-slice default for bounded continuation when a worker explicitly reports
+# that it stopped because the tool-calling iteration budget was exhausted.
+# Config wiring is intentionally deferred; task-level max_continuations wins.
+DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
+
 
 def _resolve_crash_grace_seconds() -> int:
     """Return the crash-detection grace period in seconds.
@@ -681,6 +686,15 @@ class Task:
     # ``kanban.failure_limit`` config, and then to ``DEFAULT_FAILURE_LIMIT``.
     # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
     max_retries: Optional[int] = None
+    # Per-task override for the worker's tool-calling iteration budget.
+    # When set, the dispatcher injects ``HERMES_MAX_ITERATIONS=N`` into
+    # the worker env. NULL = fall through to the profile's
+    # ``agent.max_turns`` config (or the global default).
+    max_iterations: Optional[int] = None
+    # Bounded auto-continuation policy for explicit iteration-budget exhaustion.
+    continuation_count: int = 0
+    max_continuations: Optional[int] = None
+    last_continuation_reason: Optional[str] = None
     # Originating chat/agent session id, when the task was created from
     # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
     # tasks created from the CLI, the dashboard, or any path that doesn't
@@ -752,6 +766,19 @@ class Task:
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
+            ),
+            max_iterations=(
+                row["max_iterations"] if "max_iterations" in keys else None
+            ),
+            continuation_count=(
+                row["continuation_count"] if "continuation_count" in keys else 0
+            ),
+            max_continuations=(
+                row["max_continuations"] if "max_continuations" in keys else None
+            ),
+            last_continuation_reason=(
+                row["last_continuation_reason"]
+                if "last_continuation_reason" in keys else None
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
@@ -888,6 +915,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
+    -- Per-task override for the worker's tool-calling iteration budget
+    -- (i.e. `--max-iterations` / `HERMES_MAX_ITERATIONS`). When set,
+    -- the dispatcher injects ``HERMES_MAX_ITERATIONS=N`` into the
+    -- worker env so the LLM agent loop allows up to N tool-calling
+    -- rounds before the iteration-budget guard fires.  NULL (the
+    -- common case) falls through to the profile's ``agent.max_turns``
+    -- config.  Added 2026-05-27 for hardening sprint TASK 8
+    -- (audit-class tasks reproducibly hit the 30-turn profile default).
+    max_iterations       INTEGER,
+    -- Auto-continuation audit/policy for workers that explicitly report
+    -- iteration_budget_exhausted. NULL max_continuations uses the code-level
+    -- default; 0 disables auto-continuation for this task.
+    continuation_count   INTEGER NOT NULL DEFAULT 0,
+    max_continuations    INTEGER,
+    last_continuation_reason TEXT,
     -- Originating chat/agent session id when the task was created from
     -- inside an agent loop that propagated ``HERMES_SESSION_ID``. NULL
     -- for tasks created from the CLI, dashboard, or any path that doesn't
@@ -942,7 +984,8 @@ CREATE TABLE IF NOT EXISTS task_runs (
     ended_at            INTEGER,
     outcome             TEXT,
     -- outcome: completed | blocked | crashed | timed_out | spawn_failed |
-    --          gave_up | reclaimed | (null while still running)
+    --          gave_up | reclaimed | iteration_budget_exhausted |
+    --          (null while still running)
     summary             TEXT,
     metadata            TEXT,
     error               TEXT
@@ -1505,6 +1548,34 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # they were getting before the column existed).
         _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
 
+    if "max_iterations" not in cols:
+        # Per-task override for the worker's tool-calling iteration
+        # budget. NULL = fall through to the profile's `agent.max_turns`
+        # config/global default.  Added 2026-05-27 for
+        # hardening-sprint TASK 8.
+        _add_column_if_missing(
+            conn, "tasks", "max_iterations", "max_iterations INTEGER"
+        )
+
+    if "continuation_count" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "continuation_count",
+            "continuation_count INTEGER NOT NULL DEFAULT 0",
+        )
+    if "max_continuations" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "max_continuations", "max_continuations INTEGER"
+        )
+    if "last_continuation_reason" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "last_continuation_reason",
+            "last_continuation_reason TEXT",
+        )
+
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
@@ -1757,6 +1828,8 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    max_iterations: Optional[int] = None,
+    max_continuations: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
@@ -1801,6 +1874,10 @@ def create_task(
         branch_name = str(branch_name).strip() or None
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
+    if max_iterations is not None and int(max_iterations) < 1:
+        raise ValueError("max_iterations must be >= 1")
+    if max_continuations is not None and int(max_continuations) < 0:
+        raise ValueError("max_continuations must be >= 0")
     parents = tuple(p for p in parents if p)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
@@ -1924,8 +2001,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, max_iterations, max_continuations,
+                        session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1944,6 +2022,8 @@ def create_task(
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
+                        int(max_iterations) if max_iterations is not None else None,
+                        int(max_continuations) if max_continuations is not None else None,
                         session_id,
                     ),
                 )
@@ -2353,6 +2433,158 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
         "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
+
+
+def _resolve_max_continuations(task: Task) -> int:
+    if task.max_continuations is not None:
+        return int(task.max_continuations)
+    return DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT
+
+
+def _schedule_continuation_after_closed_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    run_id: Optional[int],
+) -> bool:
+    """Requeue a budget-exhausted task or block it when the cap is exhausted.
+
+    Caller must hold ``write_txn`` and must already have closed the active run.
+    """
+    task = get_task(conn, task_id)
+    if task is None:
+        return False
+    limit = _resolve_max_continuations(task)
+    now = int(time.time())
+    if limit <= 0:
+        message = "iteration budget exhausted; auto-continuation disabled"
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'blocked', result = ?, completed_at = ?,
+                   claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
+                   last_continuation_reason = ?
+             WHERE id = ? AND status = 'running' AND current_run_id IS NULL
+            """,
+            (message, now, reason, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "auto_continuation_disabled",
+            {"reason": reason, "limit": limit, "message": message},
+            run_id=run_id,
+        )
+        return True
+    if int(task.continuation_count or 0) >= limit:
+        message = (
+            f"iteration budget exhausted; continuation limit exhausted "
+            f"({int(task.continuation_count or 0)}/{limit})"
+        )
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'blocked', result = ?, completed_at = ?,
+                   claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
+                   last_continuation_reason = ?
+             WHERE id = ? AND status = 'running' AND current_run_id IS NULL
+            """,
+            (message, now, reason, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "auto_continuation_exhausted",
+            {
+                "reason": reason,
+                "count": int(task.continuation_count or 0),
+                "limit": limit,
+                "message": message,
+            },
+            run_id=run_id,
+        )
+        return True
+    new_count = int(task.continuation_count or 0) + 1
+    cur = conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+               worker_pid = NULL,
+               continuation_count = continuation_count + 1,
+               last_continuation_reason = ?
+         WHERE id = ? AND status = 'running' AND current_run_id IS NULL
+        """,
+        (reason, task_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(
+        conn, task_id, "auto_continuation_scheduled",
+        {"reason": reason, "count": new_count, "limit": limit},
+        run_id=run_id,
+    )
+    return True
+
+
+def record_iteration_budget_exhausted(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+    reason: str = "iteration_budget_exhausted",
+) -> bool:
+    """Close the current run as iteration-budget exhausted and requeue/block.
+
+    This is a worker self-report path: it does not increment failure counters
+    and it uses the task's current_run_id as a run-ownership guard.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row or row["status"] != "running" or not row["current_run_id"]:
+            return False
+        current_run_id = int(row["current_run_id"])
+        if expected_run_id is not None and int(expected_run_id) != current_run_id:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="iteration_budget_exhausted",
+            status="iteration_budget_exhausted",
+            summary=summary,
+            metadata=metadata,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "iteration_budget_exhausted",
+            {
+                "reason": reason,
+                "summary": (summary or "").strip().splitlines()[0][:400]
+                if summary else None,
+            },
+            run_id=run_id,
+        )
+        return _schedule_continuation_after_closed_run(
+            conn, task_id, reason=reason, run_id=run_id,
+        )
+
+
+def maybe_schedule_continuation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str = "iteration_budget_exhausted",
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Compatibility wrapper for the planned DB API."""
+    return record_iteration_budget_exhausted(
+        conn, task_id, expected_run_id=expected_run_id, reason=reason,
+    )
 
 
 def _synthesize_ended_run(
@@ -5926,6 +6158,8 @@ def _default_spawn(
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+    if task.max_iterations is not None:
+        env["HERMES_MAX_ITERATIONS"] = str(int(task.max_iterations))
     terminal_timeout = _worker_terminal_timeout_env(
         task.max_runtime_seconds,
         env.get("TERMINAL_TIMEOUT"),
@@ -6154,6 +6388,16 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
+    if int(task.continuation_count or 0) > 0:
+        continuation_limit = _resolve_max_continuations(task)
+        lines.append("")
+        lines.append(
+            f"This is continuation run {int(task.continuation_count or 0)}/{continuation_limit}."
+        )
+        lines.append(
+            "Continue from the latest run summary/log. Do not restart from scratch."
+        )
+        lines.append("If complete, call kanban_complete. If blocked, call kanban_block.")
     lines.append("")
 
     if task.body and task.body.strip():
