@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Autoresearch Dashboard</title>
+<style>
+:root { color-scheme: light; --ink:#162016; --muted:#5f6f63; --line:#d8ded3; --panel:#f6f8f2; --accent:#126b54; --warn:#a9501a; --bad:#9b2635; --bg:#fbfcf8; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+header { padding:24px 28px 16px; border-bottom:1px solid var(--line); background:#ffffff; }
+h1 { margin:0 0 8px; font-size:28px; line-height:1.15; letter-spacing:0; }
+header p { margin:0; color:var(--muted); max-width:980px; }
+main { padding:22px 28px 36px; display:grid; gap:22px; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px,1fr)); gap:10px; }
+.metric { border:1px solid var(--line); background:#fff; border-radius:8px; padding:14px 14px 12px; min-height:88px; }
+.metric span { display:block; color:var(--muted); font-size:13px; margin-bottom:12px; }
+.metric strong { font-size:26px; line-height:1; }
+.panel { border:1px solid var(--line); border-radius:8px; background:#fff; padding:16px; overflow:auto; }
+h2 { margin:0 0 12px; font-size:18px; letter-spacing:0; }
+.meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; color:var(--muted); }
+.meta b { color:var(--ink); }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; border-bottom:1px solid var(--line); padding:9px 8px; vertical-align:top; }
+th { color:var(--muted); font-weight:650; background:var(--panel); }
+.chart { width:100%; max-width:760px; height:210px; }
+.chart polyline { fill:none; stroke:var(--accent); stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
+.chart circle { fill:#fff; stroke:var(--accent); stroke-width:2; }
+.empty { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:16px; background:var(--panel); }
+.badge { display:inline-block; padding:3px 8px; border-radius:999px; background:#e8f1ec; color:var(--accent); font-size:12px; }
+@media (max-width: 720px) { header, main { padding-left:16px; padding-right:16px; } h1 { font-size:23px; } .metric strong { font-size:22px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hermes Autoresearch Dashboard</h1>
+  <p>Read-only view over local skill audit artifacts. Model route preference: <b>MiniMax-M2.7-highspeed</b> for bounded runner loops when already configured; no provider routing or secret changes are performed by this dashboard.</p>
+</header>
+<main>
+  <section class="metrics"><section class="metric"><span>Inventoried skills</span><strong>308</strong></section><section class="metric"><span>High priority</span><strong>101</strong></section><section class="metric"><span>Medium priority</span><strong>47</strong></section><section class="metric"><span>Low priority</span><strong>160</strong></section><section class="metric"><span>Iterations logged</span><strong>11</strong></section><section class="metric"><span>Kept</span><strong>11</strong></section><section class="metric"><span>Blocked</span><strong>0</strong></section><section class="metric"><span>Discarded</span><strong>0</strong></section></section>
+  <section class="panel">
+    <h2>Run State</h2>
+    <div class="meta">
+      <div><b>Generated:</b> 2026-05-28T23:38:03+02:00</div>
+      <div><b>Audit folder:</b> /home/piet/.hermes/hermes-agent/.hermes/skill-audit</div>
+      <div><b>Last target:</b> /home/piet/.hermes/hermes-agent/scripts/render_autoresearch_dashboard.py</div>
+      <div><b>Last decision:</b> <span class="badge">keep</span></div>
+      <div><b>Safety gate:</b> read-only dashboard, no mutation endpoints</div>
+      <div><b>Stop reason:</b> pending until render</div>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Score Trend</h2>
+    <div class="empty">No numeric score trend yet</div>
+  </section>
+  <section class="panel">
+    <h2>Lowest Rubric Scores</h2>
+    <table><thead><tr><th>skill</th><th>safety</th><th>output</th><th>activation</th><th>total</th><th>priority</th></tr></thead><tbody><tr><td>repeated-action-pattern</td><td>1</td><td>1</td><td>1</td><td>11</td><td>high</td></tr><tr><td>stocks</td><td>1</td><td>3</td><td>3</td><td>15</td><td>high</td></tr><tr><td>mcporter</td><td>3</td><td>3</td><td>1</td><td>15</td><td>medium</td></tr><tr><td>chroma</td><td>1</td><td>1</td><td>3</td><td>15</td><td>high</td></tr><tr><td>clip</td><td>1</td><td>1</td><td>3</td><td>15</td><td>high</td></tr><tr><td>faiss</td><td>1</td><td>1</td><td>3</td><td>15</td><td>high</td></tr><tr><td>pinecone</td><td>1</td><td>1</td><td>3</td><td>15</td><td>high</td></tr><tr><td>qdrant-vector-search</td><td>1</td><td>1</td><td>3</td><td>15</td><td>high</td></tr><tr><td>apple-notes</td><td>1</td><td>3</td><td>3</td><td>15</td><td>high</td></tr><tr><td>architecture-diagram</td><td>1</td><td>3</td><td>1</td><td>15</td><td>high</td></tr><tr><td>ascii-art</td><td>1</td><td>3</td><td>1</td><td>15</td><td>high</td></tr><tr><td>codebase-inspection</td><td>1</td><td>3</td><td>3</td><td>15</td><td>high</td></tr></tbody></table>
+  </section>
+  <section class="panel">
+    <h2>Recent Results</h2>
+    <table><thead><tr><th>timestamp</th><th>mode</th><th>target</th><th>hypothesis</th><th>decision</th><th>risk</th><th>evidence</th></tr></thead><tbody><tr><td>2026-05-28T23:33:59+02:00</td><td>code</td><td>/home/piet/.hermes/hermes-agent/scripts/render_autoresearch_dashboard.py</td><td>Dashboard should visualize audit state without mutation controls</td><td>keep</td><td>low</td><td>.hermes/skill-audit/dashboard.html</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>code</td><td>/home/piet/.hermes/hermes-agent/scripts/eval_local_skills.py</td><td>Local eval should identify real structure errors without external dependencies</td><td>keep</td><td>low</td><td>/home/piet/.hermes/hermes-agent/scripts/eval_local_skills.py</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/devops/hermes-modelrouting-codex/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; additive boundary language, no config change.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/devops/hermes-learning-skill-curator/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; additive only.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/software-development/hermes-agent-skill-authoring/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; reporting-only addition.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/software-development/hermes-agent-skill-authoring/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; additive and scoped.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/github/github-pr-workflow/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; additive safety guidance only.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/devops/hermes-dashboard-exposure/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; reporting-only addition.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>/home/piet/.hermes/skills/devops/hermes-dashboard-exposure/SKILL.md</td><td>Improve a high-value structural gap without rewriting the skill</td><td>keep</td><td>Low; additive only, no existing exposure rule removed.</td><td>.hermes/skill-audit/skill_improvements_report.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>docs</td><td>Plan spec integration</td><td>Reuse only safe dashboard and campaign-contract ideas from M2.7 plan</td><td>keep</td><td>low</td><td>docs/superpowers/specs/2026-05-28-hermes-autoresearch-m27-highspeed-dashboard-design.md</td></tr><tr><td>2026-05-28T23:33:59+02:00</td><td>skills</td><td>~/.hermes/skills</td><td>Establish baseline before any skill edits</td><td>keep</td><td>low</td><td>.hermes/skill-audit/skills_inventory.md</td></tr></tbody></table>
+  </section>
+</main>
+</body>
+</html>
