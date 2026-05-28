@@ -4377,6 +4377,10 @@ def decompose_triage_task(
                 conn, new_id, "created",
                 {"by": author or "decomposer", "from_decompose_of": task_id},
             )
+            # H1: inherit the root/triage task's Discord notify-subscription
+            # so this child can deliver its own terminal state back to the
+            # originating chat without a manual notify-subscribe. Same write_txn.
+            _inherit_notify_subs(conn, task_id, new_id, now=now)
             child_ids.append(new_id)
 
         # Link children to their sibling parents (within the decomposed graph).
@@ -6861,6 +6865,45 @@ def add_notify_sub(
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
             )
+
+
+def _inherit_notify_subs(
+    conn: sqlite3.Connection,
+    src_task_id: str,
+    dst_task_id: str,
+    *,
+    now: Optional[int] = None,
+) -> None:
+    """Copy every notify-subscription of ``src_task_id`` onto ``dst_task_id``.
+
+    Used so auto-decompose children inherit the root/triage task's Discord
+    subscription and can deliver their own terminal state back to the
+    originating chat without a manual ``notify-subscribe``.
+
+    ``last_event_id`` is deliberately NOT copied: the child has its own
+    event stream and the inherited sub must start at cursor 0 so the
+    child's own terminal events get delivered.
+
+    Idempotent: ``INSERT OR IGNORE`` collides on the
+    ``(task_id, platform, chat_id, thread_id)`` primary key, so a repeated
+    decompose never creates duplicate rows.
+
+    MUST be called from inside an existing ``write_txn`` — it issues a bare
+    ``conn.execute`` and does not open its own transaction (mirrors the
+    inlined-INSERT discipline of :func:`decompose_triage_task`).
+    """
+    if now is None:
+        now = int(time.time())
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
+        SELECT ?, platform, chat_id, thread_id, user_id, notifier_profile, ?
+          FROM kanban_notify_subs
+         WHERE task_id = ?
+        """,
+        (dst_task_id, now, src_task_id),
+    )
 
 
 def list_notify_subs(

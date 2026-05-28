@@ -234,3 +234,47 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
         f"deliveries (texts: {[d['text'] for d in adapter.sent]})"
     )
     assert "crashed" in adapter.sent[1]["text"].lower()
+
+
+def test_notifier_delivers_decompose_child_terminal_state(tmp_path, monkeypatch):
+    """H1 end-to-end: a child created by auto-decompose inherits the root's
+    notify-subscription, so the child's own terminal state (here: blocked)
+    reaches the originating chat via the gateway notifier — no manual
+    notify-subscribe. This is the bug from task t_8ae7534a: a blocked
+    decompose-child never pinged the user.
+    """
+    db_path = tmp_path / "decompose-child.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship a feature", triage=True)
+        kb.add_notify_sub(conn, task_id=root, platform="telegram", chat_id="chat-1")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "build it", "assignee": "engineer", "parents": []}],
+            author="decomposer",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+        child = child_ids[0]
+        # Parentless child was promoted ready -> drive it to a terminal block.
+        assert kb.get_task(conn, child).status == "ready"
+        assert kb.block_task(conn, child, reason="needs human input")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1, (
+        f"blocked decompose-child should ping the inherited chat; "
+        f"got {len(adapter.sent)} deliveries"
+    )
+    sent = adapter.sent[0]
+    assert sent["chat_id"] == "chat-1"
+    assert child in sent["text"]
+    assert "blocked" in sent["text"].lower()
