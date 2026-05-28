@@ -654,3 +654,83 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     # Only the real file was uploaded.
     assert len(documents_uploaded) == 1
     assert "real.pdf" in documents_uploaded[0]
+
+
+# ---------------------------------------------------------------------------
+# H1: auto-decompose children inherit the root's notify-subscription
+# ---------------------------------------------------------------------------
+
+def test_decompose_inherits_root_notify_sub(kanban_home):
+    """Children created by decompose_triage_task inherit the root/triage
+    task's Discord notify-subscription, so a child's own terminal state
+    (blocked / gave_up / completed) reaches the originating chat without a
+    manual notify-subscribe. The inherited sub must start at cursor 0
+    (last_event_id not copied) and double-application must not duplicate.
+    """
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="ship a feature", triage=True)
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="discord",
+            chat_id="chan-123",
+            thread_id="thr-9",
+            user_id="user-42",
+            notifier_profile="reviewer:hub-done",
+        )
+        root_subs = kb.list_notify_subs(conn, root)
+        assert len(root_subs) == 1
+
+    children = [
+        {"title": "research", "assignee": "researcher", "parents": []},
+        {"title": "build it", "assignee": "engineer", "parents": [0]},
+    ]
+    with kb.connect() as conn:
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=children,
+            author="decomposer",
+        )
+    assert child_ids is not None and len(child_ids) == 2
+
+    with kb.connect() as conn:
+        for cid in child_ids:
+            subs = kb.list_notify_subs(conn, cid)
+            assert len(subs) == 1, f"child {cid} should inherit exactly one sub"
+            s = subs[0]
+            assert s["platform"] == "discord"
+            assert s["chat_id"] == "chan-123"
+            assert s["thread_id"] == "thr-9"
+            assert s["user_id"] == "user-42"
+            assert s["notifier_profile"] == "reviewer:hub-done"
+            # Fresh cursor: the child's own terminal events must be delivered.
+            assert s["last_event_id"] == 0
+
+    # Idempotent: re-applying the inherit (a real double-decompose can't
+    # happen because the root leaves 'triage', so we exercise the helper
+    # directly) must not create duplicate rows — INSERT OR IGNORE on the
+    # (task_id, platform, chat_id, thread_id) primary key.
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            kb._inherit_notify_subs(conn, root, child_ids[0])
+        subs = kb.list_notify_subs(conn, child_ids[0])
+    assert len(subs) == 1, "re-inherit must not duplicate the subscription"
+
+
+def test_decompose_without_root_sub_leaves_children_unsubscribed(kanban_home):
+    """No root subscription → children inherit nothing (no spurious rows)."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="unwatched feature", triage=True)
+    with kb.connect() as conn:
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "solo", "parents": []}],
+            author="decomposer",
+        )
+    assert child_ids is not None
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, child_ids[0]) == []
