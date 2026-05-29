@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
@@ -22,10 +22,15 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const loaderRef = useRef(loader);
+
+  useEffect(() => {
+    loaderRef.current = loader;
+  }, [loader]);
 
   const reload = useCallback(async () => {
     try {
-      const next = await loader();
+      const next = await loaderRef.current();
       setData(next);
       setError(null);
     } catch (e) {
@@ -33,17 +38,23 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
     } finally {
       setLoading(false);
     }
-  }, [loader]);
+  }, []);
 
   useEffect(() => {
     let alive = true;
     const run = async () => {
-      if (!alive) return;
+      if (!alive || document.hidden) return;
       await reload();
     };
     void run();
     const timer = window.setInterval(run, intervalMs);
-    return () => { alive = false; window.clearInterval(timer); };
+    const onVisible = () => { if (!document.hidden) void run(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [intervalMs, reload]);
 
   return { data, error, loading, reload, updateData: setData };

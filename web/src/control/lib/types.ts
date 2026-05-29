@@ -111,7 +111,7 @@ export interface AutoresearchStatus {
   heartbeat_age_s: number | null;
   heartbeat_fresh: boolean;
   last_receipt: string | null;
-  last_run: number | null;
+  last_run: unknown | null;
   note: string | null;
 }
 

@@ -62,7 +62,7 @@ export const AutoresearchStatusSchema = z.object({
   heartbeat_age_s: nullableNumber,
   heartbeat_fresh: z.boolean().catch(false),
   last_receipt: nullableString,
-  last_run: nullableNumber,
+  last_run: z.unknown().nullable().catch(null),
   note: nullableString,
 });
 
