@@ -136,6 +136,13 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   }
 }
 
+
+/* Control is an operator surface; keep the global design-system grain out
+   so status text and dense proposal lists do not visually shimmer. */
+#root > [data-layout-variant]:has([data-control]) {
+  --noise-opacity-mul: 0;
+}
+
 /* Nousnet's hermes-agent layout bumps `small` and `code` to readable
    dashboard sizes. Keep in sync. */
 small { font-size: 1.0625rem; }
