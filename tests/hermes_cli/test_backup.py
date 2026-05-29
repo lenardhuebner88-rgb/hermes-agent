@@ -946,6 +946,17 @@ class TestImportEdgeCases:
 # ---------------------------------------------------------------------------
 
 class TestProfileRestoration:
+    @pytest.fixture(autouse=True)
+    def _hermetic_path(self, monkeypatch):
+        """Isolate PATH so ``check_alias_collision`` (which runs ``which <name>``)
+        can't discover host binaries like a real ``~/.local/bin/coder``. Without
+        this the wrapper-creation tests pass or fail depending on what the dev's
+        machine happens to have installed — green in CI, red on a box that has a
+        ``coder`` (or similarly-named) command on PATH. ``which`` itself still
+        resolves from the standard system dirs, so the collision check runs for
+        real; it just sees a clean PATH that mirrors the test's isolated HOME."""
+        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+
     def _make_backup_zip(self, zip_path: Path, files: dict[str, str | bytes]) -> None:
         with zipfile.ZipFile(zip_path, "w") as zf:
             for name, content in files.items():
