@@ -62,6 +62,8 @@ _DATA_SCRIPT_RE = re.compile(
     r'<script type="application/json" id="data-autoresearch">(.+?)</script>',
     re.DOTALL,
 )
+_SCAFFOLD_MARKER = "autoresearch-scaffold"
+_SCAFFOLD_TODO_RE = re.compile(r"document the \*\*(?P<section>[^*]+)\*\* of `(?P<skill>[^`]+)`")
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +255,49 @@ def read_audit() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Worklist: skills that still carry an autoresearch placeholder ("needs input")
+# ---------------------------------------------------------------------------
+def scan_open_scaffolds() -> dict[str, Any]:
+    """Find live skills that have an autoresearch scaffold section still on TODO.
+
+    These are the concrete "next step" items: apply inserts the section skeleton;
+    the operator (or a later model pass) fills in the actual wording.
+    """
+    root = _skills_root()
+    items: list[dict[str, str]] = []
+    if root.exists():
+        for path in sorted(root.rglob("SKILL.md")):
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _SCAFFOLD_MARKER not in text:
+                continue
+            for m in _SCAFFOLD_TODO_RE.finditer(text):
+                items.append({
+                    "skill": m.group("skill"),
+                    "section": m.group("section"),
+                    "path": str(path),
+                })
+    return {"schema": "autoresearch-worklist-v1", "count": len(items),
+            "open_scaffolds": items, "skills_root": str(root)}
+
+
+# ---------------------------------------------------------------------------
 # MiniMax-M2.7 self-test (harmless config-presence check; no secrets emitted)
 # ---------------------------------------------------------------------------
 _MODEL_NEEDLE = "MiniMax-M2.7"
+
+
+def _skills_root() -> Path:
+    override = os.environ.get("HERMES_SKILLS_ROOT")
+    return Path(override) if override else (_hermes_home() / "skills")
 
 
 def _hermes_home() -> Path:
@@ -464,6 +506,16 @@ th{color:var(--muted);font-weight:600;background:var(--panel);position:sticky;to
 .lastrun.lr-err{background:var(--bad-soft);border-color:transparent;color:var(--bad);}
 .lastrun.lr-warn{background:var(--warn-soft);border-color:transparent;color:var(--warn);}
 .lastrun b{color:inherit;}
+.nextstep{border-left:4px solid var(--accent);}
+.nextstep-body{font-size:15px;line-height:1.55;}
+.nextstep-body b{color:var(--ink);}
+.nextstep-body .big{font-size:16px;font-weight:700;display:block;margin-bottom:6px;}
+.how{margin:0;padding-left:20px;color:var(--muted);font-size:13.5px;line-height:1.7;}
+.how b{color:var(--ink);}
+.wl-item{display:flex;gap:10px;align-items:baseline;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);margin-bottom:8px;flex-wrap:wrap;}
+.wl-item .sec{font-weight:700;color:var(--warn);}
+.wl-item .sk{font-weight:600;}
+.wl-item .p{color:var(--muted);font-size:12px;word-break:break-all;width:100%;}
 code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;}
 @media (max-width:560px){ .bar .lbl{flex-basis:120px;} .topbar h1{font-size:16px;} }
 </style>
@@ -477,6 +529,20 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
   <button class="iconbtn" id="refresh" title="Refresh now">↻</button>
 </div>
 <main>
+  <section class="card nextstep" id="nextstepCard">
+    <h2>👉 Dein nächster Schritt</h2>
+    <div id="nextstep" class="nextstep-body">…</div>
+  </section>
+
+  <section class="card">
+    <h2>Was Autoresearch macht</h2>
+    <ol class="how">
+      <li><b>Dry-run</b> — sucht Skills, denen ein empfohlener Abschnitt fehlt (When to Use, Safety, Procedure, Output). Ändert nichts, schlägt nur vor.</li>
+      <li><b>Apply</b> — fügt das fehlende Abschnitts-<i>Gerüst</i> ein (Überschrift + <code>TODO</code>-Platzhalter). Mit Backup; wird automatisch zurückgerollt, wenn es nichts verbessert.</li>
+      <li><b>Du füllst den Platzhalter</b> mit echtem Inhalt — die Liste „Braucht deine Eingabe" unten zeigt genau wo.</li>
+    </ol>
+  </section>
+
   <section class="card">
     <h2>Loop status</h2>
     <div class="grid cols">
@@ -502,8 +568,14 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
       <button class="btn btn-apply" id="btnApply">✓ Apply…</button>
       <button class="btn btn-stop" id="btnStop">■ Stop</button>
     </div>
-    <p class="toast" id="toast">Dry-run proposes changes without touching any file. Apply edits only under <code>~/.hermes/skills</code> with a backup and auto-revert on regression.</p>
-    <p class="safety">Single-operator system — no token. Reversible by design: backup + eval-gate + iteration cap + Stop. No secrets/config/routing/push.</p>
+    <p class="toast" id="toast">Dry-run schlägt nur vor (ändert nichts). Apply editiert nur unter <code>~/.hermes/skills</code>, mit Backup und Auto-Revert.</p>
+    <p class="safety">Single-operator — kein Token. Reversibel: Backup + eval-Gate + Cap + Stop. Keine Secrets/Config/Routing/Push.</p>
+  </section>
+
+  <section class="card">
+    <h2>📝 Braucht deine Eingabe <span class="badge badge-info" id="worklistCount"></span></h2>
+    <p class="muted" style="margin-top:-6px;">Abschnitte, die Apply als Gerüst eingefügt hat — hier fehlt noch dein Text.</p>
+    <div id="worklist"><p class="muted">loading…</p></div>
   </section>
 
   <section class="card">
@@ -517,7 +589,7 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
   </section>
 
   <section class="card">
-    <h2>Recent results &amp; proposals</h2>
+    <h2>Aktivität (was wurde gemacht)</h2>
     <div class="tablewrap"><div id="results"><p class="muted">loading…</p></div></div>
     <p class="muted" id="receipt" style="margin-top:10px;"></p>
   </section>
@@ -529,6 +601,7 @@ const $=id=>document.getElementById(id);
 const esc=s=>{const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;};
 $('area').innerHTML=AREAS.map(a=>'<option>'+a+'</option>').join('');
 let running=false;
+let gStatus={}, gWorklist={count:0,open_scaffolds:[]};
 
 function setPill(state){const p=$('pill');p.className='pill pill-'+(state||'idle');p.textContent=state||'idle';}
 function routeBadge(s){s=s||'unknown';const c=s==='yellow'?'badge-yellow':(s==='unavailable'?'badge-bad':'badge');return '<span class="badge '+c+'">'+esc(s)+'</span>';}
@@ -562,6 +635,7 @@ async function poll(){
     $('updated').textContent='updated '+new Date().toLocaleTimeString();
     if(d.last_receipt)$('receipt').textContent='Last receipt: '+d.last_receipt;
     renderLastRun(d.last_run,d.note);
+    gStatus=d; renderNextStep();
     // surface completion of a run (incl. fast/refused ones) as a toast, once
     const lr=d.last_run;
     if(lr&&lr.finished_at&&lr.finished_at!==lastSeenFinish&&(wasRunning||!lastSeenFinish)){
@@ -569,7 +643,7 @@ async function poll(){
       if(lr.ok===false)toast('⚠ run refused: '+(lr.refused||d.note||''),'err');
       else if(lr.mode==='apply')toast('✓ apply finished — '+lr.kept+' kept, '+lr.reverted+' reverted','ok');
       else toast('▶ dry-run finished — '+lr.proposed+' proposal(s)','ok');
-      loadAudit();
+      loadAudit(); loadWorklist();
     }
     wasRunning=running;
   }catch(e){$('updated').textContent='status failed';}
@@ -587,12 +661,51 @@ async function loadAudit(){
     const mx=Math.max(1,...ents.map(e=>e[1]||0));
     $('weakness').innerHTML=ents.length?ents.map(e=>'<div class="bar"><span class="lbl">'+esc(e[0].replace(/_/g,' '))+'</span><div class="track"><span style="width:'+((e[1]||0)/mx*100)+'%"></span></div><span class="n">'+esc(e[1])+'</span></div>').join(''):'<div class="empty">No weakness data yet — run a dry-run.</div>';
     const rows=(d.results||[]).slice(-25).reverse();
-    if(!rows.length){$('results').innerHTML='<div class="empty">No iterations logged yet. Click Dry-run to generate proposals.</div>';return;}
-    const cols=[['timestamp','When'],['mode','Mode'],['target','Target'],['hypothesis','Hypothesis'],['decision','Decision'],['eval_result','Eval']];
-    let h='<table><thead><tr>'+cols.map(c=>'<th>'+c[1]+'</th>').join('')+'</tr></thead><tbody>';
-    for(const r of rows){h+='<tr>'+cols.map(c=>{let v=r[c[0]];if(c[0]==='decision'){const k=(v||'').toLowerCase();return '<td><span class="dec dec-'+k+'">'+esc(v)+'</span></td>';}return '<td>'+esc(v)+'</td>';}).join('')+'</tr>';}
+    if(!rows.length){$('results').innerHTML='<div class="empty">Noch nichts gelaufen. Klick Dry-run, um Vorschläge zu erzeugen.</div>';return;}
+    let h='<table><thead><tr><th>Wann</th><th>Was passierte</th><th>Skill / Abschnitt</th><th>Ergebnis</th></tr></thead><tbody>';
+    for(const r of rows){
+      const k=(r.decision||'').toLowerCase();
+      let what;
+      if(k==='keep'&&r.mode==='apply')what='<span class="dec dec-keep">✓ Abschnitt eingefügt</span>';
+      else if(k==='discard')what='<span class="dec dec-discard">↩ verworfen (keine Verbesserung)</span>';
+      else if(k==='proposed')what='<span class="dec dec-proposed">💡 vorgeschlagen (nichts geändert)</span>';
+      else if(k==='blocked')what='<span class="dec dec-blocked">⚠ blockiert</span>';
+      else what='<span class="dec">'+esc(r.decision)+'</span>';
+      const m=(r.eval_result||'').match(/warnings\\s+(\\d+)\\s*->\\s*(\\d+)/);
+      let res=m?((Number(m[1])-Number(m[2]))+' Lücke(n) geschlossen'):esc(r.eval_result||'');
+      h+='<tr><td>'+esc(fmtTime(r.timestamp))+'</td><td>'+what+'</td><td>'+esc(r.target||'')+'</td><td>'+res+'</td></tr>';
+    }
     $('results').innerHTML=h+'</tbody></table>';
   }catch(e){$('results').innerHTML='<div class="empty">audit fetch failed</div>';}
+}
+async function loadWorklist(){
+  try{
+    gWorklist=await(await fetch(BASE+'/autoresearch/worklist',{headers:{'Accept':'application/json'}})).json();
+  }catch(e){gWorklist={count:0,open_scaffolds:[]};}
+  const items=(gWorklist.open_scaffolds||[]);
+  $('worklistCount').textContent=items.length?(items.length+' offen'):'';
+  if(!items.length){$('worklist').innerHTML='<div class="empty">Nichts offen — keine Platzhalter-Abschnitte warten auf Text.</div>';}
+  else{
+    $('worklist').innerHTML=items.map(it=>'<div class="wl-item"><span class="sk">'+esc(it.skill)+'</span>·<span class="sec">'+esc(it.section)+'</span> braucht Inhalt<span class="p">'+esc(it.path)+'</span></div>').join('');
+  }
+  renderNextStep();
+}
+function renderNextStep(){
+  const box=$('nextstep');
+  const open=(gWorklist.open_scaffolds||[]).length;
+  const lr=gStatus.last_run;
+  if(running){box.innerHTML='<span class="big">⏳ Ein Lauf läuft gerade…</span>Warte, bis er fertig ist — Status oben aktualisiert sich automatisch.';return;}
+  if(lr&&lr.ok===false){box.innerHTML='<span class="big">⚠ Letzter Lauf abgelehnt</span>Grund: '+esc(lr.refused||gStatus.note||'')+'. Wähle eine Skills-Area (z. B. <b>all</b>) und versuch es erneut.';return;}
+  if(open>0){
+    const names=[...new Set((gWorklist.open_scaffolds||[]).map(i=>i.skill))].slice(0,6).join(', ');
+    box.innerHTML='<span class="big">📝 '+open+' Abschnitt(e) brauchen deinen Text</span>'+
+      'Apply hat Gerüste eingefügt — jetzt fehlt der Inhalt. Öffne die Dateien in <b>„Braucht deine Eingabe"</b> unten und ersetze die <code>TODO</code>-Zeilen mit echtem Inhalt (betroffen: '+esc(names)+'). '+
+      'Wenn du keinen Inhalt willst: sag mir Bescheid, ich rolle die Gerüste zurück.';
+    return;
+  }
+  const dc=(gStatus.last_run&&gStatus.last_run.mode==='dry-run');
+  if(dc){box.innerHTML='<span class="big">▶ Vorschläge liegen vor</span>Schau unten in <b>Aktivität</b> die 💡-Zeilen an. Wenn sie passen: gleiche Area wählen und <b>Apply</b> klicken, um die Struktur einzufügen.';return;}
+  box.innerHTML='<span class="big">✅ Alles aufgeräumt</span>Keine offenen Platzhalter. Starte einen <b>Dry-run</b> (z. B. Area <b>all</b>), um neue Verbesserungs-Kandidaten zu finden.';
 }
 function toast(msg,kind){const t=$('toast');t.className='toast'+(kind?' '+kind:'');t.textContent=msg;}
 async function trigger(mode){
@@ -605,7 +718,7 @@ async function trigger(mode){
     if(r.ok)toast(mode+' started — '+d.request_id+' (pid '+d.pid+')','ok');
     else toast('error '+r.status+': '+(d.detail||''),'err');
   }catch(e){toast('request failed: '+e,'err');}
-  poll();setTimeout(()=>{poll();loadAudit();},1500);
+  poll();setTimeout(()=>{poll();loadAudit();loadWorklist();},1500);
 }
 async function stop(){
   toast('stopping…');
@@ -616,11 +729,11 @@ async function stop(){
 $('btnDry').addEventListener('click',()=>trigger('dry-run'));
 $('btnApply').addEventListener('click',()=>trigger('apply'));
 $('btnStop').addEventListener('click',stop);
-$('refresh').addEventListener('click',()=>{poll();loadAudit();});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll();loadAudit();}});
+$('refresh').addEventListener('click',()=>{poll();loadAudit();loadWorklist();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll();loadAudit();loadWorklist();}});
 let pollTimer=setInterval(()=>{if(!document.hidden)poll();},4000);
-let auditTimer=setInterval(()=>{if(!document.hidden)loadAudit();},12000);
-poll();loadAudit();setControls();
+let auditTimer=setInterval(()=>{if(!document.hidden){loadAudit();loadWorklist();}},12000);
+poll();loadAudit();loadWorklist();setControls();
 </script>
 </body>
 </html>
@@ -660,6 +773,10 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.get("/autoresearch/selftest")
     async def autoresearch_selftest() -> dict[str, Any]:
         return self_test()
+
+    @app.get("/autoresearch/worklist")
+    async def autoresearch_worklist() -> dict[str, Any]:
+        return scan_open_scaffolds()
 
     @app.post("/autoresearch/trigger")
     async def autoresearch_trigger(body: TriggerBody) -> dict[str, Any]:

@@ -240,8 +240,36 @@ def test_html_view_has_operational_controls(client):
     cl, _view = client
     text = cl.get("/autoresearch").text
     for needle in ['id="pill"', 'id="btnDry"', 'id="btnApply"', 'id="btnStop"',
-                   'id="iterbar"', 'id="weakness"', 'id="metrics"', 'id="results"']:
+                   'id="iterbar"', 'id="weakness"', 'id="metrics"', 'id="results"',
+                   'id="nextstep"', 'id="worklist"', 'id="lastrun"']:
         assert needle in text, f"missing {needle}"
+
+
+def test_worklist_lists_open_scaffolds(client):
+    cl, view = client
+    sk = view._home_test / "skills" / "demo" / "x"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text(
+        "# X\n\n## Output\n\n<!-- autoresearch-scaffold: replace with concrete guidance for `x` -->\n"
+        "TODO: document the **Output** of `x`.\n",
+        encoding="utf-8",
+    )
+    d = cl.get("/autoresearch/worklist").json()
+    assert d["count"] == 1
+    assert d["open_scaffolds"][0]["skill"] == "x"
+    assert d["open_scaffolds"][0]["section"] == "Output"
+
+
+def test_worklist_skips_archived(client):
+    cl, view = client
+    arch = view._home_test / "skills" / ".archive" / "y"
+    arch.mkdir(parents=True)
+    (arch / "SKILL.md").write_text(
+        "# Y\n\n<!-- autoresearch-scaffold: x -->\nTODO: document the **Output** of `y`.\n",
+        encoding="utf-8",
+    )
+    d = cl.get("/autoresearch/worklist").json()
+    assert d["count"] == 0
 
 
 # --------------------------------------------------------------------------
