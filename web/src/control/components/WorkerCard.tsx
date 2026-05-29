@@ -4,6 +4,7 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import {
+  STUCK_HEARTBEAT_S,
   fmtDur,
   fmtMB,
   workerHeartbeatAge,
@@ -38,10 +39,12 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   const [confirming, setConfirming] = useState(false);
   const inspect = worker.inspect ?? null;
   const remaining = workerRemaining(worker, now);
+  const hasHeartbeat = worker.last_heartbeat_at > 0;
   const heartbeatAge = workerHeartbeatAge(worker, now);
   const primary = health.key === "blocked" ? "unlock" : health.key === "stuck" ? "nudge" : health.key === "offline" ? "restart" : "dispatch";
   const primaryLabel = de.worker.actions[primary];
-  const problemText = worker.block_reason || (health.key === "offline" ? de.worker.offlineReason : health.key === "stuck" ? de.worker.stuckReason(fmtDur(heartbeatAge)) : null);
+  const stuckReason = hasHeartbeat ? de.worker.stuckReason(fmtDur(heartbeatAge)) : de.worker.expiredReason;
+  const problemText = worker.block_reason || (health.key === "offline" ? de.worker.offlineReason : health.key === "stuck" ? stuckReason : null);
 
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3")}>
@@ -58,7 +61,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
 
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
         <Metric label={de.worker.runtime} value={fmtDur(workerRuntime(worker, now))} />
-        <Metric label={de.worker.heartbeat} value={fmtDur(heartbeatAge)} warn={heartbeatAge > 90} />
+        <Metric label={de.worker.heartbeat} value={hasHeartbeat ? fmtDur(heartbeatAge) : "—"} warn={hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S} />
         <Metric label={de.worker.remaining} value={remaining <= 0 ? "0s" : fmtDur(remaining)} warn={remaining <= 0} />
         <Metric label="PID" value={String(worker.worker_pid || "-")} />
       </div>

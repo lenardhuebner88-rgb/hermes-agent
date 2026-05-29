@@ -45,6 +45,15 @@ describe('workerHealth', () => {
   it('Heartbeat genau auf der Schwelle ist NICHT stuck', () => {
     expect(workerHealth(mkWorker({ last_heartbeat_at: NOW - STUCK_HEARTBEAT_S }), NOW).key).toBe('healthy');
   });
+  it('laufender Worker OHNE Heartbeat (last_heartbeat_at=0) ist healthy, nicht stuck', () => {
+    // Regression: most workers never write a heartbeat (NULL -> coerced to 0).
+    // A missing heartbeat must not read as "ancient" and flip a healthy worker
+    // to "Stuck"; claim_expires is the liveness signal.
+    expect(workerHealth(mkWorker({ last_heartbeat_at: 0 }), NOW).key).toBe('healthy');
+  });
+  it('OHNE Heartbeat aber abgelaufenem Claim ist stuck', () => {
+    expect(workerHealth(mkWorker({ last_heartbeat_at: 0, claim_expires: NOW - 1 }), NOW).key).toBe('stuck');
+  });
 });
 
 describe('buildOverview', () => {

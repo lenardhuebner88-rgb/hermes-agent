@@ -12,8 +12,15 @@ import type {
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
 
-/** Stuck-Schwelle: Heartbeat älter als das gilt als „stuck" (Sekunden). */
-export const STUCK_HEARTBEAT_S = 90;
+/**
+ * Stuck-Schwelle: ein *tatsächlich getrackter* Heartbeat, der älter als das ist,
+ * gilt als „stuck" (Sekunden). Bewusst nahe an der Backend-Reclaim-Schwelle
+ * (`_STALE_HEARTBEAT_GAP_SECONDS = 3600`), damit die UI nicht „stuck" zeigt,
+ * während der Dispatcher den Worker noch als lebendig führt. Greift NUR, wenn
+ * der Run überhaupt Heartbeats schreibt — die meisten tun das nie (dann ist
+ * `claim_expires` das maßgebliche Liveness-Signal, nicht das Heartbeat-Alter).
+ */
+export const STUCK_HEARTBEAT_S = 600;
 
 /* ── Worker-Gesundheit ─────────────────────────────────────────────────── */
 /**
@@ -21,8 +28,13 @@ export const STUCK_HEARTBEAT_S = 90;
  * Genau diese Logik bildet die UI-Stati in allen drei Richtungen ab.
  */
 export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
-  const hbAge = now - w.last_heartbeat_at;
-  const expired = w.claim_expires < now;
+  // Most workers never write a heartbeat (last_heartbeat_at stays NULL, coerced
+  // to 0 here), so a missing heartbeat must NOT read as "ancient" — that made
+  // healthy running workers show "Stuck". A heartbeat only counts when present.
+  const hasHeartbeat = w.last_heartbeat_at > 0;
+  const heartbeatStale = hasHeartbeat && (now - w.last_heartbeat_at) > STUCK_HEARTBEAT_S;
+  // Authoritative liveness signal (matches the dispatcher's TTL reclaim).
+  const expired = w.claim_expires > 0 && w.claim_expires < now;
 
   if (w.run_status === 'timed_out' || w.run_status === 'crashed' || (w.inspect ? !w.inspect.alive : false)) {
     return { key: 'offline', tone: 'zinc', label: 'Offline', dot: 'offline' };
@@ -30,7 +42,7 @@ export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
   if (w.run_status === 'blocked') {
     return { key: 'blocked', tone: 'red', label: 'Blockiert', dot: 'error' };
   }
-  if (hbAge > STUCK_HEARTBEAT_S || expired) {
+  if (expired || heartbeatStale) {
     return { key: 'stuck', tone: 'amber', label: 'Stuck', dot: 'warn' };
   }
   return { key: 'healthy', tone: 'cyan', label: 'Läuft', dot: 'live' };

@@ -14,6 +14,7 @@ export const de = {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
     actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten", confirm: "Bestätigen", cancel: "Abbrechen" },
     stuckReason: (age: string) => `Heartbeat ${age} alt oder Claim abgelaufen`,
+    expiredReason: "Claim-TTL abgelaufen (kein Heartbeat getrackt)",
     offlineReason: "Prozess reagiert nicht mehr",
     confirmHint: "Schreibt Live-Status der Worker. Fortfahren?",
     restartHint: "Holt den laufenden Worker zurück und plant die Task neu ein. Fortfahren?",
