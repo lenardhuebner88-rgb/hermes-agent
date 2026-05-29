@@ -31,18 +31,22 @@ def _load_stub():
 
 @pytest.fixture()
 def view(monkeypatch, tmp_path):
-    """autoresearch_view module with state + audit dirs pointed at tmp_path."""
+    """autoresearch_view module with state + audit + home pointed at tmp_path."""
     state_dir = tmp_path / "runner-state"
     audit_dir = tmp_path / "audit"
+    home = tmp_path / "home"
     state_dir.mkdir()
     audit_dir.mkdir()
+    (home / "skills").mkdir(parents=True)
+    (home / "config.yaml").write_text("model: MiniMax-M2.7-highspeed\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(state_dir))
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(audit_dir))
-    monkeypatch.delenv("HERMES_AUTORESEARCH_TOKEN", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
     module = importlib.import_module("hermes_cli.autoresearch_view")
     importlib.reload(module)
     module._state_dir_test = state_dir  # convenience handle for tests
     module._audit_dir_test = audit_dir
+    module._home_test = home
     return module
 
 
@@ -115,41 +119,80 @@ def test_status_stopping_when_status_declares_stopping(client):
 
 
 # --------------------------------------------------------------------------
-# Token gate on the mutate routes
+# Trigger / Stop (no token; apply needs confirm; runner spawn is injected)
 # --------------------------------------------------------------------------
-def test_trigger_denied_without_token(client):
+@pytest.fixture()
+def spawned(view, monkeypatch):
+    calls = {}
+
+    def fake_spawn(args):
+        calls["args"] = args
+        return 99999
+
+    monkeypatch.setattr(view, "_spawn_runner", fake_spawn)
+    return calls
+
+
+def test_selftest_route_configured(client):
     cl, _view = client
-    resp = cl.post("/autoresearch/trigger", json={"request_id": "x", "mode": "dry-run"})
-    assert resp.status_code == 403
+    body = cl.get("/autoresearch/selftest").json()
+    assert body["route_status"] == "configured"
 
 
-def test_stop_denied_without_token(client):
+def test_trigger_dry_run_spawns_without_apply(client, spawned):
+    cl, view = client
+    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "dry-run", "max_iterations": 2})
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert d["ok"] and d["mode"] == "dry-run" and d["pid"] == 99999
+    assert "--apply" not in spawned["args"]
+    # a real run-request JSON was written into the (test) audit dir
+    assert list((view._audit_dir_test / "run-requests").glob("*.json"))
+
+
+def test_trigger_apply_requires_confirm(client, spawned):
     cl, _view = client
-    resp = cl.post("/autoresearch/stop")
-    assert resp.status_code == 403
+    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": False})
+    assert resp.status_code == 400
+    assert "confirm" in resp.json()["detail"]
+    assert "args" not in spawned  # never spawned
 
 
-def test_trigger_denied_with_wrong_token(client, monkeypatch):
+def test_trigger_apply_with_confirm_passes_apply_flag(client, spawned):
     cl, _view = client
-    monkeypatch.setenv("HERMES_AUTORESEARCH_TOKEN", "the-real-token")
-    resp = cl.post("/autoresearch/trigger", headers={"X-Autoresearch-Token": "wrong"})
-    assert resp.status_code == 403
+    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": True})
+    assert resp.status_code == 200, resp.text
+    assert "--apply" in spawned["args"] and "--confirm" in spawned["args"]
 
 
-def test_trigger_with_valid_token_is_503_no_runner_in_phase4(client, monkeypatch):
-    """Even a valid token must not execute anything in Phase 4 (no runner)."""
+def test_trigger_rejects_bad_mode(client, spawned):
     cl, _view = client
-    monkeypatch.setenv("HERMES_AUTORESEARCH_TOKEN", "the-real-token")
-    resp = cl.post("/autoresearch/trigger", headers={"X-Autoresearch-Token": "the-real-token"})
-    assert resp.status_code == 503
-    assert "Phase 5" in resp.json()["detail"]
+    resp = cl.post("/autoresearch/trigger", json={"mode": "delete-everything"})
+    assert resp.status_code == 400
 
 
-def test_stop_with_valid_token_is_503(client, monkeypatch):
+def test_trigger_409_when_already_running(client, spawned):
+    cl, view = client
+    sd = view._state_dir_test
+    _write(sd / "current.lock", {"pid": 4321, "request_id": "busy"})
+    _write(sd / "current.heartbeat", {"ts": time.time()})
+    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "dry-run"})
+    assert resp.status_code == 409
+
+
+def test_stop_idle_when_nothing_running(client):
     cl, _view = client
-    monkeypatch.setenv("HERMES_AUTORESEARCH_TOKEN", "tok")
-    resp = cl.post("/autoresearch/stop", headers={"Authorization": "Bearer tok"})
-    assert resp.status_code == 503
+    d = cl.post("/autoresearch/stop").json()
+    assert d["ok"] and d["state"] == "idle"
+
+
+def test_stop_signals_lock_pid(client, view, monkeypatch):
+    cl, v = client
+    sent = {}
+    monkeypatch.setattr(v, "_signal_pid", lambda pid, sig: sent.update(pid=pid, sig=sig))
+    _write(v._state_dir_test / "current.lock", {"pid": 4321, "request_id": "r"})
+    d = cl.post("/autoresearch/stop").json()
+    assert d["ok"] and d["signalled"] == 4321 and sent["pid"] == 4321
 
 
 # --------------------------------------------------------------------------

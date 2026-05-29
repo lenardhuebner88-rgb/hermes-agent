@@ -31,11 +31,12 @@ The runner-state contract (written by the Phase 5 runner, or by the tiny
 from __future__ import annotations
 
 import csv
-import hmac
 import html
 import json
 import os
 import re
+import signal
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,7 @@ from typing import Any
 # This module is only imported by the dashboard, where fastapi is guaranteed.
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 # hermes-agent repo root (this file lives in hermes_cli/).
 _REPO = Path(__file__).resolve().parents[1]
@@ -56,7 +58,6 @@ _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
 # a present lock with a stale heartbeat is reported as "crashed".
 _DEFAULT_HEARTBEAT_TTL = 30.0
 
-_TOKEN_HEADER = "X-Autoresearch-Token"
 _DATA_SCRIPT_RE = re.compile(
     r'<script type="application/json" id="data-autoresearch">(.+?)</script>',
     re.DOTALL,
@@ -134,9 +135,9 @@ def read_runner_status(*, now: float | None = None) -> dict[str, Any]:
     heartbeat = _read_json(state_dir / "current.heartbeat")
     status_file = _read_json(state_dir / "current.status") or {}
 
-    # route_status: from status file when written; the request generator default
-    # is "configured" (MiniMax-M2.7 is configured in config.yaml).
-    route_status = status_file.get("route_status") or "configured"
+    # route_status: from the status file when a run wrote it; otherwise a live
+    # self-test (config-presence) so the badge is meaningful even at idle.
+    route_status = status_file.get("route_status") or self_test()["route_status"]
 
     base: dict[str, Any] = {
         "schema": "autoresearch-runner-status-v1",
@@ -250,26 +251,128 @@ def read_audit() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Token gate for the mutate routes (Phase 4: deny without token; 503 with)
+# MiniMax-M2.7 self-test (harmless config-presence check; no secrets emitted)
 # ---------------------------------------------------------------------------
-def _read_token(request: Any) -> str:
-    header = request.headers.get(_TOKEN_HEADER, "") or ""
-    if header:
-        return header
-    auth = request.headers.get("authorization", "") or ""
-    prefix = "Bearer "
-    return auth[len(prefix):] if auth.startswith(prefix) else ""
+_MODEL_NEEDLE = "MiniMax-M2.7"
 
 
-def _token_ok(request: Any) -> bool:
-    expected = os.environ.get("HERMES_AUTORESEARCH_TOKEN", "") or ""
-    if not expected:
-        # No token configured → the mutate capability is not enabled at all.
-        return False
-    provided = _read_token(request)
-    if not provided:
-        return False
-    return hmac.compare_digest(provided.encode(), expected.encode())
+def _hermes_home() -> Path:
+    override = os.environ.get("HERMES_HOME")
+    if override:
+        return Path(override)
+    try:
+        from hermes_constants import get_hermes_home
+
+        return get_hermes_home()
+    except Exception:
+        return Path.home() / ".hermes"
+
+
+def self_test() -> dict[str, str]:
+    """Is the MiniMax-M2.7 route configured? config-presence only, no secrets."""
+    cfg = _hermes_home() / "config.yaml"
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"route_status": "yellow", "detail": "config.yaml unreadable"}
+    if _MODEL_NEEDLE in text:
+        return {"route_status": "configured", "detail": f"{_MODEL_NEEDLE} present in config.yaml"}
+    return {"route_status": "unavailable", "detail": f"{_MODEL_NEEDLE} not found in config.yaml"}
+
+
+# ---------------------------------------------------------------------------
+# Runner spawn / stop (no token — single-operator system; safety is the runner's
+# reversibility: backup + eval-revert + cap + SIGTERM, mutation only in skills/).
+# Apply still needs an explicit operator confirm (the one "are you sure" step).
+# ---------------------------------------------------------------------------
+_REPO = Path(__file__).resolve().parents[1]
+_RUNNER_SCRIPT = _REPO / "scripts" / "run_autoresearch_request.py"
+_REQUEST_SCRIPT = _REPO / "scripts" / "autoresearch_request.py"
+
+
+def _load_request_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("autoresearch_request", _REQUEST_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+def _spawn_runner(args: list[str]) -> int:
+    """Spawn the runner detached; return its PID. Isolated for test injection."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        [sys.executable, str(_RUNNER_SCRIPT), *args],
+        cwd=str(_REPO),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
+def _signal_pid(pid: int, sig: int) -> None:
+    os.kill(pid, sig)
+
+
+class TriggerBody(BaseModel):
+    area: str = "all"
+    focus: str = "recommended_sections"
+    mode: str = "dry-run"  # "dry-run" | "apply"
+    confirm: bool = False
+    max_iterations: int = 1
+
+
+def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
+                 max_iterations: int) -> dict[str, Any]:
+    """Create a run-request and spawn the bounded runner. No token; apply needs confirm."""
+    if mode not in {"dry-run", "apply"}:
+        raise HTTPException(status_code=400, detail="mode must be 'dry-run' or 'apply'")
+    if mode == "apply" and not confirm:
+        raise HTTPException(status_code=400, detail="apply requires confirm=true (the operator 'are you sure' step)")
+
+    state = read_runner_status()["state"]
+    if state in {"running", "stopping"}:
+        raise HTTPException(status_code=409, detail="a run is already in progress")
+
+    mi = max(1, min(int(max_iterations), 5))
+    arr = _load_request_module()
+    requests_dir = _audit_dir() / "run-requests"
+    try:
+        request_path = arr.create_request(
+            mode="skills", area=area, focus=focus, max_iterations=mi,
+            mutation_policy="requires_operator_go", requests_dir=requests_dir,
+            repo_root=_REPO, hermes_home=_hermes_home(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid request: {exc}")
+
+    args = [str(request_path)]
+    if mode == "apply":
+        args += ["--apply", "--confirm"]
+    args += ["--max-iterations", str(mi)]
+    pid = _spawn_runner(args)
+    return {
+        "ok": True, "mode": mode, "pid": pid,
+        "request_id": Path(request_path).stem, "request_path": str(request_path),
+        "area": area, "focus": focus, "max_iterations": mi,
+    }
+
+
+def stop_runner() -> dict[str, Any]:
+    """SIGTERM the running loop (read PID from the lock). No token; stop is safe."""
+    lock = _read_json(_state_dir() / "current.lock")
+    pid = lock.get("pid") if lock else None
+    if not pid:
+        return {"ok": True, "state": "idle", "detail": "nothing running"}
+    try:
+        _signal_pid(int(pid), signal.SIGTERM)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "detail": f"could not signal pid {pid}: {exc}"}
+    return {"ok": True, "signalled": int(pid), "detail": "SIGTERM sent; runner finishes its step and releases the lock"}
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +411,14 @@ th, td { text-align:left; border-bottom:1px solid var(--line); padding:8px; vert
 th { color:var(--muted); background:var(--panel); }
 .banner { border:1px solid #efcf9d; background:#fff8e9; color:#5d3b00; border-radius:8px; padding:12px 14px; }
 .muted { color:var(--muted); }
+.actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+.btn { cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:9px 14px; font-weight:700; background:#eef1ec; color:var(--ink); }
+.btn-apply { background:#e3f4ec; color:var(--accent); border-color:#bfe3d2; }
+.btn-stop { background:#fbe3e6; color:var(--bad); border-color:#f0c2c8; }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
+label.kv span { font-weight:600; }
+label.kv select, label.kv input { width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:4px; }
+code { background:#eef1ec; padding:1px 5px; border-radius:4px; }
 </style>
 </head>
 <body data-autoresearch="live-v1">
@@ -317,8 +428,23 @@ th { color:var(--muted); background:var(--panel); }
      Trigger/Stop are token-gated and the applying runner is a separate Go (Phase 5).</p>
 </header>
 <main>
-  <section class="banner"><b>Safety:</b> read-only view. No secrets, no provider routing change,
-     no skill mutation, no push/merge. Trigger/Stop require a local token (403 without it).</section>
+  <section class="banner"><b>Safety:</b> bounded &amp; reversible. Every apply takes a backup,
+     is eval-gated and reverted on regression, capped, and Stop-able; mutation only under
+     <code>~/.hermes/skills</code>. No secrets/config/routing/push.</section>
+  <section class="panel">
+    <h2>Run a campaign</h2>
+    <div class="grid">
+      <label class="kv"><span>Area</span><select id="area"></select></label>
+      <label class="kv"><span>Focus</span><input id="focus" value="recommended_sections"></label>
+      <label class="kv"><span>Iterations</span><input id="iters" type="number" min="1" max="5" value="2"></label>
+    </div>
+    <div class="actions">
+      <button id="btnDry" class="btn">▶ Dry-run (propose only)</button>
+      <button id="btnApply" class="btn btn-apply">✓ Apply (confirm)</button>
+      <button id="btnStop" class="btn btn-stop">■ Stop</button>
+    </div>
+    <p class="muted" id="actionMsg">Dry-run proposes changes without touching any file. Apply asks for confirmation.</p>
+  </section>
   <section class="panel">
     <h2>Loop status <span id="pill" class="pill pill-idle">…</span></h2>
     <div class="grid">
@@ -391,9 +517,36 @@ async function loadAudit(){
     el('resultsTable').innerHTML = '<p class="muted">audit fetch failed: '+esc(e)+'</p>';
   }
 }
+const AREAS = ['all','devops','github','software-development','research','productivity','mlops','creative','firecrawl','hermes-kanban'];
+el('area').innerHTML = AREAS.map(a => '<option value="'+a+'">'+a+'</option>').join('');
+async function trigger(mode){
+  const body = { area: el('area').value, focus: el('focus').value || 'recommended_sections',
+                 mode: mode, confirm: false, max_iterations: Number(el('iters').value||2) };
+  if (mode === 'apply'){
+    if (!confirm('Apply will edit SKILL.md files under ~/.hermes/skills (with backup + auto-revert on regression). Proceed?')) return;
+    body.confirm = true;
+  }
+  el('actionMsg').textContent = 'starting ' + mode + '…';
+  try {
+    const r = await fetch(BASE + '/autoresearch/trigger', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    el('actionMsg').textContent = r.ok ? (mode+' started (pid '+d.pid+', '+d.request_id+')') : ('error: '+(d.detail||r.status));
+  } catch(e){ el('actionMsg').textContent = 'request failed: '+e; }
+  poll();
+}
+async function stop(){
+  el('actionMsg').textContent = 'stopping…';
+  try { const r = await fetch(BASE + '/autoresearch/stop', {method:'POST'}); const d = await r.json();
+        el('actionMsg').textContent = d.detail || (r.ok?'stopped':'error'); }
+  catch(e){ el('actionMsg').textContent = 'stop failed: '+e; }
+  poll();
+}
+el('btnDry').addEventListener('click', () => trigger('dry-run'));
+el('btnApply').addEventListener('click', () => trigger('apply'));
+el('btnStop').addEventListener('click', stop);
 poll(); loadAudit();
 setInterval(poll, 4000);
-setInterval(loadAudit, 30000);
+setInterval(() => loadAudit(), 12000);
 </script>
 </body>
 </html>
@@ -430,22 +583,17 @@ def register_autoresearch_routes(app: Any) -> None:
     async def autoresearch_audit() -> dict[str, Any]:
         return read_audit()
 
+    @app.get("/autoresearch/selftest")
+    async def autoresearch_selftest() -> dict[str, Any]:
+        return self_test()
+
     @app.post("/autoresearch/trigger")
-    async def autoresearch_trigger(request: Request) -> dict[str, Any]:
-        # Token gate FIRST (no body parsing, so a missing body can't pre-empt
-        # the 403 with a 422). Phase 4 has no runner → 503 even with a token.
-        if not _token_ok(request):
-            raise HTTPException(status_code=403, detail="Forbidden: local autoresearch token required")
-        raise HTTPException(
-            status_code=503,
-            detail="Autoresearch runner is not enabled in this build (Phase 5).",
+    async def autoresearch_trigger(body: TriggerBody) -> dict[str, Any]:
+        return start_runner(
+            area=body.area, focus=body.focus, mode=body.mode,
+            confirm=body.confirm, max_iterations=body.max_iterations,
         )
 
     @app.post("/autoresearch/stop")
-    async def autoresearch_stop(request: Request) -> dict[str, Any]:
-        if not _token_ok(request):
-            raise HTTPException(status_code=403, detail="Forbidden: local autoresearch token required")
-        raise HTTPException(
-            status_code=503,
-            detail="Autoresearch runner is not enabled in this build (Phase 5).",
-        )
+    async def autoresearch_stop() -> dict[str, Any]:
+        return stop_runner()
