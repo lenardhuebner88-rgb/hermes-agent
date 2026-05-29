@@ -57,6 +57,8 @@ export function splitAutoresearchProposals(proposals: Proposal[]) {
     actionable: proposals.filter(isActionable),
     reverted: proposals.filter(isRevertedNoImprovement),
     testing: proposals.filter((p) => p.status === "testing"),
+    applied: proposals.filter((p) => p.status === "applied"),
+    skipped: proposals.filter((p) => p.status === "skipped"),
     done: proposals.filter((p) => p.status === "applied" || p.status === "skipped"),
   };
 }

@@ -54,12 +54,13 @@ function DensityControls({ density, pinned, setDensity, resetToAuto }: Pick<Prop
 function ShellAiry({ active, children, density, pinned, openProposals, onNavigate, setDensity, resetToAuto, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
-      <header className="mb-4 flex items-start justify-between gap-3">
+      <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots /><DensityControls density={density} pinned={pinned} setDensity={setDensity} resetToAuto={resetToAuto} /></div></div>
+        <DesktopTabs active={active} openProposals={openProposals} onNavigate={onNavigate} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
+      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
         <div className="grid grid-cols-4">
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} openProposals={openProposals} onClick={() => onNavigate(tab.id)} />)}
         </div>
@@ -88,6 +89,23 @@ function ShellCompact({ active, children, density, pinned, openProposals, onNavi
         <main>{children}</main>
       </div>
     </div>
+  );
+}
+
+
+function DesktopTabs({ active, openProposals, onNavigate }: { active: ControlTab; openProposals: number; onNavigate: (tab: ControlTab) => void }) {
+  return (
+    <nav className="hidden w-full flex-wrap gap-2 lg:flex">
+      {tabs.map((tab) => {
+        const Icon = tab.icon;
+        return (
+          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft", active === tab.id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
+            <Icon className="h-4 w-4" />{tab.label}
+            {tab.id === "autoresearch" && openProposals > 0 ? <span className="rounded-full bg-[var(--hc-accent)] px-1.5 text-[10px] text-white">{openProposals}</span> : null}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 

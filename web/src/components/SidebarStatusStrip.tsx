@@ -16,7 +16,8 @@ export function SidebarStatusStrip({ status }: SidebarStatusStripProps) {
   }
 
   const gw = gatewayLine(status, t);
-  const { activeSessionsLabel, gatewayStatusLabel } = t.app;
+  const { gatewayStatusLabel } = t.app;
+  const sessionsLabel = status.active_sessions_label ?? t.app.activeSessionsLabel;
 
   return (
     <Link
@@ -38,11 +39,16 @@ export function SidebarStatusStrip({ status }: SidebarStatusStripProps) {
         </p>
 
         <p className="break-words">
-          <span className="text-text-tertiary">{activeSessionsLabel}</span>{" "}
+          <span className="text-text-tertiary">{sessionsLabel}</span>{" "}
           <span className="tabular-nums text-text-secondary">
             {status.active_sessions}
           </span>
         </p>
+        {status.active_sessions_updated_at ? (
+          <p className="break-words text-[10px] text-text-tertiary">
+            Quelle: {status.active_sessions_source ?? "Status API"}
+          </p>
+        ) : null}
       </div>
     </Link>
   );

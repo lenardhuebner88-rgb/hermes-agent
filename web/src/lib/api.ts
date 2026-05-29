@@ -564,6 +564,9 @@ export interface PlatformStatus {
 
 export interface StatusResponse {
   active_sessions: number;
+  active_sessions_label?: string;
+  active_sessions_source?: string;
+  active_sessions_updated_at?: number;
   /** Phase 7: ``true`` when the dashboard's OAuth gate is engaged
    * (public bind, no ``--insecure``). Read alongside ``auth_providers``
    * to render a "gated / loopback" badge. */
@@ -964,6 +967,8 @@ export interface PluginManifestResponse {
   entry: string;
   css?: string | null;
   has_api: boolean;
+  loadable?: boolean;
+  reason?: string | null;
   source: string;
 }
 

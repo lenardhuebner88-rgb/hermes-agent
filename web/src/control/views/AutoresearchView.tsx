@@ -20,7 +20,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const split = useMemo(() => splitAutoresearchProposals(store.proposals), [store.proposals]);
   const open = split.actionable;
   const reverted = split.reverted;
-  const done = split.done;
+  const applied = split.applied;
+  const skipped = split.skipped;
   const relevanceQueue = useMemo(() => rankAutoresearchProposals(open, 10), [open]);
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
@@ -134,6 +135,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       </section>
 
+      {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
       {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
 
       <section className="space-y-3">
@@ -160,17 +162,18 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       </section>
 
       {reverted.length > 0 ? (
-        <section className="space-y-3 border-t border-white/10 pt-4">
-          <div>
-            <p className="hc-eyebrow">Zurückgerollt</p>
-            <h2 className="text-lg font-semibold text-white">{reverted.length} ohne Verbesserung</h2>
-          </div>
-          <div className="grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
-        </section>
+        <details className="space-y-3 border-t border-white/10 pt-4">
+          <summary className="cursor-pointer text-lg font-semibold text-white">Zurückgerollt ({reverted.length})</summary>
+          <div className="mt-3 grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
+        </details>
       ) : null}
 
-      {done.length > 0 ? (
-        <section className="space-y-3"><h2 className="text-lg font-semibold text-white">{de.autoresearch.done}</h2><div className="grid gap-3">{done.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></section>
+      {applied.length > 0 ? (
+        <details className="space-y-3"><summary className="cursor-pointer text-lg font-semibold text-white">Erledigt ({applied.length})</summary><div className="mt-3 grid gap-3">{applied.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></details>
+      ) : null}
+
+      {skipped.length > 0 ? (
+        <details className="space-y-3"><summary className="cursor-pointer text-lg font-semibold text-white">Übersprungen ({skipped.length})</summary><div className="mt-3 grid gap-3">{skipped.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></details>
       ) : null}
 
       <section className="hc-card p-4">
@@ -193,13 +196,19 @@ function LastRun({ status }: { status: ReturnType<typeof useAutoresearchStatus>[
   const objectRun = lastRun && typeof lastRun === "object" ? lastRun as Record<string, unknown> : null;
   const finishedAt = typeof objectRun?.finished_at === "string" ? objectRun.finished_at : null;
   const mode = typeof objectRun?.mode === "string" ? objectRun.mode : null;
+  const proposed = typeof objectRun?.proposed === "number" ? objectRun.proposed : null;
+  const persisted = typeof objectRun?.persisted === "number" ? objectRun.persisted : null;
+  const discarded = typeof objectRun?.discarded === "number" ? objectRun.discarded : null;
+  const reason = typeof objectRun?.reason === "string" ? objectRun.reason : null;
   const summary = objectRun ? [mode, finishedAt ? new Date(finishedAt).toLocaleString("de-DE") : null].filter(Boolean).join(" · ") : lastRunText;
 
-  if (!summary && !receipt && !note) return <p className="text-sm hc-soft">Letzter Lauf: noch keine verwertbaren Laufdaten.</p>;
+  if (!summary && !receipt && !note) return <p className="text-sm hc-soft">Letzter Dry-Run: noch keine verwertbaren Laufdaten.</p>;
   return (
     <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
-      <p><span className="text-white">Letzter Lauf:</span> {summary || "Backend liefert nur Statusnotiz"}</p>
-      {receipt ? <p className="mt-1 truncate">Receipt: <span className="hc-mono">{receipt}</span></p> : null}
+      <p><span className="text-white">Letzter Dry-Run:</span> {summary || "Backend liefert nur Statusnotiz"}</p>
+      {proposed !== null || persisted !== null || discarded !== null ? <p className="mt-1 hc-mono">proposed={proposed ?? "?"} · persisted={persisted ?? "?"} · discarded={discarded ?? "?"}</p> : null}
+      {reason ? <p className="mt-1">Grund: {reason}</p> : null}
+      {receipt ? <p className="mt-1 truncate">Receipt: <a className="underline" href={`/api/read-file?path=${encodeURIComponent(receipt)}`}>{receipt}</a></p> : null}
       {note ? <p className="mt-1">{note}</p> : null}
     </div>
   );

@@ -56,7 +56,7 @@ export function DiffView({ lines, showLineNumbers, collapsible = true, defaultCo
   const numbered = useMemo(() => withLineNumbers(lines), [lines]);
   const stats = diffStats(lines);
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--hc-border)] bg-black/25">
+    <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-[var(--hc-border)] bg-black/25">
       <div className="flex min-h-11 items-center justify-between gap-3 border-b border-[var(--hc-border)] px-3 py-2">
         <div><p className="text-sm font-medium text-white">Vorher / Nachher</p><p className="text-xs hc-soft">+{stats.added} / -{stats.removed}</p></div>
         {collapsible ? (
@@ -65,11 +65,11 @@ export function DiffView({ lines, showLineNumbers, collapsible = true, defaultCo
           </Button>
         ) : null}
       </div>
-      <pre className={cn("max-h-72 overflow-auto p-0 text-xs leading-5 hc-mono", collapsed && "hidden md:block")}>
+      <pre className={cn("max-h-72 max-w-full overflow-auto p-0 text-xs leading-5 hc-mono", collapsed && "hidden md:block")}>
         {numbered.map((line, idx) => (
-          <div key={`${idx}-${line.text}`} className={cn("grid min-w-max grid-cols-[auto_1fr] gap-3 px-3", line.type === "add" && "bg-emerald-500/10 text-emerald-100", line.type === "del" && "bg-red-500/10 text-red-100", line.type === "ctx" && "text-zinc-300")}>
+          <div key={`${idx}-${line.text}`} className={cn("grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-3 px-3", line.type === "add" && "bg-emerald-500/10 text-emerald-100", line.type === "del" && "bg-red-500/10 text-red-100", line.type === "ctx" && "text-zinc-300")}>
             <span className="select-none text-right text-zinc-600">{showLineNumbers ? (line.ln ?? "-") : line.type === "add" ? "+" : line.type === "del" ? "-" : " "}</span>
-            <code>{line.text || " "}</code>
+            <code className="whitespace-pre-wrap break-words">{line.text || " "}</code>
           </div>
         ))}
       </pre>

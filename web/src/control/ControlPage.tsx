@@ -62,6 +62,7 @@ export default function ControlPage() {
       >
         <Routes>
           <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} agents={openclaw.data?.agents ?? []} />} />
+          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} agents={openclaw.data?.agents ?? []} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
           <Route path="openclaw" element={<OpenClawFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />

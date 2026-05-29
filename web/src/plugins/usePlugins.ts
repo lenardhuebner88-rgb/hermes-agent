@@ -41,6 +41,11 @@ export function usePlugins() {
     const injectedScripts: HTMLScriptElement[] = [];
 
     for (const manifest of manifests) {
+      if (manifest.loadable === false) {
+        setPluginLoadError(manifest.name, manifest.reason || "LOAD_DISABLED");
+        continue;
+      }
+
       // Inject CSS if specified.
       if (manifest.css) {
         const cssUrl = `${HERMES_BASE_PATH}/dashboard-plugins/${manifest.name}/${manifest.css}`;
@@ -79,10 +84,7 @@ export function usePlugins() {
         script.crossOrigin = "anonymous";
       }
       script.onerror = () => {
-        setPluginLoadError(manifest.name, "LOAD_FAILED");
-        console.warn(
-          `[plugins] Failed to load ${manifest.name} from ${scriptSrc} (open Network tab)`,
-        );
+        setPluginLoadError(manifest.name, manifest.reason || "LOAD_FAILED");
       };
       script.onload = () => {
         notifyPluginRegistry();

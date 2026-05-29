@@ -19,14 +19,14 @@ def _empty_error_response(error: str) -> dict[str, Any]:
     return {"agents": [], "updatedAt": None, "error": error}
 
 
-def read_openclaw_agents() -> dict[str, Any]:
+async def read_openclaw_agents() -> dict[str, Any]:
     """Fetch the Mission Control live-agent payload without mutating MC state."""
     try:
-        response = httpx.get(
-            _MISSION_CONTROL_AGENTS_URL,
-            headers=_READ_HEADERS,
-            timeout=_TIMEOUT_SECONDS,
-        )
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                _MISSION_CONTROL_AGENTS_URL,
+                headers=_READ_HEADERS,
+            )
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
@@ -45,4 +45,4 @@ def register_openclaw_routes(app: Any) -> None:
 
     @app.get("/api/openclaw/agents")
     async def openclaw_agents() -> dict[str, Any]:
-        return read_openclaw_agents()
+        return await read_openclaw_agents()

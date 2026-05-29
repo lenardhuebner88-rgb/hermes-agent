@@ -738,6 +738,9 @@ async def get_status():
         "gateway_exit_reason": gateway_exit_reason,
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
+        "active_sessions_label": "Dashboard sessions (active in last 5m)",
+        "active_sessions_source": "hermes_state.SessionDB.list_sessions_rich(limit=50)",
+        "active_sessions_updated_at": int(time.time()),
         "auth_required": auth_required,
         "auth_providers": auth_providers,
     }
@@ -4400,6 +4403,7 @@ def _discover_dashboard_plugins() -> list:
                         "not be mounted",
                         name, raw_api,
                     )
+                entry, loadable, load_reason = _safe_plugin_entry_state(data.get("entry"), dashboard_dir=dashboard_dir)
                 plugins.append({
                     "name": name,
                     "label": data.get("label", name),
@@ -4408,9 +4412,11 @@ def _discover_dashboard_plugins() -> list:
                     "version": data.get("version", "0.0.0"),
                     "tab": tab_info,
                     "slots": slots,
-                    "entry": data.get("entry", "dist/index.js"),
+                    "entry": entry,
                     "css": data.get("css"),
                     "has_api": bool(safe_api),
+                    "loadable": loadable,
+                    "reason": load_reason,
                     "source": source,
                     "_dir": str(dashboard_dir),
                     "_api_file": safe_api,

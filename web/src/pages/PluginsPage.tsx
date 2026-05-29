@@ -341,6 +341,7 @@ export default function PluginsPage() {
 
 
                   {m.label ?? m.name} — {m.description || m.tab?.path}
+                  {m.loadable === false ? <Badge className="ml-2 border-warning/30 bg-warning/10 text-warning">Plugin nicht geladen: {m.reason}</Badge> : null}
 
 
                   {!m.tab?.hidden ? (
