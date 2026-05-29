@@ -280,14 +280,20 @@ def _restore_file(path: Path, skills_root: Path, backup_dir: Path) -> None:
         shutil.copy2(src, path)
 
 
-def apply_scaffold(path: Path, label: str) -> str:
-    header = _SCAFFOLD[label]
-    skill = path.parent.name
-    block = (
+def build_scaffold_block(skill: str, header: str) -> str:
+    """The exact scaffold block apply_scaffold appends. Pure (no I/O) so the
+    proposal generator can preview the same text without mutating the file."""
+    return (
         f"\n## {header}\n\n"
         f"<!-- autoresearch-scaffold: replace with concrete guidance for `{skill}` -->\n"
         f"TODO: document the **{header}** of `{skill}`.\n"
     )
+
+
+def apply_scaffold(path: Path, label: str) -> str:
+    header = _SCAFFOLD[label]
+    skill = path.parent.name
+    block = build_scaffold_block(skill, header)
     text = path.read_text(encoding="utf-8")
     if not text.endswith("\n"):
         text += "\n"

@@ -50,6 +50,9 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+# Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
+from hermes_cli import autoresearch_proposals as _proposals
+
 # hermes-agent repo root (this file lives in hermes_cli/).
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
@@ -370,6 +373,15 @@ class TriggerBody(BaseModel):
     max_iterations: int = 1
 
 
+class ApplyProposalBody(BaseModel):
+    id: str
+    confirm: bool = True
+
+
+class SkipProposalBody(BaseModel):
+    id: str
+
+
 def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
                  max_iterations: int) -> dict[str, Any]:
     """Create a run-request and spawn the bounded runner. No token; apply needs confirm."""
@@ -518,6 +530,35 @@ th{color:var(--muted);font-weight:600;background:var(--panel);position:sticky;to
 .wl-item .p{color:var(--muted);font-size:12px;word-break:break-all;width:100%;}
 code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;}
 @media (max-width:560px){ .bar .lbl{flex-basis:120px;} .topbar h1{font-size:16px;} }
+/* --- A1 proposal cards (the One-Click centerpiece) --- */
+.prop-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:6px;}
+.prop-toolbar .spacer{flex:1 1 auto;}
+.prop{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:14px 15px;margin-bottom:12px;}
+.prop.is-applied{opacity:.72;border-style:dashed;}
+.prop.is-skipped{opacity:.55;border-style:dashed;}
+.prop-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;}
+.prop-title{font-weight:700;font-size:15px;}
+.mode-badge{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;text-transform:uppercase;letter-spacing:.3px;}
+.mode-skill{background:var(--accent-soft);color:var(--accent);}
+.mode-code{background:var(--bad-soft);color:var(--bad);}
+.prop-why{color:var(--muted);font-size:13.5px;line-height:1.55;margin:8px 0 10px;}
+.prop-why b{color:var(--ink);}
+.diff{margin:0;border:1px solid var(--line);border-radius:9px;background:var(--card);overflow:hidden;}
+.diff>summary{cursor:pointer;list-style:none;padding:8px 12px;font-size:12.5px;color:var(--muted);user-select:none;}
+.diff>summary::-webkit-details-marker{display:none;}
+.diff>summary::before{content:"▸ ";}
+.diff[open]>summary::before{content:"▾ ";}
+.diff pre{margin:0;max-height:300px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.5;border-top:1px solid var(--line);}
+.diff .dl{display:block;padding:0 12px;white-space:pre-wrap;word-break:break-word;}
+.diff .add{background:var(--accent-soft);color:var(--accent);}
+.diff .del{background:var(--bad-soft);color:var(--bad);}
+.diff .hdr{color:var(--info);}
+.diff .ctx{color:var(--muted);}
+.prop-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px;align-items:center;}
+.prop-result{font-size:13px;margin-top:9px;padding:7px 10px;border-radius:8px;}
+.prop-result.ok{background:var(--accent-soft);color:var(--accent);}
+.prop-result.err{background:var(--warn-soft);color:var(--warn);}
+.done-head{margin:16px 0 8px;font-size:13px;color:var(--muted);font-weight:600;}
 </style>
 </head>
 <body data-autoresearch="live-v2">
@@ -532,6 +573,18 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
   <section class="card nextstep" id="nextstepCard">
     <h2>👉 Dein nächster Schritt</h2>
     <div id="nextstep" class="nextstep-body">…</div>
+  </section>
+
+  <section class="card" id="proposalsCard">
+    <h2>💡 Verbesserungs-Vorschläge <span class="badge badge-info" id="propOpenCount"></span></h2>
+    <div class="prop-toolbar">
+      <button class="btn btn-primary" id="btnGenerate">✨ Verbesserungen holen</button>
+      <span class="spacer"></span>
+      <button class="btn btn-apply" id="btnApplyAll" title="Alle offenen Skill-Vorschläge übernehmen">✓ Alle übernehmen</button>
+    </div>
+    <p class="muted" style="margin:2px 0 12px;">Jeder Vorschlag zeigt im Klartext <b>was</b> und <b>warum</b> — mit echtem Vorher/Nachher-Diff. „Übernehmen“ schreibt genau das live (Backup + Auto-Revert, wenn’s nichts verbessert).</p>
+    <div id="proposalsOpen"><p class="muted">loading…</p></div>
+    <div id="proposalsDone"></div>
   </section>
 
   <section class="card">
@@ -726,14 +779,94 @@ async function stop(){
   catch(e){toast('stop failed: '+e,'err');}
   poll();
 }
+// ---- A1 proposals (One-Click flow) ----
+let gProposals={proposals:[],open_count:0};
+function renderDiff(diff){
+  if(!diff)return '<p class="muted" style="padding:6px 12px;">Kein Diff.</p>';
+  const lines=String(diff).split('\\n').map(l=>{
+    let cls='ctx';
+    if(l.startsWith('+++')||l.startsWith('---'))cls='hdr';
+    else if(l.startsWith('@@'))cls='hdr';
+    else if(l.startsWith('+'))cls='add';
+    else if(l.startsWith('-'))cls='del';
+    return '<span class="dl '+cls+'">'+esc(l||' ')+'</span>';
+  }).join('');
+  return '<details class="diff"><summary>Vorher / Nachher anzeigen</summary><pre>'+lines+'</pre></details>';
+}
+function propCard(p){
+  const st=p.status||'proposed';
+  const modeCls=p.mode==='code'?'mode-code':'mode-skill';
+  const modeLbl=p.mode==='code'?'Code · riskanter':'Skill';
+  let actions='';
+  if(st==='proposed'){
+    actions='<button class="btn btn-apply" data-apply="'+esc(p.id)+'">✓ Übernehmen</button>'+
+            '<button class="btn" data-skip="'+esc(p.id)+'">Überspringen</button>';
+  }
+  let result=p.result?('<div class="prop-result '+(st==='applied'?'ok':(st==='proposed'?'err':''))+'">'+esc(p.result)+'</div>'):'';
+  return '<div class="prop is-'+esc(st)+'" id="prop-'+esc(p.id)+'">'+
+    '<div class="prop-head"><span class="prop-title">'+esc(p.title||p.id)+'</span>'+
+      '<span class="mode-badge '+modeCls+'">'+esc(modeLbl)+'</span></div>'+
+    '<div class="prop-why"><b>Warum:</b> '+esc(p.rationale_plain||'')+'</div>'+
+    renderDiff(p.diff_before_after)+
+    '<div class="prop-actions">'+actions+'</div>'+result+'</div>';
+}
+function renderProposals(){
+  const all=gProposals.proposals||[];
+  const open=all.filter(p=>p.status==='proposed');
+  const done=all.filter(p=>p.status!=='proposed');
+  $('propOpenCount').textContent=open.length?(open.length+' offen'):'';
+  $('btnApplyAll').disabled=!open.some(p=>p.mode!=='code');
+  $('proposalsOpen').innerHTML=open.length?open.map(propCard).join(''):
+    '<div class="empty">Keine offenen Vorschläge. Klick „Verbesserungen holen“, um welche zu erzeugen.</div>';
+  $('proposalsDone').innerHTML=done.length?('<div class="done-head">Erledigt</div>'+done.map(propCard).join('')):'';
+  $('proposalsOpen').querySelectorAll('[data-apply]').forEach(b=>b.addEventListener('click',()=>applyProposal(b.getAttribute('data-apply'))));
+  $('proposalsOpen').querySelectorAll('[data-skip]').forEach(b=>b.addEventListener('click',()=>skipProposal(b.getAttribute('data-skip'))));
+}
+async function loadProposals(){
+  try{gProposals=await(await fetch(BASE+'/autoresearch/proposals',{headers:{'Accept':'application/json'}})).json();}
+  catch(e){gProposals={proposals:[],open_count:0};}
+  renderProposals();
+}
+async function applyProposal(id){
+  toast('übernehme '+id+'…');
+  try{
+    const r=await fetch(BASE+'/autoresearch/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,confirm:true})});
+    const d=await r.json();
+    if(d.ok)toast('✓ übernommen: '+id,'ok');
+    else toast('nicht übernommen: '+(d.detail||d.result||r.status),'err');
+  }catch(e){toast('apply fehlgeschlagen: '+e,'err');}
+  loadProposals();loadAudit();loadWorklist();
+}
+async function skipProposal(id){
+  try{await fetch(BASE+'/autoresearch/skip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});toast('übersprungen: '+id,'ok');}
+  catch(e){toast('skip fehlgeschlagen: '+e,'err');}
+  loadProposals();
+}
+async function generateProposals(){
+  toast('suche Verbesserungen…');
+  try{
+    const d=await(await fetch(BASE+'/autoresearch/generate',{method:'POST'})).json();
+    toast(d.created_count?('✨ '+d.created_count+' neue(r) Vorschlag/Vorschläge'):'keine neuen Kandidaten gefunden',d.created_count?'ok':null);
+  }catch(e){toast('generate fehlgeschlagen: '+e,'err');}
+  loadProposals();
+}
+async function applyAll(){
+  const open=(gProposals.proposals||[]).filter(p=>p.status==='proposed'&&p.mode!=='code');
+  if(!open.length){toast('nichts offen zum Übernehmen');return;}
+  if(!confirm('Alle '+open.length+' offenen Skill-Vorschläge übernehmen? (Backup + Auto-Revert pro Stück)'))return;
+  for(const p of open){await applyProposal(p.id);}
+  toast('Alle übernommen ('+open.length+')','ok');
+}
+$('btnGenerate').addEventListener('click',generateProposals);
+$('btnApplyAll').addEventListener('click',applyAll);
 $('btnDry').addEventListener('click',()=>trigger('dry-run'));
 $('btnApply').addEventListener('click',()=>trigger('apply'));
 $('btnStop').addEventListener('click',stop);
-$('refresh').addEventListener('click',()=>{poll();loadAudit();loadWorklist();});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll();loadAudit();loadWorklist();}});
+$('refresh').addEventListener('click',()=>{poll();loadAudit();loadWorklist();loadProposals();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll();loadAudit();loadWorklist();loadProposals();}});
 let pollTimer=setInterval(()=>{if(!document.hidden)poll();},4000);
-let auditTimer=setInterval(()=>{if(!document.hidden){loadAudit();loadWorklist();}},12000);
-poll();loadAudit();loadWorklist();setControls();
+let auditTimer=setInterval(()=>{if(!document.hidden){loadAudit();loadWorklist();loadProposals();}},12000);
+poll();loadAudit();loadWorklist();loadProposals();setControls();
 </script>
 </body>
 </html>
@@ -788,3 +921,24 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.post("/autoresearch/stop")
     async def autoresearch_stop() -> dict[str, Any]:
         return stop_runner()
+
+    # --- Sprint A1: One-Click proposals (persistent store + apply-by-id) ---
+    @app.get("/autoresearch/proposals")
+    async def autoresearch_proposals() -> dict[str, Any]:
+        return _proposals.proposals_payload()
+
+    @app.post("/autoresearch/generate")
+    async def autoresearch_generate() -> dict[str, Any]:
+        """Deterministic (A1): discover skill-improvement candidates and persist
+        them as previewable proposals. No mutation, no model."""
+        return _proposals.generate_proposals()
+
+    @app.post("/autoresearch/apply")
+    async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:
+        """Apply exactly one stored proposal: backup → write → eval-gate →
+        keep/auto-revert. Skill-mode only in A1; code-mode is gated to A3."""
+        return _proposals.apply_proposal(body.id, confirm=body.confirm)
+
+    @app.post("/autoresearch/skip")
+    async def autoresearch_skip_proposal(body: SkipProposalBody) -> dict[str, Any]:
+        return _proposals.skip_proposal(body.id)
