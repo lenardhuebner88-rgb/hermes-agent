@@ -21,6 +21,18 @@ RUNNER = ROOT / "scripts" / "run_autoresearch_request.py"
 REQUEST_SCRIPT = ROOT / "scripts" / "autoresearch_request.py"
 
 
+class _Msg:
+    content = "pong"
+
+
+class _Choice:
+    message = _Msg()
+
+
+class _Resp:
+    choices = [_Choice()]
+
+
 def _load(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -88,6 +100,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(state))
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(audit))
     runner = _load("run_autoresearch_request", RUNNER)
+    monkeypatch.setattr(runner, "_call_auxiliary_llm", lambda **_kwargs: _Resp())
     arr = _load("autoresearch_request", REQUEST_SCRIPT)
     return {
         "runner": runner, "arr": arr, "home": home, "skills": skills,
@@ -130,14 +143,25 @@ def test_discovery_skips_archived_and_hidden_skills(env):
 
 
 def test_self_test_configured_when_model_in_config(env):
-    status, _detail = env["runner"].self_test()
+    status, detail = env["runner"].self_test()
     assert status == "configured"
+    assert "skills_hub" in detail
 
 
 def test_self_test_unavailable_when_model_absent(env, monkeypatch):
     (env["home"] / "config.yaml").write_text("model: something-else\n", encoding="utf-8")
     status, _detail = env["runner"].self_test()
     assert status == "unavailable"
+
+
+def test_self_test_yellow_when_model_ping_fails(env, monkeypatch):
+    def _boom(**_kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(env["runner"], "_call_auxiliary_llm", _boom)
+    status, detail = env["runner"].self_test()
+    assert status == "yellow"
+    assert "RuntimeError" in detail
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +285,7 @@ def test_double_run_refused_while_fresh_lock(env):
 # SIGTERM stop on a paced dry-run loop (real subprocess)
 # --------------------------------------------------------------------------
 def test_sigterm_stops_loop_and_releases_lock(env):
+    (env["home"] / "config.yaml").write_text("model: something-else\n", encoding="utf-8")
     req = _make_request(env)
     e = dict(os.environ)
     e["HERMES_AUTORESEARCH_STEP_SLEEP"] = "2"  # pace the loop so we can interrupt it

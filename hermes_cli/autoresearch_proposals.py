@@ -34,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,10 @@ from typing import Any
 _REPO = Path(__file__).resolve().parents[1]
 _RUNNER_SCRIPT = _REPO / "scripts" / "run_autoresearch_request.py"
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from scripts.autoresearch_writer import draft_section  # noqa: E402
 
 PROPOSAL_SCHEMA = "autoresearch-proposal-v1"
 _VALID_MODES = {"skill", "code"}
@@ -138,7 +143,7 @@ def list_proposals() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
-    "rationale_plain", "diff_before_after", "status", "result",
+    "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "result",
     "created_at", "applied_at",
 )
 
@@ -161,7 +166,7 @@ def proposals_payload() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Generate (deterministic — A1). Reuses the runner's candidate discovery.
+# Generate. Reuses the runner's candidate discovery.
 # ---------------------------------------------------------------------------
 def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any]:
     path: Path = cand["path"]
@@ -169,7 +174,24 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
     skill: str = cand["skill"]
     header = runner._SCAFFOLD[label]
     before = path.read_text(encoding="utf-8")
-    block = runner.build_scaffold_block(skill, header)
+    writer = "scaffold"
+    writer_res: dict[str, Any]
+    try:
+        writer_res = draft_section(skill, header, before)
+    except Exception as exc:
+        writer_res = {"ok": False, "reason": f"writer failed: {type(exc).__name__}"}
+    if writer_res.get("ok") and isinstance(writer_res.get("text"), str):
+        block = writer_res["text"]
+        writer = "minimax"
+        rationale = writer_res.get("rationale") or "MiniMax hat einen fertigen Abschnitt vorgeschlagen."
+    else:
+        block = runner.build_scaffold_block(skill, header)
+        reason = writer_res.get("reason") or "writer unavailable"
+        rationale = (
+            f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
+            f"Der MiniMax-Schreiber lieferte keinen validen Abschnitt ({reason}); "
+            f"Autoresearch fällt deshalb auf das reversible Gerüst zurück."
+        )
     after = before if before.endswith("\n") else before + "\n"
     after = after + block
     pid = f"{_slug(skill)}-{_slug(header)}"
@@ -183,14 +205,16 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
         "eval_label": label,
         "title": f"Abschnitt „{header}“ zu {skill} hinzufügen",
         "rationale_plain": (
+            rationale if writer == "scaffold" else
             f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
-            f"Autoresearch fügt ein klar markiertes Gerüst ein, das du danach mit "
-            f"echtem Inhalt füllst. Wird automatisch zurückgerollt, wenn die "
-            f"Skill-Prüfung dadurch nicht besser wird."
+            f"Autoresearch hat dafür einen fertigen MiniMax-Abschnitt erzeugt. "
+            f"Wird automatisch zurückgerollt, wenn die Skill-Prüfung dadurch nicht besser wird."
         ),
         "before_text": before,
         "after_text": after,
         "new_text": block,
+        "writer": writer,
+        "writer_rationale": rationale,
         "diff_before_after": _make_diff(before, after, f"{skill}/SKILL.md"),
         "status": "proposed",
         "created_at": _utc_now(),

@@ -33,6 +33,9 @@ def tmp_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_SKILLS_ROOT", str(skills))
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(home / "skill-audit"))
     monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(home / "skill-audit" / "runner-state"))
+    monkeypatch.setattr(proposals, "draft_section", lambda *_args, **_kwargs: {
+        "ok": False, "reason": "offline test fallback",
+    })
     (home / "config.yaml").write_text("model: MiniMax-M2.7\n", encoding="utf-8")
     return home
 
@@ -63,6 +66,7 @@ def test_generate_creates_proposals_for_thin_skill(tmp_home):
         assert p["rationale_plain"]
         assert p["diff_before_after"]
         assert p["new_text"]
+        assert p["writer"] == "scaffold"
 
 
 def test_generate_is_idempotent(tmp_home):
@@ -103,6 +107,42 @@ def test_apply_keeps_and_mutates_with_backup(tmp_home):
     assert stored["status"] == "applied"
     assert stored["result"].startswith("✓")
     assert Path(stored["backup_dir"]).exists()
+
+
+def test_generate_uses_minimax_draft_when_valid(tmp_home, monkeypatch):
+    skill = _write_skill(tmp_home / "skills", "mu", "# Mu\n\nThin.\n")
+
+    def _draft(_skill, header, _text, **_kwargs):
+        return {
+            "ok": True,
+            "text": (
+                f"\n## {header}\n\n"
+                "Use this when the Mu skill needs a concrete trigger for operator review.\n"
+            ),
+            "rationale": "drafted in test",
+        }
+
+    monkeypatch.setattr(proposals, "draft_section", _draft)
+    pid = proposals.generate_proposals()["created"][0]
+    stored = proposals.load_proposal(pid)
+    assert stored["new_text"].startswith(f"\n## {stored['section']}\n\n")
+    assert stored["writer"] == "minimax"
+    assert "concrete trigger" in stored["diff_before_after"]
+    res = proposals.apply_proposal(pid, confirm=True)
+    assert res["status"] == "applied"
+    assert "concrete trigger" in skill.read_text(encoding="utf-8")
+
+
+def test_generate_falls_back_when_writer_returns_invalid(tmp_home, monkeypatch):
+    _write_skill(tmp_home / "skills", "nu", "# Nu\n\nThin.\n")
+    monkeypatch.setattr(proposals, "draft_section", lambda *_args, **_kwargs: {
+        "ok": False,
+        "reason": "missing expected section header",
+    })
+    pid = proposals.generate_proposals()["created"][0]
+    stored = proposals.load_proposal(pid)
+    assert stored["writer"] == "scaffold"
+    assert "autoresearch-scaffold" in stored["new_text"]
 
 
 def test_apply_requires_confirm(tmp_home):

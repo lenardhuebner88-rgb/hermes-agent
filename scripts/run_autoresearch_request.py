@@ -41,14 +41,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
+REPO = _SCRIPTS.parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 import autoresearch_request as arr  # noqa: E402  (sibling script)
 import eval_local_skills as evals  # noqa: E402  (sibling script)
 from hermes_constants import get_hermes_home  # noqa: E402
 
-REPO = _SCRIPTS.parent
 _DEFAULT_AUDIT = REPO / ".hermes" / "skill-audit"
 RESULTS_COLUMNS = [
     "timestamp", "mode", "target", "hypothesis", "change",
@@ -113,15 +115,31 @@ def _under(path: Path, root: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Self-test (harmless config-presence check; no secrets emitted)
 # ---------------------------------------------------------------------------
+def _call_auxiliary_llm(**kwargs):
+    from agent.auxiliary_client import call_llm
+    return call_llm(**kwargs)
+
+
 def self_test() -> tuple[str, str]:
     cfg = _config_yaml()
     try:
         text = cfg.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "yellow", "config.yaml unreadable; route unverified"
-    if MODEL_NEEDLE in text:
-        return "configured", f"{MODEL_NEEDLE} present in config.yaml"
-    return "unavailable", f"{MODEL_NEEDLE} not found in config.yaml"
+    if MODEL_NEEDLE not in text:
+        return "unavailable", f"{MODEL_NEEDLE} not found in config.yaml"
+    try:
+        resp = _call_auxiliary_llm(
+            task="skills_hub",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8,
+            temperature=0,
+            timeout=10,
+        )
+        _ = (resp.choices[0].message.content or "")
+        return "configured", f"{MODEL_NEEDLE} reachable via skills_hub aux"
+    except Exception as exc:
+        return "yellow", f"model ping failed: {type(exc).__name__}"
 
 
 # ---------------------------------------------------------------------------
