@@ -10,15 +10,18 @@ operator actually cares about:
 * ``missing_trigger``  — no "when to use" / activation trigger at all
 * ``unclear_trigger``  — a trigger exists but is vague / un-actionable
 * ``incomplete_steps`` — the procedure stops mid-way / has an obvious gap
-* ``missing_section``  — a recommended section is absent (the deterministic AR0
-                         signal, folded in so this is a strict *superset* of the
-                         old ``discover_candidates``)
+* ``missing_section``  — a recommended section is absent. RESERVED category: it
+                         carries a severity weight so the deterministic AR0
+                         signal from ``run_autoresearch_request.discover_candidates``
+                         can be *folded in* later, but THIS module does not emit
+                         it yet — it is purely model-driven today and complements
+                         (does not replace) ``discover_candidates``.
 
 The semantic categories are detected by the **MiniMax-M2.7** model over the
 existing ``skills_hub`` auxiliary slot (``agent.auxiliary_client.call_llm(
 task="skills_hub", ...)`` — the very slot AR1's writer uses; an *unknown* task
 name would silently fall back to gpt-5.5, so we deliberately reuse ``skills_hub``
-and never touch config). ``missing_section`` stays deterministic.
+and never touch config).
 
 Guardrails carried over from AR1.1 / the apply-gate (Sprint-D D4):
 
