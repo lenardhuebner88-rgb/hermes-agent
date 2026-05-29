@@ -3,8 +3,9 @@
 
 Covers the One-Click contract: generate persists previewable proposals (store
 roundtrip); apply is confirm-gated and reversible (backup → write → eval-gate →
-keep or auto-revert); skip closes a proposal; code-mode apply is refused until
-the A3 test-suite gate; the FastAPI routes wire it all together.
+keep or auto-revert); skip closes a proposal; code-mode apply runs the A3
+test-suite gate (keep on green, auto-revert on red/crash); the FastAPI routes
+wire it all together.
 """
 from __future__ import annotations
 
@@ -235,31 +236,126 @@ def test_skip_closes_proposal(tmp_home):
 
 
 # ---------------------------------------------------------------------------
-# Code-mode is gated to A3
+# A3: code-mode test-suite gate + minimal generator
 # ---------------------------------------------------------------------------
-def test_code_mode_apply_is_gated(tmp_home):
-    skill = _write_skill(tmp_home / "skills", "kappa", "# Kappa\n\nThin.\n")
-    before = skill.read_text(encoding="utf-8")
-    code = {
-        "id": "kappa-code",
-        "schema": proposals.PROPOSAL_SCHEMA,
-        "mode": "code",
-        "target": "kappa",
-        "target_path": str(skill),
-        "section": "n/a",
-        "eval_label": "Output / Ergebnis",
-        "title": "Code change",
-        "rationale_plain": "test",
-        "before_text": before, "after_text": before, "new_text": "x",
-        "diff_before_after": "x", "status": "proposed",
-        "created_at": "2026-05-29T00:00:00Z", "applied_at": None, "result": None,
-    }
-    proposals.save_proposal(code)
-    res = proposals.apply_proposal("kappa-code", confirm=True)
+@pytest.fixture()
+def tmp_repo(tmp_path, monkeypatch):
+    """A throwaway repo root so code-proposal apply never touches the real tree."""
+    repo = tmp_path / "repo"
+    (repo / "agent").mkdir(parents=True)
+    monkeypatch.setattr(proposals, "_REPO", repo)
+    return repo
+
+
+def test_build_code_proposal_roundtrip(tmp_home, tmp_repo):
+    target = tmp_repo / "agent" / "foo.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "x = 2\n", title="bump x", rationale="weil")
+    assert p["mode"] == "code"
+    assert p["status"] == "proposed"
+    assert p["after_text"] == "x = 2\n"
+    assert p["target"] == "agent/foo.py"
+    assert "x = 2" in p["diff_before_after"]
+    stored = proposals.load_proposal(p["id"])
+    assert stored["after_text"] == "x = 2\n"
+    # Bulky before/after stay server-side in the list payload.
+    proposals.proposals_payload()  # must not raise with a gate-bearing proposal
+
+
+def test_code_apply_writes_live_and_marks_testing(tmp_home, tmp_repo, monkeypatch):
+    target = tmp_repo / "agent" / "foo.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "x = 2\n", title="bump", rationale="r")
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)  # no real worker
+    res = proposals.apply_proposal(p["id"], confirm=True)
+    assert res["ok"] is True
+    assert res["status"] == "testing"
+    assert target.read_text(encoding="utf-8") == "x = 2\n"  # written live, pending the gate
+    stored = proposals.load_proposal(p["id"])
+    assert stored["status"] == "testing"
+    assert stored["gate"]["phase"] == "running"
+    assert stored["gate"]["pid"] == 4242
+
+
+def test_code_gate_keeps_on_green(tmp_home, tmp_repo, monkeypatch):
+    target = tmp_repo / "agent" / "foo.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "x = 2\n", title="bump", rationale="r")
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)
+    proposals.apply_proposal(p["id"], confirm=True)
+    fin = proposals.finalize_code_gate(p["id"], run_suite=lambda log: (0, "==== 3 passed ===="))
+    assert fin["ok"] is True
+    assert fin["status"] == "applied"
+    assert target.read_text(encoding="utf-8") == "x = 2\n"  # kept
+    stored = proposals.load_proposal(p["id"])
+    assert stored["status"] == "applied"
+    assert stored["gate"]["phase"] == "passed"
+    assert "passed" in stored["result"]
+
+
+def test_code_gate_reverts_on_red(tmp_home, tmp_repo, monkeypatch):
+    target = tmp_repo / "agent" / "bar.py"
+    target.write_text("ok = True\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "ok = False\n", title="break", rationale="r")
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)
+    proposals.apply_proposal(p["id"], confirm=True)
+    assert target.read_text(encoding="utf-8") == "ok = False\n"  # written before the gate
+    fin = proposals.finalize_code_gate(p["id"], run_suite=lambda log: (1, "==== 1 failed ===="))
+    assert fin["ok"] is False
+    assert fin.get("reverted") is True
+    assert target.read_text(encoding="utf-8") == "ok = True\n"  # restored from backup
+    stored = proposals.load_proposal(p["id"])
+    assert stored["status"] == "proposed"  # reopened for retry/skip
+    assert stored["gate"]["phase"] == "failed"
+
+
+def test_code_apply_outside_repo_refused(tmp_home, tmp_repo):
+    outside = tmp_home / "skills" / "x.py"  # under HERMES_HOME, not the repo
+    outside.write_text("y = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(outside, "y = 2\n", title="t", rationale="r")
+    res = proposals.apply_proposal(p["id"], confirm=True)
     assert res["ok"] is False
-    assert res.get("gated")
-    assert skill.read_text(encoding="utf-8") == before  # nothing written
-    assert proposals.load_proposal("kappa-code")["status"] == "proposed"
+    assert "inside the repo" in res["detail"]
+    assert outside.read_text(encoding="utf-8") == "y = 1\n"  # untouched
+
+
+def test_code_apply_self_protect_refused(tmp_home, tmp_repo):
+    target = tmp_repo / "scripts" / "run_tests.sh"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("echo hi\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "echo pwned\n", title="t", rationale="r")
+    res = proposals.apply_proposal(p["id"], confirm=True)
+    assert res["ok"] is False
+    assert "gate" in res["detail"].lower()
+    assert target.read_text(encoding="utf-8") == "echo hi\n"  # untouched
+
+
+def test_testing_gate_crash_is_reconciled(tmp_home, tmp_repo, monkeypatch):
+    target = tmp_repo / "agent" / "baz.py"
+    target.write_text("a = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "a = 2\n", title="t", rationale="r")
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)
+    proposals.apply_proposal(p["id"], confirm=True)
+    assert proposals.load_proposal(p["id"])["status"] == "testing"
+    # Worker is gone without a verdict → the read path auto-reverts it.
+    monkeypatch.setattr(proposals, "_pid_alive", lambda pid: False)
+    proposals.list_proposals()
+    stored = proposals.load_proposal(p["id"])
+    assert stored["status"] == "proposed"
+    assert stored["gate"]["phase"] == "crashed"
+    assert target.read_text(encoding="utf-8") == "a = 1\n"  # restored
+
+
+def test_route_code_apply_returns_testing(client, tmp_home, tmp_repo, monkeypatch):
+    target = tmp_repo / "agent" / "route.py"
+    target.write_text("v = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "v = 2\n", title="t", rationale="r")
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)
+    r = client.post("/autoresearch/apply", json={"id": p["id"], "confirm": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "testing"
 
 
 # ---------------------------------------------------------------------------

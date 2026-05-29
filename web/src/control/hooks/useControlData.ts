@@ -103,16 +103,27 @@ export function useProposals() {
   }, [log, state]);
 
   const apply = useCallback(async (proposal: Proposal) => {
-    if (proposal.mode === "code") return;
+    const isCode = proposal.mode === "code";
     setBusy(proposal.id);
-    mutateProposal(proposal.id, { status: "applied", result: "übernommen" });
+    // Code apply kicks off the full test-suite gate (async, status "testing");
+    // skill apply resolves synchronously.
+    mutateProposal(proposal.id, isCode
+      ? { status: "testing", result: "Test-Suite läuft …" }
+      : { status: "applied", result: "übernommen" });
     try {
-      const result = await fetchJSON<{ ok?: boolean; result?: string; gated?: string }>("/autoresearch/apply", {
+      const result = await fetchJSON<{ ok?: boolean; status?: string; result?: string; detail?: string }>("/autoresearch/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: proposal.id, confirm: true }),
       });
-      log(`${proposal.title ?? proposal.target}: ${result.result ?? "übernommen"}`, "emerald");
+      const label = proposal.title ?? proposal.target;
+      if (result.status === "testing") {
+        log(`${label}: Test-Suite gestartet — Ergebnis folgt`, "violet");
+      } else if (result.ok === false) {
+        log(`${label}: ${result.detail ?? result.result ?? "nicht übernommen"}`, "amber");
+      } else {
+        log(`${label}: ${result.result ?? "übernommen"}`, "emerald");
+      }
       await state.reload();
     } catch (e) {
       log(`Übernehmen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");

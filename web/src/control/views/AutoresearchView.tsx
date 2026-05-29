@@ -18,7 +18,9 @@ type ProposalStore = ReturnType<typeof useProposals>;
 export function AutoresearchView({ density, store }: { density: Density; store: ProposalStore }) {
   const status = useAutoresearchStatus();
   const open = store.proposals.filter((p) => p.status === "proposed");
-  const done = store.proposals.filter((p) => p.status !== "proposed");
+  const testing = store.proposals.filter((p) => p.status === "testing");
+  const active = [...open, ...testing];
+  const done = store.proposals.filter((p) => p.status === "applied" || p.status === "skipped");
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
   const [maxIterations, setMaxIterations] = useState(2);
@@ -135,9 +137,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       <section className="space-y-3">
         <div className="flex items-center justify-between"><h2 className="text-lg font-semibold text-white">{de.autoresearch.proposals}</h2>{store.loading ? <Spinner /> : null}</div>
-        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
+        {active.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
-          {open.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} busy={store.busy === proposal.id} onApply={store.apply} onSkip={store.skip} />)}
+          {active.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} busy={store.busy === proposal.id} onApply={store.apply} onSkip={store.skip} />)}
         </div>
       </section>
 

@@ -34,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,6 +43,8 @@ from typing import Any
 
 _REPO = Path(__file__).resolve().parents[1]
 _RUNNER_SCRIPT = _REPO / "scripts" / "run_autoresearch_request.py"
+_GATE_RUNNER = _REPO / "scripts" / "run_proposal_code_gate.py"
+_TEST_RUNNER = _REPO / "scripts" / "run_tests.sh"
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -50,8 +53,22 @@ from scripts.autoresearch_writer import draft_section  # noqa: E402
 
 PROPOSAL_SCHEMA = "autoresearch-proposal-v1"
 _VALID_MODES = {"skill", "code"}
-_VALID_STATUS = {"proposed", "applied", "skipped"}
+# "testing" = a code proposal is live-written and the full test-suite gate (A3)
+# is running in a detached worker; it resolves to "applied" (green) or back to
+# "proposed" (red / crashed, auto-reverted).
+_VALID_STATUS = {"proposed", "testing", "applied", "skipped"}
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+# A code proposal may never edit the gate's own harness — otherwise a proposal
+# could neuter the very test-suite that is supposed to vet it. Repo-relative.
+_GATE_SELF_PROTECT = frozenset({
+    "scripts/run_tests.sh",
+    "scripts/run_tests_parallel.py",
+    "scripts/run_proposal_code_gate.py",
+    "hermes_cli/autoresearch_proposals.py",
+    "conftest.py",
+    "tests/conftest.py",
+})
 
 # AR2 relevance ranking. Section criticality is a fixed, easily-tuned weight:
 # a missing Safety or trigger (When-to-Use) section costs an agent system far
@@ -146,7 +163,10 @@ def list_proposals() -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         if isinstance(data, dict):
-            out.append(data)
+            # Kill-switch safety: a "testing" proposal whose gate worker died
+            # without finalising is auto-reverted here, on the read path, so a
+            # crashed gate can never leave a half-applied code edit live.
+            out.append(_reconcile_testing(data))
     # Stable multi-pass sort (least-significant first): newest-first, then by
     # AR2 rank_score (highest impact first), then grouped open → applied →
     # skipped. Pre-AR2 proposals lack rank_score → treated as 0, order unchanged.
@@ -163,7 +183,7 @@ def list_proposals() -> list[dict[str, Any]]:
 _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
     "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "result",
-    "created_at", "applied_at", "rank_score", "rank_reason",
+    "created_at", "applied_at", "rank_score", "rank_reason", "gate",
 )
 
 
@@ -439,14 +459,10 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
     if mode not in _VALID_MODES:
         return {"ok": False, "detail": f"unknown mode '{mode}'", "status": "proposed"}
     if mode == "code":
-        # Code edits go live only behind the hard test-suite gate (Sprint A3).
-        return {
-            "ok": False,
-            "detail": "code-mode apply ist noch nicht freigeschaltet — kommt mit dem "
-                      "Test-Suite-Gate in Sprint A3. Skill-Vorschläge sind übernehmbar.",
-            "status": "proposed",
-            "gated": "test-suite (A3)",
-        }
+        # A3: code edits go live behind the full test-suite gate. Validate →
+        # backup → write → mark "testing" → spawn detached gate worker. The
+        # worker runs the whole suite and keeps (green) or auto-reverts (red).
+        return _apply_code_proposal(proposal, pid)
 
     runner = _runner()
     skills_root = runner._skills_root()
@@ -498,3 +514,308 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
     save_proposal(proposal)
     return {"ok": False, "status": "proposed", "id": pid,
             "detail": proposal["result"], "reverted": True, "eval_result": eval_result}
+
+
+# ---------------------------------------------------------------------------
+# A3: code-mode test-suite gate
+#
+# A code proposal carries a full ``after_text`` for one repo file. Applying it
+# is reversible by construction: backup → write → run the *whole* test suite in
+# a detached worker → keep on green, auto-revert on red (or on a crashed gate,
+# reconciled on the next read). The full suite is the honest gate (a code edit
+# can break tests far from the file it touches); it runs out-of-band so the
+# HTTP apply returns immediately with status "testing".
+# ---------------------------------------------------------------------------
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _backup_code_file(path: Path, backup_dir: Path) -> None:
+    rel = path.resolve().relative_to(_REPO.resolve())
+    dest = backup_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        shutil.copy2(path, dest)
+
+
+def _restore_code_file(path: Path, backup_dir: Path) -> None:
+    rel = path.resolve().relative_to(_REPO.resolve())
+    src = backup_dir / rel
+    if src.exists():
+        shutil.copy2(src, path)
+
+
+def _code_target_ok(path: Path) -> tuple[bool, str]:
+    """A code proposal may only touch a real file inside the repo, never a
+    secret/auth/config/db surface, never ``.git``, never the gate's own harness."""
+    try:
+        rp = path.resolve()
+    except OSError:
+        return False, f"target path unreadable: {path}"
+    if not rp.exists() or not rp.is_file():
+        return False, f"target no longer exists: {path}"
+    if not _under(rp, _REPO):
+        return False, f"refused: code target must live inside the repo ({_REPO})"
+    try:
+        from scripts.autoresearch_request import forbidden_paths  # lazy: avoid import cost on skill path
+        home = _runner()._hermes_home()
+        for f in forbidden_paths(home):
+            fp = Path(f).resolve()
+            if rp == fp or _under(rp, fp):
+                return False, "refused: secrets/auth/config/db surfaces are off-limits"
+    except Exception:
+        # Validator unavailable → fail closed on the obviously-sensitive names.
+        if rp.name in {".env", "auth.json", "config.yaml"} or rp.suffix == ".db":
+            return False, "refused: secrets/auth/config/db surfaces are off-limits"
+    rel = rp.relative_to(_REPO.resolve())
+    if rel.parts and rel.parts[0] == ".git":
+        return False, "refused: .git is off-limits"
+    if rel.as_posix() in _GATE_SELF_PROTECT:
+        return False, "refused: a proposal may not modify the test-suite gate's own harness"
+    return True, ""
+
+
+def _code_backup_root() -> Path:
+    return _runner()._hermes_home() / "backups"
+
+
+def _apply_code_proposal(proposal: dict[str, Any], pid: str) -> dict[str, Any]:
+    after_text = proposal.get("after_text")
+    if not isinstance(after_text, str):
+        return {"ok": False, "detail": "code proposal is malformed (missing after_text)",
+                "status": "proposed"}
+    target_path = Path(proposal.get("target_path", ""))
+    ok, why = _code_target_ok(target_path)
+    if not ok:
+        return {"ok": False, "detail": why, "status": "proposed"}
+
+    backup_dir = (_code_backup_root()
+                  / f"code-before-proposal-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{_slug(pid)[:16]}")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    _backup_code_file(target_path, backup_dir)
+
+    log_path = _proposals_dir() / f"{_slug(pid)}.gate.log"
+    # Write the candidate edit live, then hand off to the detached gate worker.
+    target_path.write_text(after_text, encoding="utf-8")
+    proposal["status"] = "testing"
+    proposal["applied_at"] = None
+    proposal["result"] = "Test-Suite läuft … (volle Suite, dauert ein paar Minuten)"
+    proposal["gate"] = {
+        "phase": "running",
+        "started_at": _utc_now(),
+        "finished_at": None,
+        "returncode": None,
+        "summary": None,
+        "backup_dir": str(backup_dir),
+        "log_path": str(log_path),
+        "pid": None,
+    }
+    save_proposal(proposal)
+
+    gate_pid = _spawn_code_gate(pid)
+    # Re-load before stamping the pid so we never clobber a same-tick edit; the
+    # full suite takes minutes, so the worker cannot have finalised this fast.
+    latest = load_proposal(pid) or proposal
+    gate = latest.get("gate") or proposal["gate"]
+    gate["pid"] = gate_pid
+    latest["gate"] = gate
+    save_proposal(latest)
+    return {"ok": True, "status": "testing", "id": pid,
+            "result": latest.get("result"), "gate": gate}
+
+
+def _spawn_code_gate(pid: str) -> int:
+    """Spawn the detached code-gate worker; return its PID. Isolated so tests
+    can stub it (mirrors autoresearch_view._spawn_runner)."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        [sys.executable, str(_GATE_RUNNER), pid],
+        cwd=str(_REPO),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
+def _tail(path: Path, limit: int = 4000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-limit:]
+
+
+def _summarize_test_log(tail: str, returncode: int) -> str:
+    """A short, human line for the proposal card — the pytest summary line if we
+    can find it, else a generic pass/fail."""
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip().strip("= ")
+        low = stripped.lower()
+        if any(tok in low for tok in ("passed", "failed", "error", "no tests")):
+            return stripped[:200]
+    return "Tests grün" if returncode == 0 else f"Tests rot (exit {returncode})"
+
+
+def _run_test_suite(log_path: Path) -> tuple[int, str]:
+    """Run the canonical full suite, streaming output to ``log_path``; return
+    (returncode, log_tail). Isolated so finalize_code_gate is testable without
+    actually spawning ~26k tests."""
+    import subprocess
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as fh:
+        proc = subprocess.run(
+            ["bash", str(_TEST_RUNNER)],
+            cwd=str(_REPO),
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+        )
+    return proc.returncode, _tail(log_path)
+
+
+def finalize_code_gate(pid: str, *, run_suite=None) -> dict[str, Any]:
+    """Run the test-suite gate for one "testing" code proposal and resolve it:
+    keep on green (status=applied), auto-revert on red (status back to
+    proposed). Called by the detached gate worker; ``run_suite`` is injectable
+    for tests."""
+    run_suite = run_suite or _run_test_suite
+    proposal = load_proposal(pid)
+    if proposal is None:
+        return {"ok": False, "detail": f"no such proposal: {pid}", "status": None}
+    if proposal.get("status") != "testing":
+        return {"ok": False, "detail": f"proposal is '{proposal.get('status')}', not under test",
+                "status": proposal.get("status")}
+
+    gate = dict(proposal.get("gate") or {})
+    target_path = Path(proposal.get("target_path", ""))
+    backup_dir = Path(gate.get("backup_dir", ""))
+    log_path = Path(gate.get("log_path") or (_proposals_dir() / f"{_slug(pid)}.gate.log"))
+
+    returncode, tail = run_suite(log_path)
+    summary = _summarize_test_log(tail, returncode)
+    gate["returncode"] = returncode
+    gate["finished_at"] = _utc_now()
+    gate["summary"] = summary
+
+    if returncode == 0:
+        gate["phase"] = "passed"
+        proposal["status"] = "applied"
+        proposal["applied_at"] = _utc_now()
+        proposal["result"] = f"✓ übernommen — Test-Suite grün ({summary})"
+        proposal["gate"] = gate
+        save_proposal(proposal)
+        return {"ok": True, "status": "applied", "id": pid,
+                "result": proposal["result"], "returncode": returncode}
+
+    # Tests red → roll the edit back; the proposal reopens for retry/skip.
+    if backup_dir and backup_dir.exists():
+        _restore_code_file(target_path, backup_dir)
+    gate["phase"] = "failed"
+    proposal["status"] = "proposed"
+    proposal["applied_at"] = None
+    proposal["result"] = f"↩ zurückgerollt — Test-Suite rot ({summary})"
+    proposal["gate"] = gate
+    save_proposal(proposal)
+    return {"ok": False, "status": "proposed", "id": pid,
+            "detail": proposal["result"], "reverted": True, "returncode": returncode}
+
+
+def _reconcile_testing(proposal: dict[str, Any]) -> dict[str, Any]:
+    """If a code proposal is stuck in "testing" but its gate worker is gone
+    without a verdict, auto-revert it. Idempotent; safe to call on every read."""
+    if proposal.get("status") != "testing":
+        return proposal
+    gate = proposal.get("gate") or {}
+    pid = gate.get("pid")
+    if not isinstance(pid, int):
+        return proposal  # not spawned/stamped yet — leave the grace window
+    if _pid_alive(pid) or gate.get("phase") != "running":
+        return proposal
+
+    gate = dict(gate)
+    target_path = Path(proposal.get("target_path", ""))
+    backup_dir = Path(gate.get("backup_dir", ""))
+    try:
+        if backup_dir and backup_dir.exists():
+            _restore_code_file(target_path, backup_dir)
+    except OSError:
+        pass
+    gate["phase"] = "crashed"
+    gate["finished_at"] = _utc_now()
+    proposal["status"] = "proposed"
+    proposal["applied_at"] = None
+    proposal["result"] = "↩ zurückgerollt — Test-Gate abgebrochen (Prozess beendet ohne Ergebnis)"
+    proposal["gate"] = gate
+    save_proposal(proposal)
+    return proposal
+
+
+# ---------------------------------------------------------------------------
+# Minimal code-proposal generator
+#
+# Code proposals don't come from the deterministic skill-gap discovery; they
+# come from an author (an agent like Codex/Claude, or the operator) handing a
+# concrete file rewrite into the same preview → gate → apply flow. This keeps
+# the authoring surface tiny and model-free: supply the full new text for one
+# file, get back a previewable, test-gated proposal. (CLI: make_code_proposal.py)
+# ---------------------------------------------------------------------------
+def build_code_proposal(
+    target_path: str | Path,
+    after_text: str,
+    *,
+    title: str,
+    rationale: str,
+    pid: str | None = None,
+    section: str | None = None,
+) -> dict[str, Any]:
+    path = Path(target_path)
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    rel_name = path.name
+    try:
+        rel_name = str(path.resolve().relative_to(_REPO.resolve()))
+    except (ValueError, OSError):
+        pass
+    pid = pid or _slug(f"code-{rel_name}-{title}")
+    proposal = {
+        "id": pid,
+        "schema": PROPOSAL_SCHEMA,
+        "mode": "code",
+        "target": rel_name,
+        "target_path": str(path.resolve() if path.exists() else path),
+        "section": section,
+        "eval_label": None,
+        "title": title,
+        "rationale_plain": rationale,
+        "before_text": before,
+        "after_text": after_text,
+        "new_text": None,
+        "writer": "operator",
+        "writer_rationale": None,
+        "diff_before_after": _make_diff(before, after_text, rel_name),
+        "status": "proposed",
+        "created_at": _utc_now(),
+        "applied_at": None,
+        "result": None,
+        "rank_score": None,
+        "rank_reason": None,
+    }
+    save_proposal(proposal)
+    return proposal

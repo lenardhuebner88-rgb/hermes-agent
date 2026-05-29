@@ -116,7 +116,18 @@ export interface AutoresearchStatus {
 }
 
 export type ProposalMode = "skill" | "code";
-export type ProposalStatus = "proposed" | "applied" | "skipped";
+export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped";
+
+export type GatePhase = "running" | "passed" | "failed" | "crashed";
+
+/** A3 test-suite gate state, present on code proposals once apply has run. */
+export interface ProposalGate {
+  phase: GatePhase;
+  started_at?: string | null;
+  finished_at?: string | null;
+  returncode?: number | null;
+  summary?: string | null;
+}
 
 export type DiffLineType = "ctx" | "add" | "del";
 export interface DiffLine {
@@ -137,6 +148,7 @@ export interface Proposal {
   result?: string | null;
   created_at?: number | string | null;
   applied_at?: number | string | null;
+  gate?: ProposalGate | null;
 }
 
 export interface ProposalsResponse {

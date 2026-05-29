@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { ProposalsResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -20,5 +20,36 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers).toHaveLength(1);
     expect(parsed.workers[0].run_id).toBe("380");
     expect(parsed.workers[0].run_status).toBe("blocked");
+  });
+});
+
+describe("ProposalsResponseSchema (A3 code gate)", () => {
+  it("accepts a code proposal in the 'testing' state with its gate", () => {
+    const raw = {
+      count: 1, open_count: 0,
+      proposals: [{
+        id: "code-foo", target: "agent/foo.py", section: null,
+        rationale_plain: "weil", diff_before_after: "- x = 1\n+ x = 2",
+        mode: "code", status: "testing", result: "Test-Suite läuft …",
+        gate: { phase: "running", started_at: "2026-05-29T00:00:00Z", returncode: null },
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].status).toBe("testing");
+    expect(parsed.proposals[0].gate?.phase).toBe("running");
+  });
+
+  it("tolerates a missing gate and an unknown gate phase", () => {
+    const raw = {
+      count: 1, open_count: 1,
+      proposals: [{
+        id: "code-bar", target: "agent/bar.py", section: null,
+        rationale_plain: "r", diff_before_after: "",
+        mode: "code", status: "proposed",
+        gate: { phase: "weird-future-phase" },
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].gate?.phase).toBe("running"); // .catch fallback
   });
 });

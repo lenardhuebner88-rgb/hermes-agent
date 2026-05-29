@@ -79,10 +79,17 @@ export const ProposalSchema = z.object({
   rationale_plain: z.string().catch(""),
   diff_before_after: z.string().catch(""),
   mode: z.enum(["skill", "code"]).catch("skill"),
-  status: z.enum(["proposed", "applied", "skipped"]).catch("proposed"),
+  status: z.enum(["proposed", "testing", "applied", "skipped"]).catch("proposed"),
   result: z.string().nullable().optional(),
   created_at: z.union([z.number(), z.string()]).nullable().optional(),
   applied_at: z.union([z.number(), z.string()]).nullable().optional(),
+  gate: z.object({
+    phase: z.enum(["running", "passed", "failed", "crashed"]).catch("running"),
+    started_at: nullableString.optional(),
+    finished_at: nullableString.optional(),
+    returncode: nullableNumber.optional(),
+    summary: nullableString.optional(),
+  }).nullable().optional(),
 });
 
 export const ProposalsResponseSchema = z.object({
