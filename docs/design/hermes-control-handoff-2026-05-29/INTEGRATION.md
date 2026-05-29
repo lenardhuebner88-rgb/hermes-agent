@@ -69,5 +69,8 @@ Konsequente Anpassungen:
 - Theme: `web/src/themes/` (nous-Registry; Control-Tokens gescopet daneben).
 - i18n: `web/src/i18n/` (für den Sidebar-Eintrag „Control").
 
-Reihenfolge & Sprint-Schnitt: siehe Vault-Plan
+## Sprint-Schnitt (gelockt 2026-05-29)
+B0 Fundament → **B1 Autoresearch (zuerst)** → B2 Hermes-Worker → B4 Übersicht →
+B5 Dichte/⌘K. **B3 OpenClaw-Worker zurückgestellt** (braucht Read-only-Proxy →
+eigener Folge-Slice). Voller Schnitt + DoD je Slice: Vault-Plan
 `03-Agents/Hermes/plans/unified-dashboard-sprint-b-plan-2026-05-29.md`.
