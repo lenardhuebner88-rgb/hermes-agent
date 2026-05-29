@@ -1,11 +1,13 @@
+import { useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
-import { useProposals } from "./hooks/useControlData";
+import { useHermesWorkers, useOpenClawAgents, useProposals } from "./hooks/useControlData";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
+import { CommandPalette } from "./components/CommandPalette";
 import { OverviewView } from "./views/OverviewView";
 import { HermesFleet } from "./views/HermesFleet";
-import { OpenClawPlaceholder } from "./views/OpenClawPlaceholder";
+import { OpenClawFleet } from "./views/OpenClawFleet";
 import { AutoresearchView } from "./views/AutoresearchView";
 
 function activeFromPath(pathname: string): ControlTab {
@@ -27,7 +29,23 @@ export default function ControlPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const proposals = useProposals();
+  const openclaw = useOpenClawAgents();
+  const workers = useHermesWorkers();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const active = activeFromPath(location.pathname);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const combo = `${event.metaKey ? "Meta+" : event.ctrlKey ? "Control+" : ""}${event.key.toLowerCase()}`;
+      if (combo === "Meta+k" || combo === "Control+k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div data-control>
@@ -39,15 +57,27 @@ export default function ControlPage() {
         onNavigate={(tab) => navigate(tabPath[tab])}
         setDensity={density.setDensity}
         resetToAuto={density.resetToAuto}
+        commandButtonRef={commandButtonRef}
+        onOpenCommand={() => setPaletteOpen(true)}
       >
         <Routes>
-          <Route index element={<OverviewView proposals={proposals.proposals} />} />
+          <Route index element={<OverviewView proposals={proposals.proposals} agents={openclaw.data?.agents ?? []} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
-          <Route path="openclaw" element={<OpenClawPlaceholder />} />
+          <Route path="openclaw" element={<OpenClawFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
           <Route path="*" element={<Navigate to="/control" replace />} />
         </Routes>
       </ControlShell>
+      <CommandPalette
+        open={paletteOpen}
+        workers={workers.data?.workers ?? []}
+        agents={openclaw.data?.agents ?? []}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={(path) => navigate(path)}
+        onGenerate={proposals.generate}
+        onApplyAll={proposals.applyAll}
+        triggerRef={commandButtonRef}
+      />
     </div>
   );
 }

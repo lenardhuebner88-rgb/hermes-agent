@@ -88,6 +88,50 @@ export const ProposalsResponseSchema = z.object({
   proposals: z.array(ProposalSchema).catch([]),
 });
 
+const AgentTaskSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  priority: z.enum(["high", "med", "low"]).catch("med"),
+  progressPercent: z.coerce.number().catch(0),
+});
+
+const AgentTasksSchema = z.object({
+  queued: z.array(AgentTaskSchema).catch([]),
+  active: z.array(AgentTaskSchema).catch([]),
+  review: z.array(AgentTaskSchema).catch([]),
+  recentDone: z.array(AgentTaskSchema).catch([]),
+});
+
+const FleetHealthSchema = z.object({
+  currentTask: z.string().catch("Keine aktive Aufgabe"),
+  heartbeat: nullableNumber,
+  throughput: z.string().catch("0/h"),
+  currentTool: z.string().catch("-"),
+  lastOutput: z.string().catch(""),
+});
+
+export const AgentLiveSchema = z.object({
+  id: z.enum(["main", "sre-expert", "frontend-guru", "efficiency-auditor", "spark", "james"]).catch("main"),
+  name: z.string().catch("OpenClaw"),
+  emoji: z.string().catch("⚙️"),
+  status: z.enum(["active", "monitoring", "ready", "idle", "offline"]).catch("idle"),
+  model: z.string().catch("unbekannt"),
+  lastActive: z.coerce.number().catch(0),
+  tasks: AgentTasksSchema.catch({ queued: [], active: [], review: [], recentDone: [] }),
+  stuckSignal: z.boolean().catch(false),
+  activityPulse: z.coerce.number().catch(0),
+  fleetHealth: FleetHealthSchema.catch({ currentTask: "Keine aktive Aufgabe", heartbeat: null, throughput: "0/h", currentTool: "-", lastOutput: "" }),
+  roleLabel: z.string().catch("Agent"),
+  roleSummary: z.string().catch("OpenClaw-Agent"),
+  escalationNote: z.string().nullable().catch(null),
+});
+
+export const AgentsResponseSchema = z.object({
+  agents: z.array(AgentLiveSchema).catch([]),
+  updatedAt: nullableNumber,
+  error: z.string().nullable().optional(),
+});
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

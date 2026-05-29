@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import {
+  AgentsResponseSchema,
   AutoresearchStatusSchema,
   ProposalsResponseSchema,
   RunInspectSchema,
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { AutoresearchStatus, Proposal, ProposalsResponse, RunInspect, WorkersResponse } from "../lib/types";
+import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RunInspect, WorkersResponse } from "../lib/types";
 
 type LoadState<T> = {
   data: T | null;
@@ -157,4 +158,12 @@ export function useRunInspect() {
     }
   }, []);
   return { inspectByRun, loadingRun, inspect };
+}
+
+
+export function useOpenClawAgents() {
+  return usePolling<AgentsResponse>(
+    async () => parseOrThrow(AgentsResponseSchema, await fetchJSON<unknown>("/api/openclaw/agents"), "openclaw/agents"),
+    5000,
+  );
 }

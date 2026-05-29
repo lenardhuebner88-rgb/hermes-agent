@@ -1,9 +1,11 @@
+import { useEffect } from "react";
 import { FlaskConical, GitPullRequestArrow, RotateCw } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
+import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import { StatusPill, ToneCallout } from "../components/atoms";
@@ -16,6 +18,26 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const open = store.proposals.filter((p) => p.status === "proposed");
   const done = store.proposals.filter((p) => p.status !== "proposed");
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,[contenteditable='true'],[role='dialog']")) return;
+      const top = open[0];
+      if (!top) return;
+      const key = event.key.toLowerCase();
+      if (KEYMAP.autoresearch.apply.includes(key as "a")) {
+        event.preventDefault();
+        void store.apply(top);
+      }
+      if (KEYMAP.autoresearch.skip.includes(key as "s")) {
+        event.preventDefault();
+        void store.skip(top);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, store]);
 
   return (
     <div className="space-y-5">

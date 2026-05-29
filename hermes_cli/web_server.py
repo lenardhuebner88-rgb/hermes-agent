@@ -4882,6 +4882,11 @@ app.include_router(_dashboard_auth_router)
 from hermes_cli.autoresearch_view import register_autoresearch_routes  # noqa: E402
 register_autoresearch_routes(app)
 
+# Read-only OpenClaw live-agent proxy for Hermes Control. The route itself is
+# still protected by the dashboard session-token middleware under /api/.
+from hermes_cli.openclaw_view import register_openclaw_routes  # noqa: E402
+register_openclaw_routes(app)
+
 mount_spa(app)
 
 

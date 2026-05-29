@@ -22,8 +22,14 @@
   --hc-red: #ef4444;
   --hc-zinc: #52525b;
   --hc-font-sans: "Geist", "Geist Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --agent-atlas: #14b8a6;
+  --agent-forge: #f97316;
+  --agent-pixel: #d946ef;
+  --agent-lens: #eab308;
+  --agent-spark: #ec4899;
+  --agent-james: #10b981;
   --hc-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --hc-radius: .5rem;
+  --hc-radius: .75rem;
   min-height: calc(100dvh - 5rem);
   color: var(--hc-text);
   font-family: var(--hc-font-sans);

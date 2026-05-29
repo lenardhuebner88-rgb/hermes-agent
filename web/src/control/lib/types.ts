@@ -92,7 +92,8 @@ export interface AgentLive {
 
 export interface AgentsResponse {
   agents: AgentLive[];
-  updatedAt: number;
+  updatedAt: number | null;
+  error?: string | null;
 }
 
 export type AutoresearchState = "idle" | "running" | "stopping" | "crashed";
