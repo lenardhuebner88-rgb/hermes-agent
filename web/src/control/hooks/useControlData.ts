@@ -81,7 +81,7 @@ export function useProposals() {
     setBusy("generate");
     try {
       await fetchJSON<unknown>("/autoresearch/generate", { method: "POST" });
-      log("Neue Vorschl?ge angefragt", "violet");
+      log("Neue Vorschläge angefragt", "violet");
       await state.reload();
     } catch (e) {
       log(`Generate fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
@@ -93,17 +93,17 @@ export function useProposals() {
   const apply = useCallback(async (proposal: Proposal) => {
     if (proposal.mode === "code") return;
     setBusy(proposal.id);
-    mutateProposal(proposal.id, { status: "applied", result: "?bernommen" });
+    mutateProposal(proposal.id, { status: "applied", result: "übernommen" });
     try {
       const result = await fetchJSON<{ ok?: boolean; result?: string; gated?: string }>("/autoresearch/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: proposal.id, confirm: true }),
       });
-      log(`${proposal.title ?? proposal.target}: ${result.result ?? "?bernommen"}`, "emerald");
+      log(`${proposal.title ?? proposal.target}: ${result.result ?? "übernommen"}`, "emerald");
       await state.reload();
     } catch (e) {
-      log(`?bernehmen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
+      log(`Übernehmen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
       await state.reload();
     } finally {
       setBusy(null);
@@ -112,17 +112,17 @@ export function useProposals() {
 
   const skip = useCallback(async (proposal: Proposal) => {
     setBusy(proposal.id);
-    mutateProposal(proposal.id, { status: "skipped", result: "?bersprungen" });
+    mutateProposal(proposal.id, { status: "skipped", result: "übersprungen" });
     try {
       await fetchJSON<unknown>("/autoresearch/skip", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: proposal.id }),
       });
-      log(`${proposal.title ?? proposal.target}: ?bersprungen`, "amber");
+      log(`${proposal.title ?? proposal.target}: übersprungen`, "amber");
       await state.reload();
     } catch (e) {
-      log(`?berspringen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
+      log(`Überspringen fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
       await state.reload();
     } finally {
       setBusy(null);

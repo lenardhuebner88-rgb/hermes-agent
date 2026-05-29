@@ -17,7 +17,7 @@ interface Props {
 }
 
 function proposalTitle(proposal: Proposal): string {
-  return proposal.title?.trim() || `${proposal.target}${proposal.section ? ` ? ${proposal.section}` : ""}`;
+  return proposal.title?.trim() || `${proposal.target}${proposal.section ? ` · ${proposal.section}` : ""}`;
 }
 
 export function ProposalCard({ proposal, density, busy, onApply, onSkip }: Props) {
@@ -30,12 +30,12 @@ export function ProposalCard({ proposal, density, busy, onApply, onSkip }: Props
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <ModeBadge mode={proposal.mode} />
-            {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "?bersprungen"}</span> : null}
+            {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
           <h3 className="text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
           <div className="space-y-1">
             <p className="hc-eyebrow">{de.autoresearch.why}</p>
-            <p className="text-sm leading-6 hc-soft">{proposal.rationale_plain || "Keine Begr?ndung geliefert."}</p>
+            <p className="text-sm leading-6 hc-soft">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>
           </div>
         </div>
       </div>

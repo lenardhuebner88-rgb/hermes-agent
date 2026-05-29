@@ -18,8 +18,8 @@ export function HermesFleet({ density }: { density: Density }) {
   return (
     <div className="space-y-5">
       <section className="hc-card flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div><p className="hc-eyebrow">Hermes-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{workers.data?.count ?? list.length} aktive L?ufe</h2></div>
-        {workers.loading ? <Spinner /> : <span className="text-sm hc-soft">Inspect l?dt CPU/RAM pro Worker auf Knopfdruck.</span>}
+        <div><p className="hc-eyebrow">Hermes-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{workers.data?.count ?? list.length} aktive Läufe</h2></div>
+        {workers.loading ? <Spinner /> : <span className="text-sm hc-soft">Inspect lädt CPU/RAM pro Worker auf Knopfdruck.</span>}
       </section>
       {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
       {list.length === 0 && !workers.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Bot className="h-5 w-5" />Keine aktiven Worker.</div> : null}

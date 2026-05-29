@@ -29,7 +29,7 @@ describe('workerHealth', () => {
   });
   it('offline bei timed_out ODER nicht-alive (höchste Priorität)', () => {
     expect(workerHealth(mkWorker({ run_status: 'timed_out' }), NOW).key).toBe('offline');
-    expect(workerHealth(mkWorker({ inspect: { ...mkWorker().inspect, alive: false } }), NOW).key).toBe('offline');
+    expect(workerHealth(mkWorker({ inspect: { cpu_percent: 10, rss: 1048576, num_threads: 1, num_fds: 1, status: 'running', alive: false } }), NOW).key).toBe('offline');
   });
   it('blocked schlägt stuck (auch bei altem Heartbeat)', () => {
     const w = mkWorker({ run_status: 'blocked', last_heartbeat_at: NOW - 9999 });

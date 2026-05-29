@@ -63,7 +63,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         <div className="grid gap-3 sm:grid-cols-2">
           <MeterBar label="CPU" value={inspect.cpu_percent} max={100} tone={inspect.cpu_percent > 80 ? "amber" : "cyan"} />
           <MeterBar label="RAM" value={inspect.rss / 1048576} max={2048} tone={inspect.rss > 1536 * 1048576 ? "amber" : "cyan"} />
-          <p className="text-xs hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} ? {fmtMB(inspect.rss)} ? {inspect.num_threads} Threads ? {inspect.num_fds} FDs</p>
+          <p className="text-xs hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</p>
         </div>
       ) : null}
 
@@ -74,7 +74,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {de.worker.actions.inspect}
         </Button>
         <Button outlined size="sm" disabled prefix={<Eye className="h-4 w-4" />}>{de.worker.actions.details}</Button>
-        <Button outlined size="sm" disabled prefix={actionIcon(primary)}>{primaryLabel} ? TODO</Button>
+        <Button outlined size="sm" disabled prefix={actionIcon(primary)}>{primaryLabel} · TODO</Button>
       </div>
     </article>
   );

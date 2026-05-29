@@ -37,7 +37,7 @@ export function ToneCallout({ tone, children }: { tone: ToneName; children: Reac
 }
 
 export function ModeBadge({ mode }: { mode: "skill" | "code" }) {
-  return mode === "code" ? <Badge tone="warning">Code-?nderung</Badge> : <Badge className="border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]">Skill</Badge>;
+  return mode === "code" ? <Badge tone="warning">Code-Änderung</Badge> : <Badge className="border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]">Skill</Badge>;
 }
 
 export function MeterBar({ label, value, max, tone = "cyan" }: { label: string; value: number; max: number; tone?: "cyan" | "amber" | "red" }) {
