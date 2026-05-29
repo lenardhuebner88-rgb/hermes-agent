@@ -152,6 +152,8 @@ def read_runner_status(*, now: float | None = None) -> dict[str, Any]:
         "heartbeat_age_s": None,
         "heartbeat_fresh": False,
         "last_receipt": status_file.get("last_receipt"),
+        "last_run": status_file.get("last_run"),
+        "note": status_file.get("note"),
         "state_dir": str(state_dir),
     }
 
@@ -456,6 +458,12 @@ th{color:var(--muted);font-weight:600;background:var(--panel);position:sticky;to
 .muted{color:var(--muted);}
 .empty{color:var(--muted);border:1px dashed var(--line);border-radius:10px;padding:14px;background:var(--panel);font-size:13px;}
 .safety{font-size:12.5px;color:var(--muted);border-left:3px solid var(--accent);padding:4px 0 4px 12px;}
+.lastrun{margin-top:14px;font-size:13.5px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel);}
+.lastrun:empty{display:none;}
+.lastrun.lr-ok{background:var(--accent-soft);border-color:transparent;color:var(--accent);}
+.lastrun.lr-err{background:var(--bad-soft);border-color:transparent;color:var(--bad);}
+.lastrun.lr-warn{background:var(--warn-soft);border-color:transparent;color:var(--warn);}
+.lastrun b{color:inherit;}
 code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;}
 @media (max-width:560px){ .bar .lbl{flex-basis:120px;} .topbar h1{font-size:16px;} }
 </style>
@@ -481,6 +489,7 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
     <div style="margin-top:14px;">
       <div class="bar"><span class="lbl">Iteration <b id="iterlbl">—</b></span><div class="track"><span id="iterbar"></span></div></div>
     </div>
+    <div id="lastrun" class="lastrun"></div>
   </section>
 
   <section class="card">
@@ -524,7 +533,20 @@ let running=false;
 function setPill(state){const p=$('pill');p.className='pill pill-'+(state||'idle');p.textContent=state||'idle';}
 function routeBadge(s){s=s||'unknown';const c=s==='yellow'?'badge-yellow':(s==='unavailable'?'badge-bad':'badge');return '<span class="badge '+c+'">'+esc(s)+'</span>';}
 function setControls(){$('btnDry').disabled=running;$('btnApply').disabled=running;$('btnStop').disabled=!running;}
-
+function fmtTime(iso){try{return new Date(iso).toLocaleTimeString();}catch(e){return iso;}}
+let lastSeenFinish=null, wasRunning=false;
+function renderLastRun(lr,note){
+  const box=$('lastrun');
+  if(!lr){box.innerHTML=note?('<span class="lr-note">'+esc(note)+'</span>'):'';return;}
+  let cls='lr-ok',label;
+  if(lr.ok===false){cls='lr-err';label='⚠ refused — '+esc(lr.refused||note||'see logs');}
+  else if(lr.stopped){cls='lr-warn';label='■ stopped after '+esc(lr.iterations)+' step(s)';}
+  else if(lr.mode==='apply'){label='✓ apply done — '+esc(lr.kept)+' kept, '+esc(lr.reverted)+' reverted';}
+  else {label='▶ dry-run done — '+esc(lr.proposed)+' proposed';}
+  let tgts=(lr.targets||[]).length?(' · '+lr.targets.map(esc).join(', ')):'';
+  box.className='lastrun '+cls;
+  box.innerHTML='<b>Last run</b> ('+esc(lr.mode)+(lr.finished_at?(' · '+fmtTime(lr.finished_at)):'')+'): '+label+tgts;
+}
 async function poll(){
   try{
     const d=await(await fetch(BASE+'/autoresearch/status',{headers:{'Accept':'application/json'}})).json();
@@ -539,6 +561,17 @@ async function poll(){
     $('iterbar').style.width=(it!=null&&mx)?Math.min(100,(it/mx)*100)+'%':'0';
     $('updated').textContent='updated '+new Date().toLocaleTimeString();
     if(d.last_receipt)$('receipt').textContent='Last receipt: '+d.last_receipt;
+    renderLastRun(d.last_run,d.note);
+    // surface completion of a run (incl. fast/refused ones) as a toast, once
+    const lr=d.last_run;
+    if(lr&&lr.finished_at&&lr.finished_at!==lastSeenFinish&&(wasRunning||!lastSeenFinish)){
+      lastSeenFinish=lr.finished_at;
+      if(lr.ok===false)toast('⚠ run refused: '+(lr.refused||d.note||''),'err');
+      else if(lr.mode==='apply')toast('✓ apply finished — '+lr.kept+' kept, '+lr.reverted+' reverted','ok');
+      else toast('▶ dry-run finished — '+lr.proposed+' proposal(s)','ok');
+      loadAudit();
+    }
+    wasRunning=running;
   }catch(e){$('updated').textContent='status failed';}
 }
 async function loadAudit(){

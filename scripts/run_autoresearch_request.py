@@ -180,11 +180,37 @@ def heartbeat(state_dir: Path, request_id: str, iteration: int, max_iter: int,
 
 
 def set_status(state_dir: Path, state: str, route_status: str,
-               last_receipt: str | None = None, note: str | None = None) -> None:
+               last_receipt: str | None = None, note: str | None = None,
+               last_run: dict | None = None) -> None:
     _write_json(state_dir / "current.status", {
         "state": state, "route_status": route_status, "last_receipt": last_receipt,
-        "note": note, "updated_at": _utc_now(),
+        "note": note, "last_run": last_run, "updated_at": _utc_now(),
     })
+
+
+def _build_last_run(summary: dict) -> dict:
+    """Compact, human-facing summary of the most recent run for the dashboard."""
+    return {
+        "mode": summary.get("mode"),
+        "ok": summary.get("ok"),
+        "refused": summary.get("refused"),
+        "iterations": summary.get("iterations"),
+        "kept": summary.get("kept"),
+        "reverted": summary.get("reverted"),
+        "proposed": summary.get("proposed"),
+        "stopped": summary.get("stopped"),
+        "targets": [s["target"] for s in summary.get("steps", [])],
+        "request_id": summary.get("request_id"),
+        "finished_at": _utc_now(),
+    }
+
+
+def _finish_status(state_dir: Path, route_status: str, summary: dict,
+                   last_receipt: str | None = None) -> None:
+    """Write an idle status that carries the last-run summary (and any refusal/note)."""
+    note = summary.get("refused") or ("stopped by signal" if summary.get("stopped") else summary.get("route_note"))
+    set_status(state_dir, "idle", route_status, last_receipt=last_receipt,
+               note=note, last_run=_build_last_run(summary))
 
 
 def release_lock(state_dir: Path) -> None:
@@ -213,6 +239,15 @@ def discover_candidates(roots: list[Path], attempted: set[tuple[str, str]]) -> l
             if path in seen:
                 continue
             seen.add(path)
+            # never touch archived / hidden skills (e.g. skills/.archive/...).
+            # Check parts RELATIVE to the root — the root itself may live under a
+            # dotted dir (~/.hermes) which must not disqualify everything.
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
             _errors, warnings = evals.check_skill(path)
             missing = [lbl for lbl in _SCAFFOLD if _missing_label_to_warning(lbl) in warnings]
             for label in missing:
@@ -340,17 +375,23 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         "backup_dir": None, "stopped": False, "steps": [], "refused": None,
     }
 
+    # Apply may only ever mutate under ~/.hermes/skills. A request's allowed_paths
+    # legitimately also carries a sibling repo skills root (~/.hermes/hermes-agent/
+    # skills) that is NOT under it — we simply don't edit there rather than refusing
+    # the whole run. Refuse only when NOTHING resolves under ~/.hermes/skills
+    # (e.g. a family / non-skill area like "dashboard").
+    under_skills = [p for p in allowed if _under(p, skills_root)]
+
     # ---- apply gating (reversibility-first, confirm instead of token) ----
     effective_apply = apply
     if apply:
         if not (confirm or request.get("approved_by_operator") is True):
             summary.update(ok=False, refused="apply requires operator confirm (--confirm or approved_by_operator)")
-            set_status(state_dir, "idle", route_status, note=summary["refused"])
+            _finish_status(state_dir, route_status, summary)
             return summary
-        outside = [str(p) for p in allowed if not _under(p, skills_root)]
-        if outside:
-            summary.update(ok=False, refused=f"apply refused: paths outside ~/.hermes/skills: {outside}")
-            set_status(state_dir, "idle", route_status, note=summary["refused"])
+        if not under_skills:
+            summary.update(ok=False, refused="apply refused: no allowed paths under ~/.hermes/skills (family / non-skill area)")
+            _finish_status(state_dir, route_status, summary)
             return summary
         if route_status != "configured":
             effective_apply = False
@@ -360,6 +401,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
 
     if not acquire_lock(state_dir, request_id, summary["mode"]):
         summary.update(ok=False, refused="a fresh run is already in progress (lock held)")
+        _finish_status(state_dir, route_status, summary)
         return summary
 
     backup_dir: Path | None = None
@@ -370,7 +412,8 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
 
     set_status(state_dir, "running", route_status, note=summary.get("route_note"))
     attempted: set[tuple[str, str]] = set()
-    roots = [p for p in allowed if p.exists()]
+    # apply scans only under-skills roots; dry-run may scan all allowed roots (read-only).
+    roots = [p for p in (under_skills if effective_apply else allowed) if p.exists()]
 
     try:
         for i in range(1, cap + 1):
@@ -435,8 +478,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
     finally:
         receipt = write_receipt(summary)
         summary["receipt"] = str(receipt)
-        set_status(state_dir, "idle", route_status, last_receipt=str(receipt),
-                   note=("stopped by signal" if summary["stopped"] else summary.get("route_note")))
+        _finish_status(state_dir, route_status, summary, last_receipt=str(receipt))
         release_lock(state_dir)
     return summary
 

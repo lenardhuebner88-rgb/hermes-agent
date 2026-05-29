@@ -72,7 +72,9 @@ Produce a structured report as the deliverable for the caller.
 
 @pytest.fixture()
 def env(monkeypatch, tmp_path):
-    home = tmp_path / "home"
+    # home lives under a DOTTED dir (mirrors the real ~/.hermes) so the
+    # archived/hidden skip can't accidentally disqualify every skill.
+    home = tmp_path / ".hermes"
     skills = home / "skills"
     audit = tmp_path / "audit"
     state = audit / "runner-state"
@@ -116,6 +118,17 @@ def _needy(env) -> Path:
 # --------------------------------------------------------------------------
 # Self-test
 # --------------------------------------------------------------------------
+def test_discovery_skips_archived_and_hidden_skills(env):
+    arch = env["skills"] / ".archive" / "old" / "needy-archived"
+    arch.mkdir(parents=True)
+    (arch / "SKILL.md").write_text(SKILL_NEEDS_PROCEDURE, encoding="utf-8")
+    cands = env["runner"].discover_candidates([env["skills"]], set())
+    paths = [str(c["path"]) for c in cands]
+    assert not any(".archive" in p for p in paths), "archived skills must be skipped"
+    # the live needy skill is still a candidate
+    assert any("demo/needy-skill" in p for p in paths)
+
+
 def test_self_test_configured_when_model_in_config(env):
     status, _detail = env["runner"].self_test()
     assert status == "configured"
@@ -204,7 +217,24 @@ def test_apply_refused_outside_skills(env):
     req.write_text(json.dumps(data), encoding="utf-8")
     summary = env["runner"].run(req, apply=True, confirm=True)
     assert summary["ok"] is False
-    assert "outside ~/.hermes/skills" in summary["refused"]
+    assert "under ~/.hermes/skills" in summary["refused"]
+
+
+def test_apply_succeeds_when_request_also_lists_outside_repo_skills(env):
+    """area=all carries both ~/.hermes/skills and repo/skills; the outside repo
+    root must NOT block apply — we just don't edit there."""
+    arr = env["arr"]
+    data = arr.build_request(area="all", focus="recommended_sections",
+                             hermes_home=env["home"], repo_root=ROOT)
+    # keep the real under-skills root AND an outside sibling repo skills root
+    data["allowed_paths"] = [str(env["skills"]), str(ROOT / "skills")]
+    data["approved_by_operator"] = True
+    req = env["tmp"] / "mixed.json"
+    req.write_text(json.dumps(data), encoding="utf-8")
+    summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=1)
+    assert summary["ok"] is True and summary["mode"] == "apply"
+    assert summary["kept"] >= 1
+    assert "## Procedure" in _needy(env).read_text()
 
 
 def test_apply_downgrades_to_dry_run_when_selftest_not_configured(env):
