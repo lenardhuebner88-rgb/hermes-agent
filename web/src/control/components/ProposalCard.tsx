@@ -4,14 +4,16 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
+import type { ProposalPriorityGroup } from "../lib/autoresearch";
 import type { Density } from "../hooks/useDensity";
 import type { Proposal } from "../lib/types";
-import { DiffView, ModeBadge, ToneCallout } from "./atoms";
+import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
 
 interface Props {
   proposal: Proposal;
   density: Density;
   busy?: boolean;
+  priorityGroup?: ProposalPriorityGroup;
   onApply: (proposal: Proposal) => void;
   onSkip: (proposal: Proposal) => void;
 }
@@ -20,7 +22,7 @@ function proposalTitle(proposal: Proposal): string {
   return proposal.title?.trim() || `${proposal.target}${proposal.section ? ` · ${proposal.section}` : ""}`;
 }
 
-export function ProposalCard({ proposal, density, busy, onApply, onSkip }: Props) {
+export function ProposalCard({ proposal, density, busy, priorityGroup, onApply, onSkip }: Props) {
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
   const isTesting = proposal.status === "testing";
@@ -32,6 +34,7 @@ export function ProposalCard({ proposal, density, busy, onApply, onSkip }: Props
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <ModeBadge mode={proposal.mode} />
+            {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}
             {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"><Spinner />{de.autoresearch.testing}</span> : null}
             {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
