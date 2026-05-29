@@ -4,15 +4,17 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
-import { useHermesWorkers, useRunInspect } from "../hooks/useControlData";
+import { useHermesRecentResults, useHermesWorkers, useRunInspect } from "../hooks/useControlData";
 import { nowSec, workerHealth, workerSortRank } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { WorkerCard } from "../components/WorkerCard";
+import { HermesResultCard } from "../components/HermesResultCard";
 import { ToneCallout } from "../components/atoms";
 
 export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
+  const results = useHermesRecentResults();
   const { inspectByRun, loadingRun, inspect } = useRunInspect();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
@@ -65,6 +67,20 @@ export function HermesFleet({ density }: { density: Density }) {
       <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
         {list.map((worker, index) => <div key={worker.run_id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><WorkerCard worker={worker} health={workerHealth(worker, now)} density={density} now={now} inspectLoading={loadingRun === worker.run_id} onInspect={inspect} onAction={onAction} actionBusy={busyRun === worker.run_id} /></div>)}
       </div>
+      <section className="space-y-3">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="hc-eyebrow">{de.hermes.recentResults}</p>
+            <h2 className="mt-1 text-lg font-semibold text-white">{results.data?.count ?? 0} abgeschlossene Laeufe</h2>
+          </div>
+          <span className="text-sm hc-soft">{de.hermes.recentResultsHint}</span>
+        </div>
+        {results.error ? <ToneCallout tone="red">{de.hermes.resultsError}<br />{results.error}</ToneCallout> : null}
+        {(results.data?.results ?? []).length === 0 && !results.loading && !results.error ? <div className="hc-card p-4 text-sm hc-soft">{de.hermes.emptyResults}</div> : null}
+        <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
+          {(results.data?.results ?? []).map((result) => <HermesResultCard key={result.run_id} result={result} now={now} />)}
+        </div>
+      </section>
     </div>
   );
 }

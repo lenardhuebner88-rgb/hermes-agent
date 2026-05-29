@@ -49,6 +49,36 @@ export interface WorkersResponse {
   checked_at: number;
 }
 
+
+export interface KanbanResult {
+  run_id: string;
+  task_id: string;
+  task_title: string;
+  task_status: TaskStatus;
+  task_assignee: string;
+  profile: WorkerProfile;
+  status: RunStatus;
+  outcome: RunOutcome | null;
+  started_at: number;
+  ended_at: number;
+  duration_seconds: number;
+  summary: string;
+  summary_preview: string;
+  followups: string[];
+  artifacts: string[];
+  verification: string[];
+  residual_risk?: string | null;
+}
+
+export interface RecentResultsResponse {
+  results: KanbanResult[];
+  count: number;
+  checked_at: number;
+  limit: number;
+  since_hours: number;
+  outcome: string;
+}
+
 export type AgentStatus = "active" | "monitoring" | "ready" | "idle" | "offline";
 export type AgentId =
   | "main" | "sre-expert" | "frontend-guru" | "efficiency-auditor" | "spark" | "james";

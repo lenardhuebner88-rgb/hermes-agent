@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProposalsResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { ProposalsResponseSchema, RecentResultsResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -67,5 +67,35 @@ describe("ProposalsResponseSchema (Sprint A last_outcome counts)", () => {
     const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
     expect(parsed.reverted_count).toBe(4);
     expect(parsed.proposals[0].last_outcome).toBe("reverted_no_improvement");
+  });
+});
+
+
+describe("RecentResultsResponseSchema", () => {
+  it("coerces numeric run ids and counters without dropping real results", () => {
+    const parsed = parseOrThrow(RecentResultsResponseSchema, {
+      count: "1",
+      checked_at: "100",
+      results: [{
+        run_id: 408,
+        task_id: "t_1",
+        task_title: "Visible result",
+        task_assignee: "coder",
+        profile: "coder",
+        status: "done",
+        outcome: "completed",
+        started_at: "10",
+        ended_at: "25",
+        duration_seconds: "15",
+        summary: "line one",
+        summary_preview: "line one",
+        followups: ["check artifact"],
+        artifacts: ["/tmp/receipt.md"],
+        verification: ["pytest"],
+      }],
+    }, "recent-results");
+    expect(parsed.count).toBe(1);
+    expect(parsed.results[0].run_id).toBe("408");
+    expect(parsed.results[0].duration_seconds).toBe(15);
   });
 });

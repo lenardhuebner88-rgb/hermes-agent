@@ -10,6 +10,16 @@ export const de = {
     proposals: "Vorschläge offen",
     warnings: "Warnungen",
   },
+  hermes: {
+    recentResults: "Letzte Ergebnisse",
+    recentResultsHint: "Abgeschlossene Worker mit Summary, Belegen und naechsten Schritten.",
+    emptyResults: "Noch keine abgeschlossenen Worker im gewaehlten Zeitraum.",
+    resultsError: "Ergebnisse konnten nicht geladen werden. Aktive Worker bleiben davon unberuehrt.",
+    followups: "Naechste sinnvolle Schritte",
+    residualRisk: "Restrisiko",
+    details: "Details",
+    copyPath: "Pfad kopieren",
+  },
   worker: {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
     actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten", confirm: "Bestätigen", cancel: "Abbrechen" },

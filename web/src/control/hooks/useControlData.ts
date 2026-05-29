@@ -4,12 +4,13 @@ import {
   AgentsResponseSchema,
   AutoresearchStatusSchema,
   ProposalsResponseSchema,
+  RecentResultsResponseSchema,
   RunInspectSchema,
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
-import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RunInspect, WorkersResponse } from "../lib/types";
+import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, WorkersResponse } from "../lib/types";
 
 type LoadState<T> = {
   data: T | null;
@@ -164,6 +165,18 @@ export function useHermesWorkers() {
   return usePolling<WorkersResponse>(
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
     5000,
+  );
+}
+
+
+export function useHermesRecentResults() {
+  return usePolling<RecentResultsResponse>(
+    async () => parseOrThrow(
+      RecentResultsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/recent-results?limit=12&since_hours=48&outcome=completed"),
+      "runs/recent-results",
+    ),
+    20000,
   );
 }
 

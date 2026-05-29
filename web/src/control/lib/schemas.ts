@@ -54,6 +54,36 @@ export const WorkersResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+
+export const KanbanResultSchema = z.object({
+  run_id: z.coerce.string(),
+  task_id: z.string().catch(""),
+  task_title: z.string().catch("Ohne Titel"),
+  task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("done"),
+  task_assignee: z.string().catch("hermes"),
+  profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic"]).catch("default"),
+  status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("done"),
+  outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch("completed"),
+  started_at: z.coerce.number().catch(0),
+  ended_at: z.coerce.number().catch(0),
+  duration_seconds: z.coerce.number().catch(0),
+  summary: z.string().catch(""),
+  summary_preview: z.string().catch(""),
+  followups: z.array(z.string()).catch([]),
+  artifacts: z.array(z.string()).catch([]),
+  verification: z.array(z.string()).catch([]),
+  residual_risk: z.string().nullable().optional(),
+});
+
+export const RecentResultsResponseSchema = z.object({
+  results: z.array(KanbanResultSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  limit: z.coerce.number().catch(12),
+  since_hours: z.coerce.number().catch(48),
+  outcome: z.string().catch("completed"),
+});
+
 export const AutoresearchStatusSchema = z.object({
   schema: z.string().optional(),
   state: z.enum(["idle", "running", "stopping", "crashed"]).catch("idle"),

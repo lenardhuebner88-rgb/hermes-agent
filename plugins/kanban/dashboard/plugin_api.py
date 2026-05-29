@@ -208,6 +208,83 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
     }
 
 
+_RESULT_SUMMARY_LIMIT = 8 * 1024
+_RESULT_METADATA_LIMIT = 16 * 1024
+_RESULT_PREVIEW_LIMIT = 160
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item not in (None, "")]
+    if isinstance(value, dict):
+        return [json.dumps(value, ensure_ascii=False, sort_keys=True)]
+    if value == "":
+        return []
+    return [str(value)]
+
+
+def _append_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        if value and value not in target:
+            target.append(value)
+
+
+def _load_result_metadata(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    text = str(raw)[:_RESULT_METADATA_LIMIT]
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {"raw_metadata": text}
+    return data if isinstance(data, dict) else {"metadata": data}
+
+
+def _summary_preview(summary: str) -> str:
+    first = next((line.strip() for line in summary.splitlines() if line.strip()), "")
+    source = first or summary.strip()
+    return source[:_RESULT_PREVIEW_LIMIT]
+
+
+def _recent_result_dict(row: sqlite3.Row) -> dict[str, Any]:
+    summary = (row["summary"] or "")[:_RESULT_SUMMARY_LIMIT]
+    metadata = _load_result_metadata(row["metadata"])
+    followups: list[str] = []
+    artifacts: list[str] = []
+    verification: list[str] = []
+    for key in ("required_verification", "next_actions", "suggested_fixes", "residual_risk"):
+        _append_unique(followups, _coerce_str_list(metadata.get(key)))
+    for key in ("artifacts", "artifact", "receipt_path"):
+        _append_unique(artifacts, _coerce_str_list(metadata.get(key)))
+    for key in ("verification_evidence", "tests_run", "tests_passed", "changed_files"):
+        _append_unique(verification, _coerce_str_list(metadata.get(key)))
+    ended_at = int(row["ended_at"] or 0)
+    started_at = int(row["started_at"] or 0)
+    return {
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "task_title": row["task_title"],
+        "task_status": row["task_status"],
+        "task_assignee": row["task_assignee"],
+        "profile": row["profile"] or row["task_assignee"] or "default",
+        "status": row["run_status"],
+        "outcome": row["run_outcome"],
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": max(0, ended_at - started_at) if ended_at and started_at else 0,
+        "summary": summary,
+        "summary_preview": _summary_preview(summary),
+        "followups": followups,
+        "artifacts": artifacts,
+        "verification": verification,
+        "residual_risk": metadata.get("residual_risk") if isinstance(metadata.get("residual_risk"), str) else None,
+    }
+
+
 # Hallucination-warning event kinds — see complete_task() in kanban_db.py.
 # completion_blocked_hallucination: kernel rejected created_cards with
 #   phantom ids; task stays in prior state.
@@ -1245,6 +1322,63 @@ def list_active_workers(
             for row in rows
         ]
         return {"workers": workers, "count": len(workers), "checked_at": int(time.time())}
+    finally:
+        conn.close()
+
+
+
+@router.get("/runs/recent-results")
+def list_recent_results(
+    limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),
+    since_hours: int = Query(48, ge=1, le=24 * 30, description="Lookback window in hours"),
+    outcome: str = Query("completed", description="task_runs.outcome filter"),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return recent completed worker results for the Hermes tab.
+
+    This intentionally does not overload /workers/active: active workers stay
+    fast and narrow, while completed summaries/artifacts/followups are served
+    through this read-only history endpoint.
+    """
+    board = _resolve_board(board)
+    capped_limit = max(1, min(int(limit), 50))
+    cutoff = int(time.time()) - int(since_hours) * 3600
+    conn = _conn(board=board)
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                r.id AS run_id,
+                r.task_id,
+                t.title AS task_title,
+                t.status AS task_status,
+                t.assignee AS task_assignee,
+                r.profile,
+                r.status AS run_status,
+                r.outcome AS run_outcome,
+                r.started_at,
+                r.ended_at,
+                r.summary,
+                r.metadata
+            FROM task_runs r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE r.ended_at IS NOT NULL
+              AND r.ended_at >= ?
+              AND r.outcome = ?
+            ORDER BY r.ended_at DESC, r.id DESC
+            LIMIT ?
+            """,
+            (cutoff, outcome, capped_limit),
+        ).fetchall()
+        results = [_recent_result_dict(row) for row in rows]
+        return {
+            "results": results,
+            "count": len(results),
+            "checked_at": int(time.time()),
+            "limit": capped_limit,
+            "since_hours": int(since_hours),
+            "outcome": outcome,
+        }
     finally:
         conn.close()
 

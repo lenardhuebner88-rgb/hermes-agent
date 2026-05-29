@@ -8,6 +8,7 @@ REST surface without spinning up the whole dashboard.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -2271,3 +2272,120 @@ def test_create_task_no_home_channels_is_noop(client, monkeypatch):
     finally:
         conn.close()
     assert subs == []
+
+
+# ---------------------------------------------------------------------------
+# GET /runs/recent-results - completed worker handoff visibility
+# ---------------------------------------------------------------------------
+
+
+def _insert_completed_run(conn, *, task_id, title, started_at, ended_at, outcome="completed", summary="", metadata=None, profile="coder"):
+    conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, summary, metadata) "
+        "VALUES (?, ?, 'done', ?, ?, ?, ?, ?)",
+        (task_id, profile, outcome, started_at, ended_at, summary, json.dumps(metadata or {})),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metadata(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        older_task = kb.create_task(conn, title="older", assignee="coder")
+        newer_task = kb.create_task(conn, title="newer", assignee="research")
+        blocked_task = kb.create_task(conn, title="blocked", assignee="critic")
+        _insert_completed_run(
+            conn,
+            task_id=older_task,
+            title="Ship receipt artifact",
+            started_at=now - 500,
+            ended_at=now - 400,
+            summary="First line\nSecond line with details",
+            metadata={"artifact": "/tmp/a.txt", "tests_run": ["pytest x"], "residual_risk": "needs operator review"},
+        )
+        newer_run = _insert_completed_run(
+            conn,
+            task_id=newer_task,
+            title="Verify changed files",
+            started_at=now - 120,
+            ended_at=now - 60,
+            summary="Verified worker output",
+            metadata={
+                "next_actions": ["open board drawer"],
+                "artifacts": ["/tmp/b.txt"],
+                "receipt_path": "/tmp/receipt.md",
+                "verification_evidence": ["curl ok"],
+                "changed_files": ["web/src/x.ts"],
+            },
+            profile="research",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=blocked_task,
+            title="Blocked task",
+            started_at=now - 40,
+            ended_at=now - 20,
+            outcome="blocked",
+            summary="blocked summary",
+            metadata={"next_actions": ["not in default"]},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/recent-results")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 2
+    assert [row["task_title"] for row in data["results"]] == ["Verify changed files", "Ship receipt artifact"]
+    first = data["results"][0]
+    assert first["run_id"] == newer_run
+    assert first["followups"] == ["open board drawer"]
+    assert first["artifacts"] == ["/tmp/b.txt", "/tmp/receipt.md"]
+    assert first["verification"] == ["curl ok", "web/src/x.ts"]
+    assert first["summary_preview"] == "Verified worker output"
+    second = data["results"][1]
+    assert second["followups"] == ["needs operator review"]
+    assert second["artifacts"] == ["/tmp/a.txt"]
+    assert second["verification"] == ["pytest x"]
+
+
+def test_recent_results_caps_limit_filters_since_and_truncates_summary(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        old_task = kb.create_task(conn, title="old", assignee="coder")
+        new_task = kb.create_task(conn, title="new", assignee="coder")
+        _insert_completed_run(
+            conn,
+            task_id=old_task,
+            title="too old",
+            started_at=now - 200000,
+            ended_at=now - 190000,
+            summary="old",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=new_task,
+            title="large summary",
+            started_at=now - 30,
+            ended_at=now - 10,
+            summary="x" * 9000,
+            metadata={"required_verification": ["check"], "suggested_fixes": ["fix"]},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/recent-results?since_hours=1&limit=999")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["limit"] == 50
+    assert data["count"] == 1
+    result = data["results"][0]
+    assert result["task_title"] == "large summary"
+    assert len(result["summary"]) == 8192
+    assert len(result["summary_preview"]) == 160
+    assert result["followups"] == ["check", "fix"]
