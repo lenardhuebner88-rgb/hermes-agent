@@ -231,9 +231,17 @@ def test_html_view_is_readonly_and_served(client):
     assert resp.status_code == 200
     text = resp.text
     assert "Hermes Autoresearch" in text
-    # read-only: no mutation forms in the served page
+    # read-only: no mutation forms in the served page (controls use fetch, not <form>)
     assert '<form' not in text.lower()
     assert 'method="post"' not in text.lower()
+
+
+def test_html_view_has_operational_controls(client):
+    cl, _view = client
+    text = cl.get("/autoresearch").text
+    for needle in ['id="pill"', 'id="btnDry"', 'id="btnApply"', 'id="btnStop"',
+                   'id="iterbar"', 'id="weakness"', 'id="metrics"', 'id="results"']:
+        assert needle in text, f"missing {needle}"
 
 
 # --------------------------------------------------------------------------

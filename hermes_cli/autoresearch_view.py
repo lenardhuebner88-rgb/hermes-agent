@@ -378,175 +378,216 @@ def stop_runner() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Self-contained HTML view (polls the JSON routes; no mutation forms)
 # ---------------------------------------------------------------------------
-_HTML_PAGE = """<!doctype html>
+_HTML_PAGE = """
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hermes Autoresearch — Live Loop</title>
+<title>Hermes Autoresearch</title>
 <style>
-:root { color-scheme: light; --ink:#162016; --muted:#5f6f63; --line:#d8ded3; --panel:#f6f8f2; --accent:#126b54; --warn:#a9501a; --bad:#9b2635; --bg:#fbfcf8; }
-* { box-sizing:border-box; }
-body { margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
-header { padding:22px 26px 14px; border-bottom:1px solid var(--line); background:#fff; }
-h1 { margin:0 0 6px; font-size:24px; }
-header p { margin:0; color:var(--muted); max-width:960px; }
-main { padding:20px 26px 36px; display:grid; gap:18px; }
-.panel { border:1px solid var(--line); background:#fff; border-radius:8px; padding:16px; }
-h2 { margin:0 0 12px; font-size:17px; }
-.pill { display:inline-block; padding:4px 12px; border-radius:999px; font-weight:700; font-size:14px; }
-.pill-idle { background:#eef1ec; color:var(--muted); }
-.pill-running { background:#e3f4ec; color:var(--accent); }
-.pill-stopping { background:#fff1dc; color:var(--warn); }
-.pill-crashed { background:#fbe3e6; color:var(--bad); }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
-.kv { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
-.kv span { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
-.kv strong { font-size:16px; }
-.badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#e8f1ec; color:var(--accent); }
-.badge-yellow { background:#fff1dc; color:var(--warn); }
-.badge-bad { background:#fbe3e6; color:var(--bad); }
-table { width:100%; border-collapse:collapse; font-size:13px; }
-th, td { text-align:left; border-bottom:1px solid var(--line); padding:8px; vertical-align:top; }
-th { color:var(--muted); background:var(--panel); }
-.banner { border:1px solid #efcf9d; background:#fff8e9; color:#5d3b00; border-radius:8px; padding:12px 14px; }
-.muted { color:var(--muted); }
-.actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
-.btn { cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:9px 14px; font-weight:700; background:#eef1ec; color:var(--ink); }
-.btn-apply { background:#e3f4ec; color:var(--accent); border-color:#bfe3d2; }
-.btn-stop { background:#fbe3e6; color:var(--bad); border-color:#f0c2c8; }
-.btn:disabled { opacity:.5; cursor:not-allowed; }
-label.kv span { font-weight:600; }
-label.kv select, label.kv input { width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:4px; }
-code { background:#eef1ec; padding:1px 5px; border-radius:4px; }
+:root{
+  color-scheme:light;
+  --ink:#15201a; --muted:#647069; --line:#dde3da; --panel:#f5f8f2; --card:#ffffff;
+  --accent:#0f6b52; --accent-soft:#e4f3ec; --warn:#a9590f; --warn-soft:#fff1dc;
+  --bad:#9b2635; --bad-soft:#fbe3e6; --info:#1f5fa8; --info-soft:#e6effb; --bg:#fafcf7;
+  --radius:12px; --shadow:0 1px 2px rgba(20,40,30,.06),0 2px 8px rgba(20,40,30,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root{ color-scheme:dark; --ink:#e7efe9;
+    --muted:#9baba2; --line:#26312b; --panel:#161d19; --card:#121815; --accent:#48c79e;
+    --accent-soft:#16302a; --warn:#e0a35c; --warn-soft:#2c2417; --bad:#f08a96; --bad-soft:#2c191c;
+    --info:#7db4ee; --info-soft:#172430; --bg:#0d1210; }
+}
+*{box-sizing:border-box;}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);}
+.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:14px 20px;background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);}
+.topbar h1{margin:0;font-size:18px;letter-spacing:.2px;flex:0 0 auto;}
+.topbar .spacer{flex:1 1 auto;}
+.updated{color:var(--muted);font-size:13px;}
+.iconbtn{cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:13px;}
+main{max-width:1100px;margin:0 auto;padding:18px 18px 48px;display:grid;gap:16px;}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px;}
+.card h2{margin:0 0 14px;font-size:15px;font-weight:650;letter-spacing:.2px;display:flex;align-items:center;gap:10px;}
+.grid{display:grid;gap:12px;}
+.cols{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 13px;border-radius:999px;font-weight:700;font-size:14px;}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;}
+.pill-idle{background:var(--panel);color:var(--muted);}
+.pill-running{background:var(--accent-soft);color:var(--accent);}
+.pill-stopping{background:var(--warn-soft);color:var(--warn);}
+.pill-crashed{background:var(--bad-soft);color:var(--bad);}
+.pill-running::before{animation:blink 1s infinite;}
+@keyframes blink{50%{opacity:.25;}}
+.kv{border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:var(--panel);}
+.kv .k{display:block;color:var(--muted);font-size:12px;margin-bottom:5px;}
+.kv .v{font-size:17px;font-weight:600;word-break:break-word;}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;background:var(--accent-soft);color:var(--accent);}
+.badge-yellow{background:var(--warn-soft);color:var(--warn);}
+.badge-bad{background:var(--bad-soft);color:var(--bad);}
+.badge-info{background:var(--info-soft);color:var(--info);}
+.progress{height:9px;border-radius:999px;background:var(--panel);overflow:hidden;border:1px solid var(--line);}
+.progress>span{display:block;height:100%;background:var(--accent);width:0;transition:width .4s ease;}
+label.field{display:flex;flex-direction:column;gap:5px;font-size:13px;color:var(--muted);min-width:120px;}
+label.field select,label.field input{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--card);color:var(--ink);font-size:14px;}
+.btn{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:10px 16px;font-weight:650;font-size:14px;background:var(--panel);color:var(--ink);transition:filter .15s;}
+.btn:hover:not(:disabled){filter:brightness(.97);}
+.btn:disabled{opacity:.45;cursor:not-allowed;}
+.btn-primary{background:var(--accent);color:#fff;border-color:transparent;}
+.btn-apply{background:var(--accent-soft);color:var(--accent);border-color:transparent;}
+.btn-stop{background:var(--bad-soft);color:var(--bad);border-color:transparent;}
+.toast{margin-top:12px;font-size:13px;color:var(--muted);min-height:18px;}
+.toast.err{color:var(--bad);}
+.toast.ok{color:var(--accent);}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 8px;vertical-align:top;}
+th{color:var(--muted);font-weight:600;background:var(--panel);position:sticky;top:0;}
+.tablewrap{max-height:380px;overflow:auto;border:1px solid var(--line);border-radius:10px;}
+.dec{font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;}
+.dec-keep{color:var(--accent);} .dec-discard{color:var(--warn);} .dec-proposed{color:var(--info);} .dec-blocked{color:var(--bad);}
+.bar{display:flex;align-items:center;gap:10px;margin:6px 0;}
+.bar .lbl{flex:0 0 200px;font-size:13px;color:var(--ink);}
+.bar .track{flex:1;height:10px;border-radius:999px;background:var(--panel);overflow:hidden;border:1px solid var(--line);}
+.bar .track>span{display:block;height:100%;background:var(--warn);}
+.bar .n{flex:0 0 32px;text-align:right;color:var(--muted);font-size:13px;}
+.muted{color:var(--muted);}
+.empty{color:var(--muted);border:1px dashed var(--line);border-radius:10px;padding:14px;background:var(--panel);font-size:13px;}
+.safety{font-size:12.5px;color:var(--muted);border-left:3px solid var(--accent);padding:4px 0 4px 12px;}
+code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;}
+@media (max-width:560px){ .bar .lbl{flex-basis:120px;} .topbar h1{font-size:16px;} }
 </style>
 </head>
-<body data-autoresearch="live-v1">
-<header>
-  <h1>Hermes Autoresearch — Live Loop</h1>
-  <p>Read-only status of the bounded skill-research runner. No mutation here:
-     Trigger/Stop are token-gated and the applying runner is a separate Go (Phase 5).</p>
-</header>
+<body data-autoresearch="live-v2">
+<div class="topbar">
+  <h1>Hermes Autoresearch</h1>
+  <span id="pill" class="pill pill-idle">loading</span>
+  <span class="spacer"></span>
+  <span class="updated" id="updated">…</span>
+  <button class="iconbtn" id="refresh" title="Refresh now">↻</button>
+</div>
 <main>
-  <section class="banner"><b>Safety:</b> bounded &amp; reversible. Every apply takes a backup,
-     is eval-gated and reverted on regression, capped, and Stop-able; mutation only under
-     <code>~/.hermes/skills</code>. No secrets/config/routing/push.</section>
-  <section class="panel">
+  <section class="card">
+    <h2>Loop status</h2>
+    <div class="grid cols">
+      <div class="kv"><span class="k">Request</span><span class="v" id="req">—</span></div>
+      <div class="kv"><span class="k">Step</span><span class="v" id="step">—</span></div>
+      <div class="kv"><span class="k">Last eval</span><span class="v" id="evalv">—</span></div>
+      <div class="kv"><span class="k">Model route</span><span class="v" id="route">—</span></div>
+      <div class="kv"><span class="k">Heartbeat</span><span class="v" id="age">—</span></div>
+    </div>
+    <div style="margin-top:14px;">
+      <div class="bar"><span class="lbl">Iteration <b id="iterlbl">—</b></span><div class="track"><span id="iterbar"></span></div></div>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Run a campaign</h2>
-    <div class="grid">
-      <label class="kv"><span>Area</span><select id="area"></select></label>
-      <label class="kv"><span>Focus</span><input id="focus" value="recommended_sections"></label>
-      <label class="kv"><span>Iterations</span><input id="iters" type="number" min="1" max="5" value="2"></label>
+    <div class="row">
+      <label class="field">Area<select id="area"></select></label>
+      <label class="field">Focus<input id="focus" value="recommended_sections"></label>
+      <label class="field" style="min-width:90px;">Iterations<input id="iters" type="number" min="1" max="5" value="2"></label>
+      <button class="btn btn-primary" id="btnDry">▶ Dry-run</button>
+      <button class="btn btn-apply" id="btnApply">✓ Apply…</button>
+      <button class="btn btn-stop" id="btnStop">■ Stop</button>
     </div>
-    <div class="actions">
-      <button id="btnDry" class="btn">▶ Dry-run (propose only)</button>
-      <button id="btnApply" class="btn btn-apply">✓ Apply (confirm)</button>
-      <button id="btnStop" class="btn btn-stop">■ Stop</button>
-    </div>
-    <p class="muted" id="actionMsg">Dry-run proposes changes without touching any file. Apply asks for confirmation.</p>
+    <p class="toast" id="toast">Dry-run proposes changes without touching any file. Apply edits only under <code>~/.hermes/skills</code> with a backup and auto-revert on regression.</p>
+    <p class="safety">Single-operator system — no token. Reversible by design: backup + eval-gate + iteration cap + Stop. No secrets/config/routing/push.</p>
   </section>
-  <section class="panel">
-    <h2>Loop status <span id="pill" class="pill pill-idle">…</span></h2>
-    <div class="grid">
-      <div class="kv"><span>Request</span><strong id="req">—</strong></div>
-      <div class="kv"><span>Iteration</span><strong id="iter">—</strong></div>
-      <div class="kv"><span>Last step</span><strong id="step">—</strong></div>
-      <div class="kv"><span>Last eval</span><strong id="eval">—</strong></div>
-      <div class="kv"><span>Model route</span><strong id="route">—</strong></div>
-      <div class="kv"><span>Heartbeat age</span><strong id="age">—</strong></div>
-    </div>
-    <p class="muted" id="updated" style="margin-top:10px;">polling…</p>
-  </section>
-  <section class="panel">
+
+  <section class="card">
     <h2>Audit summary</h2>
-    <div class="grid" id="auditCards"></div>
+    <div class="grid cols" id="metrics"></div>
   </section>
-  <section class="panel">
-    <h2>Recent results</h2>
-    <div id="resultsTable"><p class="muted">loading…</p></div>
+
+  <section class="card">
+    <h2>Where skills are weak <span class="badge badge-info" id="weakTotal"></span></h2>
+    <div id="weakness"><p class="muted">loading…</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent results &amp; proposals</h2>
+    <div class="tablewrap"><div id="results"><p class="muted">loading…</p></div></div>
+    <p class="muted" id="receipt" style="margin-top:10px;"></p>
   </section>
 </main>
 <script>
-const BASE = (window.__HERMES_BASE_PATH__ || "");
-function el(id){ return document.getElementById(id); }
-function esc(s){ const d=document.createElement('div'); d.textContent = (s==null?'':String(s)); return d.innerHTML; }
-function setRoute(node, status){
-  const s = (status||'unknown');
-  node.innerHTML = '<span class="badge'+(s==='yellow'?' badge-yellow':(s==='unavailable'?' badge-bad':''))+'">'+esc(s)+'</span>';
-}
+const BASE=(window.__HERMES_BASE_PATH__||"");
+const AREAS=['all','devops','github','software-development','research','productivity','mlops','creative','firecrawl','hermes-kanban'];
+const $=id=>document.getElementById(id);
+const esc=s=>{const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;};
+$('area').innerHTML=AREAS.map(a=>'<option>'+a+'</option>').join('');
+let running=false;
+
+function setPill(state){const p=$('pill');p.className='pill pill-'+(state||'idle');p.textContent=state||'idle';}
+function routeBadge(s){s=s||'unknown';const c=s==='yellow'?'badge-yellow':(s==='unavailable'?'badge-bad':'badge');return '<span class="badge '+c+'">'+esc(s)+'</span>';}
+function setControls(){$('btnDry').disabled=running;$('btnApply').disabled=running;$('btnStop').disabled=!running;}
+
 async function poll(){
-  try {
-    const r = await fetch(BASE + '/autoresearch/status', {headers:{'Accept':'application/json'}});
-    const d = await r.json();
-    const pill = el('pill');
-    pill.className = 'pill pill-' + (d.state||'idle');
-    pill.textContent = (d.state||'idle');
-    el('req').textContent = d.request_id || '—';
-    el('iter').textContent = (d.iteration!=null && d.max!=null) ? (d.iteration + ' / ' + d.max) : '—';
-    el('step').textContent = d.last_step || '—';
-    el('eval').textContent = d.last_eval || '—';
-    setRoute(el('route'), d.route_status);
-    el('age').textContent = (d.heartbeat_age_s!=null) ? (d.heartbeat_age_s + 's' + (d.heartbeat_fresh?'':' (stale)')) : '—';
-    el('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
-  } catch (e) {
-    el('updated').textContent = 'status fetch failed: ' + e;
-  }
+  try{
+    const d=await(await fetch(BASE+'/autoresearch/status',{headers:{'Accept':'application/json'}})).json();
+    setPill(d.state); running=(d.state==='running'||d.state==='stopping'); setControls();
+    $('req').textContent=d.request_id||'—';
+    $('step').textContent=d.last_step||'—';
+    $('evalv').textContent=d.last_eval||'—';
+    $('route').innerHTML=routeBadge(d.route_status);
+    $('age').textContent=(d.heartbeat_age_s!=null)?(d.heartbeat_age_s+'s'+(d.heartbeat_fresh?'':' · stale')):'—';
+    const it=d.iteration,mx=d.max;
+    $('iterlbl').textContent=(it!=null&&mx!=null)?(it+' / '+mx):'—';
+    $('iterbar').style.width=(it!=null&&mx)?Math.min(100,(it/mx)*100)+'%':'0';
+    $('updated').textContent='updated '+new Date().toLocaleTimeString();
+    if(d.last_receipt)$('receipt').textContent='Last receipt: '+d.last_receipt;
+  }catch(e){$('updated').textContent='status failed';}
 }
 async function loadAudit(){
-  try {
-    const r = await fetch(BASE + '/autoresearch/audit', {headers:{'Accept':'application/json'}});
-    const d = await r.json();
-    const cards = [];
-    const inv = d.inventory || {};
-    const pc = inv.priority_counts || {};
-    cards.push(['Iterations logged', d.results_count]);
-    cards.push(['Kept', (d.decision_counts||{}).keep || 0]);
-    cards.push(['Blocked', (d.decision_counts||{}).blocked || 0]);
-    cards.push(['Discarded', (d.decision_counts||{}).discard || 0]);
-    if (pc.high!=null) cards.push(['High-priority skills', pc.high]);
-    if (inv.model_route_status) cards.push(['Model route', inv.model_route_status]);
-    el('auditCards').innerHTML = cards.map(c =>
-      '<div class="kv"><span>'+esc(c[0])+'</span><strong>'+esc(c[1])+'</strong></div>').join('');
-    const rows = (d.results||[]).slice(-15).reverse();
-    if (!rows.length){ el('resultsTable').innerHTML = '<p class="muted">No iterations logged yet.</p>'; return; }
-    const cols = ['timestamp','mode','target','hypothesis','decision','risk'];
-    let html = '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>';
-    for (const row of rows){ html += '<tr>'+cols.map(c=>'<td>'+esc(row[c])+'</td>').join('')+'</tr>'; }
-    el('resultsTable').innerHTML = html + '</tbody></table>';
-  } catch (e) {
-    el('resultsTable').innerHTML = '<p class="muted">audit fetch failed: '+esc(e)+'</p>';
-  }
+  try{
+    const d=await(await fetch(BASE+'/autoresearch/audit',{headers:{'Accept':'application/json'}})).json();
+    const inv=d.inventory||{},pc=inv.priority_counts||{},dc=d.decision_counts||{};
+    const cards=[['Iterations logged',d.results_count],['Kept',dc.keep||0],['Reverted',dc.discard||0],['Blocked',dc.blocked||0]];
+    if(pc.high!=null){cards.push(['High priority',pc.high]);cards.push(['Medium',pc.medium||0]);cards.push(['Low',pc.low||0]);}
+    if(inv.inventory_summary&&inv.inventory_summary['Total SKILL.md files inventoried'])cards.unshift(['Skills inventoried',inv.inventory_summary['Total SKILL.md files inventoried']]);
+    $('metrics').innerHTML=cards.map(c=>'<div class="kv"><span class="k">'+esc(c[0])+'</span><span class="v">'+esc(c[1])+'</span></div>').join('');
+    const wc=inv.weakness_counts||{};const ents=Object.entries(wc).sort((a,b)=>b[1]-a[1]);
+    const tot=ents.reduce((s,e)=>s+(e[1]||0),0);$('weakTotal').textContent=tot?tot+' gaps':'';
+    const mx=Math.max(1,...ents.map(e=>e[1]||0));
+    $('weakness').innerHTML=ents.length?ents.map(e=>'<div class="bar"><span class="lbl">'+esc(e[0].replace(/_/g,' '))+'</span><div class="track"><span style="width:'+((e[1]||0)/mx*100)+'%"></span></div><span class="n">'+esc(e[1])+'</span></div>').join(''):'<div class="empty">No weakness data yet — run a dry-run.</div>';
+    const rows=(d.results||[]).slice(-25).reverse();
+    if(!rows.length){$('results').innerHTML='<div class="empty">No iterations logged yet. Click Dry-run to generate proposals.</div>';return;}
+    const cols=[['timestamp','When'],['mode','Mode'],['target','Target'],['hypothesis','Hypothesis'],['decision','Decision'],['eval_result','Eval']];
+    let h='<table><thead><tr>'+cols.map(c=>'<th>'+c[1]+'</th>').join('')+'</tr></thead><tbody>';
+    for(const r of rows){h+='<tr>'+cols.map(c=>{let v=r[c[0]];if(c[0]==='decision'){const k=(v||'').toLowerCase();return '<td><span class="dec dec-'+k+'">'+esc(v)+'</span></td>';}return '<td>'+esc(v)+'</td>';}).join('')+'</tr>';}
+    $('results').innerHTML=h+'</tbody></table>';
+  }catch(e){$('results').innerHTML='<div class="empty">audit fetch failed</div>';}
 }
-const AREAS = ['all','devops','github','software-development','research','productivity','mlops','creative','firecrawl','hermes-kanban'];
-el('area').innerHTML = AREAS.map(a => '<option value="'+a+'">'+a+'</option>').join('');
+function toast(msg,kind){const t=$('toast');t.className='toast'+(kind?' '+kind:'');t.textContent=msg;}
 async function trigger(mode){
-  const body = { area: el('area').value, focus: el('focus').value || 'recommended_sections',
-                 mode: mode, confirm: false, max_iterations: Number(el('iters').value||2) };
-  if (mode === 'apply'){
-    if (!confirm('Apply will edit SKILL.md files under ~/.hermes/skills (with backup + auto-revert on regression). Proceed?')) return;
-    body.confirm = true;
-  }
-  el('actionMsg').textContent = 'starting ' + mode + '…';
-  try {
-    const r = await fetch(BASE + '/autoresearch/trigger', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    el('actionMsg').textContent = r.ok ? (mode+' started (pid '+d.pid+', '+d.request_id+')') : ('error: '+(d.detail||r.status));
-  } catch(e){ el('actionMsg').textContent = 'request failed: '+e; }
-  poll();
+  const body={area:$('area').value,focus:$('focus').value||'recommended_sections',mode:mode,confirm:false,max_iterations:Number($('iters').value||2)};
+  if(mode==='apply'){if(!confirm('Apply will edit SKILL.md files under ~/.hermes/skills (backup + auto-revert on regression). Proceed?'))return;body.confirm=true;}
+  toast('starting '+mode+'…');
+  try{
+    const r=await fetch(BASE+'/autoresearch/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(r.ok)toast(mode+' started — '+d.request_id+' (pid '+d.pid+')','ok');
+    else toast('error '+r.status+': '+(d.detail||''),'err');
+  }catch(e){toast('request failed: '+e,'err');}
+  poll();setTimeout(()=>{poll();loadAudit();},1500);
 }
 async function stop(){
-  el('actionMsg').textContent = 'stopping…';
-  try { const r = await fetch(BASE + '/autoresearch/stop', {method:'POST'}); const d = await r.json();
-        el('actionMsg').textContent = d.detail || (r.ok?'stopped':'error'); }
-  catch(e){ el('actionMsg').textContent = 'stop failed: '+e; }
+  toast('stopping…');
+  try{const d=await(await fetch(BASE+'/autoresearch/stop',{method:'POST'})).json();toast(d.detail||'stopped',d.ok?'ok':'err');}
+  catch(e){toast('stop failed: '+e,'err');}
   poll();
 }
-el('btnDry').addEventListener('click', () => trigger('dry-run'));
-el('btnApply').addEventListener('click', () => trigger('apply'));
-el('btnStop').addEventListener('click', stop);
-poll(); loadAudit();
-setInterval(poll, 4000);
-setInterval(() => loadAudit(), 12000);
+$('btnDry').addEventListener('click',()=>trigger('dry-run'));
+$('btnApply').addEventListener('click',()=>trigger('apply'));
+$('btnStop').addEventListener('click',stop);
+$('refresh').addEventListener('click',()=>{poll();loadAudit();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll();loadAudit();}});
+let pollTimer=setInterval(()=>{if(!document.hidden)poll();},4000);
+let auditTimer=setInterval(()=>{if(!document.hidden)loadAudit();},12000);
+poll();loadAudit();setControls();
 </script>
 </body>
 </html>
