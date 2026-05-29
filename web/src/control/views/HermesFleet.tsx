@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
+import { de } from "../i18n/de";
 import { useHermesWorkers, useRunInspect } from "../hooks/useControlData";
 import { nowSec, workerHealth, workerSortRank } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
@@ -14,6 +16,25 @@ export function HermesFleet({ density }: { density: Density }) {
   const { inspectByRun, loadingRun, inspect } = useRunInspect();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
+  const [busyRun, setBusyRun] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const onAction = async (runId: string, action: string) => {
+    setBusyRun(runId);
+    setActionError(null);
+    try {
+      const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        `/api/plugins/kanban/workers/${encodeURIComponent(runId)}/action`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, confirm: true }) },
+      );
+      if (res.ok === false) setActionError(res.detail || de.worker.actionFailed);
+    } catch (e) {
+      setActionError(`${de.worker.actionFailed}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusyRun(null);
+      await workers.reload();
+    }
+  };
   const list = (workers.data?.workers ?? [])
     .map((worker) => ({ ...worker, inspect: inspectByRun[worker.run_id] ?? worker.inspect }))
     .sort((a, b) => workerSortRank(b, now) - workerSortRank(a, now));
@@ -39,9 +60,10 @@ export function HermesFleet({ density }: { density: Density }) {
         {workers.loading ? <Spinner /> : <span className="text-sm hc-soft">Inspect lädt CPU/RAM pro Worker auf Knopfdruck.</span>}
       </section>
       {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
+      {actionError ? <ToneCallout tone="red">{actionError}</ToneCallout> : null}
       {list.length === 0 && !workers.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Bot className="h-5 w-5" />Keine aktiven Worker.</div> : null}
       <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
-        {list.map((worker, index) => <div key={worker.run_id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><WorkerCard worker={worker} health={workerHealth(worker, now)} density={density} now={now} inspectLoading={loadingRun === worker.run_id} onInspect={inspect} /></div>)}
+        {list.map((worker, index) => <div key={worker.run_id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><WorkerCard worker={worker} health={workerHealth(worker, now)} density={density} now={now} inspectLoading={loadingRun === worker.run_id} onInspect={inspect} onAction={onAction} actionBusy={busyRun === worker.run_id} /></div>)}
       </div>
     </div>
   );

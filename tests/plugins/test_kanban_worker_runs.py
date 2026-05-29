@@ -299,3 +299,144 @@ def test_inspect_run_live_pid(client, monkeypatch):
     assert body["memory_rss_bytes"] == fake_mem.rss
     assert body["num_threads"] == 4
     assert body["status"] == "sleeping"
+
+
+# ---------------------------------------------------------------------------
+# POST /workers/{run_id}/action  (C2 control worker actions)
+# ---------------------------------------------------------------------------
+def _running_worker(conn, *, title, assignee="alice"):
+    """Create a running task with a live claim + a run row; return (task_id, run_id)."""
+    import secrets as _secrets
+    task_id = kb.create_task(conn, title=title, assignee=assignee)
+    lock = _secrets.token_hex(8)
+    future = int(time.time()) + 3600
+    conn.execute(
+        "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, worker_pid=NULL WHERE id=?",
+        (lock, future, task_id),
+    )
+    run_id = _insert_run(conn, task_id, worker_pid=None)
+    conn.commit()
+    return task_id, run_id
+
+
+def test_worker_action_requires_confirm(client):
+    conn = kb.connect()
+    try:
+        task_id, run_id = _running_worker(conn, title="c2-confirm")
+    finally:
+        conn.close()
+    r = client.post(f"/api/plugins/kanban/workers/{run_id}/action", json={"action": "unlock"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and "confirm" in body["detail"]
+    # No mutation: task is still running.
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "running"
+    finally:
+        conn.close()
+
+
+def test_worker_action_unknown_action_400(client):
+    r = client.post("/api/plugins/kanban/workers/1/action", json={"action": "explode", "confirm": True})
+    assert r.status_code == 400
+
+
+def test_worker_action_unlock_reclaims_claim(client):
+    conn = kb.connect()
+    try:
+        task_id, run_id = _running_worker(conn, title="c2-unlock")
+    finally:
+        conn.close()
+    r = client.post(f"/api/plugins/kanban/workers/{run_id}/action",
+                    json={"action": "unlock", "confirm": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["action"] == "unlock"
+    # Reversible: the claim is gone and the task is re-claimable (ready).
+    conn = kb.connect()
+    try:
+        t = kb.get_task(conn, task_id)
+        assert t.status == "ready"
+        assert t.claim_lock is None
+    finally:
+        conn.close()
+
+
+def test_worker_action_unlock_guard_when_not_running(client):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="c2-idle", assignee="alice")  # stays 'triage'/'todo'
+        run_id = _insert_run(conn, task_id, worker_pid=None)
+        conn.commit()
+    finally:
+        conn.close()
+    r = client.post(f"/api/plugins/kanban/workers/{run_id}/action",
+                    json={"action": "unlock", "confirm": True})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False  # nothing to reclaim
+
+
+def test_worker_action_nudge_adds_comment_without_kill(client):
+    conn = kb.connect()
+    try:
+        task_id, run_id = _running_worker(conn, title="c2-nudge")
+    finally:
+        conn.close()
+    r = client.post(f"/api/plugins/kanban/workers/{run_id}/action",
+                    json={"action": "nudge", "confirm": True, "reason": "weitermachen bitte"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    conn = kb.connect()
+    try:
+        # Soft: a comment was added and the worker is NOT killed (still running).
+        comments = kb.list_comments(conn, task_id)
+        assert any("weitermachen" in c.body for c in comments)
+        assert kb.get_task(conn, task_id).status == "running"
+    finally:
+        conn.close()
+
+
+def test_worker_action_restart_reclaims_then_dispatches(client):
+    conn = kb.connect()
+    try:
+        task_id, run_id = _running_worker(conn, title="c2-restart")
+    finally:
+        conn.close()
+    r = client.post(f"/api/plugins/kanban/workers/{run_id}/action",
+                    json={"action": "restart", "confirm": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["action"] == "restart"
+    assert "dispatch" in body  # a dispatcher tick ran
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).claim_lock is None
+    finally:
+        conn.close()
+
+
+def test_worker_action_dispatch_runs_tick(client):
+    # dispatch is board-level; run_id need not reference a live worker.
+    r = client.post("/api/plugins/kanban/workers/0/action",
+                    json={"action": "dispatch", "confirm": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["action"] == "dispatch"
+    assert body.get("dispatch") is not None
+
+
+def test_workers_active_includes_run_status_fields(client):
+    """C2: payload carries run_status/run_outcome/block_reason so the SPA's
+    health logic (blocked/offline → unlock/restart) works off live data."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="c2-fields", assignee="alice")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        _insert_run(conn, task_id, worker_pid=4242)
+    finally:
+        conn.close()
+    body = client.get("/api/plugins/kanban/workers/active").json()
+    assert body["count"] == 1
+    w = body["workers"][0]
+    assert "run_status" in w and "run_outcome" in w and "block_reason" in w

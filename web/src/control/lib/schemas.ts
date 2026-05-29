@@ -25,7 +25,11 @@ export const RunInspectSchema = z.object({
 }));
 
 export const WorkerSchema = z.object({
-  run_id: z.string(),
+  // The backend sends run_id as an integer (task_runs.id); the SPA treats it
+  // as a string (React key, URL param, inspect map). Without coercion a numeric
+  // id fails validation and — because the array has .catch([]) — silently
+  // empties the ENTIRE worker list (count > 0 but zero cards rendered).
+  run_id: z.coerce.string(),
   task_id: z.string().catch(""),
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("running"),

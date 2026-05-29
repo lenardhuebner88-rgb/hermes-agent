@@ -42,7 +42,7 @@ import logging
 import os
 import sqlite3
 import time
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status as http_status
@@ -1209,7 +1209,10 @@ def list_active_workers(
                 r.claim_lock,
                 r.claim_expires,
                 r.last_heartbeat_at,
-                r.max_runtime_seconds
+                r.max_runtime_seconds,
+                r.status       AS run_status,
+                r.outcome      AS run_outcome,
+                t.result       AS block_reason
             FROM task_runs r
             JOIN tasks t ON t.id = r.task_id
             WHERE r.ended_at IS NULL
@@ -1232,6 +1235,12 @@ def list_active_workers(
                 "claim_expires": row["claim_expires"],
                 "last_heartbeat_at": row["last_heartbeat_at"],
                 "max_runtime_seconds": row["max_runtime_seconds"],
+                # C2: the SPA's WorkerSchema/health logic consumes these; they
+                # were declared frontend-side but never sent, so blocked/offline
+                # health (→ unlock/restart actions) never surfaced from live data.
+                "run_status": row["run_status"],
+                "run_outcome": row["run_outcome"],
+                "block_reason": row["block_reason"],
             }
             for row in rows
         ]
@@ -1328,6 +1337,101 @@ def inspect_run_endpoint(
         return {"run_id": run_id, "alive": False, "pid": pid, "reason": "process not found"}
     except _psutil.AccessDenied:
         return {"run_id": run_id, "alive": True, "pid": pid, "error": "access denied"}
+
+
+# ---------------------------------------------------------------------------
+# Control dashboard worker actions (C2) — operator recovery from the worker
+# card. Every action maps onto an existing, proven kanban primitive; no new
+# claim or dispatch logic is introduced here.
+# ---------------------------------------------------------------------------
+class WorkerActionBody(BaseModel):
+    action: str = Field(..., description="unlock | nudge | restart | dispatch")
+    confirm: bool = False
+    reason: Optional[str] = None
+
+
+_WORKER_ACTIONS = {"unlock", "nudge", "restart", "dispatch"}
+
+
+@router.post("/workers/{run_id}/action")
+def worker_action_endpoint(
+    run_id: int,
+    payload: WorkerActionBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Operator worker-recovery actions for the Control dashboard (C2).
+
+    * ``unlock``   – release a hung claim so the task is re-claimable
+                     (``reclaim_task``: terminates the worker, task → ready).
+    * ``nudge``    – soft, no-kill operator ping: appends a visible comment to
+                     the task. Lowest-impact, fully reversible.
+    * ``restart``  – reclaim the run, then run one dispatcher tick so it is
+                     re-picked (``reclaim_task`` + ``dispatch_once``). No
+                     gateway restart from here — that stays a separate,
+                     deliberate action.
+    * ``dispatch`` – run one dispatcher tick to pick up ready work
+                     (``dispatch_once``).
+
+    Mutating actions require ``confirm: true`` (the dashboard confirm dialog).
+    Returns a structured ``{ok, action, detail, run_id, task_id}``; a guard
+    refusal is ``ok: false`` at HTTP 200 so the UI shows the reason inline
+    rather than throwing.
+    """
+    action = (payload.action or "").strip().lower()
+    if action not in _WORKER_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"unknown worker action: {payload.action!r}")
+    if not payload.confirm:
+        return {"ok": False, "action": action, "run_id": run_id, "detail": "confirm required"}
+
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if action == "dispatch":
+            result = kanban_db.dispatch_once(conn, board=board)
+            n = len(getattr(result, "spawned", []) or [])
+            log.info("control worker-action=dispatch board=%s spawned=%d", board, n)
+            return {
+                "ok": True, "action": action, "run_id": run_id,
+                "detail": f"Dispatcher-Tick ausgeführt — {n} Worker gestartet.",
+                "dispatch": asdict(result) if is_dataclass(result) else None,
+            }
+
+        run = kanban_db.get_run(conn, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        task_id = run.task_id
+
+        if action == "nudge":
+            kanban_db.add_comment(
+                conn, task_id, author="control-dashboard",
+                body=(payload.reason or "Operator-Nudge: bitte Status prüfen / weitermachen."),
+            )
+            log.info("control worker-action=nudge run=%s task=%s", run_id, task_id)
+            return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
+                    "detail": "Nudge als Kommentar gesetzt (kein Kill)."}
+
+        if action == "unlock":
+            ok = kanban_db.reclaim_task(conn, task_id, reason=(payload.reason or "control unlock"))
+            log.info("control worker-action=unlock run=%s task=%s ok=%s", run_id, task_id, ok)
+            if not ok:
+                return {"ok": False, "action": action, "run_id": run_id, "task_id": task_id,
+                        "detail": "Kein aktiver Claim zum Lösen (Task nicht running)."}
+            return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
+                    "detail": "Claim gelöst — Task ist wieder beanspruchbar (ready)."}
+
+        # restart: reclaim the run, then one dispatcher tick so it is re-picked.
+        ok = kanban_db.reclaim_task(conn, task_id, reason=(payload.reason or "control restart"))
+        if not ok:
+            log.info("control worker-action=restart run=%s task=%s reclaimed=False", run_id, task_id)
+            return {"ok": False, "action": action, "run_id": run_id, "task_id": task_id,
+                    "detail": "Konnte Run nicht zurückholen (kein aktiver Claim)."}
+        redispatch = kanban_db.dispatch_once(conn, board=board)
+        log.info("control worker-action=restart run=%s task=%s reclaimed=True", run_id, task_id)
+        return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
+                "detail": "Worker zurückgeholt und neu eingeplant.",
+                "dispatch": asdict(redispatch) if is_dataclass(redispatch) else None}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

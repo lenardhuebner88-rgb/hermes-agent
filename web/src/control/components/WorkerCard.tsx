@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AlertTriangle, Eye, Lock, RotateCw, Send, Zap } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
@@ -22,6 +23,8 @@ interface Props {
   now: number;
   inspectLoading?: boolean;
   onInspect: (runId: string) => void;
+  onAction?: (runId: string, action: string) => void | Promise<void>;
+  actionBusy?: boolean;
 }
 
 function actionIcon(key: string) {
@@ -31,7 +34,8 @@ function actionIcon(key: string) {
   return <Zap className="h-4 w-4" />;
 }
 
-export function WorkerCard({ worker, health, density, now, inspectLoading, onInspect }: Props) {
+export function WorkerCard({ worker, health, density, now, inspectLoading, onInspect, onAction, actionBusy }: Props) {
+  const [confirming, setConfirming] = useState(false);
   const inspect = worker.inspect ?? null;
   const remaining = workerRemaining(worker, now);
   const heartbeatAge = workerHeartbeatAge(worker, now);
@@ -74,8 +78,30 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {de.worker.actions.inspect}
         </Button>
         <Button outlined size="sm" disabled prefix={<Eye className="h-4 w-4" />}>{de.worker.actions.details}</Button>
-        <Button outlined size="sm" disabled prefix={actionIcon(primary)}>{primaryLabel} · TODO</Button>
+        {onAction && !confirming ? (
+          <Button outlined size="sm" disabled={actionBusy} onClick={() => setConfirming(true)} prefix={actionBusy ? <Spinner /> : actionIcon(primary)}>
+            {primaryLabel}
+          </Button>
+        ) : null}
+        {onAction && confirming ? (
+          <>
+            <Button
+              size="sm"
+              disabled={actionBusy}
+              onClick={async () => { await onAction(worker.run_id, primary); setConfirming(false); }}
+              prefix={actionBusy ? <Spinner /> : actionIcon(primary)}
+            >
+              {primaryLabel} · {de.worker.actions.confirm}
+            </Button>
+            <Button outlined size="sm" disabled={actionBusy} onClick={() => setConfirming(false)}>
+              {de.worker.actions.cancel}
+            </Button>
+          </>
+        ) : null}
       </div>
+      {onAction && confirming ? (
+        <p className="text-xs hc-soft">{primary === "restart" ? de.worker.restartHint : de.worker.confirmHint}</p>
+      ) : null}
     </article>
   );
 }

@@ -12,9 +12,12 @@ export const de = {
   },
   worker: {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
-    actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten" },
+    actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten", confirm: "Bestätigen", cancel: "Abbrechen" },
     stuckReason: (age: string) => `Heartbeat ${age} alt oder Claim abgelaufen`,
     offlineReason: "Prozess reagiert nicht mehr",
+    confirmHint: "Schreibt Live-Status der Worker. Fortfahren?",
+    restartHint: "Holt den laufenden Worker zurück und plant die Task neu ein. Fortfahren?",
+    actionFailed: "Aktion fehlgeschlagen",
   },
   autoresearch: {
     nextStep: "Dein nächster Schritt",
