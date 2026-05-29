@@ -44,6 +44,10 @@ if [ "$SMOKE" = "1" ]; then
   tmp_shot="/tmp/$(basename "$shot")"
   rm -f "$tmp_shot"
   chromium --headless=new --no-sandbox --disable-gpu --disable-background-timer-throttling --disable-renderer-backgrounding --virtual-time-budget=5000 --window-size=390,844 --screenshot="$tmp_shot" http://127.0.0.1:9119/control/autoresearch >/tmp/hermes-control-smoke.log 2>&1 || { cat /tmp/hermes-control-smoke.log; exit 1; }
+  for i in $(seq 1 20); do
+    if [ -s "$tmp_shot" ]; then break; fi
+    sleep 0.2
+  done
   test -s "$tmp_shot" || { echo "[deploy] FAILED — smoke screenshot is empty: $tmp_shot"; cat /tmp/hermes-control-smoke.log || true; exit 1; }
   mv "$tmp_shot" "$shot"
   echo "[deploy] smoke screenshot: $shot"
