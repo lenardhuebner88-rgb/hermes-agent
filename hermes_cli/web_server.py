@@ -4283,6 +4283,27 @@ async def set_dashboard_theme(body: ThemeSetBody):
 # Dashboard plugin system
 # ---------------------------------------------------------------------------
 
+def _safe_plugin_entry_state(entry_field: Any, *, dashboard_dir: Path) -> tuple[str, bool, Optional[str]]:
+    entry = entry_field if isinstance(entry_field, str) and entry_field.strip() else "dist/index.js"
+    candidate = Path(entry)
+    if candidate.is_absolute():
+        return entry, False, "entry path is absolute"
+    try:
+        base = dashboard_dir.resolve()
+        target = (dashboard_dir / candidate).resolve()
+        target.relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        return entry, False, "entry path escapes plugin dashboard directory"
+    if not target.is_file():
+        return entry, False, f"entry file not found: {entry}"
+    try:
+        with target.open("rb"):
+            pass
+    except OSError as exc:
+        return entry, False, f"entry file is not readable: {exc}"
+    return entry, True, None
+
+
 def _safe_plugin_api_relpath(api_field: Any, *, dashboard_dir: Path) -> Optional[str]:
     """Validate the manifest's ``api`` field for the plugin loader.
 
