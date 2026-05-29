@@ -156,6 +156,34 @@ export function fmtDur(sec: number): string {
 
 export const fmtMB = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
 
+/* ── Datenfrische (E1) ─────────────────────────────────────────────────── */
+/**
+ * Frische einer Polling-Quelle. `stale` heißt: die Quelle wurde länger als das
+ * Dreifache ihres Poll-Intervalls (mind. 30 s) nicht erfolgreich aktualisiert.
+ * Das ist erwartbar, wenn der Tab im Hintergrund liegt (usePolling pausiert bei
+ * `document.hidden` — BY DESIGN), und genau deshalb eine *Warnung*, kein Fehler:
+ * „pausiert/veraltet" ≠ „kaputt" ≠ „0". (Adressiert Sprint-A4: nie stilles 0.)
+ */
+export interface Freshness {
+  ageSec: number | null;
+  stale: boolean;
+  /** kurzer Klartext: "vor 4s", "vor 2m", "noch nie" */
+  label: string;
+}
+
+export function freshness(
+  lastUpdated: number | null,
+  intervalMs: number,
+  now: number = nowSec(),
+): Freshness {
+  if (lastUpdated == null) {
+    return { ageSec: null, stale: false, label: "noch nie" };
+  }
+  const ageSec = Math.max(0, now - lastUpdated);
+  const threshold = Math.max(30, Math.floor((intervalMs / 1000) * 3));
+  return { ageSec, stale: ageSec > threshold, label: `vor ${fmtAge(lastUpdated, now)}` };
+}
+
 /** DD/MM/YYYY, HH:mm (Design-System-Format). */
 export function fmtClock(epochSec: number): string {
   const d = new Date(epochSec * 1000);

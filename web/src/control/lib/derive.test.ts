@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, STUCK_HEARTBEAT_S,
+  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, STUCK_HEARTBEAT_S,
 } from './derive';
 import type { Worker, AgentLive, Proposal } from './types';
 
@@ -105,5 +105,27 @@ describe('Formatierung', () => {
   });
   it('fmtMB', () => {
     expect(fmtMB(536870912)).toBe('512 MB');
+  });
+});
+
+describe('Datenfrische (E1)', () => {
+  it('noch nie aktualisiert → nicht stale, Label "noch nie"', () => {
+    const f = freshness(null, 5000, NOW);
+    expect(f).toEqual({ ageSec: null, stale: false, label: 'noch nie' });
+  });
+  it('frisch innerhalb 3x Intervall', () => {
+    const f = freshness(NOW - 4, 5000, NOW);
+    expect(f.stale).toBe(false);
+    expect(f.label).toBe('vor 4s');
+  });
+  it('stale jenseits 3x Intervall (mind. 30s Boden)', () => {
+    // 6s-Poll → Schwelle 18s, aber Boden 30s greift
+    expect(freshness(NOW - 25, 6000, NOW).stale).toBe(false);
+    expect(freshness(NOW - 31, 6000, NOW).stale).toBe(true);
+  });
+  it('langes Intervall: Schwelle = 3x Intervall', () => {
+    // 20s-Poll → Schwelle 60s
+    expect(freshness(NOW - 59, 20000, NOW).stale).toBe(false);
+    expect(freshness(NOW - 61, 20000, NOW).stale).toBe(true);
   });
 });

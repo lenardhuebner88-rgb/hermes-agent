@@ -88,6 +88,9 @@ export interface AgentLive {
   roleLabel: string;
   roleSummary: string;
   escalationNote: string | null;
+  /** E4: MC-parity enrichment (queue depth + heartbeat provenance). Optional. */
+  load?: number;
+  heartbeatTruth?: string | null;
 }
 
 export interface AgentsResponse {

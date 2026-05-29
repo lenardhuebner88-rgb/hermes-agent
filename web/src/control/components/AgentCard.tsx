@@ -1,7 +1,7 @@
 import { AlertTriangle, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { agentColorVar, priorityLabel, priorityTone } from "../lib/tones";
-import { agentLabel, agentTone, fmtAge } from "../lib/derive";
+import { STUCK_HEARTBEAT_S, agentLabel, agentTone, fmtAge } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
 import type { AgentLive, AgentTask } from "../lib/types";
 import { StatusPill, ToneCallout } from "./atoms";
@@ -12,11 +12,24 @@ interface Props {
   now: number;
 }
 
+// MC marks each metric live | derived | fallback | unavailable. Anything but
+// "live" means the heartbeat age is a guess, not ground truth — flag it so the
+// operator doesn't trust an estimated heartbeat (E4 parity).
+const HEARTBEAT_TRUTH_LABEL: Record<string, string> = {
+  derived: "abgeleitet", fallback: "geschätzt", unavailable: "unbekannt",
+};
+
 export function AgentCard({ agent, density, now }: Props) {
   const tone = agentTone(agent);
   const colorVar = agentColorVar[agent.id] ?? "--hc-accent";
   const heartbeat = agent.fleetHealth.heartbeat ?? agent.lastActive;
   const heartbeatText = heartbeat ? fmtAge(heartbeat, now) : "-";
+  const heartbeatAge = heartbeat ? now - heartbeat : null;
+  const heartbeatStale = heartbeatAge != null && heartbeatAge > STUCK_HEARTBEAT_S;
+  const truthHint = agent.heartbeatTruth && agent.heartbeatTruth !== "live"
+    ? HEARTBEAT_TRUTH_LABEL[agent.heartbeatTruth] ?? agent.heartbeatTruth
+    : null;
+  const lastActiveText = agent.lastActive ? fmtAge(agent.lastActive, now) : null;
   const problem = agent.stuckSignal || agent.status === "offline";
 
   return (
@@ -32,6 +45,7 @@ export function AgentCard({ agent, density, now }: Props) {
               <span className="rounded-full border border-white/10 px-2 py-0.5 text-xs hc-soft">{agent.roleLabel}</span>
             </div>
             <p className="mt-1 line-clamp-2 text-sm hc-soft">{agent.roleSummary}</p>
+            {lastActiveText ? <p className="mt-0.5 text-xs hc-dim">zuletzt aktiv vor {lastActiveText}{agent.load ? ` · ${agent.load} in Queue` : ""}</p> : null}
           </div>
         </div>
         <StatusPill tone={tone} label={agentLabel(agent)} dot={problem ? "warn" : agent.status === "ready" ? "ready" : agent.status === "idle" ? "idle" : "live"} />
@@ -43,7 +57,7 @@ export function AgentCard({ agent, density, now }: Props) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-        <Metric label="Heartbeat" value={heartbeatText} warn={problem} />
+        <Metric label="Heartbeat" value={heartbeatText} sub={truthHint} warn={problem || heartbeatStale} />
         <Metric label="Throughput" value={agent.fleetHealth.throughput || "0/h"} />
         <Metric label="Tool" value={agent.fleetHealth.currentTool || "-"} />
         <Metric label="Modell" value={agent.model || "unbekannt"} />
@@ -68,8 +82,8 @@ export function AgentCard({ agent, density, now }: Props) {
   );
 }
 
-function Metric({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
-  return <div className={cn("rounded-lg border border-white/10 bg-white/[.03] px-3 py-2", warn && "border-amber-500/30 bg-amber-500/10 text-amber-100")}><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold">{value}</p></div>;
+function Metric({ label, value, sub, warn }: { label: string; value: string; sub?: string | null; warn?: boolean }) {
+  return <div className={cn("rounded-lg border border-white/10 bg-white/[.03] px-3 py-2", warn && "border-amber-500/30 bg-amber-500/10 text-amber-100")}><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold">{value}{sub ? <span className="ml-1 text-[10px] font-normal hc-dim">({sub})</span> : null}</p></div>;
 }
 
 function QueueCounter({ label, count, tasks }: { label: string; count: number; tasks: AgentTask[] }) {

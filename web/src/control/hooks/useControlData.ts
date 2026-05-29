@@ -15,6 +15,8 @@ type LoadState<T> = {
   data: T | null;
   error: string | null;
   loading: boolean;
+  /** Epoch seconds of the last SUCCESSFUL load (E1 freshness). null until first ok. */
+  lastUpdated: number | null;
   reload: () => Promise<void>;
   updateData: React.Dispatch<React.SetStateAction<T | null>>;
 };
@@ -23,6 +25,7 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const loaderRef = useRef(loader);
 
   useEffect(() => {
@@ -34,6 +37,7 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
       const next = await loaderRef.current();
       setData(next);
       setError(null);
+      setLastUpdated(Math.floor(Date.now() / 1000));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -58,7 +62,7 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
     };
   }, [intervalMs, reload]);
 
-  return { data, error, loading, reload, updateData: setData };
+  return { data, error, loading, lastUpdated, reload, updateData: setData };
 }
 
 export function useAutoresearchStatus() {
