@@ -41,7 +41,25 @@ function setSessionHeader(headers: Headers, token: string): void {
   }
 }
 
-export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+/** Extra knobs for {@link fetchJSON} that aren't part of the Fetch API. */
+export interface FetchJSONOptions {
+  /**
+   * Suppress the loopback stale-token auto-reload for this call. Set it for
+   * endpoints whose 401 is an *expected, steady-state* answer rather than a
+   * stale token — chiefly ``/api/auth/me``, which returns 401 on every call
+   * in non-gated (loopback) mode. Without this, that permanent 401 retriggers
+   * the reload on every mount and the SPA reload-loops (it also pins the
+   * dashboard process). When set, the 401 bubbles up as a normal ``401:``
+   * error so the caller (e.g. AuthWidget) can handle it.
+   */
+  skipStaleTokenReload?: boolean;
+}
+
+export async function fetchJSON<T>(
+  url: string,
+  init?: RequestInit,
+  opts?: FetchJSONOptions,
+): Promise<T> {
   // Inject the session token into all /api/ requests.
   const headers = new Headers(init?.headers);
   const token = window.__HERMES_SESSION_TOKEN__;
@@ -100,7 +118,7 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
     // that reload once on the first stale-token 401 — gated mode is
     // handled above, so reaching here in gated mode means a real
     // middleware failure that should not reload-loop.
-    if (!window.__HERMES_AUTH_REQUIRED__) {
+    if (!window.__HERMES_AUTH_REQUIRED__ && !opts?.skipStaleTokenReload) {
       let alreadyReloaded = false;
       try {
         alreadyReloaded =
@@ -199,7 +217,14 @@ export const api = {
    * AuthWidget component swallows 401s from this call: if the gate isn't
    * engaged, /api/auth/me returns 401 and the widget renders nothing.
    */
-  getAuthMe: () => fetchJSON<AuthMeResponse>("/api/auth/me"),
+  getAuthMe: () =>
+    fetchJSON<AuthMeResponse>("/api/auth/me", undefined, {
+      // Loopback mode answers /api/auth/me with 401 on every call (gate not
+      // engaged). That is not a stale token, so it must NOT trigger the
+      // auto-reload — otherwise the SPA reload-loops. Let the 401 bubble up;
+      // AuthWidget swallows it and renders nothing.
+      skipStaleTokenReload: true,
+    }),
   logout: () =>
     fetch(`${BASE}/auth/logout`, {
       method: "POST",
