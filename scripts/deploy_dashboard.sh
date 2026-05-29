@@ -41,8 +41,11 @@ echo "[deploy] payload: $PAYLOAD_OK"
 if [ "$SMOKE" = "1" ]; then
   mkdir -p "$HOME/.hermes/reports"
   shot="$HOME/.hermes/reports/control-smoke-$(date +%Y%m%d-%H%M%S).png"
-  chromium --headless=new --no-sandbox --disable-gpu --disable-background-timer-throttling --disable-renderer-backgrounding --virtual-time-budget=5000 --window-size=390,844 --screenshot="$shot" http://127.0.0.1:9119/control/autoresearch >/tmp/hermes-control-smoke.log 2>&1 || { cat /tmp/hermes-control-smoke.log; exit 1; }
-  test -s "$shot" || { echo "[deploy] FAILED — smoke screenshot is empty: $shot"; exit 1; }
+  tmp_shot="/tmp/$(basename "$shot")"
+  rm -f "$tmp_shot"
+  chromium --headless=new --no-sandbox --disable-gpu --disable-background-timer-throttling --disable-renderer-backgrounding --virtual-time-budget=5000 --window-size=390,844 --screenshot="$tmp_shot" http://127.0.0.1:9119/control/autoresearch >/tmp/hermes-control-smoke.log 2>&1 || { cat /tmp/hermes-control-smoke.log; exit 1; }
+  test -s "$tmp_shot" || { echo "[deploy] FAILED — smoke screenshot is empty: $tmp_shot"; cat /tmp/hermes-control-smoke.log || true; exit 1; }
+  mv "$tmp_shot" "$shot"
   echo "[deploy] smoke screenshot: $shot"
 fi
 
