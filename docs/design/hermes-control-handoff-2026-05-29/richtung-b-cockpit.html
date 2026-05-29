@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="de" data-theme="dark" data-density="normal">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Hermes Control — Richtung B · Cockpit</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="stylesheet" href="tokens.css" />
+<script src="hermes-data.js"></script>
+<style>
+  /* ── Richtung B: kompakt-operativ, Cockpit. Rail (Desktop) + Top-Tabs (Mobil). Monospace-Zahlen, LEDs, dichte Raster. ── */
+  :root { --b-accent: var(--accent); --b-accent-text: var(--accent-text); --b-accent-wash: var(--accent-wash); --b-accent-border: var(--accent-border); --rail-w: 64px; }
+  [data-theme="light"] {
+    --bg:#eceef2; --rail:#ffffff; --panel:#ffffff; --panel-2:#f3f4f7; --panel-active:#e7e9ee;
+    --panel-card:#ffffff; --border:#dfe2e8; --border-strong:#cbcfd8;
+    --text:#15171c; --text-soft:#5a6472; --text-dim:#98a0ad;
+  }
+  [data-theme="light"] body { background: linear-gradient(180deg,#eceef2,#e4e7ec); }
+  body { font-family: var(--font-sans); }
+
+  /* numbers + labels lean mono in cockpit */
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .eyebrow { font-family: var(--font-sans); font-size:9.5px; letter-spacing:.2em; text-transform:uppercase; font-weight:600; color:var(--text-dim); }
+  .led { width:7px; height:7px; border-radius:999px; flex:none; }
+  [data-pulse="off"] .mc-dot-live, [data-pulse="off"] .mc-dot-warn, [data-pulse="off"] .mc-dot-error { animation: none !important; }
+
+  /* layout */
+  .shell { display:flex; min-height:100vh; }
+  .rail { display:none; }
+  .col { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .content { padding:14px; max-width:1500px; width:100%; margin:0 auto; }
+  [data-density="dense"] .content { padding:10px; }
+
+  /* mobile top chrome */
+  .topbar { position:sticky; top:0; z-index:40; background: color-mix(in srgb, var(--rail) 96%, transparent); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+  .tabstrip { display:flex; gap:6px; overflow-x:auto; padding:8px 12px; scrollbar-width:none; }
+  .tabstrip::-webkit-scrollbar{display:none;}
+  .tchip { flex:none; display:inline-flex; align-items:center; gap:7px; padding:8px 13px; border-radius:8px; border:1px solid var(--border); background:var(--panel); color:var(--text-soft); font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; -webkit-tap-highlight-color:transparent; transition:all .15s; }
+  .tchip[aria-selected="true"] { border-color:var(--b-accent-border); background:var(--b-accent-wash); color:var(--b-accent-text); box-shadow: var(--shadow-accent-chip); }
+  .tchip .ct-badge { background:var(--rose); color:#fff; font-size:10px; font-weight:700; border-radius:999px; padding:0 5px; min-width:16px; text-align:center; }
+
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; }
+  .panel-2 { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; }
+  .hair { border-top:1px solid var(--border); }
+  .pill { display:inline-flex; align-items:center; gap:5px; border:1px solid transparent; border-radius:999px; padding:2px 8px; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; }
+  .toneb-emerald{border-color:rgba(34,197,94,.25);background:rgba(34,197,94,.10);color:var(--emerald-200)}
+  .toneb-cyan{border-color:rgba(34,211,238,.25);background:rgba(34,211,238,.10);color:var(--cyan-200)}
+  .toneb-sky{border-color:rgba(56,189,248,.25);background:rgba(56,189,248,.10);color:var(--sky-200)}
+  .toneb-amber{border-color:rgba(245,158,11,.30);background:rgba(245,158,11,.12);color:var(--amber-200)}
+  .toneb-rose{border-color:rgba(244,63,94,.30);background:rgba(244,63,94,.12);color:var(--rose-200)}
+  .toneb-red{border-color:rgba(239,68,68,.30);background:rgba(239,68,68,.12);color:var(--red-200)}
+  .toneb-zinc{border-color:rgba(82,82,91,.30);background:rgba(82,82,91,.12);color:var(--zinc-200)}
+  .toneb-violet{border-color:var(--b-accent-border);background:var(--b-accent-wash);color:var(--b-accent-text)}
+
+  .gridbar { height:5px; border-radius:2px; background:var(--panel-active); overflow:hidden; }
+  .gridbar > i { display:block; height:100%; border-radius:2px; }
+
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; border-radius:8px; padding:8px 12px; font-size:12.5px; font-weight:600; border:1px solid var(--border-strong); background:var(--panel-active); color:var(--text); cursor:pointer; transition:filter .15s, transform .1s; min-height:38px; }
+  .btn:hover{filter:brightness(1.18)} .btn:active{transform:scale(.97)}
+  .btn-accent{ border-color:var(--b-accent-border); background:var(--b-accent-wash); color:var(--b-accent-text); box-shadow:var(--shadow-accent-chip); }
+  .btn-warn{ border-color:rgba(245,158,11,.35); background:rgba(245,158,11,.12); color:var(--amber-200); }
+  .btn-danger{ border-color:rgba(244,63,94,.35); background:rgba(244,63,94,.12); color:var(--rose-200); }
+
+  .diffbox{ font-family:var(--font-mono); font-size:11.5px; line-height:1.5; background:#0a0a0c; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  [data-theme="light"] .diffbox{ background:#0f1117; }
+  .diff-scroll{ max-height:240px; overflow:auto; }
+  .drow{ display:flex; padding:0 8px; white-space:pre; }
+  .drow .sgn{ width:13px; opacity:.6; flex:none; }
+  .d-add{ background:rgba(34,197,94,.13); color:#86efac; }
+  .d-del{ background:rgba(244,63,94,.13); color:#fda4af; }
+  .d-ctx{ color:#6b7280; }
+  .drow .gut{ width:30px; text-align:right; padding-right:8px; color:#3a3f4a; flex:none; user-select:none; }
+
+  .rise > *{ animation:b-rise .3s ease-out both; }
+  @keyframes b-rise{ from{transform:translateY(6px)} to{transform:none} }
+
+  /* drawer (secondary nav) */
+  .scrim{ position:fixed; inset:0; background:rgba(0,0,0,.62); backdrop-filter:blur(3px); z-index:60; display:none; }
+  .scrim.open{ display:block; }
+  .drawer{ position:fixed; top:0; bottom:0; left:0; width:280px; max-width:84vw; z-index:61; background:var(--rail); border-right:1px solid var(--border-strong); padding:16px; padding-top:calc(16px + var(--safe-top)); overflow:auto; display:none; }
+  .drawer.open{ display:block; animation: drawer-in .24s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes drawer-in { from { transform:translateX(-40px); } to { transform:none; } }
+
+  /* tweaks */
+  .tw-pop{ position:fixed; right:14px; bottom:14px; z-index:56; }
+  .tw-btn{ width:44px; height:44px; border-radius:10px; background:var(--panel); border:1px solid var(--border-strong); color:var(--text-soft); display:flex;align-items:center;justify-content:center; }
+  .tw-card{ position:absolute; right:0; bottom:54px; width:248px; background:var(--rail); border:1px solid var(--border-strong); border-radius:10px; padding:14px; box-shadow:var(--shadow-card-hover); }
+  .tw-card[hidden]{ display:none; }
+  .seg{ display:flex; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:2px; gap:2px; }
+  .seg button{ flex:1; border:none; background:transparent; color:var(--text-soft); font-size:12px; font-weight:600; padding:6px; border-radius:6px; cursor:pointer; }
+  .seg button[aria-pressed="true"]{ background:var(--b-accent-wash); color:var(--b-accent-text); }
+  .sw button{ width:24px; height:24px; border-radius:6px; border:2px solid transparent; cursor:pointer; }
+  .sw button[aria-pressed="true"]{ border-color:var(--text); }
+
+  @media (min-width:1024px){
+    .topbar{ display:none; }
+    .rail{ display:flex; flex-direction:column; align-items:center; gap:4px; width:var(--rail-w); flex:none; background:var(--rail); border-right:1px solid var(--border); padding:14px 0; position:sticky; top:0; height:100vh; }
+    .content{ padding:22px 26px; }
+    .railbtn{ width:46px; height:46px; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; color:var(--text-soft); cursor:pointer; position:relative; font-size:8.5px; letter-spacing:.04em; border:1px solid transparent; transition:all .15s; }
+    .railbtn[aria-selected="true"]{ color:var(--b-accent-text); background:var(--b-accent-wash); border-color:var(--b-accent-border); }
+    .railbtn .rb-badge{ position:absolute; top:4px; right:6px; background:var(--rose); color:#fff; font-size:9px; font-weight:700; border-radius:999px; min-width:14px; height:14px; display:flex;align-items:center;justify-content:center; padding:0 3px; }
+  }
+</style>
+</head>
+<body data-pulse="on">
+<div class="shell">
+  <!-- Desktop rail -->
+  <aside class="rail" id="rail"></aside>
+
+  <div class="col">
+    <!-- Mobile top chrome -->
+    <header class="topbar">
+      <div class="flex items-center justify-between px-3 py-2.5">
+        <div class="flex items-center gap-2.5">
+          <img src="logo.svg" width="30" height="30" alt="" />
+          <div class="leading-none">
+            <div class="mc-wordmark" style="color:var(--text);font-size:10.5px">HERMES</div>
+            <div class="mc-wordmark" style="color:var(--text-soft);font-size:10.5px">CONTROL</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <div id="sysled" class="flex items-center gap-1.5 panel-2 px-2.5 py-1.5" style="border-radius:8px"></div>
+          <button id="menuBtn" class="btn" style="min-height:36px;padding:8px"><i data-lucide="menu" style="width:16px;height:16px"></i></button>
+        </div>
+      </div>
+      <nav class="tabstrip" id="tabstrip"></nav>
+    </header>
+
+    <main id="view" class="content rise"></main>
+  </div>
+</div>
+
+<!-- Drawer -->
+<div id="scrim" class="scrim"></div>
+<aside id="drawer" class="drawer">
+  <div class="flex items-center justify-between mb-4">
+    <div class="eyebrow">Sekundär</div>
+    <button id="drawerClose" class="btn" style="min-height:32px;padding:6px"><i data-lucide="x" style="width:15px;height:15px"></i></button>
+  </div>
+  <div id="moreList" class="flex flex-col gap-1.5"></div>
+  <div class="hair my-4"></div>
+  <div class="eyebrow mb-2">System</div>
+  <div id="drawerStatus" class="panel-2 p-3 text-xs" style="color:var(--text-soft)"></div>
+</aside>
+
+<!-- Tweaks -->
+<div class="tw-pop">
+  <div id="twCard" class="tw-card" hidden>
+    <div class="eyebrow mb-3">Tweaks</div>
+    <div class="flex flex-col gap-3.5">
+      <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Akzent</div>
+        <div class="sw flex gap-1.5" id="twAccent">
+          <button data-c="#7c3aed" style="background:#7c3aed" aria-pressed="true"></button>
+          <button data-c="#22d3ee" style="background:#22d3ee"></button>
+          <button data-c="#22c55e" style="background:#22c55e"></button>
+          <button data-c="#f43f5e" style="background:#f43f5e"></button>
+        </div></div>
+      <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Dichte</div>
+        <div class="seg" id="twDensity"><button data-d="normal" aria-pressed="true">Normal</button><button data-d="dense">Dicht</button></div></div>
+      <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Erscheinung</div>
+        <div class="seg" id="twTheme"><button data-t="dark" aria-pressed="true">Dunkel</button><button data-t="light">Hell</button></div></div>
+      <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Heartbeat-Puls</div>
+        <div class="seg" id="twPulse"><button data-p="on" aria-pressed="true">An</button><button data-p="off">Aus</button></div></div>
+    </div>
+  </div>
+  <button id="twBtn" class="tw-btn"><i data-lucide="sliders-horizontal" style="width:18px;height:18px"></i></button>
+</div>
+
+<script>
+const H = window.HERMES;
+const el = (h)=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild;};
+const esc = (s)=>(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let TAB='overview';
+const applied=new Set(), skipped=new Set();
+
+const TABS=[
+  {id:'overview',label:'Übersicht',icon:'layout-dashboard'},
+  {id:'hermes',label:'Hermes',icon:'cpu'},
+  {id:'openclaw',label:'OpenClaw',icon:'bot'},
+  {id:'auto',label:'Autoresearch',icon:'sparkles'},
+];
+const openCount=()=> H.proposals.filter(p=>p.status==='proposed'&&!applied.has(p.id)&&!skipped.has(p.id)).length;
+const ledColor={live:'var(--emerald)',warn:'var(--amber)',error:'var(--red)',ready:'var(--sky)',idle:'var(--zinc)',offline:'#374151'};
+function ledDot(kind,pulse){ const c=ledColor[kind]||'var(--zinc)'; const cls = pulse&&(kind==='live'||kind==='warn'||kind==='error')?`mc-dot mc-dot-${kind==='live'?'live':kind==='error'?'error':'warn'}`:''; return `<span class="led ${cls}" style="background:${c};box-shadow:0 0 6px ${c}"></span>`; }
+function pill(t,tone,{led=null}={}){ return `<span class="pill toneb-${tone}">${led?ledDot(led,true):''}${t}</span>`; }
+
+/* ── Übersicht: System-Status-Matrix ── */
+function renderOverview(){
+  const o=H.overview();
+  const wrap=el(`<div class="flex flex-col gap-4"></div>`);
+  // KPI strip
+  const kpis=[
+    {k:'Hermes läuft',v:`${o.hermesRunning}/${o.hermesTotal}`,tone:'cyan'},
+    {k:'OpenClaw aktiv',v:`${o.ocActive}/${o.ocTotal}`,tone:'sky'},
+    {k:'Vorschläge offen',v:`${o.openProps}`,tone:'violet'},
+    {k:'Warnungen',v:`${o.warnings.length}`,tone:o.warnings.length?'amber':'emerald'},
+  ];
+  const strip=el(`<section class="grid grid-cols-2 lg:grid-cols-4 gap-2.5"></section>`);
+  kpis.forEach(x=>strip.appendChild(el(`<div class="panel p-3.5">
+    <div class="eyebrow">${x.k}</div>
+    <div class="mono" style="font-size:26px;font-weight:600;color:var(--text);line-height:1.1;margin-top:4px">${x.v}</div>
+    <div class="mt-1.5">${pill(x.tone==='emerald'?'nominal':x.tone==='amber'?'prüfen':'live',x.tone)}</div>
+  </div>`)));
+  wrap.appendChild(strip);
+
+  // System banner
+  const banner=el(`<section class="panel p-4 flex items-center gap-3" style="border-color:${o.allHealthy?'rgba(34,197,94,.3)':'rgba(245,158,11,.35)'}">
+    ${ledDot(o.allHealthy?'live':'warn',true)}
+    <div class="flex-1"><div style="font-weight:600;color:var(--text);font-size:15px">${o.allHealthy?'Alle Systeme nominal':`${o.warnings.length} Signale brauchen Eingriff`}</div>
+    <div class="mono text-xs" style="color:var(--text-soft)">checked_at ${H.fmtClock(H.NOW)} · route configured · loop ${o.autoState}</div></div>
+  </section>`);
+  wrap.appendChild(banner);
+
+  // Two-fleet matrix
+  const matrix=el(`<section class="grid lg:grid-cols-2 gap-4"></section>`);
+  // Hermes mini grid
+  const hcol=el(`<div class="panel p-3"><div class="flex items-center justify-between mb-2.5"><div class="eyebrow">Hermes-Flotte</div><span class="mono text-xs" style="color:var(--text-soft)">${o.hermesTotal} Prozesse</span></div><div class="flex flex-col gap-1.5"></div></div>`);
+  const hc=hcol.querySelector('.flex.flex-col');
+  H.hermesWorkers.forEach(w=>{ const hp=H.workerHealth(w);
+    hc.appendChild(el(`<div class="panel-2 px-2.5 py-2 flex items-center gap-2.5" data-goto="hermes" style="cursor:pointer">
+      ${ledDot(hp.dot,true)}
+      <span class="pill toneb-violet" style="flex:none">${H.profileLabels[w.profile]}</span>
+      <span class="truncate flex-1" style="font-size:12.5px;color:var(--text)">${w.task_title}</span>
+      <span class="mono text-xs" style="color:var(--text-soft)">${H.fmtAge(w.last_heartbeat_at)}</span>
+      ${pill(hp.label,hp.tone)}
+    </div>`)); });
+  matrix.appendChild(hcol);
+  // OpenClaw mini grid
+  const ocol=el(`<div class="panel p-3"><div class="flex items-center justify-between mb-2.5"><div class="eyebrow">OpenClaw-Flotte</div><span class="mono text-xs" style="color:var(--text-soft)">${o.ocTotal} Agenten</span></div><div class="flex flex-col gap-1.5"></div></div>`);
+  const oc=ocol.querySelector('.flex.flex-col');
+  H.openclawAgents.forEach(a=>{ const tone=a.stuckSignal?'amber':H.agentStatusTone[a.status]; const dot=a.stuckSignal?'warn':a.status==='active'?'live':a.status==='monitoring'?'warn':a.status==='ready'?'ready':a.status==='offline'?'offline':'idle';
+    oc.appendChild(el(`<div class="panel-2 px-2.5 py-2 flex items-center gap-2.5" data-goto="openclaw" style="cursor:pointer">
+      ${ledDot(dot,true)}
+      <span style="font-size:15px;flex:none">${a.emoji}</span>
+      <span style="font-size:12.5px;color:var(--text);flex:none;font-weight:600">${a.name}</span>
+      <span class="truncate flex-1 text-xs" style="color:var(--text-soft)">${a.fleetHealth.currentTask}</span>
+      ${pill(a.stuckSignal?'Stuck':H.agentStatusLabel[a.status],tone)}
+    </div>`)); });
+  matrix.appendChild(ocol);
+  wrap.appendChild(matrix);
+
+  // Autoresearch mini + warnings
+  const a=H.autoresearchStatus;
+  const bottom=el(`<section class="grid lg:grid-cols-2 gap-4"></section>`);
+  bottom.appendChild(el(`<div class="panel p-3.5" data-goto="auto" style="cursor:pointer;border-color:var(--b-accent-border)">
+    <div class="flex items-center justify-between mb-2"><div class="eyebrow" style="color:var(--b-accent-text)">Autoresearch</div>${pill(a.state==='running'?'running':'idle',a.state==='running'?'emerald':'zinc',{led:a.state==='running'?'live':'idle'})}</div>
+    <div class="mono text-xs" style="color:var(--text-soft)">iter ${a.iteration}/${a.max} · hb ${a.heartbeat_age_s}s · ${a.last_step}</div>
+    <div class="flex items-center gap-2 mt-3"><span class="mono" style="font-size:22px;font-weight:600;color:var(--text)">${o.openProps}</span><span style="font-size:13px;color:var(--text-soft)">Vorschläge bereit →</span></div>
+  </div>`));
+  const warn=el(`<div class="panel p-3.5"><div class="eyebrow mb-2">Needs attention</div><div class="flex flex-col gap-1.5"></div></div>`);
+  const wl=warn.querySelector('.flex.flex-col');
+  if(o.warnings.length){ o.warnings.forEach(w=>{ if(w.kind==='hermes'){ wl.appendChild(el(`<div class="flex items-center gap-2 text-xs" data-goto="hermes" style="cursor:pointer"><span style="color:var(--${w.health.tone==='red'?'rose':w.health.tone}-300,#fff)">▸</span><span class="truncate" style="color:var(--text)">${H.profileLabels[w.w.profile]} · ${w.health.label} — ${w.w.task_title}</span></div>`)); } else { wl.appendChild(el(`<div class="flex items-center gap-2 text-xs" data-goto="openclaw" style="cursor:pointer"><span>${w.a.emoji}</span><span class="truncate" style="color:var(--text)">${w.a.name} · ${w.a.stuckSignal?'Stuck':'Offline'} — ${w.a.escalationNote||w.a.fleetHealth.lastOutput}</span></div>`)); } }); }
+  else wl.appendChild(el(`<div class="text-xs" style="color:var(--text-soft)">Nichts dringend. System läuft sauber.</div>`));
+  bottom.appendChild(warn);
+  wrap.appendChild(bottom);
+  return wrap;
+}
+
+/* ── Hermes ── */
+function renderHermes(){
+  const wrap=el(`<div class="flex flex-col gap-3"></div>`);
+  wrap.appendChild(headerRow('Hermes-Worker','GET /api/plugins/kanban/workers/active', `${H.hermesWorkers.length} aktiv`));
+  const grid=el(`<div class="grid md:grid-cols-2 2xl:grid-cols-3 gap-3"></div>`);
+  [...H.hermesWorkers].sort((a,b)=>hr(b)-hr(a)).forEach(w=>grid.appendChild(workerCard(w)));
+  wrap.appendChild(grid);
+  return wrap;
+}
+function hr(w){return {stuck:3,blocked:3,offline:2,healthy:0}[H.workerHealth(w).key]||0;}
+function workerCard(w){
+  const hp=H.workerHealth(w); const rt=H.NOW-w.started_at; const rest=w.max_runtime_seconds-rt; const cpu=w.inspect.cpu_percent; const ram=w.inspect.rss/1073741824*100;
+  const prob=hp.key!=='healthy'; const ac=({cyan:'#22d3ee',amber:'#f59e0b',red:'#ef4444',zinc:'#52525b'})[hp.tone];
+  return el(`<article class="panel" style="${prob?`border-color:${ac}66`:''}">
+    <div class="p-3">
+      <div class="flex items-center gap-2 mb-2">
+        ${ledDot(hp.dot,true)}
+        <span class="pill toneb-violet">${H.profileLabels[w.profile]}</span>
+        <span class="mono text-xs" style="color:var(--text-dim)">${w.run_id}</span>
+        <span class="ml-auto">${pill(hp.label,hp.tone)}</span>
+      </div>
+      <h3 style="font-size:13.5px;font-weight:600;color:var(--text);line-height:1.35">${w.task_title}</h3>
+      <div class="mono text-xs mt-1" style="color:var(--text-soft)">${H.taskStatusLabel[w.task_status]} · run:${w.run_status}${w.run_outcome?' · '+w.run_outcome:''}</div>
+      ${prob?`<div class="panel-2 px-2.5 py-1.5 mt-2.5 flex items-start gap-2" style="border-color:${ac}40;background:${ac}14"><i data-lucide="${hp.key==='blocked'?'lock':hp.key==='offline'?'power-off':'alarm-clock'}" style="width:13px;height:13px;color:${ac};flex:none;margin-top:2px"></i><span class="text-xs" style="color:var(--text)">${w.block_reason||`Heartbeat ${H.fmtAge(w.last_heartbeat_at)} alt · claim_expires überschritten`}</span></div>`:''}
+      <div class="grid grid-cols-4 gap-2 mt-3 mono">
+        ${mini('LAUFZEIT',H.fmtDur(rt))}
+        ${mini('HB',H.fmtAge(w.last_heartbeat_at),hp.key==='stuck'||hp.key==='offline')}
+        ${mini('REST',rest>0?H.fmtDur(rest):'0m',rest<=0)}
+        ${mini('PID',w.worker_pid)}
+      </div>
+      <div class="mt-3 flex flex-col gap-1.5">
+        ${gbar('CPU',cpu,cpu+'%',cpu>80?'#f43f5e':'#22d3ee')}
+        ${gbar('RAM',ram,H.fmtMB(w.inspect.rss),'#818cf8')}
+      </div>
+    </div>
+    <div class="hair flex">
+      <button class="btn" style="flex:1;border:none;border-radius:0 0 0 10px;background:transparent;min-height:40px">Inspect</button>
+      <div style="width:1px;background:var(--border)"></div>
+      <button class="btn ${prob?(hp.key==='offline'?'btn-danger':'btn-warn'):''}" style="flex:1;border:none;border-radius:0 0 10px 0;background:transparent;min-height:40px">${prob?(hp.key==='offline'?'Neustart':hp.key==='blocked'?'Lock lösen':'Anstoßen'):'Dispatch'}</button>
+    </div>
+  </article>`);
+}
+function mini(l,v,warn=false){return `<div><div class="eyebrow">${l}</div><div style="font-size:12.5px;font-weight:600;color:${warn?'var(--amber-300)':'var(--text)'};margin-top:1px">${v}</div></div>`;}
+function gbar(l,pct,val,col){const w=Math.min(100,pct);return `<div><div class="flex justify-between mb-1"><span class="eyebrow">${l}</span><span class="mono text-xs" style="color:var(--text-soft)">${val}</span></div><div class="gridbar"><i style="width:${w}%;background:${col}"></i></div></div>`;}
+
+/* ── OpenClaw ── */
+function renderOpenclaw(){
+  const wrap=el(`<div class="flex flex-col gap-3"></div>`);
+  wrap.appendChild(headerRow('OpenClaw-Agenten','GET /api/openclaw/agents',`${H.openclawAgents.length} Agenten`));
+  const grid=el(`<div class="grid md:grid-cols-2 2xl:grid-cols-3 gap-3"></div>`);
+  [...H.openclawAgents].sort((a,b)=>or(b)-or(a)).forEach(a=>grid.appendChild(agentCard(a)));
+  wrap.appendChild(grid);
+  return wrap;
+}
+function or(a){return a.stuckSignal?3:a.status==='offline'?2:0;}
+function agentCard(a){
+  const tone=a.stuckSignal?'amber':H.agentStatusTone[a.status]; const dot=a.stuckSignal?'warn':a.status==='active'?'live':a.status==='monitoring'?'warn':a.status==='ready'?'ready':a.status==='offline'?'offline':'idle';
+  const col=`var(${H.agentColorVar[a.id]})`; const t=a.tasks; const prob=a.stuckSignal||a.status==='offline'; const ac=({amber:'#f59e0b',zinc:'#52525b'})[tone]||col;
+  return el(`<article class="panel p-3" style="${prob?`border-color:${ac}66`:''}">
+    <div class="flex items-center gap-2.5">
+      <div style="width:38px;height:38px;border-radius:9px;flex:none;display:flex;align-items:center;justify-content:center;font-size:19px;background:${col}1a;border:1px solid ${col}55">${a.emoji}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2"><span style="font-weight:600;color:var(--text);font-size:14px">${a.name}</span>${ledDot(dot,true)}<span class="ml-auto">${pill(a.stuckSignal?'Stuck':H.agentStatusLabel[a.status],tone)}</span></div>
+        <div class="mono text-xs" style="color:var(--text-soft)">${a.roleLabel} · ${a.model.replace('claude-','')}</div>
+      </div>
+    </div>
+    <div class="panel-2 px-2.5 py-2 mt-2.5">
+      <div class="text-xs" style="color:var(--text)">${a.fleetHealth.currentTask}</div>
+      <div class="mono text-xs mt-1 flex gap-3" style="color:var(--text-soft)"><span>hb ${a.fleetHealth.heartbeat?H.fmtAge(a.fleetHealth.heartbeat):'—'}</span><span>${a.fleetHealth.throughput}</span><span>tool:${a.fleetHealth.currentTool}</span></div>
+    </div>
+    ${a.escalationNote?`<div class="px-2.5 py-1.5 mt-2 flex items-start gap-2" style="border-radius:7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)"><i data-lucide="triangle-alert" style="width:13px;height:13px;color:var(--amber-300);flex:none;margin-top:2px"></i><span class="text-xs" style="color:var(--text)">${a.escalationNote}</span></div>`:''}
+    <div class="grid grid-cols-4 gap-1.5 mt-2.5">
+      ${qcell('WARTET',t.queued.length,'zinc')}${qcell('AKTIV',t.active.length,'cyan')}${qcell('REVIEW',t.review.length,'amber')}${qcell('FERTIG',t.recentDone.length,'emerald')}
+    </div>
+  </article>`);
+}
+function qcell(l,n,tone){return `<div class="panel-2 py-1.5 text-center toneb-${tone}" style="border-radius:7px"><div class="mono" style="font-size:16px;font-weight:600">${n}</div><div class="eyebrow" style="font-size:8px">${l}</div></div>`;}
+
+/* ── Autoresearch ── */
+function renderAuto(){
+  const wrap=el(`<div class="flex flex-col gap-3"></div>`);
+  const a=H.autoresearchStatus; const open=H.proposals.filter(p=>p.status==='proposed'&&!applied.has(p.id)&&!skipped.has(p.id));
+  // status bar
+  wrap.appendChild(el(`<section class="panel p-3.5" style="border-color:var(--b-accent-border)">
+    <div class="flex items-center flex-wrap gap-2.5">
+      ${pill(a.state==='running'?'LOOP RUNNING':'IDLE',a.state==='running'?'emerald':'zinc',{led:a.state==='running'?'live':'idle'})}
+      <span class="mono text-xs" style="color:var(--text-soft)">pid ${a.pid} · iter ${a.iteration}/${a.max} · hb ${a.heartbeat_age_s}s ${a.heartbeat_fresh?'fresh':'stale'} · route ${a.route_status}</span>
+    </div>
+    <div class="panel-2 p-2.5 mt-2.5 flex items-start gap-2.5" style="background:var(--b-accent-wash);border-color:var(--b-accent-border)">
+      <i data-lucide="terminal" style="width:15px;height:15px;color:var(--b-accent-text);flex:none;margin-top:2px"></i>
+      <div><div class="eyebrow" style="color:var(--b-accent-text)">Dein nächster Schritt</div>
+      <div class="text-xs mt-0.5" style="color:var(--text)">${open.length?`${open.length} Vorschläge stehen bereit. Diff prüfen → übernehmen. Code-Vorschläge gehen erst nach grüner Test-Suite live.`:'Queue leer. Loop läuft weiter — neue Vorschläge holen, wenn gewünscht.'}</div></div>
+    </div>
+    <div class="flex gap-2 mt-3">
+      <button class="btn btn-accent" style="flex:1;min-height:42px" onclick="fetchMore(this)"><i data-lucide="play" style="width:15px;height:15px"></i>Verbesserungen holen</button>
+      ${open.length>1?`<button class="btn" style="min-height:42px" onclick="applyAll()"><i data-lucide="check-check" style="width:15px;height:15px"></i>Alle übernehmen</button>`:''}
+    </div>
+  </section>`));
+  // open proposals
+  const openSec=el(`<section><div class="eyebrow mb-2">Vorschläge · ${open.length}</div><div class="grid xl:grid-cols-2 gap-3" id="pl"></div></section>`);
+  const pl=openSec.querySelector('#pl');
+  if(open.length) open.forEach(p=>pl.appendChild(proposalCard(p)));
+  else pl.appendChild(el(`<div class="panel p-6 text-center text-xs" style="color:var(--text-soft)">Keine offenen Vorschläge.</div>`));
+  wrap.appendChild(openSec);
+  // done
+  const done=H.proposals.filter(p=>p.status!=='proposed'||applied.has(p.id)||skipped.has(p.id));
+  if(done.length){ const ds=el(`<section><div class="eyebrow mb-2">Erledigt · ${done.length}</div><div class="flex flex-col gap-1.5"></div></section>`); const dl=ds.querySelector('.flex.flex-col');
+    done.forEach(p=>{ const sk=p.status==='skipped'||skipped.has(p.id); dl.appendChild(el(`<div class="panel px-3 py-2 flex items-center gap-2.5">
+      <i data-lucide="${sk?'minus-circle':'check-circle-2'}" style="width:14px;height:14px;color:${sk?'var(--text-dim)':'var(--emerald-300)'};flex:none"></i>
+      <span class="truncate flex-1 text-xs" style="color:var(--text)">${p.title}</span>
+      <span class="mono text-xs" style="color:${sk?'var(--text-dim)':'var(--emerald-300)'}">${sk?'skipped':(p.result||(p.mode==='code'?'Tests grün':'eval grün'))}</span>
+      ${pill(p.mode==='code'?'CODE':'SKILL',p.mode==='code'?'amber':'violet')}
+    </div>`)); }); wrap.appendChild(ds); }
+  // log
+  const log=el(`<section class="panel p-3"><div class="eyebrow mb-2">Aktivitäts-Log</div><div class="diffbox" style="background:#0a0a0c"><div class="p-2.5 flex flex-col gap-1 mono" style="font-size:11.5px"></div></div></section>`);
+  const ll=log.querySelector('.flex.flex-col');
+  H.activityLog.forEach(l=>ll.appendChild(el(`<div class="flex gap-2"><span style="color:#3a3f4a">${H.fmtClock(l.at).split(', ')[1]}</span><span style="color:${l.tone==='emerald'?'#86efac':l.tone==='violet'?'var(--b-accent-text)':'#6b7280'}">${l.tone==='emerald'?'✓':l.tone==='violet'?'›':'·'}</span><span style="color:var(--text-soft)">${esc(l.text)}</span></div>`)));
+  wrap.appendChild(log);
+  return wrap;
+}
+function proposalCard(p){
+  const code=p.mode==='code'; const did='d-'+p.id; let ln=0;
+  const rows=p.diff_before_after.map(l=>{const cls=l.type==='add'?'d-add':l.type==='del'?'d-del':'d-ctx';const s=l.type==='add'?'+':l.type==='del'?'−':' ';if(l.type!=='del')ln++;return `<div class="drow ${cls}"><span class="gut">${l.type==='del'?'':ln}</span><span class="sgn">${s}</span>${esc(l.text)||' '}</div>`;}).join('');
+  return el(`<article class="panel" style="${code?'border-color:rgba(245,158,11,.4)':''}">
+    <div class="p-3">
+      <div class="flex items-center gap-2 mb-2">${code?pill('CODE',code?'amber':'violet',{led:'warn'}):pill('SKILL','violet')}<span class="mono text-xs truncate" style="color:var(--text-dim)">${p.target} › ${p.section}</span></div>
+      <h3 style="font-size:14px;font-weight:600;color:var(--text);line-height:1.3">${p.title}</h3>
+      <p class="text-xs mt-1.5" style="color:var(--text-soft);line-height:1.5">${p.rationale_plain}</p>
+      ${code?`<div class="flex items-center gap-1.5 mt-1.5 text-xs" style="color:var(--amber-300)"><i data-lucide="shield-alert" style="width:12px;height:12px"></i>Gate: Test-Suite muss grün sein</div>`:''}
+    </div>
+    <div class="px-3"><div class="diffbox"><div class="diff-scroll" id="${did}">${rows}</div></div></div>
+    <div class="hair flex mt-3">
+      <button class="btn btn-accent" style="flex:1;border-radius:0 0 0 10px;min-height:40px" onclick="applyProp('${p.id}',this)"><i data-lucide="check" style="width:14px;height:14px"></i>Übernehmen</button>
+      <div style="width:1px;background:var(--border)"></div>
+      <button class="btn" style="flex:none;width:120px;border-radius:0 0 10px 0;min-height:40px;color:var(--text-soft)" onclick="skipProp('${p.id}')">Überspringen</button>
+    </div>
+  </article>`);
+}
+
+window.applyProp=(id,btn)=>{applied.add(id);if(btn)btn.innerHTML='<i data-lucide="loader"></i>…';setTimeout(render,340);};
+window.skipProp=(id)=>{skipped.add(id);render();};
+window.applyAll=()=>{H.proposals.filter(p=>p.status==='proposed').forEach(p=>{if(!skipped.has(p.id))applied.add(p.id);});render();};
+window.fetchMore=(b)=>{b.innerHTML='<i data-lucide="loader"></i>Suche…';setTimeout(()=>{b.innerHTML='<i data-lucide="check"></i>Keine neuen';lucide.createIcons();},1000);};
+
+function headerRow(title,api,meta){return el(`<div class="flex items-end justify-between flex-wrap gap-2 mb-1">
+  <div><div class="mono text-xs" style="color:var(--text-dim)">${api}</div><h1 style="font-size:20px;font-weight:600;color:var(--text);letter-spacing:-.01em">${title}</h1></div>
+  <span class="mono text-xs" style="color:var(--text-soft)">${meta}</span></div>`);}
+
+/* ── nav build ── */
+function buildNav(){
+  const oc=openCount();
+  const rail=document.getElementById('rail'); rail.innerHTML='';
+  rail.appendChild(el(`<div style="margin-bottom:10px"><img src="logo.svg" width="32" height="32" alt=""/></div>`));
+  TABS.forEach(t=>{ const b=el(`<button class="railbtn" aria-selected="${TAB===t.id}"><i data-lucide="${t.icon}" style="width:20px;height:20px"></i>${t.label.slice(0,4)}${(t.id==='auto'&&oc)?`<span class="rb-badge">${oc}</span>`:''}</button>`); b.onclick=()=>{TAB=t.id;render();}; rail.appendChild(b); });
+  const sp=el(`<div style="flex:1"></div>`); rail.appendChild(sp);
+  const more=el(`<button class="railbtn"><i data-lucide="more-horizontal" style="width:20px;height:20px"></i>Mehr</button>`); more.onclick=openDrawer; rail.appendChild(more);
+
+  const ts=document.getElementById('tabstrip'); ts.innerHTML='';
+  TABS.forEach(t=>{ const c=el(`<button class="tchip" aria-selected="${TAB===t.id}"><i data-lucide="${t.icon}" style="width:15px;height:15px"></i>${t.label}${(t.id==='auto'&&oc)?`<span class="ct-badge">${oc}</span>`:''}</button>`); c.onclick=()=>{TAB=t.id;render();}; ts.appendChild(c); });
+  const mc=el(`<button class="tchip" style="margin-left:auto"><i data-lucide="more-horizontal" style="width:15px;height:15px"></i>Mehr</button>`); mc.onclick=openDrawer; ts.appendChild(mc);
+
+  // system led summary (mobile header)
+  const o=H.overview(); const sl=document.getElementById('sysled');
+  sl.innerHTML=`${ledDot(o.allHealthy?'live':'warn',true)}<span class="mono text-xs" style="color:var(--text-soft)">${o.hermesRunning+o.ocActive} live · ${o.warnings.length}⚠</span>`;
+}
+function render(){
+  const v=document.getElementById('view'); v.innerHTML='';
+  v.appendChild(TAB==='overview'?renderOverview():TAB==='hermes'?renderHermes():TAB==='openclaw'?renderOpenclaw():renderAuto());
+  buildNav();
+  fillDrawer();
+  lucide.createIcons();
+  v.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>{TAB=b.dataset.goto;render();});
+  window.scrollTo({top:0});
+  v.classList.remove('rise'); void v.offsetWidth; v.classList.add('rise');
+}
+
+/* drawer */
+function fillDrawer(){ const ml=document.getElementById('moreList'); ml.innerHTML=''; H.moreNav.forEach(n=>ml.appendChild(el(`<button class="panel-2 px-3 py-2.5 flex items-center gap-2.5 text-left" style="cursor:pointer"><i data-lucide="${n.icon}" style="width:16px;height:16px;color:var(--text-soft)"></i><span style="color:var(--text);font-size:13.5px;font-weight:600">${n.label}</span></button>`)));
+  const a=H.autoresearchStatus; document.getElementById('drawerStatus').innerHTML=`<div class="mono">loop: ${a.state}<br>route: ${a.route_status}<br>hb: ${a.heartbeat_age_s}s ${a.heartbeat_fresh?'fresh':'stale'}<br>operator: pieter_pan</div>`; }
+function openDrawer(){document.getElementById('scrim').classList.add('open');document.getElementById('drawer').classList.add('open');}
+function closeDrawer(){document.getElementById('scrim').classList.remove('open');document.getElementById('drawer').classList.remove('open');}
+document.getElementById('menuBtn').onclick=openDrawer; document.getElementById('drawerClose').onclick=closeDrawer; document.getElementById('scrim').onclick=closeDrawer;
+
+/* theme + tweaks */
+const root=document.documentElement;
+function setTheme(t){root.dataset.theme=t;document.querySelectorAll('#twTheme button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===t));}
+document.getElementById('twBtn').onclick=()=>{const c=document.getElementById('twCard');c.hidden=!c.hidden;};
+document.getElementById('twAccent').onclick=e=>{const b=e.target.closest('button');if(!b)return;const c=b.dataset.c;root.style.setProperty('--b-accent',c);root.style.setProperty('--b-accent-text',c);root.style.setProperty('--b-accent-wash',c+'26');root.style.setProperty('--b-accent-border',c+'4d');document.querySelectorAll('#twAccent button').forEach(x=>x.setAttribute('aria-pressed',x===b));};
+document.getElementById('twDensity').onclick=e=>{const b=e.target.closest('button');if(!b)return;root.dataset.density=b.dataset.d;document.querySelectorAll('#twDensity button').forEach(x=>x.setAttribute('aria-pressed',x===b));};
+document.getElementById('twTheme').onclick=e=>{const b=e.target.closest('button');if(!b)return;setTheme(b.dataset.t);};
+document.getElementById('twPulse').onclick=e=>{const b=e.target.closest('button');if(!b)return;document.body.dataset.pulse=b.dataset.p;document.querySelectorAll('#twPulse button').forEach(x=>x.setAttribute('aria-pressed',x===b));};
+
+render();
+</script>
+</body>
+</html>

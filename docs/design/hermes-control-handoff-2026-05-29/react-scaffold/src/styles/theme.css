@@ -1,0 +1,47 @@
+/* =========================================================================
+   theme.css — Tailwind 4 Einstieg für Hermes Control
+   In der App genau EINMAL importieren (z.B. in app/globals.css oben).
+   ========================================================================= */
+
+@import "tailwindcss";
+
+/* Die komplette Token-Schicht (CSS-Variablen, Dark-Default, Status-Töne,
+   Animationen, Card-/Pill-/Button-Rezepte) liegt in tokens.css daneben.
+   Sie wird hier eingezogen: */
+@import "./tokens.css";
+
+/* Dark ist Default (tokens.css setzt die :root-Werte auf Dark).
+   Heller Modus: setze data-theme="light" am <html> und überschreibe die
+   wenigen Flächen-/Text-Variablen (Beispiel — an euer Light-Branding anpassen). */
+[data-theme="light"] {
+  --bg: #f6f6f8;
+  --rail: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f1f1f4;
+  --panel-active: #eaeaef;
+  --panel-card: #ffffff;
+  --border: #e4e4ea;
+  --border-strong: #d4d4dc;
+  --text: #1a1a1f;
+  --text-soft: #5b6472;
+  --text-dim: #9aa1ad;
+}
+
+/* Tailwind-Theme: Geist als Font-Family-Utilities + die exakten Status-Hexe,
+   damit Klassen wie bg-cyan-500/10 / text-amber-200 pixelgenau dem DS folgen.
+   (Werte stimmen mit tokens.css überein.) */
+@theme inline {
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --color-emerald-500: #22c55e;
+  --color-cyan-500:    #22d3ee;
+  --color-sky-500:     #38bdf8;
+  --color-indigo-400:  #818cf8;
+  --color-amber-500:   #f59e0b;
+  --color-rose-500:    #f43f5e;
+  --color-red-500:     #ef4444;
+}
+
+/* Hinweis: tabular-nums ist in tokens.css global aktiv (font-feature-settings).
+   Hit-Targets mobil nie < 44px; Bottom-Tab-Zellen >= 60px. */

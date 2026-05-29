@@ -1,0 +1,31 @@
+{
+  "_hinweis": "Abhängigkeiten, die dieses Scaffold erwartet. In euer bestehendes package.json mergen (Versionen an euren Stack anpassen — der Stack-Vertrag stammt aus dem Design-System: Next 15.5 / React 19 / Tailwind 4 / shadcn-Radix).",
+  "dependencies": {
+    "next": "^15.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "swr": "^2.2.5",
+    "zod": "^3.23.0",
+    "lucide-react": "^0.460.0",
+    "framer-motion": "^11.0.0",
+    "recharts": "^2.12.0",
+    "sonner": "^1.5.0",
+    "@hello-pangea/dnd": "^17.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/postcss": "^4.0.0",
+    "vitest": "^2.0.0",
+    "msw": "^2.4.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "mock:init": "msw init public/ --save"
+  },
+  "pfad-alias": {
+    "_hinweis": "tsconfig.json: \"paths\": { \"@/*\": [\"./src/*\"] } — die Imports im Scaffold nutzen relative Pfade, @/-Aliase optional.",
+    "beispiel": "@/lib/derive, @/hooks/useHermesData, @/mocks/browser"
+  }
+}

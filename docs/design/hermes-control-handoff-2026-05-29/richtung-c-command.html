@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="de" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Hermes Control — Richtung C · Command</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="stylesheet" href="tokens.css" />
+<script src="hermes-data.js"></script>
+<style>
+  /* ── Richtung C: minimalistisch, type-forward, Command-/Spotlight-zentriert, tastaturorientiert. ── */
+  :root { --c-accent: var(--accent); --c-accent-text: var(--accent-text); --c-accent-wash: var(--accent-wash); --c-accent-border: var(--accent-border); }
+  [data-theme="light"]{ --bg:#fbfbfc; --rail:#ffffff; --panel:#ffffff; --panel-2:#f4f4f6; --panel-active:#ececef; --panel-card:#fff; --border:#e7e7eb; --border-strong:#d6d6dc; --text:#16161a; --text-soft:#6a7280; --text-dim:#a6acb6; }
+  [data-theme="light"] body{ background:#fbfbfc; }
+  body{ font-family:var(--font-sans); background: linear-gradient(180deg,#0b0b0d,#0a0a0c); }
+  .mono{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+  .wrap{ max-width:680px; margin:0 auto; padding:0 20px calc(64px + var(--safe-bottom)); }
+  [data-kbd="off"] .kbd-hint{ display:none !important; }
+
+  kbd{ font-family:var(--font-mono); font-size:10.5px; background:var(--panel-2); border:1px solid var(--border-strong); border-radius:5px; padding:1px 6px; color:var(--text-soft); line-height:1.6; }
+  .eyebrow{ font-size:9.5px; letter-spacing:.24em; text-transform:uppercase; font-weight:600; color:var(--text-dim); }
+
+  /* command bar */
+  .cmdbar{ position:sticky; top:0; z-index:30; padding:14px 0 10px; background:linear-gradient(180deg, var(--bg) 78%, transparent); }
+  [data-theme="dark"] .cmdbar{ background:linear-gradient(180deg, #0b0b0d 78%, transparent); }
+  .cmdfield{ width:100%; display:flex; align-items:center; gap:10px; height:46px; padding:0 14px; border-radius:12px; border:1px solid var(--border); background:var(--panel); color:var(--text-soft); cursor:text; transition:border-color .15s, box-shadow .15s; }
+  .cmdfield:hover{ border-color:var(--border-strong); }
+  .cmdfield .kbd-hint{ margin-left:auto; }
+
+  /* segmented tab indicator (minimal) */
+  .seg-tabs{ display:flex; gap:2px; margin-top:10px; }
+  .seg-tabs button{ background:none; border:none; cursor:pointer; padding:7px 0; margin-right:20px; font-size:14px; font-weight:500; color:var(--text-soft); position:relative; }
+  .seg-tabs button[aria-selected="true"]{ color:var(--text); }
+  .seg-tabs button[aria-selected="true"]::after{ content:''; position:absolute; left:0; right:0; bottom:-1px; height:2px; background:var(--c-accent); border-radius:2px; }
+  .seg-tabs .st-badge{ font-size:10px; color:var(--c-accent-text); margin-left:5px; font-variant-numeric:tabular-nums; }
+
+  .rowlist > * { border-top:1px solid var(--border); }
+  .rowlist > *:first-child{ border-top:none; }
+  .row{ display:flex; align-items:center; gap:12px; padding:15px 4px; cursor:pointer; transition:background .12s; border-radius:8px; }
+  .row:hover{ background:var(--panel-2); }
+  .row.sel{ background:var(--c-accent-wash); box-shadow: inset 2px 0 0 var(--c-accent); }
+  .dot{ width:8px; height:8px; border-radius:999px; flex:none; }
+
+  .stat-line{ display:flex; gap:28px; flex-wrap:wrap; }
+  .stat-line .s-v{ font-size:30px; font-weight:600; color:var(--text); letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .stat-line .s-k{ font-size:12px; color:var(--text-soft); margin-top:2px; }
+
+  .btn{ display:inline-flex; align-items:center; justify-content:center; gap:8px; height:44px; padding:0 18px; border-radius:11px; font-size:14px; font-weight:600; border:1px solid var(--border); background:var(--panel); color:var(--text); cursor:pointer; transition:filter .15s, transform .1s, border-color .15s; }
+  .btn:hover{ border-color:var(--border-strong); }
+  .btn:active{ transform:scale(.98); }
+  .btn-accent{ background:var(--c-accent); color:#fff; border-color:transparent; box-shadow:var(--shadow-accent-chip); }
+  [data-theme="light"] .btn-accent{ color:#fff; }
+  .btn-quiet{ background:none; border-color:transparent; color:var(--text-soft); }
+  .btn-quiet:hover{ color:var(--text); background:var(--panel-2); }
+
+  .tag{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; color:var(--text-soft); }
+  .tag-dotc{ width:7px;height:7px;border-radius:999px; }
+
+  /* diff — minimal, generous */
+  .diff{ font-family:var(--font-mono); font-size:12.5px; line-height:1.6; border-left:2px solid var(--border); padding-left:0; margin-top:10px; overflow:hidden; }
+  .dline{ display:flex; padding:0 0 0 12px; white-space:pre; border-left:2px solid transparent; margin-left:-2px; }
+  .dline.add{ border-left-color:var(--emerald); background:rgba(34,197,94,.07); color:var(--emerald-300); }
+  .dline.del{ border-left-color:var(--rose); background:rgba(244,63,94,.07); color:var(--rose-300); }
+  .dline.ctx{ color:var(--text-soft); }
+  .dline .s{ width:14px; opacity:.6; }
+  .diff-scroll{ max-height:300px; overflow:auto; }
+
+  /* proposal block */
+  .prop{ padding:22px 0; border-top:1px solid var(--border); }
+  .prop:first-of-type{ border-top:none; }
+
+  .rise{ animation:c-rise .32s ease-out both; }
+  @keyframes c-rise{ from{transform:translateY(7px)} to{transform:none} }
+
+  /* command palette */
+  .palette-scrim{ position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.55); backdrop-filter:blur(4px); display:none; align-items:flex-start; justify-content:center; padding:14vh 16px 0; }
+  .palette-scrim.open{ display:flex; }
+  .palette{ width:100%; max-width:560px; background:var(--rail); border:1px solid var(--border-strong); border-radius:16px; box-shadow:0 24px 64px rgba(0,0,0,.6); overflow:hidden; transform:translateY(-6px); transition:transform .16s; }
+  .palette-scrim.open .palette{ transform:none; }
+  .palette input{ width:100%; height:54px; background:none; border:none; outline:none; color:var(--text); font-size:16px; padding:0 18px; border-bottom:1px solid var(--border); }
+  .palette input::placeholder{ color:var(--text-dim); }
+  .palette-list{ max-height:50vh; overflow:auto; padding:8px; }
+  .pitem{ display:flex; align-items:center; gap:12px; padding:11px 12px; border-radius:9px; cursor:pointer; color:var(--text); font-size:14px; }
+  .pitem .p-meta{ margin-left:auto; }
+  .pitem.act{ background:var(--c-accent-wash); }
+  .pgroup{ font-size:9.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--text-dim); padding:10px 12px 5px; font-weight:600; }
+
+  /* tweaks */
+  .tw-pop{ position:fixed; right:16px; bottom:16px; z-index:56; }
+  .tw-btn{ width:42px;height:42px;border-radius:11px;background:var(--panel);border:1px solid var(--border);color:var(--text-soft);display:flex;align-items:center;justify-content:center; }
+  .tw-card{ position:absolute; right:0; bottom:52px; width:238px; background:var(--rail); border:1px solid var(--border-strong); border-radius:13px; padding:14px; box-shadow:var(--shadow-card-hover); }
+  .tw-card[hidden]{ display:none; }
+  .seg{ display:flex; background:var(--panel-2); border:1px solid var(--border); border-radius:9px; padding:2px; gap:2px; }
+  .seg button{ flex:1;border:none;background:none;color:var(--text-soft);font-size:12px;font-weight:600;padding:6px;border-radius:7px;cursor:pointer; }
+  .seg button[aria-pressed="true"]{ background:var(--c-accent-wash); color:var(--c-accent-text); }
+  .sw button{ width:24px;height:24px;border-radius:999px;border:2px solid transparent;cursor:pointer; }
+  .sw button[aria-pressed="true"]{ border-color:var(--text); }
+</style>
+</head>
+<body data-kbd="on">
+  <div class="wrap">
+    <div class="cmdbar">
+      <div class="flex items-center gap-2.5 mb-2.5">
+        <img src="logo.svg" width="26" height="26" alt="" />
+        <span class="mc-wordmark" style="color:var(--text)">HERMES CONTROL</span>
+        <span class="kbd-hint ml-auto tag mono" style="color:var(--text-dim)" id="clock"></span>
+      </div>
+      <div class="cmdfield" id="cmdField">
+        <i data-lucide="search" style="width:17px;height:17px"></i>
+        <span style="font-size:14px">Befehl, Worker oder Vorschlag suchen…</span>
+        <span class="kbd-hint"><kbd>⌘</kbd> <kbd>K</kbd></span>
+      </div>
+      <nav class="seg-tabs" id="segTabs"></nav>
+    </div>
+    <main id="view" class="rise"></main>
+  </div>
+
+  <!-- Command palette -->
+  <div class="palette-scrim" id="paletteScrim">
+    <div class="palette" role="dialog" aria-label="Command">
+      <input id="paletteInput" placeholder="Springe zu… oder tippe einen Befehl" autocomplete="off" />
+      <div class="palette-list" id="paletteList"></div>
+    </div>
+  </div>
+
+  <!-- Tweaks -->
+  <div class="tw-pop">
+    <div id="twCard" class="tw-card" hidden>
+      <div class="eyebrow mb-3">Tweaks</div>
+      <div class="flex flex-col gap-3.5">
+        <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Akzent</div>
+          <div class="sw flex gap-1.5" id="twAccent">
+            <button data-c="#7c3aed" style="background:#7c3aed" aria-pressed="true"></button>
+            <button data-c="#e4e4e7" style="background:#e4e4e7"></button>
+            <button data-c="#22c55e" style="background:#22c55e"></button>
+            <button data-c="#38bdf8" style="background:#38bdf8"></button>
+          </div></div>
+        <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Erscheinung</div>
+          <div class="seg" id="twTheme"><button data-t="dark" aria-pressed="true">Dunkel</button><button data-t="light">Hell</button></div></div>
+        <div><div class="text-xs mb-1.5" style="color:var(--text-soft)">Tastatur-Hinweise</div>
+          <div class="seg" id="twKbd"><button data-k="on" aria-pressed="true">An</button><button data-k="off">Aus</button></div></div>
+      </div>
+    </div>
+    <button id="twBtn" class="tw-btn"><i data-lucide="sliders-horizontal" style="width:17px;height:17px"></i></button>
+  </div>
+
+<script>
+const H=window.HERMES;
+const el=(h)=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild;};
+const esc=(s)=>(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let TAB='overview'; let SEL=0; const applied=new Set(),skipped=new Set();
+const TABS=[{id:'overview',label:'Übersicht'},{id:'hermes',label:'Hermes'},{id:'openclaw',label:'OpenClaw'},{id:'auto',label:'Autoresearch'}];
+const openCount=()=>H.proposals.filter(p=>p.status==='proposed'&&!applied.has(p.id)&&!skipped.has(p.id)).length;
+const dotColor={live:'#22c55e',warn:'#f59e0b',error:'#ef4444',ready:'#38bdf8',idle:'#52525b',offline:'#374151'};
+function statusDot(kind){ const c=dotColor[kind]; const anim=(kind==='live')?'mc-dot mc-dot-live':kind==='warn'?'mc-dot mc-dot-warn':kind==='error'?'mc-dot mc-dot-error':''; return `<span class="dot ${anim}" style="background:${c};box-shadow:0 0 6px ${c}"></span>`; }
+
+/* ── Übersicht ── */
+function renderOverview(){
+  const o=H.overview(); const wrap=el(`<div class="flex flex-col"></div>`);
+  // one-line health statement
+  wrap.appendChild(el(`<section style="padding:14px 0 22px">
+    <div class="flex items-center gap-3 mb-2">${statusDot(o.allHealthy?'live':'warn')}<span class="eyebrow">${o.allHealthy?'System nominal':'Eingriff empfohlen'}</span></div>
+    <h1 style="font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1.2;color:var(--text)">${o.allHealthy?'Alles läuft ruhig.':`${o.warnings.length} Signale warten auf dich.`}</h1>
+    <p style="color:var(--text-soft);font-size:15px;margin-top:8px;max-width:46ch">${o.allHealthy?'Beide Flotten melden sich regelmäßig, der Autoresearch-Loop arbeitet im Hintergrund.':'Öffne die Command-Leiste, um direkt zu springen — oder tippe einen Eintrag unten an.'}</p>
+  </section>`));
+  // stat line
+  wrap.appendChild(el(`<section class="stat-line" style="padding:18px 0;border-top:1px solid var(--border)">
+    <button data-goto="hermes" style="text-align:left;background:none;border:none;cursor:pointer"><div class="s-v">${o.hermesRunning}<span style="color:var(--text-dim);font-size:18px">/${o.hermesTotal}</span></div><div class="s-k">Hermes-Worker</div></button>
+    <button data-goto="openclaw" style="text-align:left;background:none;border:none;cursor:pointer"><div class="s-v">${o.ocActive}<span style="color:var(--text-dim);font-size:18px">/${o.ocTotal}</span></div><div class="s-k">OpenClaw aktiv</div></button>
+    <button data-goto="auto" style="text-align:left;background:none;border:none;cursor:pointer"><div class="s-v" style="color:var(--c-accent-text)">${o.openProps}</div><div class="s-k">Vorschläge offen</div></button>
+    <div><div class="s-v" style="color:${o.warnings.length?'var(--amber-300)':'var(--emerald-300)'}">${o.warnings.length}</div><div class="s-k">Warnungen</div></div>
+  </section>`));
+  // needs attention
+  const sec=el(`<section style="padding-top:20px;border-top:1px solid var(--border)"><div class="eyebrow mb-1">Braucht Aufmerksamkeit</div><div class="rowlist"></div></section>`);
+  const list=sec.querySelector('.rowlist');
+  if(o.warnings.length){ o.warnings.forEach(w=>{
+    if(w.kind==='hermes'){ list.appendChild(el(`<div class="row" data-goto="hermes">${statusDot(w.health.dot)}
+      <div class="flex-1 min-w-0"><div style="font-size:14.5px;color:var(--text);font-weight:500">${H.profileLabels[w.w.profile]} · ${w.health.label}</div><div class="truncate text-sm" style="color:var(--text-soft)">${w.w.task_title}</div></div>
+      <span class="tag mono kbd-hint" style="color:var(--text-dim)">${w.w.run_id}</span><i data-lucide="arrow-up-right" style="width:15px;height:15px;color:var(--text-dim)"></i></div>`)); }
+    else { list.appendChild(el(`<div class="row" data-goto="openclaw"><span style="font-size:17px">${w.a.emoji}</span>
+      <div class="flex-1 min-w-0"><div style="font-size:14.5px;color:var(--text);font-weight:500">${w.a.name} · ${w.a.stuckSignal?'Stuck':'Offline'}</div><div class="truncate text-sm" style="color:var(--text-soft)">${w.a.escalationNote||w.a.fleetHealth.lastOutput}</div></div>
+      <i data-lucide="arrow-up-right" style="width:15px;height:15px;color:var(--text-dim)"></i></div>`)); }
+  }); } else list.appendChild(el(`<div class="row" style="cursor:default;color:var(--text-soft)">Nichts Dringendes. Alle Worker melden sich.</div>`));
+  wrap.appendChild(sec);
+  // autoresearch one-liner
+  const a=H.autoresearchStatus;
+  wrap.appendChild(el(`<section style="padding-top:20px;margin-top:20px;border-top:1px solid var(--border)" class="flex items-center gap-4">
+    <div class="flex-1"><div class="flex items-center gap-2 mb-1">${statusDot(a.state==='running'?'live':'idle')}<span class="eyebrow">Autoresearch · ${a.state}</span></div>
+    <div style="font-size:15px;color:var(--text)">${o.openProps} Verbesserungen warten auf einen Klick</div></div>
+    <button class="btn" data-goto="auto">Öffnen <i data-lucide="arrow-right" style="width:15px;height:15px"></i></button>
+  </section>`));
+  return wrap;
+}
+
+/* ── Hermes (list, focus-detail) ── */
+function renderHermes(){
+  const wrap=el(`<div class="flex flex-col"></div>`);
+  wrap.appendChild(listHeader('Hermes-Worker', `${H.hermesWorkers.length} Prozesse · ${H.overview().hermesRunning} laufen`));
+  const list=el(`<div class="rowlist" id="rowlist"></div>`);
+  const sorted=[...H.hermesWorkers].sort((a,b)=>hr(b)-hr(a));
+  sorted.forEach((w,i)=>list.appendChild(workerRow(w,i)));
+  wrap.appendChild(list);
+  wrap.appendChild(kbdFooter());
+  return wrap;
+}
+function hr(w){return {stuck:3,blocked:3,offline:2,healthy:0}[H.workerHealth(w).key]||0;}
+function workerRow(w,i){
+  const hp=H.workerHealth(w); const rt=H.NOW-w.started_at; const rest=w.max_runtime_seconds-rt; const prob=hp.key!=='healthy';
+  const r=el(`<div class="row ${i===SEL?'sel':''}" data-row="${i}">
+    ${statusDot(hp.dot)}
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2"><span style="font-size:14.5px;color:var(--text);font-weight:500" class="truncate">${w.task_title}</span></div>
+      <div class="text-sm mono" style="color:var(--text-soft)">${H.profileLabels[w.profile]} · ${H.fmtDur(rt)} · hb ${H.fmtAge(w.last_heartbeat_at)}${prob?` · <span style="color:var(--amber-300)">${hp.label}</span>`:''}</div>
+    </div>
+    <span class="tag"><span class="tag-dotc" style="background:${dotColor[hp.dot]}"></span>${hp.label}</span>
+  </div>`);
+  // expandable detail
+  const det=el(`<div class="detail" data-detail="${i}" style="display:none;padding:4px 4px 18px 32px"></div>`);
+  det.innerHTML=`
+    ${prob?`<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:12px;color:var(--amber-200)"><i data-lucide="${hp.key==='blocked'?'lock':hp.key==='offline'?'power-off':'alarm-clock'}" style="width:15px;height:15px;flex:none;margin-top:2px"></i><span style="font-size:13.5px">${w.block_reason||`Heartbeat ${H.fmtAge(w.last_heartbeat_at)} alt · claim_expires überschritten`}</span></div>`:''}
+    <div class="stat-line" style="gap:24px">
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--text)">${w.inspect.cpu_percent}%</div><div class="s-k">CPU</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--text)">${H.fmtMB(w.inspect.rss)}</div><div class="s-k">RAM</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:${rest<=0?'var(--amber-300)':'var(--text)'}">${rest>0?H.fmtDur(rest):'0m'}</div><div class="s-k">Rest-Zeit</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--text)">${w.worker_pid}</div><div class="s-k">PID</div></div>
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button class="btn btn-quiet" style="height:38px">Inspect</button>
+      <button class="btn ${prob?'':'btn-quiet'}" style="height:38px;${prob?'border-color:var(--c-accent-border);color:var(--c-accent-text)':''}">${prob?(hp.key==='offline'?'Neu starten':hp.key==='blocked'?'Lock lösen':'Anstoßen'):'Dispatch'}</button>
+    </div>`;
+  const frag=document.createDocumentFragment(); frag.appendChild(r); frag.appendChild(det);
+  const holder=el('<div></div>'); holder.appendChild(frag); return holder;
+}
+
+/* ── OpenClaw ── */
+function renderOpenclaw(){
+  const wrap=el(`<div class="flex flex-col"></div>`);
+  wrap.appendChild(listHeader('OpenClaw-Agenten', `${H.openclawAgents.length} Agenten · ${H.openclawAgents.filter(a=>a.status==='active').length} aktiv`));
+  const list=el(`<div class="rowlist"></div>`);
+  [...H.openclawAgents].sort((a,b)=>or(b)-or(a)).forEach((a,i)=>list.appendChild(agentRow(a,i)));
+  wrap.appendChild(list);
+  return wrap;
+}
+function or(a){return a.stuckSignal?3:a.status==='offline'?2:0;}
+function agentRow(a,i){
+  const dot=a.stuckSignal?'warn':a.status==='active'?'live':a.status==='monitoring'?'warn':a.status==='ready'?'ready':a.status==='offline'?'offline':'idle';
+  const col=`var(${H.agentColorVar[a.id]})`; const t=a.tasks; const label=a.stuckSignal?'Stuck':H.agentStatusLabel[a.status];
+  const r=el(`<div class="row" data-arow="${i}">
+    <div style="width:30px;height:30px;border-radius:9px;flex:none;display:flex;align-items:center;justify-content:center;font-size:16px;background:${col}1a;border:1px solid ${col}55">${a.emoji}</div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2"><span style="font-size:14.5px;color:var(--text);font-weight:500">${a.name}</span>${statusDot(dot)}</div>
+      <div class="truncate text-sm" style="color:var(--text-soft)">${a.fleetHealth.currentTask}</div>
+    </div>
+    <span class="tag"><span class="tag-dotc" style="background:${dotColor[dot]}"></span>${label}</span>
+  </div>`);
+  const det=el(`<div data-adetail="${i}" style="display:none;padding:0 4px 18px 46px">
+    ${a.escalationNote?`<div style="display:flex;gap:8px;align-items:flex-start;margin:2px 0 14px;color:var(--amber-200)"><i data-lucide="triangle-alert" style="width:15px;height:15px;flex:none;margin-top:2px"></i><span style="font-size:13.5px">${a.escalationNote}</span></div>`:''}
+    <div class="text-sm mono mb-3" style="color:var(--text-soft)">${a.roleLabel} · ${a.model} · hb ${a.fleetHealth.heartbeat?H.fmtAge(a.fleetHealth.heartbeat):'—'} · ${a.fleetHealth.throughput}</div>
+    <div class="stat-line" style="gap:24px">
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--text)">${t.queued.length}</div><div class="s-k">Wartet</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--cyan-300)">${t.active.length}</div><div class="s-k">Aktiv</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--amber-300)">${t.review.length}</div><div class="s-k">Review</div></div>
+      <div><div class="mono" style="font-size:17px;font-weight:600;color:var(--emerald-300)">${t.recentDone.length}</div><div class="s-k">Fertig</div></div>
+    </div>
+    <div class="text-sm mt-3" style="color:var(--text-soft)">Letzte Ausgabe: ${a.fleetHealth.lastOutput}</div>
+  </div>`);
+  const holder=el('<div></div>'); holder.appendChild(r); holder.appendChild(det); return holder;
+}
+
+/* ── Autoresearch ── */
+function renderAuto(){
+  const wrap=el(`<div class="flex flex-col"></div>`); const a=H.autoresearchStatus;
+  const open=H.proposals.filter(p=>p.status==='proposed'&&!applied.has(p.id)&&!skipped.has(p.id));
+  wrap.appendChild(el(`<section style="padding:14px 0 20px">
+    <div class="flex items-center gap-2 mb-2">${statusDot(a.state==='running'?'live':'idle')}<span class="eyebrow">Autoresearch · ${a.state} · iter ${a.iteration}/${a.max} · hb ${a.heartbeat_age_s}s</span></div>
+    <h1 style="font-size:22px;font-weight:600;letter-spacing:-.01em;color:var(--text)">Dein nächster Schritt</h1>
+    <p style="color:var(--text-soft);font-size:15px;margin-top:6px;max-width:48ch">${open.length?`${open.length} Verbesserungen sind geprüft und warten. Lies das „Warum", schau dir den Diff an, übernimm mit einem Klick.`:'Alles abgearbeitet. Hol dir neue Vorschläge, wenn du willst.'}</p>
+    <div class="flex gap-2 mt-4 flex-wrap">
+      <button class="btn btn-accent" onclick="fetchMore(this)"><i data-lucide="sparkles" style="width:16px;height:16px"></i>Verbesserungen holen</button>
+      ${open.length>1?`<button class="btn" onclick="applyAll()"><i data-lucide="check-check" style="width:16px;height:16px"></i>Alle übernehmen</button>`:''}
+      <span class="kbd-hint tag" style="align-self:center;color:var(--text-dim);margin-left:4px"><kbd>A</kbd> übernehmen · <kbd>S</kbd> überspringen</span>
+    </div>
+  </section>`));
+  // open proposals
+  const list=el(`<section style="border-top:1px solid var(--border)"></section>`);
+  if(open.length) open.forEach(p=>list.appendChild(proposalBlock(p)));
+  else list.appendChild(el(`<div style="padding:30px 0;color:var(--text-soft)" class="flex items-center gap-2"><i data-lucide="check-circle-2" style="width:18px;height:18px;color:var(--emerald-300)"></i>Keine offenen Vorschläge.</div>`));
+  wrap.appendChild(list);
+  // done
+  const done=H.proposals.filter(p=>p.status!=='proposed'||applied.has(p.id)||skipped.has(p.id));
+  if(done.length){ const ds=el(`<section style="padding-top:24px;margin-top:8px;border-top:1px solid var(--border)"><div class="eyebrow mb-2">Erledigt · ${done.length}</div><div class="rowlist"></div></section>`); const dl=ds.querySelector('.rowlist');
+    done.forEach(p=>{const sk=p.status==='skipped'||skipped.has(p.id);dl.appendChild(el(`<div class="row" style="cursor:default">
+      <i data-lucide="${sk?'minus':'check'}" style="width:15px;height:15px;color:${sk?'var(--text-dim)':'var(--emerald-300)'};flex:none"></i>
+      <div class="flex-1 min-w-0"><div class="truncate" style="font-size:14px;color:var(--text)">${p.title}</div><div class="text-xs" style="color:${sk?'var(--text-dim)':'var(--emerald-300)'}">${sk?'übersprungen':(p.result||(p.mode==='code'?'Code: Tests grün':'Skill: eval grün'))}</div></div>
+      <span class="tag"><span class="tag-dotc" style="background:${p.mode==='code'?'#f59e0b':'#7c3aed'}"></span>${p.mode==='code'?'Code':'Skill'}</span></div>`));});
+    wrap.appendChild(ds); }
+  // log
+  const log=el(`<section style="padding-top:24px;margin-top:8px;border-top:1px solid var(--border)"><div class="eyebrow mb-3">Aktivität</div><div class="flex flex-col gap-2.5"></div></section>`);
+  const ll=log.querySelector('.flex.flex-col'); H.activityLog.forEach(l=>ll.appendChild(el(`<div class="flex items-baseline gap-3 text-sm"><span class="mono" style="color:var(--text-dim);flex:none">${H.fmtAge(l.at)}</span><span style="color:var(--text-soft)">${esc(l.text)}</span></div>`)));
+  wrap.appendChild(log);
+  return wrap;
+}
+function proposalBlock(p){
+  const code=p.mode==='code';
+  const rows=p.diff_before_after.map(l=>{const c=l.type==='add'?'add':l.type==='del'?'del':'ctx';const s=l.type==='add'?'+':l.type==='del'?'−':' ';return `<div class="dline ${c}"><span class="s">${s}</span>${esc(l.text)||' '}</div>`;}).join('');
+  return el(`<article class="prop">
+    <div class="flex items-center gap-2 mb-2">
+      <span class="tag"><span class="tag-dotc" style="background:${code?'#f59e0b':'#7c3aed'}"></span>${code?'Code-Änderung':'Skill'}</span>
+      <span class="mono text-xs" style="color:var(--text-dim)">${p.target} › ${p.section}</span>
+    </div>
+    <h3 style="font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3">${p.title}</h3>
+    <p style="color:var(--text-soft);font-size:14.5px;margin-top:7px;line-height:1.55;max-width:54ch">${p.rationale_plain}</p>
+    ${code?`<div class="flex items-center gap-1.5 mt-2 text-xs" style="color:var(--amber-300)"><i data-lucide="shield-alert" style="width:13px;height:13px"></i>Höhere Stufe — wird erst nach grüner Test-Suite scharf geschaltet.</div>`:''}
+    <div class="diff"><div class="diff-scroll">${rows}</div></div>
+    <div class="flex gap-2 mt-4">
+      <button class="btn btn-accent" style="height:42px" onclick="applyProp('${p.id}',this)"><i data-lucide="check" style="width:16px;height:16px"></i>Übernehmen</button>
+      <button class="btn btn-quiet" style="height:42px" onclick="skipProp('${p.id}')">Überspringen</button>
+    </div>
+  </article>`);
+}
+
+window.applyProp=(id,btn)=>{applied.add(id);if(btn)btn.innerHTML='<i data-lucide="loader"></i>…';setTimeout(render,320);};
+window.skipProp=(id)=>{skipped.add(id);render();};
+window.applyAll=()=>{H.proposals.filter(p=>p.status==='proposed').forEach(p=>{if(!skipped.has(p.id))applied.add(p.id);});render();};
+window.fetchMore=(b)=>{b.innerHTML='<i data-lucide="loader"></i>Suche…';setTimeout(()=>{b.innerHTML='<i data-lucide="check"></i>Aktuell';lucide.createIcons();},1000);};
+
+function listHeader(title,meta){return el(`<header style="padding:14px 0 6px"><h1 style="font-size:23px;font-weight:600;letter-spacing:-.02em;color:var(--text)">${title}</h1><div class="text-sm mono" style="color:var(--text-soft);margin-top:2px">${meta}</div></header>`);}
+function kbdFooter(){return el(`<div class="kbd-hint flex items-center gap-3 mt-5 text-xs" style="color:var(--text-dim)"><span><kbd>J</kbd> <kbd>K</kbd> bewegen</span><span><kbd>↵</kbd> Details</span><span><kbd>⌘</kbd><kbd>K</kbd> Befehle</span></div>`);}
+
+/* ── tabs + router ── */
+function buildTabs(){ const st=document.getElementById('segTabs'); st.innerHTML=''; const oc=openCount();
+  TABS.forEach(t=>{const b=el(`<button aria-selected="${TAB===t.id}">${t.label}${(t.id==='auto'&&oc)?`<span class="st-badge">${oc}</span>`:''}</button>`);b.onclick=()=>{TAB=t.id;SEL=0;render();};st.appendChild(b);}); }
+function render(){
+  const v=document.getElementById('view'); v.innerHTML='';
+  v.appendChild(TAB==='overview'?renderOverview():TAB==='hermes'?renderHermes():TAB==='openclaw'?renderOpenclaw():renderAuto());
+  buildTabs(); lucide.createIcons();
+  v.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>{TAB=b.dataset.goto;SEL=0;render();});
+  // expandable rows (hermes + openclaw)
+  v.querySelectorAll('[data-row]').forEach(r=>r.onclick=()=>toggleDetail(r,'data-detail'));
+  v.querySelectorAll('[data-arow]').forEach(r=>r.onclick=()=>toggleDetail(r,'data-adetail',true));
+  window.scrollTo({top:0});
+  v.classList.remove('rise'); void v.offsetWidth; v.classList.add('rise');
+}
+function toggleDetail(row,attr,isAgent){
+  const i=row.getAttribute(isAgent?'data-arow':'data-row');
+  const det=document.querySelector(`[${attr}="${i}"]`); if(!det)return;
+  const open=det.style.display!=='none'; det.style.display=open?'none':'block';
+  row.classList.toggle('sel',!open);
+  if(!open) lucide.createIcons();
+}
+
+/* ── command palette ── */
+const commands=()=>{ const cmds=[];
+  TABS.forEach(t=>cmds.push({group:'Navigation',label:t.label,icon:'corner-down-right',act:()=>{TAB=t.id;SEL=0;render();}}));
+  H.moreNav.forEach(n=>cmds.push({group:'Mehr',label:n.label,icon:n.icon,act:()=>{}}));
+  cmds.push({group:'Aktionen',label:'Verbesserungen holen',icon:'sparkles',act:()=>{TAB='auto';render();}});
+  cmds.push({group:'Aktionen',label:'Alle Vorschläge übernehmen',icon:'check-check',meta:openCount()+' offen',act:()=>{window.applyAll();TAB='auto';render();}});
+  H.hermesWorkers.forEach(w=>cmds.push({group:'Hermes-Worker',label:w.task_title,icon:'cpu',meta:H.profileLabels[w.profile],act:()=>{TAB='hermes';render();}}));
+  H.openclawAgents.forEach(a=>cmds.push({group:'OpenClaw',label:a.name+' — '+a.fleetHealth.currentTask,icon:'bot',meta:a.emoji,act:()=>{TAB='openclaw';render();}}));
+  return cmds;
+};
+let pActive=0, pFiltered=[];
+function openPalette(){ const s=document.getElementById('paletteScrim'); s.classList.add('open'); const inp=document.getElementById('paletteInput'); inp.value=''; pActive=0; filterPalette(''); setTimeout(()=>inp.focus(),30); }
+function closePalette(){ document.getElementById('paletteScrim').classList.remove('open'); }
+function filterPalette(q){ const all=commands(); q=q.toLowerCase().trim();
+  pFiltered = q? all.filter(c=>c.label.toLowerCase().includes(q)||c.group.toLowerCase().includes(q)) : all;
+  pActive=Math.min(pActive,Math.max(0,pFiltered.length-1));
+  const list=document.getElementById('paletteList'); list.innerHTML='';
+  let lastGroup=null;
+  pFiltered.forEach((c,i)=>{ if(c.group!==lastGroup){ list.appendChild(el(`<div class="pgroup">${c.group}</div>`)); lastGroup=c.group; }
+    const it=el(`<div class="pitem ${i===pActive?'act':''}" data-pi="${i}"><i data-lucide="${c.icon}" style="width:16px;height:16px;color:var(--text-soft)"></i><span class="truncate">${c.label}</span>${c.meta?`<span class="p-meta mono text-xs" style="color:var(--text-dim)">${c.meta}</span>`:''}</div>`);
+    it.onclick=()=>{ c.act(); closePalette(); }; list.appendChild(it);
+  });
+  if(!pFiltered.length) list.appendChild(el(`<div style="padding:22px;text-align:center;color:var(--text-dim);font-size:14px">Kein Treffer</div>`));
+  lucide.createIcons();
+}
+document.getElementById('cmdField').onclick=openPalette;
+document.getElementById('paletteScrim').onclick=(e)=>{ if(e.target.id==='paletteScrim') closePalette(); };
+document.getElementById('paletteInput').addEventListener('input',e=>filterPalette(e.target.value));
+document.getElementById('paletteInput').addEventListener('keydown',e=>{
+  if(e.key==='ArrowDown'){e.preventDefault();pActive=Math.min(pActive+1,pFiltered.length-1);refreshActive();}
+  else if(e.key==='ArrowUp'){e.preventDefault();pActive=Math.max(pActive-1,0);refreshActive();}
+  else if(e.key==='Enter'){e.preventDefault();const c=pFiltered[pActive];if(c){c.act();closePalette();}}
+  else if(e.key==='Escape'){closePalette();}
+});
+function refreshActive(){ document.querySelectorAll('.pitem').forEach(it=>it.classList.toggle('act',+it.dataset.pi===pActive)); const a=document.querySelector('.pitem.act'); if(a)a.scrollIntoViewIfNeeded?a.scrollIntoViewIfNeeded():null; }
+
+/* global keyboard */
+document.addEventListener('keydown',e=>{
+  const open=document.getElementById('paletteScrim').classList.contains('open');
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){ e.preventDefault(); open?closePalette():openPalette(); return; }
+  if(open) return;
+  if(e.target.tagName==='INPUT') return;
+  // J/K navigation within hermes list
+  if(TAB==='hermes'){ const rows=[...document.querySelectorAll('[data-row]')]; if(!rows.length)return;
+    if(e.key==='j'||e.key==='J'){ SEL=Math.min(SEL+1,rows.length-1); markSel(rows); }
+    else if(e.key==='k'||e.key==='K'){ SEL=Math.max(SEL-1,0); markSel(rows); }
+    else if(e.key==='Enter'){ rows[SEL]&&rows[SEL].click(); }
+  }
+  if(TAB==='auto'){ const op=H.proposals.filter(p=>p.status==='proposed'&&!applied.has(p.id)&&!skipped.has(p.id)); 
+    if((e.key==='a'||e.key==='A')&&op[0]){ window.applyProp(op[0].id); }
+    else if((e.key==='s'||e.key==='S')&&op[0]){ window.skipProp(op[0].id); } }
+});
+function markSel(rows){ rows.forEach((r,i)=>r.classList.toggle('sel',i===SEL)); rows[SEL]&&rows[SEL].scrollIntoView&&rows[SEL].scrollIntoView({block:'nearest'}); }
+
+/* theme + tweaks */
+const root=document.documentElement;
+function setTheme(t){root.dataset.theme=t;document.querySelectorAll('#twTheme button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===t));}
+document.getElementById('twBtn').onclick=()=>{const c=document.getElementById('twCard');c.hidden=!c.hidden;};
+document.getElementById('twAccent').onclick=e=>{const b=e.target.closest('button');if(!b)return;const c=b.dataset.c;root.style.setProperty('--c-accent',c);root.style.setProperty('--c-accent-text',c==='#e4e4e7'?'#e4e4e7':c);root.style.setProperty('--c-accent-wash',c+'22');root.style.setProperty('--c-accent-border',c+'4d');document.querySelectorAll('#twAccent button').forEach(x=>x.setAttribute('aria-pressed',x===b));};
+document.getElementById('twTheme').onclick=e=>{const b=e.target.closest('button');if(!b)return;setTheme(b.dataset.t);};
+document.getElementById('twKbd').onclick=e=>{const b=e.target.closest('button');if(!b)return;document.body.dataset.kbd=b.dataset.k;document.querySelectorAll('#twKbd button').forEach(x=>x.setAttribute('aria-pressed',x===b));};
+
+document.getElementById('clock').textContent=H.fmtClock(H.NOW);
+render();
+</script>
+</body>
+</html>

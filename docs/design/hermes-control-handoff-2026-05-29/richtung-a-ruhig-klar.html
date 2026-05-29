@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="de" data-theme="dark" data-density="airy">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Hermes Control — Richtung A · Ruhig &amp; Klar</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="stylesheet" href="tokens.css" />
+<script src="hermes-data.js"></script>
+<style>
+  /* ── Richtung A: ruhig, luftig, runde Formen, consumer-app ── */
+  :root { --a-accent: var(--accent); --a-accent-text: var(--accent-text); --a-accent-wash: var(--accent-wash); --a-accent-border: var(--accent-border); }
+  [data-theme="light"] {
+    --bg: #f6f6f8; --rail:#ffffff; --panel:#ffffff; --panel-2:#f1f1f4; --panel-active:#eaeaef;
+    --panel-card:#ffffff; --border:#e4e4ea; --border-strong:#d4d4dc;
+    --text:#1a1a1f; --text-soft:#5b6472; --text-dim:#9aa1ad;
+  }
+  [data-theme="light"] body {
+    background: radial-gradient(circle at top left, rgba(124,58,237,.05), transparent 30%),
+                radial-gradient(circle at top right, rgba(124,58,237,.04), transparent 26%),
+                linear-gradient(180deg,#f6f6f8 0%, #eef0f4 100%);
+  }
+  body { font-family: var(--font-sans); }
+  .app { max-width: 760px; margin: 0 auto; padding: 0 16px calc(108px + var(--safe-bottom)); }
+  [data-density="compact"] .app-card { padding: 14px !important; }
+  [data-density="compact"] .stack > * + * { margin-top: 10px !important; }
+
+  .app-card { background: var(--panel); border:1px solid var(--border); border-radius: 22px; padding: 20px; transition: border-color .2s, transform .2s, box-shadow .2s; }
+  .soft-card { background: var(--panel-2); border:1px solid var(--border); border-radius:18px; }
+  .pressable { transition: transform .12s ease; }
+  .pressable:active { transform: scale(.98); }
+
+  /* tone wash helpers reused, but rounder + softer for consumer feel */
+  .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid transparent; border-radius:999px; padding:5px 11px; font-size:12px; font-weight:600; line-height:1; }
+  .chip-sm { padding:3px 9px; font-size:11px; }
+
+  .tabbar { position: fixed; left:0; right:0; bottom:0; z-index:50; background: color-mix(in srgb, var(--rail) 95%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter:blur(14px); border-top:1px solid var(--border); box-shadow: var(--shadow-sticky-bot); padding-bottom: var(--safe-bottom); }
+  .tabbar-inner { max-width:760px; margin:0 auto; display:grid; grid-template-columns: repeat(5,1fr); }
+  .tabcell { min-height:64px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; color:var(--text-soft); font-size:11px; font-weight:600; letter-spacing:.01em; position:relative; transition: color .15s; -webkit-tap-highlight-color:transparent; }
+  .tabcell[aria-selected="true"] { color: var(--a-accent-text); }
+  .tabcell[aria-selected="true"] .tabglyph { background: var(--a-accent-wash); border-color: var(--a-accent-border); box-shadow: var(--shadow-accent-chip); }
+  .tabglyph { width:44px; height:30px; border-radius:999px; display:flex; align-items:center; justify-content:center; border:1px solid transparent; transition: all .18s; }
+  .tabbadge { position:absolute; top:8px; right:50%; transform: translateX(20px); min-width:18px; height:18px; padding:0 5px; border-radius:999px; background: var(--rose); color:#fff; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; box-shadow:0 0 0 2px var(--rail); }
+
+  .health-hero { border-radius:22px; padding:24px; border:1px solid var(--border); position:relative; overflow:hidden; }
+  .health-ok { background: radial-gradient(120% 100% at 0% 0%, rgba(34,197,94,.14), transparent 60%), var(--panel); border-color: rgba(34,197,94,.25); }
+  .health-warn { background: radial-gradient(120% 100% at 0% 0%, rgba(245,158,11,.16), transparent 60%), var(--panel); border-color: rgba(245,158,11,.30); }
+
+  .diffbox { font-family: var(--font-mono); font-size:12.5px; line-height:1.55; border-radius:14px; border:1px solid var(--border); overflow:hidden; background: color-mix(in srgb, var(--panel-2) 92%, black); }
+  .diffrow { display:flex; gap:0; padding:1px 12px; white-space:pre; }
+  .diff-add { background: rgba(34,197,94,.12); color: var(--emerald-200); }
+  .diff-del { background: rgba(244,63,94,.12); color: var(--rose-200); }
+  .diff-ctx { color: var(--text-soft); }
+  .diff-sign { width:14px; display:inline-block; opacity:.7; }
+  .diff-scroll { max-height: 320px; overflow:auto; }
+
+  .meter { height:6px; border-radius:999px; background: var(--panel-active); overflow:hidden; }
+  .meter > span { display:block; height:100%; border-radius:999px; }
+
+  .seg { display:inline-flex; background: var(--panel-2); border:1px solid var(--border); border-radius:999px; padding:3px; gap:2px; }
+  .seg button { border:none; background:transparent; color:var(--text-soft); font-size:13px; font-weight:600; padding:7px 14px; border-radius:999px; cursor:pointer; transition: all .15s; }
+  .seg button[aria-pressed="true"] { background: var(--a-accent-wash); color:var(--a-accent-text); }
+
+  .sheet-scrim { position:fixed; inset:0; background: rgba(0,0,0,.6); backdrop-filter: blur(3px); z-index:60; display:none; }
+  .sheet-scrim.open { display:block; }
+  .sheet { position:fixed; left:0; right:0; bottom:0; z-index:61; background: var(--rail); border-top:1px solid var(--border); border-radius:24px 24px 0 0; padding:18px 16px calc(24px + var(--safe-bottom)); max-width:760px; margin:0 auto; display:none; }
+  .sheet.open { display:block; animation: sheet-rise .26s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes sheet-rise { from { transform: translateY(40px); } to { transform: none; } }
+  .grip { width:40px; height:4px; border-radius:999px; background:var(--border-strong); margin:0 auto 14px; }
+
+  .eyebrow { font-size:10px; letter-spacing:.22em; text-transform:uppercase; font-weight:600; color:var(--text-dim); }
+  .num { font-variant-numeric: tabular-nums; }
+  /* Transform-only entrance — never gates visibility behind opacity (safe when iframe timeline is paused). */
+  @keyframes a-rise { from { transform: translateY(8px); } to { transform: none; } }
+  .fade-up > * { animation: a-rise .38s ease-out both; }
+  .fade-up > *:nth-child(2){animation-delay:.05s} .fade-up > *:nth-child(3){animation-delay:.1s}
+  .fade-up > *:nth-child(4){animation-delay:.15s} .fade-up > *:nth-child(5){animation-delay:.2s}
+  .fade-up > *:nth-child(n+6){animation-delay:.25s}
+
+  /* tweaks fab + panel */
+  .fab { position:fixed; right:16px; bottom: calc(80px + var(--safe-bottom)); z-index:55; width:48px; height:48px; border-radius:999px; background:var(--panel); border:1px solid var(--border); color:var(--text-soft); display:flex; align-items:center; justify-content:center; box-shadow: var(--shadow-card); }
+  .tw-panel { position:fixed; right:16px; bottom: calc(140px + var(--safe-bottom)); z-index:56; width:260px; background:var(--rail); border:1px solid var(--border-strong); border-radius:18px; padding:16px; box-shadow: var(--shadow-card-hover); transform-origin: bottom right; transition: opacity .18s, transform .18s; }
+  .tw-panel[hidden] { opacity:0; transform: scale(.92); pointer-events:none; }
+  .sw { display:inline-flex; gap:6px; }
+  .sw button { width:26px; height:26px; border-radius:999px; border:2px solid transparent; cursor:pointer; }
+  .sw button[aria-pressed="true"] { border-color: var(--text); }
+</style>
+</head>
+<body>
+  <div class="app pt-4">
+    <!-- Header -->
+    <header class="flex items-center justify-between py-3" data-screen-label="App-Header">
+      <div class="flex items-center gap-3">
+        <img src="logo.svg" alt="" width="34" height="34" />
+        <div class="leading-tight">
+          <div class="mc-wordmark" style="color:var(--text)">HERMES</div>
+          <div class="mc-wordmark" style="color:var(--text-soft)">CONTROL</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="themeBtn" class="pressable" style="width:40px;height:40px;border-radius:999px;border:1px solid var(--border);background:var(--panel);color:var(--text-soft);display:flex;align-items:center;justify-content:center" title="Hell / Dunkel"><i data-lucide="moon"></i></button>
+      </div>
+    </header>
+
+    <main id="view" class="stack fade-up" style="display:flex;flex-direction:column;gap:16px"></main>
+  </div>
+
+  <!-- Tweaks -->
+  <button id="twFab" class="fab pressable" title="Tweaks"><i data-lucide="sliders-horizontal" style="width:20px;height:20px"></i></button>
+  <div id="twPanel" class="tw-panel" hidden>
+    <div class="eyebrow" style="margin-bottom:12px">Tweaks</div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <div class="text-xs mb-2" style="color:var(--text-soft)">Akzentfarbe</div>
+        <div class="sw" id="twAccent">
+          <button data-c="#7c3aed" style="background:#7c3aed" aria-pressed="true" title="Violett"></button>
+          <button data-c="#14b8a6" style="background:#14b8a6" title="Türkis"></button>
+          <button data-c="#22c55e" style="background:#22c55e" title="Smaragd"></button>
+          <button data-c="#f97316" style="background:#f97316" title="Orange"></button>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs mb-2" style="color:var(--text-soft)">Dichte</div>
+        <div class="seg" id="twDensity" style="width:100%">
+          <button data-d="airy" aria-pressed="true" style="flex:1">Luftig</button>
+          <button data-d="compact" style="flex:1">Kompakt</button>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs mb-2" style="color:var(--text-soft)">Erscheinung</div>
+        <div class="seg" id="twTheme" style="width:100%">
+          <button data-t="dark" aria-pressed="true" style="flex:1">Dunkel</button>
+          <button data-t="light" style="flex:1">Hell</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Tab Bar -->
+  <nav class="tabbar">
+    <div class="tabbar-inner" id="tabbar"></div>
+  </nav>
+
+  <!-- More sheet -->
+  <div id="scrim" class="sheet-scrim"></div>
+  <div id="sheet" class="sheet">
+    <div class="grip"></div>
+    <div class="eyebrow" style="margin-bottom:12px">Mehr</div>
+    <div id="moreList" class="stack" style="display:flex;flex-direction:column;gap:8px"></div>
+  </div>
+
+<script>
+const H = window.HERMES;
+const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstElementChild; };
+const toneCls = (t) => `tone-${t}`;
+let TAB = 'overview';
+const applied = new Set(), skipped = new Set(); // proposal-Status (Demo)
+
+const TABS = [
+  { id:'overview', label:'Übersicht', icon:'gauge' },
+  { id:'hermes',   label:'Hermes',    icon:'cpu' },
+  { id:'openclaw', label:'OpenClaw',  icon:'bot' },
+  { id:'auto',     label:'Auto',      icon:'sparkles' },
+  { id:'more',     label:'Mehr',      icon:'menu' },
+];
+
+function chip(text, tone, {sm=false, dot=null}={}) {
+  const d = dot ? `<span class="mc-dot mc-dot-${dot}"></span>` : '';
+  return `<span class="chip ${sm?'chip-sm':''} ${toneCls(tone)}">${d}${text}</span>`;
+}
+function diffHtml(lines, id, collapsed) {
+  const rows = lines.map(l => {
+    const cls = l.type==='add'?'diff-add':l.type==='del'?'diff-del':'diff-ctx';
+    const sign = l.type==='add'?'+':l.type==='del'?'−':' ';
+    return `<div class="diffrow ${cls}"><span class="diff-sign">${sign}</span>${escapeHtml(l.text)||' '}</div>`;
+  }).join('');
+  return `<div class="diffbox"><div class="diff-scroll" id="${id}" ${collapsed?'style="max-height:84px"':''}>${rows}</div></div>`;
+}
+function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+/* ── Übersicht ── */
+function renderOverview() {
+  const o = H.overview();
+  const wrap = document.createElement('div'); wrap.className='stack'; wrap.style.cssText='display:flex;flex-direction:column;gap:16px';
+  const okClass = o.allHealthy ? 'health-ok' : 'health-warn';
+  const headline = o.allHealthy ? 'Alles im grünen Bereich' : `${o.warnings.length} Dinge brauchen Aufmerksamkeit`;
+  const sub = o.allHealthy ? 'Alle Worker melden sich regelmäßig. Du musst nichts tun.' : 'Tippe einen Punkt an, um direkt zur Stelle zu springen.';
+  wrap.appendChild(el(`
+    <section class="health-hero ${okClass}">
+      <div class="eyebrow" style="margin-bottom:10px">Übersicht · ${H.fmtClock(H.NOW)}</div>
+      <div class="flex items-start gap-4">
+        <div style="width:52px;height:52px;border-radius:16px;flex:none;display:flex;align-items:center;justify-content:center;background:${o.allHealthy?'rgba(34,197,94,.14)':'rgba(245,158,11,.16)'};border:1px solid ${o.allHealthy?'rgba(34,197,94,.3)':'rgba(245,158,11,.3)'}">
+          <i data-lucide="${o.allHealthy?'shield-check':'triangle-alert'}" style="color:${o.allHealthy?'var(--emerald-300)':'var(--amber-300)'}"></i>
+        </div>
+        <div>
+          <h1 style="font-size:22px;font-weight:600;color:var(--text);line-height:1.2;letter-spacing:-.01em">${headline}</h1>
+          <p style="color:var(--text-soft);margin-top:6px;font-size:14px">${sub}</p>
+        </div>
+      </div>
+    </section>
+  `));
+
+  // Stat tiles
+  const tiles = el(`<section class="grid grid-cols-2 gap-3"></section>`);
+  const tileData = [
+    { eg:'Hermes-Worker', big:`${o.hermesRunning}/${o.hermesTotal}`, sub:'laufen gerade', tone:'cyan', tab:'hermes' },
+    { eg:'OpenClaw', big:`${o.ocActive}`, sub:`von ${o.ocTotal} aktiv`, tone:'sky', tab:'openclaw' },
+    { eg:'Vorschläge', big:`${o.openProps}`, sub:'warten auf dich', tone:'violet', tab:'auto' },
+    { eg:'Warnungen', big:`${o.warnings.length}`, sub:o.warnings.length?'sofort prüfen':'keine', tone:o.warnings.length?'amber':'emerald', tab: o.warnings.length?'hermes':'overview' },
+  ];
+  tileData.forEach(t => {
+    const c = el(`<button class="app-card pressable text-left" data-goto="${t.tab}" style="padding:16px">
+      <div class="eyebrow">${t.eg}</div>
+      <div class="num" style="font-size:30px;font-weight:600;color:var(--text);margin-top:6px">${t.big}</div>
+      <div style="margin-top:2px"><span class="chip chip-sm ${toneCls(t.tone)}">${t.sub}</span></div>
+    </button>`);
+    tiles.appendChild(c);
+  });
+  wrap.appendChild(tiles);
+
+  // Needs attention
+  if (o.warnings.length) {
+    const sec = el(`<section><div class="eyebrow" style="margin:4px 0 10px">Braucht Aufmerksamkeit</div><div class="stack" style="display:flex;flex-direction:column;gap:10px"></div></section>`);
+    const list = sec.querySelector('.stack');
+    o.warnings.forEach(w => {
+      if (w.kind==='hermes') {
+        list.appendChild(el(`<button class="soft-card pressable text-left p-4 flex items-center gap-3" data-goto="hermes" style="border-color:var(--${w.health.tone}-300,${w.health.tone});border-left:3px solid ${cssTone(w.health.tone)}">
+          <span class="mc-dot mc-dot-${w.health.dot}"></span>
+          <div class="flex-1 min-w-0">
+            <div style="font-weight:600;color:var(--text);font-size:14px" class="truncate">${H.profileLabels[w.w.profile]} · ${w.health.label}</div>
+            <div class="truncate" style="color:var(--text-soft);font-size:13px">${w.w.task_title}</div>
+          </div>
+          <i data-lucide="chevron-right" style="color:var(--text-dim);flex:none"></i>
+        </button>`));
+      } else {
+        const prob = w.a.stuckSignal ? 'Stuck' : 'Offline';
+        list.appendChild(el(`<button class="soft-card pressable text-left p-4 flex items-center gap-3" data-goto="openclaw" style="border-left:3px solid ${w.a.stuckSignal?cssTone('amber'):cssTone('zinc')}">
+          <span style="font-size:20px;flex:none">${w.a.emoji}</span>
+          <div class="flex-1 min-w-0">
+            <div style="font-weight:600;color:var(--text);font-size:14px">${w.a.name} · ${prob}</div>
+            <div class="truncate" style="color:var(--text-soft);font-size:13px">${w.a.escalationNote || w.a.fleetHealth.lastOutput}</div>
+          </div>
+          <i data-lucide="chevron-right" style="color:var(--text-dim);flex:none"></i>
+        </button>`));
+      }
+    });
+    wrap.appendChild(sec);
+  }
+
+  // Autoresearch teaser
+  const a = H.autoresearchStatus;
+  wrap.appendChild(el(`<button class="app-card pressable text-left" data-goto="auto" style="border-color:var(--a-accent-border)">
+    <div class="flex items-center justify-between">
+      <div class="eyebrow" style="color:var(--a-accent-text)">Autoresearch</div>
+      ${chip(a.state==='running'?'Loop läuft':'Idle', a.state==='running'?'emerald':'zinc', {sm:true, dot:a.state==='running'?'live':'idle'})}
+    </div>
+    <div style="font-weight:600;color:var(--text);font-size:16px;margin-top:8px">${o.openProps} Verbesserungen warten auf einen Klick</div>
+    <div style="color:var(--text-soft);font-size:13px;margin-top:4px">${a.note}</div>
+    <div class="flex items-center gap-2 mt-3" style="color:var(--a-accent-text);font-size:14px;font-weight:600">Öffnen <i data-lucide="arrow-right" style="width:16px;height:16px"></i></div>
+  </button>`));
+  return wrap;
+}
+function cssTone(t){const map={cyan:'#22d3ee',amber:'#f59e0b',red:'#ef4444',zinc:'#52525b',emerald:'#22c55e',sky:'#38bdf8',violet:'#7c3aed',rose:'#f43f5e'};return map[t]||t;}
+
+/* ── Hermes-Worker ── */
+function renderHermes() {
+  const wrap = el(`<div class="stack" style="display:flex;flex-direction:column;gap:16px"></div>`);
+  const o = H.overview();
+  wrap.appendChild(el(`<div><div class="eyebrow">Tab 2</div><h1 style="font-size:22px;font-weight:600;color:var(--text)">Hermes-Worker</h1>
+    <p style="color:var(--text-soft);font-size:14px;margin-top:4px">${o.hermesRunning} laufen · ${H.hermesWorkers.length - o.hermesHealthy} brauchen einen Blick</p></div>`));
+  const sorted = [...H.hermesWorkers].sort((a,b)=> rank(b)-rank(a));
+  const list = el(`<div class="stack" style="display:flex;flex-direction:column;gap:12px"></div>`);
+  sorted.forEach(w => list.appendChild(workerCard(w)));
+  wrap.appendChild(list);
+  return wrap;
+}
+function rank(w){const k=H.workerHealth(w).key;return {stuck:3,blocked:3,offline:2,healthy:0}[k]||0;}
+function workerCard(w) {
+  const hp = H.workerHealth(w);
+  const runtime = H.NOW - w.started_at;
+  const rest = w.max_runtime_seconds - runtime;
+  const cpu = w.inspect.cpu_percent;
+  const problem = hp.key !== 'healthy';
+  const accent = cssTone(hp.tone);
+  const card = el(`<article class="app-card pressable" style="${problem?`border-color:${accent}66;box-shadow:0 0 0 1px ${accent}22`:''}">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 mb-1">
+          ${chip(H.profileLabels[w.profile], 'violet', {sm:true})}
+          <span class="mc-mono" style="color:var(--text-dim);font-size:11px">${w.task_id}</span>
+        </div>
+        <h3 style="font-weight:600;color:var(--text);font-size:15px;line-height:1.3">${w.task_title}</h3>
+      </div>
+      <span class="chip ${toneCls(hp.tone)}" style="flex:none"><span class="mc-dot mc-dot-${hp.dot}"></span>${hp.label}</span>
+    </div>
+    ${problem ? `<div class="soft-card p-3 mt-3 flex items-start gap-2" style="background:${accent}14;border-color:${accent}33">
+        <i data-lucide="${hp.key==='blocked'?'lock':hp.key==='offline'?'power-off':'alarm-clock'}" style="color:${accent};width:16px;height:16px;flex:none;margin-top:2px"></i>
+        <span style="color:var(--text);font-size:13px">${w.block_reason || (hp.key==='stuck'?`Heartbeat ${H.fmtAge(w.last_heartbeat_at)} alt · Claim abgelaufen`:'Prozess reagiert nicht')}</span>
+      </div>` : ''}
+    <div class="grid grid-cols-2 gap-x-5 gap-y-3 mt-4">
+      ${metric('Laufzeit', H.fmtDur(runtime))}
+      ${metric('Heartbeat', H.fmtAge(w.last_heartbeat_at) + ' her', hp.key==='stuck'||hp.key==='offline')}
+      ${metric('Rest-Zeit', rest>0?H.fmtDur(rest):'überzogen', rest<=0)}
+      ${metric('Prozess', 'PID ' + w.worker_pid)}
+    </div>
+    <div class="mt-4 stack" style="display:flex;flex-direction:column;gap:10px">
+      ${bar('CPU', cpu, 100, cpu+' %', cpu>80?'rose':'cyan')}
+      ${bar('RAM', w.inspect.rss/1073741824*100, 100, H.fmtMB(w.inspect.rss), 'indigo')}
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button class="mc-btn" style="flex:1;min-height:40px;font-size:13px">Details</button>
+      ${problem ? `<button class="mc-btn mc-btn-danger" style="flex:1;min-height:40px;font-size:13px">${hp.key==='offline'?'Neu starten':hp.key==='blocked'?'Lock lösen':'Anstoßen'}</button>`
+                : `<button class="mc-btn" style="flex:none;min-height:40px;width:44px"><i data-lucide="more-horizontal" style="width:16px;height:16px"></i></button>`}
+    </div>
+  </article>`);
+  return card;
+}
+function metric(label, val, warn=false){
+  return `<div><div class="eyebrow">${label}</div><div class="num" style="font-size:15px;font-weight:600;color:${warn?'var(--amber-300)':'var(--text)'};margin-top:2px">${val}</div></div>`;
+}
+function bar(label, pct, max, val, tone){
+  const w = Math.min(100, pct/max*100);
+  return `<div><div class="flex justify-between items-center mb-1"><span class="eyebrow">${label}</span><span class="num" style="font-size:12px;color:var(--text-soft)">${val}</span></div><div class="meter"><span style="width:${w}%;background:${cssTone(tone)}"></span></div></div>`;
+}
+
+/* ── OpenClaw ── */
+function renderOpenclaw() {
+  const wrap = el(`<div class="stack" style="display:flex;flex-direction:column;gap:16px"></div>`);
+  const act = H.openclawAgents.filter(a=>a.status==='active').length;
+  wrap.appendChild(el(`<div><div class="eyebrow">Tab 3</div><h1 style="font-size:22px;font-weight:600;color:var(--text)">OpenClaw-Flotte</h1>
+    <p style="color:var(--text-soft);font-size:14px;margin-top:4px">${act} aktiv · ${H.openclawAgents.filter(a=>a.stuckSignal||a.status==='offline').length} mit Problem</p></div>`));
+  const sorted = [...H.openclawAgents].sort((a,b)=> ocRank(b)-ocRank(a));
+  const list = el(`<div class="stack" style="display:flex;flex-direction:column;gap:12px"></div>`);
+  sorted.forEach(a => list.appendChild(agentCard(a)));
+  wrap.appendChild(list);
+  return wrap;
+}
+function ocRank(a){ if(a.stuckSignal) return 3; if(a.status==='offline') return 2; return 0; }
+function agentCard(a) {
+  const tone = a.stuckSignal ? 'amber' : H.agentStatusTone[a.status];
+  const label = a.stuckSignal ? 'Stuck' : H.agentStatusLabel[a.status];
+  const dot = a.stuckSignal?'warn':a.status==='active'?'live':a.status==='monitoring'?'warn':a.status==='ready'?'ready':a.status==='offline'?'offline':'idle';
+  const col = `var(${H.agentColorVar[a.id]})`;
+  const t = a.tasks;
+  const problem = a.stuckSignal || a.status==='offline';
+  const card = el(`<article class="app-card pressable" style="${problem?`border-color:${cssTone(tone)}66`:''}">
+    <div class="flex items-start gap-3">
+      <div style="width:46px;height:46px;border-radius:14px;flex:none;display:flex;align-items:center;justify-content:center;font-size:22px;background:${col}1a;border:1px solid ${col}55">${a.emoji}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between gap-2">
+          <div style="font-weight:600;color:var(--text);font-size:16px">${a.name}</div>
+          <span class="chip chip-sm ${toneCls(tone)}" style="flex:none"><span class="mc-dot mc-dot-${dot}"></span>${label}</span>
+        </div>
+        <div style="color:var(--text-soft);font-size:13px">${a.roleLabel} · ${a.roleSummary}</div>
+      </div>
+    </div>
+    <div class="soft-card p-3 mt-3">
+      <div class="eyebrow" style="margin-bottom:4px">Aktuelle Aufgabe</div>
+      <div style="color:var(--text);font-size:14px">${a.fleetHealth.currentTask}</div>
+      <div class="flex items-center gap-3 mt-2" style="color:var(--text-soft);font-size:12px">
+        <span class="flex items-center gap-1"><i data-lucide="activity" style="width:13px;height:13px"></i>${a.fleetHealth.heartbeat?H.fmtAge(a.fleetHealth.heartbeat)+' her':'—'}</span>
+        <span class="flex items-center gap-1"><i data-lucide="zap" style="width:13px;height:13px"></i>${a.fleetHealth.throughput}</span>
+        <span class="flex items-center gap-1 num"><i data-lucide="cpu" style="width:13px;height:13px"></i>${a.model.replace('claude-','')}</span>
+      </div>
+    </div>
+    ${a.escalationNote ? `<div class="p-3 mt-3 flex items-start gap-2" style="border-radius:14px;background:${cssTone('amber')}14;border:1px solid ${cssTone('amber')}33">
+        <i data-lucide="triangle-alert" style="color:var(--amber-300);width:16px;height:16px;flex:none;margin-top:1px"></i>
+        <span style="color:var(--text);font-size:13px">${a.escalationNote}</span></div>`:''}
+    <div class="mt-3">
+      <div class="eyebrow" style="margin-bottom:6px">Queue</div>
+      <div class="flex gap-2">
+        ${queuePill('Wartet', t.queued.length, 'zinc')}
+        ${queuePill('Aktiv', t.active.length, 'cyan')}
+        ${queuePill('Review', t.review.length, 'amber')}
+        ${queuePill('Fertig', t.recentDone.length, 'emerald')}
+      </div>
+    </div>
+  </article>`);
+  return card;
+}
+function queuePill(label, n, tone){
+  return `<div class="flex-1 text-center p-2 rounded-xl ${toneCls(tone)}" style="border-radius:12px"><div class="num" style="font-size:18px;font-weight:600">${n}</div><div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.8">${label}</div></div>`;
+}
+
+/* ── Autoresearch ── */
+function renderAuto() {
+  const wrap = el(`<div class="stack" style="display:flex;flex-direction:column;gap:16px"></div>`);
+  const a = H.autoresearchStatus;
+  const open = H.proposals.filter(p=>p.status==='proposed' && !applied.has(p.id) && !skipped.has(p.id));
+  // Status header
+  wrap.appendChild(el(`<section class="app-card" style="border-color:var(--a-accent-border)">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        ${chip(a.state==='running'?'Loop läuft':'Idle', a.state==='running'?'emerald':'zinc',{dot:a.state==='running'?'live':'idle'})}
+        <span class="num" style="color:var(--text-soft);font-size:12px">Runde ${a.iteration}/${a.max} · Heartbeat ${a.heartbeat_age_s}s</span>
+      </div>
+    </div>
+    <div class="soft-card p-3 mt-3 flex items-start gap-3" style="background:var(--a-accent-wash);border-color:var(--a-accent-border)">
+      <i data-lucide="footprints" style="color:var(--a-accent-text);width:18px;height:18px;flex:none;margin-top:1px"></i>
+      <div><div class="eyebrow" style="color:var(--a-accent-text)">Dein nächster Schritt</div>
+      <div style="color:var(--text);font-size:14px;margin-top:2px">${open.length?`Schau dir die ${open.length} Vorschläge an und übernimm, was sinnvoll ist. Jeder zeigt dir vorher genau, was sich ändert.`:'Alles abgearbeitet. Hol dir neue Verbesserungen, wenn du magst.'}</div></div>
+    </div>
+    <div class="flex gap-2 mt-3">
+      <button class="mc-btn mc-btn-primary" style="flex:1;min-height:46px;font-size:14px" onclick="fetchMore(this)"><i data-lucide="sparkles" style="width:16px;height:16px"></i>Verbesserungen holen</button>
+      ${open.length>1?`<button class="mc-btn" style="flex:none;min-height:46px;font-size:14px" onclick="applyAll()"><i data-lucide="check-check" style="width:16px;height:16px"></i>Alle übernehmen</button>`:''}
+    </div>
+  </section>`));
+
+  // Open proposals
+  const openSec = el(`<section><div class="eyebrow" style="margin:4px 0 10px">Vorschläge · ${open.length}</div><div id="propList" class="stack" style="display:flex;flex-direction:column;gap:14px"></div></section>`);
+  const pl = openSec.querySelector('#propList');
+  if (open.length) open.forEach(p => pl.appendChild(proposalCard(p)));
+  else pl.appendChild(el(`<div class="soft-card p-6 text-center" style="color:var(--text-soft)"><i data-lucide="check-circle-2" style="width:28px;height:28px;color:var(--emerald-300);margin:0 auto 8px"></i><div>Keine offenen Vorschläge.</div></div>`));
+  wrap.appendChild(openSec);
+
+  // Done
+  const done = H.proposals.filter(p => p.status!=='proposed' || applied.has(p.id) || skipped.has(p.id));
+  if (done.length) {
+    const dsec = el(`<section><div class="eyebrow" style="margin:4px 0 10px">Erledigt · ${done.length}</div><div class="stack" style="display:flex;flex-direction:column;gap:10px"></div></section>`);
+    const dl = dsec.querySelector('.stack');
+    done.forEach(p => {
+      const isSkip = p.status==='skipped' || skipped.has(p.id);
+      dl.appendChild(el(`<div class="soft-card p-4 flex items-center gap-3">
+        <i data-lucide="${isSkip?'circle-slash':'check-circle-2'}" style="color:${isSkip?'var(--text-dim)':'var(--emerald-300)'};width:18px;height:18px;flex:none"></i>
+        <div class="flex-1 min-w-0"><div class="truncate" style="color:var(--text);font-size:14px;font-weight:600">${p.title}</div>
+        <div style="font-size:12px;color:${isSkip?'var(--text-dim)':'var(--emerald-300)'}">${isSkip?'übersprungen':(p.result || (p.mode==='code'?'✓ übernommen — Code: Tests grün':'✓ übernommen — Skill: eval grün'))}</div></div>
+        ${chip(p.mode==='code'?'Code':'Skill', p.mode==='code'?'amber':'violet',{sm:true})}
+      </div>`));
+    });
+    wrap.appendChild(dsec);
+  }
+
+  // Activity log
+  const log = el(`<section class="app-card"><div class="eyebrow" style="margin-bottom:10px">Aktivität</div><div class="stack" style="display:flex;flex-direction:column;gap:8px"></div></section>`);
+  const ll = log.querySelector('.stack');
+  H.activityLog.forEach(l => ll.appendChild(el(`<div class="flex items-center gap-3" style="font-size:13px">
+    <span class="mc-dot mc-dot-${l.tone==='emerald'?'live':l.tone==='violet'?'ready':'idle'}" style="flex:none"></span>
+    <span style="color:var(--text-soft)" class="num" >${H.fmtAge(l.at)}</span>
+    <span style="color:var(--text)">${l.text}</span></div>`)));
+  wrap.appendChild(log);
+  return wrap;
+}
+function proposalCard(p) {
+  const isCode = p.mode==='code';
+  const did = 'diff-'+p.id;
+  const card = el(`<article class="app-card" style="border-color:${isCode?cssTone('amber')+'4d':'var(--border)'};${isCode?'box-shadow:0 0 0 1px '+cssTone('amber')+'1f':''}">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 mb-2">
+          ${isCode ? chip('Code-Änderung','amber',{sm:true,dot:'warn'}) : chip('Skill','violet',{sm:true})}
+          <span class="mc-mono" style="color:var(--text-dim);font-size:11px">${p.target}</span>
+        </div>
+        <h3 style="font-weight:600;color:var(--text);font-size:16px;line-height:1.3">${p.title}</h3>
+      </div>
+    </div>
+    <p style="color:var(--text-soft);font-size:14px;margin-top:8px;line-height:1.5">${p.rationale_plain}</p>
+    ${isCode?`<div class="flex items-center gap-2 mt-2" style="color:var(--amber-300);font-size:12px"><i data-lucide="shield-alert" style="width:14px;height:14px"></i>Code-Änderung — wird erst nach grüner Test-Suite scharf geschaltet.</div>`:''}
+    <div class="mt-3">
+      <button class="flex items-center gap-1.5 mb-2 diff-toggle" data-target="${did}" style="color:var(--text-soft);font-size:12px;font-weight:600"><i data-lucide="chevron-down" class="dt-chev" style="width:14px;height:14px;transition:transform .2s"></i>Vorher / Nachher</button>
+      ${diffHtml(p.diff_before_after, did, true)}
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button class="mc-btn mc-btn-primary" style="flex:1;min-height:44px;font-size:14px" onclick="applyProp('${p.id}', this)"><i data-lucide="check" style="width:16px;height:16px"></i>Übernehmen</button>
+      <button class="mc-btn" style="flex:none;min-height:44px;font-size:14px;padding:0 18px" onclick="skipProp('${p.id}')">Überspringen</button>
+    </div>
+  </article>`);
+  return card;
+}
+
+/* ── Actions ── */
+window.applyProp = (id, btn) => { applied.add(id); if(btn){btn.innerHTML='<i data-lucide="loader" style="width:16px;height:16px"></i>Übernehmen…';} setTimeout(()=>render(), 360); };
+window.skipProp = (id) => { skipped.add(id); render(); };
+window.applyAll = () => { H.proposals.filter(p=>p.status==='proposed').forEach(p=>{ if(!skipped.has(p.id)) applied.add(p.id); }); render(); };
+window.fetchMore = (btn) => { btn.innerHTML='<i data-lucide="loader" style="width:16px;height:16px"></i>Suche…'; setTimeout(()=>{ btn.innerHTML='<i data-lucide="check" style="width:16px;height:16px"></i>Aktuell · keine neuen'; lucide.createIcons(); }, 1100); };
+
+/* ── More sheet ── */
+function fillMore(){
+  const ml = document.getElementById('moreList'); ml.innerHTML='';
+  H.moreNav.forEach(n => ml.appendChild(el(`<button class="soft-card pressable p-4 flex items-center gap-3 text-left">
+    <i data-lucide="${n.icon}" style="color:var(--text-soft);width:18px;height:18px"></i>
+    <span style="color:var(--text);font-weight:600;font-size:15px;flex:1">${n.label}</span>
+    <i data-lucide="chevron-right" style="color:var(--text-dim)"></i></button>`)));
+  lucide.createIcons();
+}
+function openSheet(){ document.getElementById('scrim').classList.add('open'); document.getElementById('sheet').classList.add('open'); }
+function closeSheet(){ document.getElementById('scrim').classList.remove('open'); document.getElementById('sheet').classList.remove('open'); }
+
+/* ── Tab bar + router ── */
+function buildTabs(){
+  const tb = document.getElementById('tabbar'); tb.innerHTML='';
+  const open = H.proposals.filter(p=>p.status==='proposed' && !applied.has(p.id) && !skipped.has(p.id)).length;
+  TABS.forEach(t => {
+    const badge = (t.id==='auto' && open) ? `<span class="tabbadge num">${open}</span>` : '';
+    const cell = el(`<button class="tabcell" aria-selected="${TAB===t.id}" data-tab="${t.id}">
+      <span class="tabglyph"><i data-lucide="${t.icon}" style="width:20px;height:20px"></i></span>${t.label}${badge}</button>`);
+    cell.onclick = () => { if(t.id==='more'){ openSheet(); return; } TAB=t.id; render(); };
+    tb.appendChild(cell);
+  });
+  lucide.createIcons();
+}
+function render(){
+  const view = document.getElementById('view');
+  view.innerHTML='';
+  let node;
+  if (TAB==='overview') node = renderOverview();
+  else if (TAB==='hermes') node = renderHermes();
+  else if (TAB==='openclaw') node = renderOpenclaw();
+  else if (TAB==='auto') node = renderAuto();
+  view.appendChild(node);
+  view.classList.remove('fade-up'); void view.offsetWidth; view.classList.add('fade-up');
+  buildTabs();
+  lucide.createIcons();
+  window.scrollTo({top:0});
+  // wire generic clicks
+  view.querySelectorAll('[data-goto]').forEach(b=> b.onclick=()=>{TAB=b.dataset.goto; render();});
+  view.querySelectorAll('.diff-toggle').forEach(b=> b.onclick=()=>{
+    const box=document.getElementById(b.dataset.target); const ch=b.querySelector('.dt-chev');
+    const open = box.style.maxHeight==='84px' || !box.style.maxHeight || box.style.maxHeight==='';
+    box.style.maxHeight = (box.style.maxHeight==='84px')? '320px':'84px';
+    ch.style.transform = box.style.maxHeight==='84px'?'rotate(0deg)':'rotate(180deg)';
+  });
+}
+
+/* ── Theme + tweaks ── */
+const root = document.documentElement;
+function setTheme(t){ root.dataset.theme=t; document.getElementById('themeBtn').innerHTML=`<i data-lucide="${t==='dark'?'moon':'sun'}"></i>`; document.querySelectorAll('#twTheme button').forEach(b=>b.setAttribute('aria-pressed', b.dataset.t===t)); lucide.createIcons(); }
+document.getElementById('themeBtn').onclick=()=> setTheme(root.dataset.theme==='dark'?'light':'dark');
+document.getElementById('twFab').onclick=()=> { const p=document.getElementById('twPanel'); p.hidden=!p.hidden; };
+document.getElementById('twAccent').onclick=(e)=>{ const b=e.target.closest('button'); if(!b)return; const c=b.dataset.c;
+  root.style.setProperty('--a-accent',c); root.style.setProperty('--a-accent-text', c); root.style.setProperty('--a-accent-wash', c+'26'); root.style.setProperty('--a-accent-border', c+'4d');
+  document.querySelectorAll('#twAccent button').forEach(x=>x.setAttribute('aria-pressed', x===b)); };
+document.getElementById('twDensity').onclick=(e)=>{ const b=e.target.closest('button'); if(!b)return; root.dataset.density=b.dataset.d; document.querySelectorAll('#twDensity button').forEach(x=>x.setAttribute('aria-pressed', x===b)); };
+document.getElementById('twTheme').onclick=(e)=>{ const b=e.target.closest('button'); if(!b)return; setTheme(b.dataset.t); };
+document.getElementById('scrim').onclick=closeSheet;
+
+fillMore();
+render();
+</script>
+</body>
+</html>
