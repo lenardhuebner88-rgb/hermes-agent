@@ -53,6 +53,22 @@ _VALID_MODES = {"skill", "code"}
 _VALID_STATUS = {"proposed", "applied", "skipped"}
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+# AR2 relevance ranking. Section criticality is a fixed, easily-tuned weight:
+# a missing Safety or trigger (When-to-Use) section costs an agent system far
+# more than a missing Output contract, so those get drafted first.
+_SECTION_CRITICALITY = {
+    "Safety / Sicherheit": 4,
+    "When to Use / Wann verwenden": 3,
+    "Procedure / Vorgehen": 2,
+    "Output / Ergebnis": 1,
+}
+_RANK_W_CRIT = 2.0
+_RANK_W_ROI = 1.0
+_RANK_W_SUBSTANCE = 0.5
+_RANK_W_USAGE = 1.0
+# use_count at/above which a skill reads as "frequently used" in the reason text
+_RANK_USAGE_FREQUENT = 50.0
+
 
 # ---------------------------------------------------------------------------
 # Paths (env-overridable so tests point at a tmp dir — mirrors autoresearch_view)
@@ -131,8 +147,11 @@ def list_proposals() -> list[dict[str, Any]]:
             continue
         if isinstance(data, dict):
             out.append(data)
-    # Stable two-pass sort: newest-first, then grouped open → applied → skipped.
+    # Stable multi-pass sort (least-significant first): newest-first, then by
+    # AR2 rank_score (highest impact first), then grouped open → applied →
+    # skipped. Pre-AR2 proposals lack rank_score → treated as 0, order unchanged.
     out.sort(key=lambda p: str(p.get("created_at") or ""), reverse=True)
+    out.sort(key=lambda p: float(p.get("rank_score") or 0.0), reverse=True)
     status_rank = {"proposed": 0, "applied": 1, "skipped": 2}
     out.sort(key=lambda p: status_rank.get(p.get("status"), 3))
     return out
@@ -144,7 +163,7 @@ def list_proposals() -> list[dict[str, Any]]:
 _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
     "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "result",
-    "created_at", "applied_at",
+    "created_at", "applied_at", "rank_score", "rank_reason",
 )
 
 
@@ -195,6 +214,18 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
     after = before if before.endswith("\n") else before + "\n"
     after = after + block
     pid = f"{_slug(skill)}-{_slug(header)}"
+    base_rationale = (
+        rationale if writer == "scaffold" else
+        f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
+        f"Autoresearch hat dafür einen fertigen MiniMax-Abschnitt erzeugt. "
+        f"Wird automatisch zurückgerollt, wenn die Skill-Prüfung dadurch nicht besser wird."
+    )
+    # AR2: lead with the "why this one first" so the card explains its own
+    # priority. (cand carries rank_reason when it came through rank_candidates.)
+    rank_reason = cand.get("rank_reason")
+    rationale_plain = (
+        f"Priorität: {rank_reason}. {base_rationale}" if rank_reason else base_rationale
+    )
     return {
         "id": pid,
         "schema": PROPOSAL_SCHEMA,
@@ -204,12 +235,7 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
         "section": header,
         "eval_label": label,
         "title": f"Abschnitt „{header}“ zu {skill} hinzufügen",
-        "rationale_plain": (
-            rationale if writer == "scaffold" else
-            f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
-            f"Autoresearch hat dafür einen fertigen MiniMax-Abschnitt erzeugt. "
-            f"Wird automatisch zurückgerollt, wenn die Skill-Prüfung dadurch nicht besser wird."
-        ),
+        "rationale_plain": rationale_plain,
         "before_text": before,
         "after_text": after,
         "new_text": block,
@@ -220,6 +246,8 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
         "created_at": _utc_now(),
         "applied_at": None,
         "result": None,
+        "rank_score": cand.get("rank_score"),
+        "rank_reason": rank_reason,
     }
 
 
@@ -231,37 +259,149 @@ def _make_diff(before: str, after: str, name: str) -> str:
     return "\n".join(diff)
 
 
-def generate_proposals(*, limit: int = 20) -> dict[str, Any]:
-    """Discover deterministic skill-improvement candidates and persist any that
-    don't already have an open proposal. Idempotent per (skill, section)."""
+# ---------------------------------------------------------------------------
+# AR2: relevance ranking — draft the highest-impact gaps first, capped, each
+# with a plain "why first". Deterministic. No telemetry system is built
+# (single operator): the only usage signal is the cheap, already-maintained
+# ``~/.hermes/skills/.usage.json`` sidecar, and ranking degrades gracefully to
+# "no usage signal" when it is absent.
+# ---------------------------------------------------------------------------
+def _load_skill_usage() -> dict[str, float]:
+    """Best-effort map of *skill leaf name* → ``use_count`` from the curator
+    usage sidecar. Returns ``{}`` on any problem — a generate run never fails
+    over a missing/broken sidecar, it just loses the usage factor. Read-only;
+    we never write telemetry here."""
+    try:
+        usage_file = _runner()._skills_root() / ".usage.json"
+        data = json.loads(usage_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, val in data.items():
+        if not isinstance(val, dict):
+            continue
+        try:
+            count = float(val.get("use_count") or 0)
+        except (TypeError, ValueError):
+            count = 0.0
+        leaf = str(key).rstrip("/").split("/")[-1]
+        if count > out.get(leaf, 0.0):
+            out[leaf] = count
+    return out
+
+
+def _candidate_content_len(cand: dict[str, Any]) -> int:
+    path = cand.get("path")
+    if not isinstance(path, Path):
+        return 0
+    try:
+        return len(path.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+
+
+def _rank_reason(label: str, n_missing: int, use_count: float) -> str:
+    """Short, plain-language 'why this one first' for the proposal card."""
+    clauses: list[str] = []
+    if label == "Safety / Sicherheit":
+        clauses.append("Safety-Lücke (für ein Agentensystem am kostspieligsten)")
+    elif label == "When to Use / Wann verwenden":
+        clauses.append("fehlender Aktivierungs-Trigger")
+    if int(n_missing or 1) <= 1:
+        clauses.append("sonst vollständig — nur dieser Abschnitt fehlt")
+    if use_count >= _RANK_USAGE_FREQUENT:
+        clauses.append(f"häufig genutzt ({int(use_count)}×)")
+    elif use_count > 0 and not clauses:
+        clauses.append(f"genutzt ({int(use_count)}×)")
+    if not clauses:
+        clauses.append("empfohlener Abschnitt fehlt")
+    return "; ".join(clauses[:2])
+
+
+def rank_candidates(
+    cands: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    usage: dict[str, float] | None = None,
+    exclude_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Rank gap-candidates by likely impact (criticality + completeness-ROI +
+    substance + optional usage), highest first, deterministically. Candidates
+    whose ``id`` is in ``exclude_ids`` (already proposed/applied/skipped) are
+    dropped; ``limit`` caps the result to the AR2 Top-N. Each returned dict is
+    a shallow copy annotated with ``rank_score`` and ``rank_reason``."""
+    usage = usage or {}
+    ranked: list[dict[str, Any]] = []
+    for cand in cands:
+        if cand.get("id") in exclude_ids:
+            continue
+        skill = cand.get("skill", "")
+        label = cand.get("label", "")
+        n_missing = int(cand.get("n_missing") or 1)
+        crit = _SECTION_CRITICALITY.get(label, 1)
+        roi = max(0, 5 - n_missing)
+        substance = min(_candidate_content_len(cand) / 1500.0, 3.0)
+        use_count = float(usage.get(skill, 0.0))
+        usage_w = min(use_count / 50.0, 3.0)
+        score = (
+            crit * _RANK_W_CRIT
+            + roi * _RANK_W_ROI
+            + substance * _RANK_W_SUBSTANCE
+            + usage_w * _RANK_W_USAGE
+        )
+        annotated = dict(cand)
+        annotated["rank_score"] = round(score, 4)
+        annotated["rank_reason"] = _rank_reason(label, n_missing, use_count)
+        ranked.append(annotated)
+    # Deterministic: descending score, then stable by path/skill/label.
+    ranked.sort(key=lambda c: (
+        -c["rank_score"], str(c.get("path", "")), c.get("skill", ""), c.get("label", ""),
+    ))
+    if limit is not None:
+        ranked = ranked[: max(1, int(limit))]
+    return ranked
+
+
+def generate_proposals(*, limit: int = 10) -> dict[str, Any]:
+    """Discover deterministic skill-improvement candidates, rank them by impact
+    (AR2), and draft only the capped Top-N that don't already have a decided
+    proposal. Idempotent per (skill, section); ranking the cap means the model
+    writer runs on the highest-value gaps, not the alphabetically-first ones."""
     runner = _runner()
     skills_root = runner._skills_root()
     roots = [skills_root] if skills_root.exists() else []
     cands = runner.discover_candidates(roots, attempted=set()) if roots else []
 
-    created: list[str] = []
-    skipped_existing = 0
+    # Annotate each candidate with its proposal id and collect the ones already
+    # decided so they're neither re-ranked nor re-drafted.
+    exclude_ids: set[str] = set()
     for cand in cands:
-        if len(created) >= max(1, int(limit)):
-            break
-        skill = cand["skill"]
         header = runner._SCAFFOLD[cand["label"]]
-        pid = f"{_slug(skill)}-{_slug(header)}"
-        existing = load_proposal(pid)
-        # Don't churn an already-decided or already-open proposal.
-        if existing and existing.get("status") in {"proposed", "applied", "skipped"}:
-            skipped_existing += 1
-            continue
+        cand["id"] = f"{_slug(cand['skill'])}-{_slug(header)}"
+        existing = load_proposal(cand["id"])
+        if existing and existing.get("status") in _VALID_STATUS:
+            exclude_ids.add(cand["id"])
+
+    usage = _load_skill_usage()
+    ranked = rank_candidates(
+        cands, limit=max(1, int(limit)), usage=usage, exclude_ids=exclude_ids
+    )
+
+    created: list[str] = []
+    for cand in ranked:
         proposal = _build_proposal_for_candidate(cand, runner)
         save_proposal(proposal)
-        created.append(pid)
+        created.append(cand["id"])
 
     return {
         "ok": True,
         "created": created,
         "created_count": len(created),
-        "skipped_existing": skipped_existing,
+        "skipped_existing": len(exclude_ids),
         "candidates_seen": len(cands),
+        "ranked_drafted": len(ranked),
     }
 
 

@@ -299,3 +299,89 @@ def test_route_apply_unknown_returns_ok_false(client, tmp_home):
     r = client.post("/autoresearch/apply", json={"id": "nope", "confirm": True})
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# AR2: relevance ranking (deterministic; cap; criticality; usage; "why first")
+# ---------------------------------------------------------------------------
+def _cand(skill, label, n_missing=1, cid=None):
+    return {
+        "skill": skill, "label": label, "n_missing": n_missing,
+        "id": cid if cid is not None else f"{skill}-{label}",
+    }
+
+
+def test_rank_candidates_criticality_safety_before_output():
+    """At otherwise-equal score, Safety outranks Output (and all get annotated)."""
+    ranked = proposals.rank_candidates([
+        _cand("s", "Output / Ergebnis"),
+        _cand("s", "Safety / Sicherheit"),
+    ])
+    assert [c["label"] for c in ranked][0] == "Safety / Sicherheit"
+    assert all("rank_score" in c and "rank_reason" in c for c in ranked)
+
+
+def test_rank_candidates_deterministic_regardless_of_input_order_and_cap():
+    cands = [_cand(f"skill{i}", "Procedure / Vorgehen", n_missing=2) for i in range(5)]
+    r1 = proposals.rank_candidates(cands, limit=3)
+    r2 = proposals.rank_candidates(list(reversed(cands)), limit=3)
+    assert len(r1) == 3
+    assert [c["skill"] for c in r1] == [c["skill"] for c in r2]
+
+
+def test_rank_candidates_excludes_decided():
+    ranked = proposals.rank_candidates(
+        [_cand("a", "Safety / Sicherheit", cid="a-safety"),
+         _cand("b", "Safety / Sicherheit", cid="b-safety")],
+        exclude_ids={"a-safety"},
+    )
+    assert [c["id"] for c in ranked] == ["b-safety"]
+
+
+def test_rank_candidates_usage_signal_promotes_frequent_skill():
+    cands = [_cand("rare", "Output / Ergebnis"), _cand("hot", "Output / Ergebnis")]
+    with_usage = proposals.rank_candidates(cands, usage={"hot": 300.0})
+    assert with_usage[0]["skill"] == "hot"
+    assert "genutzt" in with_usage[0]["rank_reason"]
+
+
+def test_rank_reason_explains_completeness():
+    ranked = proposals.rank_candidates([_cand("x", "Procedure / Vorgehen", n_missing=1)])
+    assert "nur dieser Abschnitt fehlt" in ranked[0]["rank_reason"]
+
+
+def test_generate_caps_run_and_only_drafts_top_n(tmp_home, monkeypatch):
+    skills = tmp_home / "skills"
+    for i in range(6):
+        _write_skill(skills, f"skill{i}", f"# Skill{i}\n\nthin\n")
+    calls = {"n": 0}
+
+    def counting_writer(*_a, **_k):
+        calls["n"] += 1
+        return {"ok": False, "reason": "test"}
+
+    monkeypatch.setattr(proposals, "draft_section", counting_writer)
+    res = proposals.generate_proposals(limit=3)
+
+    assert res["created_count"] <= 3
+    # The model writer runs only for the capped Top-N, not for every candidate.
+    assert calls["n"] == res["created_count"]
+    assert res["candidates_seen"] > res["created_count"]
+    # Each drafted card leads with its "why first" and persists the rank fields.
+    for pid in res["created"]:
+        p = proposals.load_proposal(pid)
+        assert p["rationale_plain"].startswith("Priorität:")
+        assert p.get("rank_reason")
+        assert p.get("rank_score") is not None
+
+
+def test_generate_payload_orders_proposed_by_rank_score(tmp_home, monkeypatch):
+    skills = tmp_home / "skills"
+    for i in range(4):
+        _write_skill(skills, f"sk{i}", f"# Sk{i}\n\nthin\n")
+    monkeypatch.setattr(proposals, "draft_section", lambda *_a, **_k: {"ok": False, "reason": "t"})
+    proposals.generate_proposals(limit=5)
+    payload = proposals.proposals_payload()
+    proposed = [c for c in payload["proposals"] if c["status"] == "proposed"]
+    scores = [c.get("rank_score") or 0.0 for c in proposed]
+    assert scores == sorted(scores, reverse=True)
