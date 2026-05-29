@@ -29,6 +29,7 @@ import {
   FileText,
   Globe,
   Heart,
+  LayoutDashboard,
   KeyRound,
   Menu,
   MessageSquare,
@@ -73,6 +74,7 @@ import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
+import ControlPage from "@/control/ControlPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -116,6 +118,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
+  "/control/*": ControlPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
@@ -136,6 +139,12 @@ function ChatRouteSink() {
 }
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/control",
+    labelKey: "control",
+    label: "Control",
+    icon: LayoutDashboard,
+  },
   {
     path: "/sessions",
     labelKey: "sessions",

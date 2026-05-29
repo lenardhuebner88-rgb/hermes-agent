@@ -1,0 +1,71 @@
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+
+[data-control] {
+  --hc-bg: #0d0d0f;
+  --hc-rail: #0f0f0f;
+  --hc-panel: #111111;
+  --hc-panel-2: #141414;
+  --hc-panel-active: #1a1a1a;
+  --hc-panel-card: #161b22;
+  --hc-border: #1e1e1e;
+  --hc-border-strong: #2a2a2a;
+  --hc-text: #f0f0f0;
+  --hc-text-soft: #9ca3af;
+  --hc-text-dim: #6b7280;
+  --hc-accent: #7c3aed;
+  --hc-accent-text: #c4b5fd;
+  --hc-accent-wash: rgba(124,58,237,.15);
+  --hc-accent-border: rgba(124,58,237,.30);
+  --hc-emerald: #22c55e;
+  --hc-cyan: #22d3ee;
+  --hc-amber: #f59e0b;
+  --hc-red: #ef4444;
+  --hc-zinc: #52525b;
+  --hc-font-sans: "Geist", "Geist Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --hc-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --hc-radius: .5rem;
+  min-height: calc(100dvh - 5rem);
+  color: var(--hc-text);
+  font-family: var(--hc-font-sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+[data-control] * { box-sizing: border-box; }
+[data-control] code,
+[data-control] pre,
+[data-control] .hc-mono { font-family: var(--hc-font-mono); }
+
+.hc-page {
+  min-height: calc(100dvh - 7rem);
+  margin: -0.5rem -0.75rem 0;
+  background:
+    radial-gradient(circle at top left, rgba(124,58,237,.08), transparent 28%),
+    radial-gradient(circle at top right, rgba(34,211,238,.035), transparent 24%),
+    linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
+}
+
+.hc-card {
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-radius);
+  background: color-mix(in srgb, var(--hc-panel-card) 94%, transparent);
+  box-shadow: 0 4px 24px rgba(0,0,0,.28);
+}
+
+.hc-soft { color: var(--hc-text-soft); }
+.hc-dim { color: var(--hc-text-dim); }
+.hc-eyebrow { color: var(--hc-text-dim); font-size: 10px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; }
+.hc-hit { min-height: 44px; }
+.hc-tab { min-height: 60px; }
+
+.hc-led { box-shadow: 0 0 6px currentColor; }
+.hc-led-live { color: var(--hc-emerald); animation: hc-pulse 2s ease-in-out infinite; }
+.hc-led-warn { color: var(--hc-amber); animation: hc-pulse 3s ease-in-out infinite; }
+.hc-led-error { color: var(--hc-red); animation: hc-pulse 1s ease-in-out infinite; }
+.hc-led-idle, .hc-led-offline { color: var(--hc-zinc); }
+.hc-led-ready { color: var(--hc-cyan); }
+
+@keyframes hc-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
+@media (prefers-reduced-motion: reduce) { .hc-led-live, .hc-led-warn, .hc-led-error { animation: none; } }
+
+@media (min-width: 1024px) { .hc-page { margin-left: -1.5rem; margin-right: -1.5rem; } }
