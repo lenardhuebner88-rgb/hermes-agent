@@ -41,7 +41,9 @@ echo "[deploy] payload: $PAYLOAD_OK"
 if [ "$SMOKE" = "1" ]; then
   mkdir -p "$HOME/.hermes/reports"
   shot="$HOME/.hermes/reports/control-smoke-$(date +%Y%m%d-%H%M%S).png"
-  tmp_shot="/tmp/$(basename "$shot")"
+  smoke_tmp_dir="$HOME/snap/chromium/common"
+  mkdir -p "$smoke_tmp_dir"
+  tmp_shot="$smoke_tmp_dir/$(basename "$shot")"
   rm -f "$tmp_shot"
   chromium --headless=new --no-sandbox --disable-gpu --disable-background-timer-throttling --disable-renderer-backgrounding --virtual-time-budget=5000 --window-size=390,844 --screenshot="$tmp_shot" http://127.0.0.1:9119/control/autoresearch >/tmp/hermes-control-smoke.log 2>&1 || { cat /tmp/hermes-control-smoke.log; exit 1; }
   for i in $(seq 1 20); do
