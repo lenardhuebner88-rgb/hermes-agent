@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const nullableNumber = z.number().nullable().catch(null);
 const nullableString = z.string().nullable().catch(null);
+const LastOutcomeSchema = z.enum(["applied", "reverted_no_improvement"]).nullable().catch(null);
 
 export const RunInspectSchema = z.object({
   cpu_percent: z.coerce.number().catch(0),
@@ -80,6 +81,7 @@ export const ProposalSchema = z.object({
   diff_before_after: z.string().catch(""),
   mode: z.enum(["skill", "code"]).catch("skill"),
   status: z.enum(["proposed", "testing", "applied", "skipped"]).catch("proposed"),
+  last_outcome: LastOutcomeSchema.optional(),
   result: z.string().nullable().optional(),
   created_at: z.union([z.number(), z.string()]).nullable().optional(),
   applied_at: z.union([z.number(), z.string()]).nullable().optional(),
@@ -96,6 +98,10 @@ export const ProposalsResponseSchema = z.object({
   schema: z.string().optional(),
   count: z.coerce.number().catch(0),
   open_count: z.coerce.number().catch(0),
+  reverted_count: z.coerce.number().catch(0),
+  testing_count: z.coerce.number().catch(0),
+  applied_count: z.coerce.number().catch(0),
+  skipped_count: z.coerce.number().catch(0),
   proposals: z.array(ProposalSchema).catch([]),
 });
 

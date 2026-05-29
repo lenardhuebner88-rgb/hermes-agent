@@ -117,6 +117,7 @@ export interface AutoresearchStatus {
 
 export type ProposalMode = "skill" | "code";
 export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped";
+export type ProposalLastOutcome = "applied" | "reverted_no_improvement" | null;
 
 export type GatePhase = "running" | "passed" | "failed" | "crashed";
 
@@ -145,6 +146,7 @@ export interface Proposal {
   diff_before_after: string;
   mode: ProposalMode;
   status: ProposalStatus;
+  last_outcome?: ProposalLastOutcome;
   result?: string | null;
   created_at?: number | string | null;
   applied_at?: number | string | null;
@@ -155,6 +157,10 @@ export interface ProposalsResponse {
   schema?: string;
   count: number;
   open_count: number;
+  reverted_count?: number;
+  testing_count?: number;
+  applied_count?: number;
+  skipped_count?: number;
   proposals: Proposal[];
 }
 

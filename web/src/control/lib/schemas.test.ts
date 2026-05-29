@@ -53,3 +53,19 @@ describe("ProposalsResponseSchema (A3 code gate)", () => {
     expect(parsed.proposals[0].gate?.phase).toBe("running"); // .catch fallback
   });
 });
+
+
+describe("ProposalsResponseSchema (Sprint A last_outcome counts)", () => {
+  it("preserves last_outcome and the backend status split", () => {
+    const raw = {
+      count: 5, open_count: 1, reverted_count: 4, testing_count: 0, applied_count: 0, skipped_count: 0,
+      proposals: [{
+        id: "reverted", target: "skill", section: null, rationale_plain: "r", diff_before_after: "",
+        mode: "skill", status: "proposed", last_outcome: "reverted_no_improvement",
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.reverted_count).toBe(4);
+    expect(parsed.proposals[0].last_outcome).toBe("reverted_no_improvement");
+  });
+});

@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, describeLoopStatus, rankAutoresearchProposals } from "../lib/autoresearch";
+import { clampLoopIterations, describeLoopStatus, rankAutoresearchProposals, splitAutoresearchProposals } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -17,11 +17,11 @@ type ProposalStore = ReturnType<typeof useProposals>;
 
 export function AutoresearchView({ density, store }: { density: Density; store: ProposalStore }) {
   const status = useAutoresearchStatus();
-  const open = useMemo(() => store.proposals.filter((p) => p.status === "proposed"), [store.proposals]);
-  const testing = useMemo(() => store.proposals.filter((p) => p.status === "testing"), [store.proposals]);
-  const active = useMemo(() => [...open, ...testing], [open, testing]);
-  const done = useMemo(() => store.proposals.filter((p) => p.status === "applied" || p.status === "skipped"), [store.proposals]);
-  const relevanceQueue = useMemo(() => rankAutoresearchProposals(active, 10), [active]);
+  const split = useMemo(() => splitAutoresearchProposals(store.proposals), [store.proposals]);
+  const open = split.actionable;
+  const reverted = split.reverted;
+  const done = split.done;
+  const relevanceQueue = useMemo(() => rankAutoresearchProposals(open, 10), [open]);
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
   const [maxIterations, setMaxIterations] = useState(2);
@@ -93,7 +93,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
             <div>
               <p className="hc-eyebrow">{de.autoresearch.nextStep}</p>
-              <p className="mt-1 max-w-2xl text-base leading-7 text-white">{open.length > 0 ? de.autoresearch.nextStepOpen(open.length) : de.autoresearch.nextStepEmpty}</p>
+              <p className="mt-1 max-w-2xl text-base leading-7 text-white">{open.length > 0 ? de.autoresearch.nextStepOpen(open.length) : reverted.length > 0 ? `${open.length} offen · ${reverted.length} zurückgerollt` : de.autoresearch.nextStepEmpty}</p>
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
           </div>
@@ -141,11 +141,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           <div>
             <p className="hc-eyebrow">Relevanz-Queue</p>
             <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
-            <p className="mt-1 text-sm hc-soft">Priorisiert nach Safety-Lücken, Quick Wins und Code-Gates. Die Aktion-Logik bleibt unverändert.</p>
+            <p className="mt-1 text-sm hc-soft">{open.length} offen · {reverted.length} zurückgerollt</p>
           </div>
           {store.loading ? <Spinner /> : null}
         </div>
-        {active.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
+        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => <ProposalCard key={item.proposal.id} proposal={item.proposal} priorityGroup={item.group} density={density} busy={store.busy === item.proposal.id} onApply={store.apply} onSkip={store.skip} />)}
         </div>
@@ -158,6 +158,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </details>
         ) : null}
       </section>
+
+      {reverted.length > 0 ? (
+        <section className="space-y-3 border-t border-white/10 pt-4">
+          <div>
+            <p className="hc-eyebrow">Zurückgerollt</p>
+            <h2 className="text-lg font-semibold text-white">{reverted.length} ohne Verbesserung</h2>
+          </div>
+          <div className="grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
+        </section>
+      ) : null}
 
       {done.length > 0 ? (
         <section className="space-y-3"><h2 className="text-lg font-semibold text-white">{de.autoresearch.done}</h2><div className="grid gap-3">{done.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></section>

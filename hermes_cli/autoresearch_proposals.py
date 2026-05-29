@@ -182,7 +182,7 @@ def list_proposals() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
-    "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "result",
+    "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "last_outcome", "result",
     "created_at", "applied_at", "rank_score", "rank_reason", "gate",
 )
 
@@ -191,17 +191,91 @@ def _to_card(proposal: dict[str, Any]) -> dict[str, Any]:
     return {k: proposal.get(k) for k in _LIST_FIELDS}
 
 
+def _is_actionable(p: dict[str, Any]) -> bool:
+    return p.get("status") == "proposed" and p.get("last_outcome") != "reverted_no_improvement"
+
+
+def _is_reverted_no_improvement(p: dict[str, Any]) -> bool:
+    return p.get("status") == "proposed" and p.get("last_outcome") == "reverted_no_improvement"
+
+
 def proposals_payload() -> dict[str, Any]:
     items = list_proposals()
     cards = [_to_card(p) for p in items]
-    open_count = sum(1 for p in items if p.get("status") == "proposed")
+    open_count = sum(1 for p in items if _is_actionable(p))
     return {
         "schema": "autoresearch-proposals-v1",
         "count": len(cards),
         "open_count": open_count,
+        "reverted_count": sum(1 for p in items if _is_reverted_no_improvement(p)),
+        "testing_count": sum(1 for p in items if p.get("status") == "testing"),
+        "applied_count": sum(1 for p in items if p.get("status") == "applied"),
+        "skipped_count": sum(1 for p in items if p.get("status") == "skipped"),
         "proposals": cards,
         "proposals_dir": str(_proposals_dir()),
     }
+
+
+# ---------------------------------------------------------------------------
+# Sprint A migration: structured last_outcome backfill
+# ---------------------------------------------------------------------------
+def _infer_last_outcome(proposal: dict[str, Any]) -> str | None:
+    if proposal.get("status") == "applied":
+        return "applied"
+    result = str(proposal.get("result") or "").lower()
+    if proposal.get("status") == "proposed" and "zurückgerollt" in result and "keine verbesserung" in result:
+        return "reverted_no_improvement"
+    return None
+
+
+def _copy_proposals_backup() -> Path | None:
+    pdir = _proposals_dir()
+    if not pdir.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest = pdir.with_name(f"{pdir.name}.bak-{stamp}")
+    suffix = 1
+    while dest.exists():
+        dest = pdir.with_name(f"{pdir.name}.bak-{stamp}-{suffix}")
+        suffix += 1
+    shutil.copytree(pdir, dest)
+    return dest
+
+
+def backfill_last_outcome(*, dry_run: bool = True) -> dict[str, Any]:
+    pdir = _proposals_dir()
+    changes: list[dict[str, Any]] = []
+    if not pdir.exists():
+        return {"ok": True, "dry_run": dry_run, "would_update": 0, "updated": 0, "backup_dir": None, "changes": []}
+    for path in sorted(pdir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        inferred = _infer_last_outcome(data)
+        if inferred is None or data.get("last_outcome") == inferred:
+            continue
+        changes.append({"path": str(path), "id": data.get("id"), "from": data.get("last_outcome"), "to": inferred})
+
+    if dry_run or not changes:
+        return {"ok": True, "dry_run": dry_run, "would_update": len(changes), "updated": 0, "backup_dir": None, "changes": changes}
+
+    backup_dir = _copy_proposals_backup()
+    updated = 0
+    for change in changes:
+        path = Path(change["path"])
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        data["last_outcome"] = change["to"]
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        updated += 1
+    return {"ok": True, "dry_run": False, "would_update": len(changes), "updated": updated, "backup_dir": str(backup_dir) if backup_dir else None, "changes": changes}
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +337,7 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
         "writer_rationale": rationale,
         "diff_before_after": _make_diff(before, after, f"{skill}/SKILL.md"),
         "status": "proposed",
+        "last_outcome": None,
         "created_at": _utc_now(),
         "applied_at": None,
         "result": None,
@@ -499,6 +574,7 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
 
     if keep:
         proposal["status"] = "applied"
+        proposal["last_outcome"] = "applied"
         proposal["result"] = f"✓ übernommen — Skill: eval grün ({eval_result})"
         proposal["applied_at"] = _utc_now()
         proposal["backup_dir"] = str(backup_dir)
@@ -511,6 +587,7 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
     proposal["result"] = f"↩ zurückgerollt — keine Verbesserung: {eval_result}"
     proposal["applied_at"] = None
     proposal["status"] = "proposed"
+    proposal["last_outcome"] = "reverted_no_improvement"
     save_proposal(proposal)
     return {"ok": False, "status": "proposed", "id": pid,
             "detail": proposal["result"], "reverted": True, "eval_result": eval_result}
@@ -718,6 +795,7 @@ def finalize_code_gate(pid: str, *, run_suite=None) -> dict[str, Any]:
     if returncode == 0:
         gate["phase"] = "passed"
         proposal["status"] = "applied"
+        proposal["last_outcome"] = "applied"
         proposal["applied_at"] = _utc_now()
         proposal["result"] = f"✓ übernommen — Test-Suite grün ({summary})"
         proposal["gate"] = gate
@@ -730,6 +808,7 @@ def finalize_code_gate(pid: str, *, run_suite=None) -> dict[str, Any]:
         _restore_code_file(target_path, backup_dir)
     gate["phase"] = "failed"
     proposal["status"] = "proposed"
+    proposal["last_outcome"] = "reverted_no_improvement"
     proposal["applied_at"] = None
     proposal["result"] = f"↩ zurückgerollt — Test-Suite rot ({summary})"
     proposal["gate"] = gate
@@ -811,6 +890,7 @@ def build_code_proposal(
         "writer_rationale": None,
         "diff_before_after": _make_diff(before, after_text, rel_name),
         "status": "proposed",
+        "last_outcome": None,
         "created_at": _utc_now(),
         "applied_at": None,
         "result": None,

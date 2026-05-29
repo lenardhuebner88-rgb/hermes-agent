@@ -6,6 +6,7 @@
  * Wichtig: `now` wird injiziert (Default = Date.now()/1000), damit Tests
  * deterministisch sind und kein verstecktes Date.now() in der Logik steckt.
  */
+import { isActionable } from './autoresearch';
 import type {
   Worker, AgentLive, Proposal, WorkerHealth, ToneName,
 } from './types';
@@ -126,7 +127,7 @@ export function buildOverview(
     ocHealthy: agents.filter((a) =>
       ['active', 'monitoring', 'ready'].includes(a.status) && !a.stuckSignal).length,
     ocActive: agents.filter((a) => a.status === 'active').length,
-    openProposals: proposals.filter((p) => p.status === 'proposed').length,
+    openProposals: proposals.filter(isActionable).length,
     warnings,
     allHealthy: warnings.length === 0,
   };

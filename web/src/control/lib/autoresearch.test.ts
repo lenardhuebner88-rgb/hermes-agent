@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, describeLoopStatus, getProposalPriorityGroup, rankAutoresearchProposals } from "./autoresearch";
+import { clampLoopIterations, describeLoopStatus, getProposalPriorityGroup, isActionable, rankAutoresearchProposals, splitAutoresearchProposals } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -66,5 +66,33 @@ describe("autoresearch proposal relevance queue", () => {
     expect(ranked.shortlist.map((item) => item.proposal.id)).toEqual(["safety", "quick", "code"]);
     expect(ranked.backlog.map((item) => item.proposal.id)).toEqual(["generic"]);
     expect(ranked.summary).toEqual({ total: 4, shown: 3, remaining: 1 });
+  });
+});
+
+
+describe("autoresearch proposal actionability", () => {
+  it("treats reverted no-improvement proposals as non-actionable while retryable crashes stay actionable", () => {
+    expect(isActionable(proposal({ id: "fresh", target: "s" }))).toBe(true);
+    expect(isActionable(proposal({ id: "reverted", target: "s", last_outcome: "reverted_no_improvement" }))).toBe(false);
+    expect(isActionable(proposal({ id: "crash", target: "s", last_outcome: null }))).toBe(true);
+  });
+
+  it("excludes reverted proposals from the relevance queue and buckets them separately", () => {
+    const items = [
+      proposal({ id: "fresh", target: "a", section: "Output" }),
+      proposal({ id: "reverted", target: "b", section: "Safety", last_outcome: "reverted_no_improvement" }),
+      proposal({ id: "testing", target: "c", status: "testing" }),
+      proposal({ id: "done", target: "d", status: "applied", last_outcome: "applied" }),
+    ];
+
+    const split = splitAutoresearchProposals(items);
+    expect(split.actionable.map((p) => p.id)).toEqual(["fresh"]);
+    expect(split.reverted.map((p) => p.id)).toEqual(["reverted"]);
+    expect(split.testing.map((p) => p.id)).toEqual(["testing"]);
+    expect(split.done.map((p) => p.id)).toEqual(["done"]);
+
+    const ranked = rankAutoresearchProposals(items, 10);
+    expect(ranked.shortlist.map((item) => item.proposal.id)).toEqual(["fresh"]);
+    expect(ranked.summary.total).toBe(1);
   });
 });

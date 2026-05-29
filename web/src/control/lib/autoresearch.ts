@@ -43,6 +43,24 @@ export function describeLoopStatus(status: AutoresearchStatus | null) {
   };
 }
 
+
+export function isActionable(proposal: Proposal): boolean {
+  return proposal.status === "proposed" && proposal.last_outcome !== "reverted_no_improvement";
+}
+
+export function isRevertedNoImprovement(proposal: Proposal): boolean {
+  return proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
+}
+
+export function splitAutoresearchProposals(proposals: Proposal[]) {
+  return {
+    actionable: proposals.filter(isActionable),
+    reverted: proposals.filter(isRevertedNoImprovement),
+    testing: proposals.filter((p) => p.status === "testing"),
+    done: proposals.filter((p) => p.status === "applied" || p.status === "skipped"),
+  };
+}
+
 const SAFETY_TERMS = ["safety", "security", "secret", "token", "credential", "warn", "risk"];
 const QUICK_WIN_SECTIONS = new Set(["output", "procedure", "when to use", "examples", "safety"]);
 
@@ -81,6 +99,7 @@ function proposalCreatedAt(proposal: Proposal): number {
 export function rankAutoresearchProposals(proposals: Proposal[], limit = 10): RankedProposalQueue {
   const boundedLimit = Math.max(1, Math.round(limit));
   const ranked = proposals
+    .filter(isActionable)
     .map((proposal) => ({ proposal, group: getProposalPriorityGroup(proposal) }))
     .sort((a, b) => {
       if (a.group.score !== b.group.score) return a.group.score - b.group.score;

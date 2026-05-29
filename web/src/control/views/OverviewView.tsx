@@ -7,12 +7,13 @@ import { de } from "../i18n/de";
 import type { AgentLive, Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 
-export function OverviewView({ proposals, agents }: { proposals: Proposal[]; agents: AgentLive[] }) {
+export function OverviewView({ proposals, agents, proposalsLoading, proposalsError }: { proposals: Proposal[]; agents: AgentLive[]; proposalsLoading?: boolean; proposalsError?: string | null }) {
   const navigate = useNavigate();
   const workers = useHermesWorkers();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], agents, proposals, now);
   const title = overview.allHealthy ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length);
+  const proposalValue = proposalsError ? "Fehler" : proposalsLoading && proposals.length === 0 ? "unbekannt" : String(overview.openProposals);
 
   return (
     <div className="space-y-5">
@@ -25,7 +26,7 @@ export function OverviewView({ proposals, agents }: { proposals: Proposal[]; age
       <section className="grid gap-3 md:grid-cols-4">
         <Tile icon={<Bot />} label="Hermes laufen" value={`${overview.hermesRunning}/${overview.hermesTotal}`} onClick={() => navigate("/control/hermes")} />
         <Tile icon={<Shield />} label="OpenClaw aktiv" value={`${overview.ocActive}/${overview.ocTotal}`} onClick={() => navigate("/control/openclaw")} />
-        <Tile icon={<FlaskConical />} label={de.overview.proposals} value={String(overview.openProposals)} onClick={() => navigate("/control/autoresearch")} />
+        <Tile icon={<FlaskConical />} label={de.overview.proposals} value={proposalValue} onClick={() => navigate("/control/autoresearch")} />
         <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(overview.warnings.length)} onClick={() => navigate("/control/hermes")} />
       </section>
       <section className="hc-card p-4">

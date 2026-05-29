@@ -72,8 +72,12 @@ describe('buildOverview', () => {
     { id: 'p2', target: 's', section: '', rationale_plain: '', diff_before_after: "", mode: 'code', status: 'applied' },
   ];
 
-  it('zählt offene Vorschläge, aktive Agenten und sammelt Warnungen', () => {
-    const o = buildOverview([mkWorker(), mkWorker({ run_status: 'blocked' })], agents, proposals, NOW);
+  it('zählt nur actionable Vorschläge, aktive Agenten und sammelt Warnungen', () => {
+    const mixedProposals = [
+      ...proposals,
+      { id: 'p3', target: 's', section: '', rationale_plain: '', diff_before_after: "", mode: 'skill', status: 'proposed', last_outcome: 'reverted_no_improvement' },
+    ] satisfies Proposal[];
+    const o = buildOverview([mkWorker(), mkWorker({ run_status: 'blocked' })], agents, mixedProposals, NOW);
     expect(o.openProposals).toBe(1);
     expect(o.ocActive).toBe(2);
     expect(o.ocHealthy).toBe(1);          // james ist stuck → nicht gesund

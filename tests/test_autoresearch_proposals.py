@@ -90,6 +90,132 @@ def test_payload_drops_bulky_fields_and_counts_open(tmp_home):
     assert "before_text" not in card  # bulky field stays server-side
     assert "after_text" not in card
 
+def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None):
+    proposals.save_proposal({
+        "id": pid,
+        "schema": proposals.PROPOSAL_SCHEMA,
+        "mode": "skill",
+        "target": "skill",
+        "target_path": "/tmp/skill/SKILL.md",
+        "section": "Output",
+        "eval_label": "Output / Ergebnis",
+        "title": pid,
+        "rationale_plain": "test",
+        "before_text": "",
+        "after_text": "",
+        "new_text": "",
+        "diff_before_after": "",
+        "status": status,
+        "last_outcome": last_outcome,
+        "created_at": "2026-05-29T00:00:00Z",
+        "applied_at": None,
+        "result": result,
+    })
+
+
+def test_payload_counts_only_actionable_open_and_reports_status_split(tmp_home):
+    for i in range(3):
+        _store_minimal_proposal(f"fresh-{i}")
+    for i in range(4):
+        _store_minimal_proposal(f"reverted-{i}", last_outcome="reverted_no_improvement")
+    _store_minimal_proposal("testing", status="testing")
+    _store_minimal_proposal("applied", status="applied", last_outcome="applied")
+    _store_minimal_proposal("skipped", status="skipped")
+
+    payload = proposals.proposals_payload()
+
+    assert payload["open_count"] == 3
+    assert payload["reverted_count"] == 4
+    assert payload["testing_count"] == 1
+    assert payload["applied_count"] == 1
+    assert payload["skipped_count"] == 1
+    reverted_cards = [p for p in payload["proposals"] if p["id"].startswith("reverted-")]
+    assert all(p["last_outcome"] == "reverted_no_improvement" for p in reverted_cards)
+
+
+def test_backfill_last_outcome_supports_dry_run_backup_and_idempotency(tmp_home):
+    _store_minimal_proposal("fresh", result="noch offen")
+    _store_minimal_proposal("reverted", result="↩ zurückgerollt — keine Verbesserung: rot")
+    _store_minimal_proposal("applied", status="applied", result="✓ übernommen")
+
+    dry = proposals.backfill_last_outcome(dry_run=True)
+    assert dry["would_update"] == 2
+    assert proposals.load_proposal("reverted").get("last_outcome") is None
+
+    live = proposals.backfill_last_outcome(dry_run=False)
+    assert live["updated"] == 2
+    assert live["backup_dir"]
+    assert Path(live["backup_dir"]).exists()
+    assert proposals.load_proposal("fresh").get("last_outcome") is None
+    assert proposals.load_proposal("reverted")["last_outcome"] == "reverted_no_improvement"
+    assert proposals.load_proposal("applied")["last_outcome"] == "applied"
+
+    again = proposals.backfill_last_outcome(dry_run=False)
+    assert again["updated"] == 0
+
+def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None):
+    proposals.save_proposal({
+        "id": pid,
+        "schema": proposals.PROPOSAL_SCHEMA,
+        "mode": "skill",
+        "target": "skill",
+        "target_path": "/tmp/skill/SKILL.md",
+        "section": "Output",
+        "eval_label": "Output / Ergebnis",
+        "title": pid,
+        "rationale_plain": "test",
+        "before_text": "",
+        "after_text": "",
+        "new_text": "",
+        "diff_before_after": "",
+        "status": status,
+        "last_outcome": last_outcome,
+        "created_at": "2026-05-29T00:00:00Z",
+        "applied_at": None,
+        "result": result,
+    })
+
+
+def test_payload_counts_only_actionable_open_and_reports_status_split(tmp_home):
+    for i in range(3):
+        _store_minimal_proposal(f"fresh-{i}")
+    for i in range(4):
+        _store_minimal_proposal(f"reverted-{i}", last_outcome="reverted_no_improvement")
+    _store_minimal_proposal("testing", status="testing")
+    _store_minimal_proposal("applied", status="applied", last_outcome="applied")
+    _store_minimal_proposal("skipped", status="skipped")
+
+    payload = proposals.proposals_payload()
+
+    assert payload["open_count"] == 3
+    assert payload["reverted_count"] == 4
+    assert payload["testing_count"] == 1
+    assert payload["applied_count"] == 1
+    assert payload["skipped_count"] == 1
+    reverted_cards = [p for p in payload["proposals"] if p["id"].startswith("reverted-")]
+    assert all(p["last_outcome"] == "reverted_no_improvement" for p in reverted_cards)
+
+
+def test_backfill_last_outcome_supports_dry_run_backup_and_idempotency(tmp_home):
+    _store_minimal_proposal("fresh", result="noch offen")
+    _store_minimal_proposal("reverted", result="\u21a9 zur\u00fcckgerollt \u2014 keine Verbesserung: rot")
+    _store_minimal_proposal("applied", status="applied", result="\u2713 \u00fcbernommen")
+
+    dry = proposals.backfill_last_outcome(dry_run=True)
+    assert dry["would_update"] == 2
+    assert proposals.load_proposal("reverted").get("last_outcome") is None
+
+    live = proposals.backfill_last_outcome(dry_run=False)
+    assert live["updated"] == 2
+    assert live["backup_dir"]
+    assert Path(live["backup_dir"]).exists()
+    assert proposals.load_proposal("fresh").get("last_outcome") is None
+    assert proposals.load_proposal("reverted")["last_outcome"] == "reverted_no_improvement"
+    assert proposals.load_proposal("applied")["last_outcome"] == "applied"
+
+    again = proposals.backfill_last_outcome(dry_run=False)
+    assert again["updated"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Apply: keep, revert, confirm-gate, idempotency

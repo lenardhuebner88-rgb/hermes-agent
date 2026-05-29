@@ -27,6 +27,7 @@ export function ProposalCard({ proposal, density, busy, priorityGroup, onApply, 
   const isCode = proposal.mode === "code";
   const isTesting = proposal.status === "testing";
   const isDone = proposal.status === "applied" || proposal.status === "skipped";
+  const isReverted = proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
   const isActionable = proposal.status === "proposed";
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3")}>
@@ -36,6 +37,7 @@ export function ProposalCard({ proposal, density, busy, priorityGroup, onApply, 
             <ModeBadge mode={proposal.mode} />
             {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}
             {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"><Spinner />{de.autoresearch.testing}</span> : null}
+            {isReverted ? <span className="rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2 py-0.5 text-xs text-zinc-200">Zurückgerollt</span> : null}
             {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
           <h3 className="text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
@@ -62,10 +64,10 @@ export function ProposalCard({ proposal, density, busy, priorityGroup, onApply, 
       ) : isActionable ? (
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
           <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
-            {de.autoresearch.skip}
+            {isReverted ? "Archivieren" : de.autoresearch.skip}
           </Button>
           <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
-            {isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
+            {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
           </Button>
         </div>
       ) : null}

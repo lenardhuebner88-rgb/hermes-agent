@@ -8,6 +8,7 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RunInspect, WorkersResponse } from "../lib/types";
 
 type LoadState<T> = {
@@ -76,7 +77,7 @@ export function useProposals() {
   );
 
   const proposals = useMemo(() => state.data?.proposals ?? [], [state.data]);
-  const openSkillProposals = useMemo(() => proposals.filter((p) => p.status === "proposed" && p.mode === "skill"), [proposals]);
+  const openSkillProposals = useMemo(() => proposals.filter((p) => isActionable(p) && p.mode === "skill"), [proposals]);
 
   const log = useCallback((text: string, tone: "emerald" | "amber" | "violet" | "red" = "violet") => {
     setActivity((items) => [{ at: Math.floor(Date.now() / 1000), text, tone }, ...items].slice(0, 8));
