@@ -7,6 +7,7 @@ const baseResult: KanbanResult = {
   run_id: "408",
   task_id: "t_408",
   task_title: "Codex receipt sichtbar machen",
+  task_status: "done",
   task_assignee: "coder",
   profile: "coder",
   status: "done",
