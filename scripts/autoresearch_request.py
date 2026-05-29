@@ -140,7 +140,12 @@ def build_request(
         "allowed_paths": allowed,
         "forbidden_paths": forbidden_paths(hermes_home),
         "model_preference": "MiniMax-M2.7-highspeed",
-        "model_route_status": "unverified",
+        # MiniMax-M2.7 + MiniMax-M2.7-highspeed are configured in config.yaml
+        # (verified 2026-05-29). The route is therefore "configured" rather than
+        # "unverified"; the runner self-test that confirms it is harmless/live
+        # has not run yet, so it is recorded separately as "pending".
+        "model_route_status": "configured",
+        "route_self_test": "pending",
         "max_iterations": int(max_iterations),
         "require_backup": True,
         "require_eval": True,

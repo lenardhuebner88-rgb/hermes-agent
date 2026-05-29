@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,29 @@ def test_valid_request_writes_json(tmp_path):
 def test_default_hermes_home_uses_profile_aware_constant():
     module = load_module()
     assert module.DEFAULT_HERMES_HOME == get_hermes_home()
+
+
+def test_model_route_status_defaults_to_configured_with_pending_self_test():
+    module = load_module()
+    data = module.build_request(area="github", focus="output_contract")
+    # MiniMax-M2.7 is configured in config.yaml, so the route is "configured",
+    # not "unverified"; the runner self-test is separately tracked as pending.
+    assert data["model_route_status"] == "configured"
+    assert data["route_self_test"] == "pending"
+    assert data["model_preference"] == "MiniMax-M2.7-highspeed"
+
+
+def test_created_request_json_records_configured_route(tmp_path):
+    module = load_module()
+    path = module.create_request(
+        mode="skills",
+        area="github",
+        focus="output_contract",
+        requests_dir=tmp_path,
+    )
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["model_route_status"] == "configured"
+    assert written["route_self_test"] == "pending"
 
 
 def test_skills_area_includes_profile_and_repo_skill_roots(tmp_path):

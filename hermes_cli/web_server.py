@@ -4875,6 +4875,13 @@ _mount_plugin_api_routes()
 from hermes_cli.dashboard_auth.routes import router as _dashboard_auth_router  # noqa: E402
 app.include_router(_dashboard_auth_router)
 
+# Read-only /autoresearch view (Phase 4): live loop status + audit history.
+# GET status/audit are open (read-only, safe over the tailnet); POST
+# trigger/stop exist but are token-gated (403 without HERMES_AUTORESEARCH_TOKEN).
+# Registered before the SPA catch-all so these explicit paths take precedence.
+from hermes_cli.autoresearch_view import register_autoresearch_routes  # noqa: E402
+register_autoresearch_routes(app)
+
 mount_spa(app)
 
 
