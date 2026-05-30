@@ -5,9 +5,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  workerHealth, buildOverview, buildOpenClawAlerts, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
+  workerHealth, buildOverview, buildOpenClawAlerts, reconcileOpenClawFleet, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
 } from './derive';
-import type { Worker, AgentLive, Proposal } from './types';
+import type { OpenClawFleetState } from './derive';
+import type { Worker, AgentLive, AgentsResponse, Proposal } from './types';
 
 const NOW = 1_780_041_720;
 
@@ -216,5 +217,53 @@ describe('buildOpenClawAlerts', () => {
     expect(result.warning).toHaveLength(1);
     expect(result.warningCount).toBe(1);
     expect(result.warning[0].id).toBe('offline-clean');
+  });
+});
+
+describe('reconcileOpenClawFleet (stale statt leer)', () => {
+  const ag = (id: string): AgentLive => ({ id } as unknown as AgentLive);
+  const resp = (over: Partial<AgentsResponse>): AgentsResponse =>
+    ({ agents: [], updatedAt: null, ...over });
+
+  it('frischer nicht-leerer Poll → übernehmen, kein Stale', () => {
+    const out = reconcileOpenClawFleet(null, resp({ agents: [ag('a')], updatedAt: 100 }));
+    expect(out.agents.map((a) => a.id)).toEqual(['a']);
+    expect(out.updatedAt).toBe(100);
+    expect(out.staleError).toBeNull();
+  });
+
+  it('leer + Fehler + Vorstand → Vorstand halten, staleError gesetzt', () => {
+    const prev: OpenClawFleetState = { agents: [ag('a'), ag('b')], updatedAt: 100, staleError: null };
+    const out = reconcileOpenClawFleet(prev, resp({ agents: [], error: 'Mission-Control-Timeout (>6s)' }));
+    expect(out.agents.map((a) => a.id)).toEqual(['a', 'b']); // nicht geblankt
+    expect(out.updatedAt).toBe(100);                          // alter Zeitstempel bleibt
+    expect(out.staleError).toBe('Mission-Control-Timeout (>6s)');
+  });
+
+  it('leer + Fehler ohne Vorstand → leer, Fehler durchreichen', () => {
+    const out = reconcileOpenClawFleet(null, resp({ agents: [], error: 'connection refused' }));
+    expect(out.agents).toHaveLength(0);
+    expect(out.staleError).toBe('connection refused');
+  });
+
+  it('leer OHNE Fehler → leer übernehmen (MC meldet ehrlich null)', () => {
+    const prev: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: null };
+    const out = reconcileOpenClawFleet(prev, resp({ agents: [], updatedAt: 200 }));
+    expect(out.agents).toHaveLength(0);
+    expect(out.updatedAt).toBe(200);
+    expect(out.staleError).toBeNull();
+  });
+
+  it('Recovery: nach Stale kommt wieder frischer Poll → Stale gelöscht', () => {
+    const stale: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: 'timeout' };
+    const out = reconcileOpenClawFleet(stale, resp({ agents: [ag('a'), ag('c')], updatedAt: 300 }));
+    expect(out.agents.map((a) => a.id)).toEqual(['a', 'c']);
+    expect(out.updatedAt).toBe(300);
+    expect(out.staleError).toBeNull();
+  });
+
+  it('null-Response → vorherigen Stand unverändert lassen', () => {
+    const prev: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: null };
+    expect(reconcileOpenClawFleet(prev, null)).toBe(prev);
   });
 });

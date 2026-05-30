@@ -29,6 +29,12 @@ _MISSION_CONTROL_SEND_URL = "http://127.0.0.1:3000/api/discord/send"
 _READ_HEADERS = {"x-actor-kind": "service", "x-request-class": "read"}
 _WRITE_HEADERS = {"x-actor-kind": "service", "x-request-class": "write"}
 _TIMEOUT_SECONDS = 2.5
+# MC's live-agent payload carries the full recentDone history and routinely takes
+# ~2.8s to assemble — above the 2.5s write/ping budget. A read timeout that tight
+# made every other 5s poll trip, blanking the OpenClaw tab with an EMPTY error
+# string (httpx timeout → str(exc) == "") so nothing surfaced. Give the read its
+# own, roomier budget; the stale-retain guard on the frontend covers the rest.
+_READ_TIMEOUT_SECONDS = 6.0
 
 _PRIORITY_MAP = {"high": "high", "medium": "med", "med": "med", "low": "low"}
 
@@ -157,7 +163,7 @@ async def read_openclaw_agents() -> dict[str, Any]:
     normalised into the Control SPA contract (epoch seconds, ``N/h`` strings).
     Uses async httpx.AsyncClient to avoid blocking the FastAPI event-loop (B2)."""
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=_READ_TIMEOUT_SECONDS) as client:
             response = await client.get(
                 _MISSION_CONTROL_AGENTS_URL,
                 headers=_READ_HEADERS,
@@ -165,7 +171,11 @@ async def read_openclaw_agents() -> dict[str, Any]:
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
-        return _empty_error_response(str(exc))
+        # httpx timeout exceptions stringify to "" — never return a blank error,
+        # or the UI can't tell "MC slow" from "MC reports zero agents".
+        return _empty_error_response(
+            str(exc) or f"Mission-Control-Timeout (>{_READ_TIMEOUT_SECONDS:g}s)"
+        )
 
     if not isinstance(data, dict):
         return _empty_error_response("Mission Control returned a non-object response")

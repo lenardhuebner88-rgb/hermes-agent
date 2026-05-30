@@ -8,7 +8,7 @@
  */
 import { isActionable } from './autoresearch';
 import type {
-  Worker, AgentLive, Proposal, WorkerHealth, ToneName,
+  Worker, AgentLive, AgentsResponse, Proposal, WorkerHealth, ToneName,
 } from './types';
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -88,6 +88,42 @@ export function buildOpenClawAlerts(agents: AgentLive[]): {
   const warning = agents.filter((a) => a.status === 'offline' && a.stuckSignal !== true);
   return { critical, warning, criticalCount: critical.length, warningCount: warning.length };
 }
+/* ── OpenClaw „stale statt leer" ───────────────────────────────────────── */
+export interface OpenClawFleetState {
+  agents: AgentLive[];
+  updatedAt: number | null;
+  /** Non-null = wir zeigen ABSICHTLICH den letzten guten Stand (veraltet), weil
+   *  der jüngste Poll leer-mit-Fehler zurückkam. Hält den Fehlertext fürs Badge. */
+  staleError: string | null;
+}
+
+/**
+ * „Stale statt leer": eine transiente MC-Verzögerung liefert `agents:[]` plus
+ * einen Fehlertext (Proxy erreicht MC nicht rechtzeitig). Den Flaggschiff-Tab bei
+ * jedem solchen Aussetzer zu blanken ist der Hauptgrund, warum er „kaputt" wirkt.
+ * Also: letzten nicht-leeren Stand halten und als veraltet markieren, statt
+ * „0 Agenten" aufblitzen zu lassen.
+ *  - frischer nicht-leerer Poll  → übernehmen, Stale-Flag löschen
+ *  - leer + Fehler + Vorstand    → Vorstand halten, staleError setzen
+ *  - leer + Fehler, kein Vorstand → leer, Fehler zeigen (wirklich noch nichts da)
+ *  - leer ohne Fehler            → leer übernehmen (MC meldet ehrlich null Agenten)
+ */
+export function reconcileOpenClawFleet(
+  prev: OpenClawFleetState | null,
+  resp: AgentsResponse | null,
+): OpenClawFleetState {
+  const base = prev ?? { agents: [], updatedAt: null, staleError: null };
+  if (!resp) return base;
+  const err = resp.error ?? null;
+  if (resp.agents.length > 0) {
+    return { agents: resp.agents, updatedAt: resp.updatedAt, staleError: null };
+  }
+  if (err && prev && prev.agents.length > 0) {
+    return { agents: prev.agents, updatedAt: prev.updatedAt, staleError: err };
+  }
+  return { agents: [], updatedAt: resp.updatedAt, staleError: err };
+}
+
 /** Effektiver Ton: stuckSignal überschreibt den Status optisch (amber). */
 export function agentTone(a: AgentLive): ToneName {
   return a.stuckSignal ? 'amber' : agentStatusTone[a.status];

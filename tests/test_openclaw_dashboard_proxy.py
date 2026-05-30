@@ -129,6 +129,38 @@ def test_openclaw_agents_proxy_degrades_when_mission_control_is_down(monkeypatch
     assert "connection refused" in body["error"]
 
 
+def test_openclaw_agents_proxy_surfaces_empty_timeout_as_text(monkeypatch):
+    """Regression: httpx timeout exceptions stringify to "" — the proxy must
+    still return a non-empty error so the UI can tell "MC slow" from "0 agents".
+    Without the fallback the OpenClaw tab silently blanked every ~2nd poll."""
+    view = importlib.import_module("hermes_cli.openclaw_view")
+
+    class FakeClientTimeout:
+        async def get(self, *_args, **_kwargs):
+            raise view.httpx.ReadTimeout("")  # str(exc) == ""
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            pass
+
+    monkeypatch.setattr(view.httpx, "AsyncClient", lambda **_kw: FakeClientTimeout())
+    app = FastAPI()
+    view.register_openclaw_routes(app)
+    body = TestClient(app).get("/api/openclaw/agents").json()
+
+    assert body["agents"] == []
+    assert body["error"]  # never blank
+    assert "Timeout" in body["error"]
+
+
+def test_openclaw_read_timeout_is_roomier_than_write(monkeypatch):
+    """The read budget must exceed MC's ~2.8s live-payload latency (and the
+    tighter write/ping budget) so reads don't trip on every other poll."""
+    view = importlib.import_module("hermes_cli.openclaw_view")
+    assert view._READ_TIMEOUT_SECONDS > view._TIMEOUT_SECONDS
+    assert view._READ_TIMEOUT_SECONDS >= 5.0
+
+
 def test_proxy_normalizes_iso_timestamps_via_http_route(monkeypatch):
     """E4: end-to-end through the HTTP route — ISO timestamps become epoch ints."""
     view = importlib.import_module("hermes_cli.openclaw_view")

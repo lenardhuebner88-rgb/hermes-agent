@@ -53,6 +53,10 @@ export const de = {
     sectionArtifacts: "Artefakte",
     sectionSources: "Quellen",
     close: "Schliessen",
+    staleFleet: (age: string) => `Letzter Stand (${age}) — MC antwortet gerade verzögert`,
+    staleBadge: "veraltet",
+    unreachable: "MC nicht erreichbar",
+    emptyFleet: "MC nicht erreichbar oder keine Agenten gemeldet.",
   },
   worker: {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
