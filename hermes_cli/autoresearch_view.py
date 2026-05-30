@@ -30,6 +30,7 @@ The runner-state contract (written by the Phase 5 runner, or by the tiny
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import html
 import json
@@ -1052,8 +1053,13 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.post("/autoresearch/generate-code-weaknesses")
     async def autoresearch_generate_code_weaknesses() -> dict[str, Any]:
         """MiniMax-backed, allowlisted code weakness finder. It only persists
-        mode=code proposals; applying them uses the existing code gate."""
-        return _proposals.generate_code_weakness_proposals()
+        mode=code proposals; applying them uses the existing code gate.
+
+        The finder makes one synchronous MiniMax call per allowlisted file
+        (each up to ~120s), so it runs on a worker thread — otherwise it would
+        block the dashboard's event loop for minutes and stall every other
+        request. The endpoint still returns the full result synchronously."""
+        return await asyncio.to_thread(_proposals.generate_code_weakness_proposals)
 
     @app.post("/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:

@@ -989,6 +989,109 @@ def test_code_finder_allowlisted_auto_reverts_on_red(tmp_home, tmp_repo):
     assert proposals.load_proposal(pid)["status"] == "proposed"  # reopened
 
 
+def _write_test_runner_stub(repo: Path, *, returncode: int, summary: str) -> Path:
+    """Write a throwaway test-runner script that mimics scripts/run_tests.sh's
+    contract — print a pytest-style summary line, exit with ``returncode`` — so
+    a gate test can drive the *real* ``_run_test_suite`` subprocess without
+    spawning the 26k-test suite. Substituting the test corpus is the legitimate
+    kind of mock (an external dependency); the gate's keep/revert machinery
+    still runs for real."""
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    stub = scripts / "run_tests_stub.sh"
+    stub.write_text(f"#!/usr/bin/env bash\necho '{summary}'\nexit {returncode}\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+# ===========================================================================
+# Track B: the REAL test-suite gate (no run_suite injection). The mocked-gate
+# tests above prove finalize_code_gate's bookkeeping; these prove the actual
+# subprocess path — _run_test_suite spawning `bash <runner>`, the real exit
+# code driving keep-on-green / auto-revert-on-red. Closes the gap where every
+# gate test replaced _run_test_suite wholesale with a lambda.
+# ===========================================================================
+def test_code_gate_real_subprocess_keeps_on_green(tmp_home, tmp_repo, monkeypatch):
+    """finalize_code_gate runs the real _run_test_suite subprocess; a green stub
+    runner (exit 0) → the edit persists and the proposal is applied."""
+    target = tmp_repo / "hermes_cli" / "model_normalize.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("good = 1\n", encoding="utf-8")
+
+    finding = {
+        "category": "bug_risk",
+        "evidence": "unique_real_green_evidence",
+        "after_text": "good = 2\n",
+        "title": "real_green",
+        "problem": "needs fix",
+        "fix_hint": "change value",
+        "old_snippet": "good = 1",
+    }
+    p = proposals._build_code_weakness_proposal(target, "good = 1\n", finding)
+    proposals.save_proposal(p)
+    pid = p["id"]
+
+    stub = _write_test_runner_stub(tmp_repo, returncode=0, summary="==== 1 passed ====")
+    monkeypatch.setattr(proposals, "_TEST_RUNNER", stub)
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda _pid: 4242)  # no real detached worker
+
+    res = proposals.apply_proposal(pid, confirm=True)
+    assert res["ok"] is True
+    assert res["status"] == "testing"
+    assert target.read_text(encoding="utf-8") == "good = 2\n"  # written live, pending the gate
+
+    # No run_suite= → finalize_code_gate uses the real _run_test_suite subprocess.
+    fin = proposals.finalize_code_gate(pid)
+    assert fin["ok"] is True
+    assert fin["status"] == "applied"
+    assert fin["returncode"] == 0
+    assert target.read_text(encoding="utf-8") == "good = 2\n"  # persisted on real green
+    stored = proposals.load_proposal(pid)
+    assert stored["status"] == "applied"
+    assert stored["gate"]["phase"] == "passed"
+
+
+def test_code_gate_real_subprocess_reverts_on_red(tmp_home, tmp_repo, monkeypatch):
+    """finalize_code_gate runs the real _run_test_suite subprocess; a red stub
+    runner (exit 1) → the edit is auto-reverted from backup and the proposal
+    reopens."""
+    target = tmp_repo / "hermes_cli" / "skin_engine.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("safe = 1\n", encoding="utf-8")
+
+    finding = {
+        "category": "bug_risk",
+        "evidence": "unique_real_red_evidence",
+        "after_text": "safe = 0\n",
+        "title": "real_red",
+        "problem": "bad change",
+        "fix_hint": "revert",
+        "old_snippet": "safe = 1",
+    }
+    p = proposals._build_code_weakness_proposal(target, "safe = 1\n", finding)
+    proposals.save_proposal(p)
+    pid = p["id"]
+
+    stub = _write_test_runner_stub(tmp_repo, returncode=1, summary="==== 1 failed ====")
+    monkeypatch.setattr(proposals, "_TEST_RUNNER", stub)
+    monkeypatch.setattr(proposals, "_spawn_code_gate", lambda _pid: 4242)
+
+    res = proposals.apply_proposal(pid, confirm=True)
+    assert res["ok"] is True
+    assert res["status"] == "testing"
+    assert target.read_text(encoding="utf-8") == "safe = 0\n"  # written before the gate
+
+    # No run_suite= → real _run_test_suite subprocess; red exit code drives revert.
+    fin = proposals.finalize_code_gate(pid)
+    assert fin["ok"] is False
+    assert fin.get("reverted") is True
+    assert fin["returncode"] == 1
+    assert target.read_text(encoding="utf-8") == "safe = 1\n"  # auto-reverted from real-gate backup
+    stored = proposals.load_proposal(pid)
+    assert stored["status"] == "proposed"  # reopened
+    assert stored["gate"]["phase"] == "failed"
+
+
 # ===========================================================================
 # Track A (1): usage filter — skills with use_count < 5 are NOT researched,
 # >= 5 are. The capability researcher only runs over above-threshold skills.
