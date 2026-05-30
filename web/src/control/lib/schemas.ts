@@ -84,6 +84,33 @@ export const RecentResultsResponseSchema = z.object({
   outcome: z.string().catch("completed"),
 });
 
+const HealthStatusSchema = z.enum(["healthy", "degraded", "offline"]);
+const SubsystemHealthSchema = z.object({
+  status: HealthStatusSchema.catch("offline"),
+  detail: z.string().catch(""),
+  error: z.string().nullable().catch(null),
+  latency_ms: z.coerce.number().catch(0).optional(),
+  heartbeat_age_s: z.coerce.number().nullable().catch(null).optional(),
+});
+const defaultSubsystemHealth = { status: "offline" as const, detail: "", error: null };
+
+export const SystemHealthResponseSchema = z.object({
+  schema: z.string().catch("hermes-health-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  overall: HealthStatusSchema.catch("offline"),
+  subsystems: z.object({
+    gateway: SubsystemHealthSchema.catch(defaultSubsystemHealth),
+    openclaw: SubsystemHealthSchema.catch(defaultSubsystemHealth),
+    autoresearch: SubsystemHealthSchema.catch(defaultSubsystemHealth),
+    kanban_db: SubsystemHealthSchema.catch(defaultSubsystemHealth),
+  }).catch({
+    gateway: defaultSubsystemHealth,
+    openclaw: defaultSubsystemHealth,
+    autoresearch: defaultSubsystemHealth,
+    kanban_db: defaultSubsystemHealth,
+  }),
+});
+
 export const AutoresearchStatusSchema = z.object({
   schema: z.string().optional(),
   state: z.enum(["idle", "running", "stopping", "crashed"]).catch("idle"),

@@ -3,12 +3,13 @@ import { AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Shield } from "
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useHermesWorkers } from "../hooks/useControlData";
+import { useHermesWorkers, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
 import { agentIsProblem, agentLabel, agentTone, buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { AgentLive, Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
+import { SystemHealthStrip } from "../components/SystemHealthStrip";
 
 type Focus = "hermes" | "openclaw" | "proposals" | "warnings" | null;
 
@@ -25,6 +26,7 @@ interface Props {
 export function OverviewView({ proposals, agents, proposalsLoading, proposalsError, proposalsLastUpdated, agentsLastUpdated, agentsError }: Props) {
   const navigate = useNavigate();
   const workers = useHermesWorkers();
+  const health = useSystemHealth();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], agents, proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
@@ -69,6 +71,8 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
 
   return (
     <div className="space-y-5">
+      <SystemHealthStrip data={health.data} error={health.error} now={now} />
+
       <section className="hc-card p-5 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div><p className="hc-eyebrow">System nominal</p><h2 className="mt-2 text-3xl font-semibold tracking-normal text-white">{title}</h2><p className="mt-2 max-w-2xl hc-soft">Hermes-Worker, OpenClaw-Agenten und Autoresearch laufen hier in einer Sicht zusammen.</p></div>
