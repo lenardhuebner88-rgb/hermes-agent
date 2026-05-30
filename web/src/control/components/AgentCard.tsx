@@ -13,11 +13,14 @@ interface Props {
 }
 
 // MC marks each metric live | derived | fallback | unavailable. Anything but
-// "live" means the heartbeat age is a guess, not ground truth — flag it so the
-// operator doesn't trust an estimated heartbeat (E4 parity).
-const HEARTBEAT_TRUTH_LABEL: Record<string, string> = {
+// "live" means the value is a guess, not ground truth — flag it so the operator
+// doesn't trust an estimated metric (E4 heartbeat → F1: all four metrics).
+const TRUTH_LABEL: Record<string, string> = {
   derived: "abgeleitet", fallback: "geschätzt", unavailable: "unbekannt",
 };
+function truthHint(t?: string | null): string | null {
+  return t && t !== "live" ? TRUTH_LABEL[t] ?? t : null;
+}
 
 export function AgentCard({ agent, density, now }: Props) {
   const tone = agentTone(agent);
@@ -26,11 +29,9 @@ export function AgentCard({ agent, density, now }: Props) {
   const heartbeatText = heartbeat ? fmtAge(heartbeat, now) : "-";
   const heartbeatAge = heartbeat ? now - heartbeat : null;
   const heartbeatStale = heartbeatAge != null && heartbeatAge > STUCK_HEARTBEAT_S;
-  const truthHint = agent.heartbeatTruth && agent.heartbeatTruth !== "live"
-    ? HEARTBEAT_TRUTH_LABEL[agent.heartbeatTruth] ?? agent.heartbeatTruth
-    : null;
   const lastActiveText = agent.lastActive ? fmtAge(agent.lastActive, now) : null;
   const problem = agent.stuckSignal || agent.status === "offline";
+  const taskTruth = truthHint(agent.currentTaskTruth);
 
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3", problem && "border-amber-500/35 shadow-[0_0_0_1px_rgba(245,158,11,.12)]")}>
@@ -45,7 +46,7 @@ export function AgentCard({ agent, density, now }: Props) {
               <span className="rounded-full border border-white/10 px-2 py-0.5 text-xs hc-soft">{agent.roleLabel}</span>
             </div>
             <p className="mt-1 line-clamp-2 text-sm hc-soft">{agent.roleSummary}</p>
-            {lastActiveText ? <p className="mt-0.5 text-xs hc-dim">zuletzt aktiv vor {lastActiveText}{agent.load ? ` · ${agent.load} in Queue` : ""}</p> : null}
+            {lastActiveText ? <p className="mt-0.5 text-xs hc-dim">zuletzt aktiv vor {lastActiveText}{agent.load ? ` · ${agent.load} in Queue${agent.loadSource ? ` (${agent.loadSource})` : ""}` : ""}{agent.activityPulse > 0 ? ` · Puls ${agent.activityPulse}` : ""}</p> : null}
           </div>
         </div>
         <StatusPill tone={tone} label={agentLabel(agent)} dot={problem ? "warn" : agent.status === "ready" ? "ready" : agent.status === "idle" ? "idle" : "live"} />
@@ -53,13 +54,13 @@ export function AgentCard({ agent, density, now }: Props) {
 
       <div className="rounded-lg border border-white/10 bg-white/[.03] p-3">
         <p className="text-xs hc-dim">Aktuelle Aufgabe</p>
-        <p className="mt-1 line-clamp-2 text-sm font-medium text-white">{agent.fleetHealth.currentTask || "Keine aktive Aufgabe"}</p>
+        <p className="mt-1 line-clamp-2 text-sm font-medium text-white">{agent.fleetHealth.currentTask || "Keine aktive Aufgabe"}{taskTruth ? <span className="ml-1 text-[10px] font-normal hc-dim">({taskTruth})</span> : null}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-        <Metric label="Heartbeat" value={heartbeatText} sub={truthHint} warn={problem || heartbeatStale} />
-        <Metric label="Throughput" value={agent.fleetHealth.throughput || "0/h"} />
-        <Metric label="Tool" value={agent.fleetHealth.currentTool || "-"} />
+        <Metric label="Heartbeat" value={heartbeatText} sub={truthHint(agent.heartbeatTruth)} warn={problem || heartbeatStale} />
+        <Metric label="Throughput" value={agent.fleetHealth.throughput || "0/h"} sub={truthHint(agent.throughputTruth)} />
+        <Metric label="Tool" value={agent.fleetHealth.currentTool || "-"} sub={truthHint(agent.currentToolTruth)} />
         <Metric label="Modell" value={agent.model || "unbekannt"} />
       </div>
 

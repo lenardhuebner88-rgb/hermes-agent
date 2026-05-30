@@ -99,11 +99,13 @@ def _normalize_agent(agent: Any) -> Any:
         if "throughput" in fleet:
             fleet["throughput"] = _throughput_str(fleet.get("throughput"))
         # MC computes a per-metric provenance map (live/derived/fallback/
-        # unavailable). Surface the heartbeat one so the card can flag a guessed
-        # heartbeat instead of presenting it as ground truth.
+        # unavailable). Surface each so the card can flag a guessed value instead
+        # of presenting it as ground truth (E4: heartbeat → F1: all four metrics).
         truth = fleet.get("truth")
-        if isinstance(truth, dict) and truth.get("heartbeat"):
-            out["heartbeatTruth"] = truth.get("heartbeat")
+        if isinstance(truth, dict):
+            for _metric in ("heartbeat", "throughput", "currentTool", "currentTask"):
+                if truth.get(_metric):
+                    out[f"{_metric}Truth"] = truth.get(_metric)
         out["fleetHealth"] = fleet
 
     if "tasks" in out:

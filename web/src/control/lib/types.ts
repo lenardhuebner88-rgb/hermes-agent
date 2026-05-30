@@ -120,7 +120,12 @@ export interface AgentLive {
   escalationNote: string | null;
   /** E4: MC-parity enrichment (queue depth + heartbeat provenance). Optional. */
   load?: number;
+  loadSource?: string | null;
   heartbeatTruth?: string | null;
+  /** F1: per-metric provenance flags for throughput/tool/currentTask. Optional. */
+  throughputTruth?: string | null;
+  currentToolTruth?: string | null;
+  currentTaskTruth?: string | null;
 }
 
 export interface AgentsResponse {

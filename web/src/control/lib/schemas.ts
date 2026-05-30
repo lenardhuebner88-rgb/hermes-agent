@@ -173,7 +173,11 @@ export const AgentLiveSchema = z.object({
   escalationNote: z.string().nullable().catch(null),
   // E4: MC-parity enrichment from the read-only proxy (optional, degrades to defaults).
   load: z.coerce.number().catch(0),
+  loadSource: z.string().nullable().optional(),
   heartbeatTruth: z.string().nullable().optional(),
+  throughputTruth: z.string().nullable().optional(),
+  currentToolTruth: z.string().nullable().optional(),
+  currentTaskTruth: z.string().nullable().optional(),
 });
 
 export const AgentsResponseSchema = z.object({
