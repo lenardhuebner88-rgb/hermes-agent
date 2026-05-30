@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentLiveSchema, ProposalsResponseSchema, RecentResultsResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { AgentLiveSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -148,6 +148,29 @@ describe("RecentResultsResponseSchema", () => {
     expect(parsed.count).toBe(1);
     expect(parsed.results[0].run_id).toBe("408");
     expect(parsed.results[0].duration_seconds).toBe(15);
+  });
+});
+
+describe("SystemHealthResponseSchema", () => {
+  it("coerces checked_at and applies catch defaults for partial bad payloads", () => {
+    const parsed = parseOrThrow(SystemHealthResponseSchema, {
+      schema: 42,
+      checked_at: "123",
+      subsystems: {
+        gateway: { status: "healthy", detail: "ok", error: null, latency_ms: "8" },
+        openclaw: { status: "future", detail: 9, error: 10 },
+        autoresearch: { status: "degraded", detail: "late", error: null, heartbeat_age_s: "12" },
+        kanban_db: null,
+      },
+    }, "health-status");
+    expect(parsed.schema).toBe("hermes-health-v1");
+    expect(parsed.checked_at).toBe(123);
+    expect(parsed.overall).toBe("offline");
+    expect(parsed.subsystems.gateway.latency_ms).toBe(8);
+    expect(parsed.subsystems.openclaw.status).toBe("offline");
+    expect(parsed.subsystems.openclaw.detail).toBe("");
+    expect(parsed.subsystems.autoresearch.heartbeat_age_s).toBe(12);
+    expect(parsed.subsystems.kanban_db.status).toBe("offline");
   });
 });
 

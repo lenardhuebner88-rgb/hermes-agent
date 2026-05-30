@@ -6,11 +6,12 @@ import {
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   RunInspectSchema,
+  SystemHealthResponseSchema,
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
-import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, WorkersResponse } from "../lib/types";
+import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -253,6 +254,13 @@ export function useHermesRecentResults() {
       "runs/recent-results",
     ),
     20000,
+  );
+}
+
+export function useSystemHealth() {
+  return usePolling<SystemHealthResponse>(
+    async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
+    5000,
   );
 }
 

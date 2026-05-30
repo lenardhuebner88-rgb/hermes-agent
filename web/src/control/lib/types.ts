@@ -79,6 +79,28 @@ export interface RecentResultsResponse {
   outcome: string;
 }
 
+export type HealthStatus = "healthy" | "degraded" | "offline";
+
+export interface SubsystemHealth {
+  status: HealthStatus;
+  detail: string;
+  error: string | null;
+  latency_ms?: number;
+  heartbeat_age_s?: number | null;
+}
+
+export interface SystemHealthResponse {
+  schema: string;
+  checked_at: number;
+  overall: HealthStatus;
+  subsystems: {
+    gateway: SubsystemHealth;
+    openclaw: SubsystemHealth;
+    autoresearch: SubsystemHealth;
+    kanban_db: SubsystemHealth;
+  };
+}
+
 export type AgentStatus = "active" | "monitoring" | "ready" | "idle" | "offline";
 export type AgentId =
   | "main" | "sre-expert" | "frontend-guru" | "efficiency-auditor" | "spark" | "james";

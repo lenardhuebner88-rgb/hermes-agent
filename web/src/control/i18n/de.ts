@@ -22,6 +22,17 @@ export const de = {
     noProblemAgents: "Keine problematischen Agenten.",
     noOpenProposals: "Keine offenen Vorschläge.",
   },
+  systemHealth: {
+    title: "System-Health",
+    gateway: "Hermes-Gateway",
+    openclaw: "OpenClaw-Proxy",
+    autoresearch: "Autoresearch-Loop",
+    kanban: "Kanban-DB",
+    healthy: "Gesund",
+    degraded: "Beeinträchtigt",
+    offline: "Offline",
+    unknown: "Status unbekannt",
+  },
   hermes: {
     recentResults: "Letzte Ergebnisse",
     recentResultsHint: "Abgeschlossene Worker mit Summary, Belegen und naechsten Schritten.",

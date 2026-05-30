@@ -4911,6 +4911,9 @@ register_autoresearch_routes(app)
 from hermes_cli.openclaw_view import register_openclaw_routes  # noqa: E402
 register_openclaw_routes(app)
 
+from hermes_cli.health_status import register_health_status_routes  # noqa: E402
+register_health_status_routes(app)
+
 mount_spa(app)
 
 
