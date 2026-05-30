@@ -36,6 +36,7 @@ import fnmatch
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -122,9 +123,15 @@ def _usage_min_use_count() -> float:
     if raw is None or not raw.strip():
         return 5.0
     try:
-        return float(raw)
+        val = float(raw)
     except ValueError:
         return 5.0
+    # float() also parses "nan"/"inf"; nan makes every `use < min` comparison
+    # False (net silently closes), inf excludes everything — both are the
+    # opposite of a usable threshold, so fall back to the default.
+    if not math.isfinite(val):
+        return 5.0
+    return val
 
 
 # Back-compat constant: the historical default. Live filtering reads
@@ -486,9 +493,13 @@ def _skills_for_capability_research(
 def _proposal_id_for_finding(finding: dict[str, Any]) -> str:
     skill = str(finding.get("skill") or "skill")
     category = str(finding.get("category") or "weakness")
-    evidence = str(finding.get("evidence") or "")
+    # Evidence-bearing findings dedup on their verbatim quote. Absence findings
+    # (missing_trigger/missing_section) carry no evidence, so they would all
+    # collapse to one id per (skill, category) and clobber each other; fall back
+    # to the problem text so distinct absence findings stay distinct + stable.
+    discriminator = str(finding.get("evidence") or "") or str(finding.get("problem") or "")
     digest = hashlib.sha1(
-        f"{skill}\0{category}\0{evidence}".encode("utf-8")
+        f"{skill}\0{category}\0{discriminator}".encode("utf-8")
     ).hexdigest()[:10]
     return f"{_slug(skill)}-{_slug(category)}-{digest}"
 

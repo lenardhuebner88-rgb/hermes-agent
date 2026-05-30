@@ -1155,6 +1155,38 @@ def test_usage_threshold_env_lever_ignores_garbage(tmp_home, monkeypatch):
     assert proposals._usage_min_use_count() == 5.0
 
 
+def test_usage_threshold_env_lever_rejects_non_finite(tmp_home, monkeypatch):
+    # float() parses nan/inf without raising; nan would silently close the net
+    # (every `use < nan` is False) and inf would exclude everything. Both must
+    # fall back to the default instead of becoming a usable threshold.
+    for bad in ("nan", "inf", "-inf", "Infinity"):
+        monkeypatch.setenv("HERMES_AUTORESEARCH_MIN_USE_COUNT", bad)
+        assert proposals._usage_min_use_count() == 5.0, bad
+
+
+def test_absence_findings_get_distinct_proposal_ids(tmp_home):
+    # Two distinct absence findings on the same skill+category carry empty
+    # evidence; they must not collapse to one id (which would clobber the first
+    # proposal). The problem text discriminates them.
+    base = {"skill": "alpha", "category": "missing_trigger", "evidence": ""}
+    id_a = proposals._proposal_id_for_finding({**base, "problem": "no trigger for the export flow"})
+    id_b = proposals._proposal_id_for_finding({**base, "problem": "no trigger for the cleanup flow"})
+    assert id_a != id_b
+    # Stable: same finding → same id.
+    assert id_a == proposals._proposal_id_for_finding({**base, "problem": "no trigger for the export flow"})
+
+
+def test_evidence_bearing_proposal_id_unchanged_by_discriminator(tmp_home):
+    # Regression guard: evidence-bearing findings still dedup on evidence, so the
+    # discriminator fallback must NOT change their id (no churn of existing
+    # proposals). Same skill+category+evidence → same id regardless of problem.
+    base = {"skill": "alpha", "category": "unclear_trigger", "evidence": "Use it sometimes."}
+    assert (
+        proposals._proposal_id_for_finding({**base, "problem": "x"})
+        == proposals._proposal_id_for_finding({**base, "problem": "y"})
+    )
+
+
 def test_usage_loader_tolerates_missing_sidecar(tmp_home):
     # No .usage.json present → empty map, never a crash; every skill then reads
     # as below threshold and is skipped.

@@ -297,6 +297,55 @@ def test_draft_fix_absence_accepts_additive_fix_without_evidence(monkeypatch):
     assert "Use beta sometimes for stuff." in res["text"]  # existing text preserved
 
 
+def test_draft_fix_absence_accepts_mid_document_insertion(monkeypatch):
+    # The common real shape: the new trigger section is inserted in the MIDDLE
+    # (after the title, before existing sections), which splits the original
+    # text. Per-line preservation must accept this, not reject it for breaking
+    # one contiguous run.
+    inserted = (
+        "# Beta\n"
+        "\n"
+        "## Trigger\n"
+        "\n"
+        "Use beta when ingesting the nightly export before the report job runs.\n"
+        "\n"
+        "## When to Use\n"
+        "\n"
+        "Use beta sometimes for stuff.\n"
+        "\n"
+        "## Procedure\n"
+        "\n"
+        "Run the thing.\n"
+    )
+    reply = json.dumps({"text": inserted, "rationale": "Inserted the missing trigger near the top."})
+    res = _draft_fix(monkeypatch, reply, finding=_absence_finding())
+    assert res["ok"] is True, res["reason"]
+    assert "## Trigger" in res["text"]
+    assert "Use beta sometimes for stuff." in res["text"]  # every original line kept
+    assert "Run the thing." in res["text"]
+
+
+def test_draft_fix_absence_rejects_dropping_a_middle_line(monkeypatch):
+    # Grows overall (appends a big section) but DELETES an existing body line →
+    # per-line preservation must catch it even though length increased.
+    dropped = (
+        "# Beta\n"
+        "\n"
+        "## When to Use\n"
+        "\n"
+        "Use beta sometimes for stuff.\n"
+        # "## Procedure" + "Run the thing." intentionally removed
+        "\n"
+        "## Trigger\n"
+        "\n"
+        "Use beta when ingesting the nightly export before the long report job runs nightly.\n"
+    )
+    reply = json.dumps({"text": dropped, "rationale": "dropped the procedure"})
+    res = _draft_fix(monkeypatch, reply, finding=_absence_finding())
+    assert res["ok"] is False
+    assert "preserve" in res["reason"]
+
+
 def test_draft_fix_absence_rejects_shortening_fix(monkeypatch):
     # An "additive" fix that actually shrinks/rewrites the skill is rejected.
     reply = json.dumps({"text": "# Beta\n\n## Trigger\n\nUse it.\n", "rationale": "x"})

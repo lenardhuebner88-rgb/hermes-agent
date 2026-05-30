@@ -209,13 +209,20 @@ def validate_fix(
         return False, None, "leaked secret value not allowed"
     normalised = body.rstrip() + "\n"
     if is_absence:
-        # The fix must genuinely add the missing trigger/section, not rewrite or
-        # shrink the skill: require it to be a strict superset in length and to
-        # keep the existing text intact.
+        # The fix must genuinely ADD the missing trigger/section, not rewrite or
+        # shrink the skill: require it to grow and to keep every existing line.
         if len(normalised.strip()) <= len(skill_text.strip()):
             return False, None, "absence fix must add content, not shorten the skill"
-        if _norm_ws(skill_text.strip()) not in _norm_ws(normalised):
-            return False, None, "absence fix must preserve the existing skill text"
+        # Per-line containment, NOT one contiguous substring: a real additive fix
+        # usually inserts the new section in the MIDDLE (e.g. a trigger near the
+        # top, before existing sections), which splits the original text. Require
+        # instead that every existing non-blank line still appears somewhere in
+        # the fix — this permits insertion anywhere while still catching deletion.
+        after_norm = _norm_ws(normalised)
+        for line in skill_text.splitlines():
+            ln = _norm_ws(line)
+            if ln and ln not in after_norm:
+                return False, None, "absence fix must preserve the existing skill text"
         return True, normalised, None
     if not _fix_touches_evidence(skill_text, normalised, evidence):
         return False, None, "fix is not grounded in the evidence quote"
