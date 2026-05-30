@@ -4,12 +4,14 @@ import { agentColorVar, priorityLabel, priorityTone } from "../lib/tones";
 import { STUCK_HEARTBEAT_S, agentLabel, agentTone, fmtAge } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
 import type { AgentLive, AgentTask } from "../lib/types";
+import { de } from "../i18n/de";
 import { StatusPill, ToneCallout } from "./atoms";
 
 interface Props {
   agent: AgentLive;
   density: Density;
   now: number;
+  onOpenDrilldown?: () => void;
 }
 
 // MC marks each metric live | derived | fallback | unavailable. Anything but
@@ -22,7 +24,7 @@ function truthHint(t?: string | null): string | null {
   return t && t !== "live" ? TRUTH_LABEL[t] ?? t : null;
 }
 
-export function AgentCard({ agent, density, now }: Props) {
+export function AgentCard({ agent, density, now, onOpenDrilldown }: Props) {
   const tone = agentTone(agent);
   const colorVar = agentColorVar[agent.id] ?? "--hc-accent";
   const heartbeat = agent.fleetHealth.heartbeat ?? agent.lastActive;
@@ -32,6 +34,7 @@ export function AgentCard({ agent, density, now }: Props) {
   const lastActiveText = agent.lastActive ? fmtAge(agent.lastActive, now) : null;
   const problem = agent.stuckSignal || agent.status === "offline";
   const taskTruth = truthHint(agent.currentTaskTruth);
+  const showDrilldownButton = Boolean(onOpenDrilldown && hasDrilldownContent(agent));
 
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3", problem && "border-amber-500/35 shadow-[0_0_0_1px_rgba(245,158,11,.12)]")}>
@@ -79,7 +82,33 @@ export function AgentCard({ agent, density, now }: Props) {
           <span className="line-clamp-2">{agent.fleetHealth.lastOutput}</span>
         </div>
       ) : null}
+
+      {showDrilldownButton ? (
+        <button
+          type="button"
+          aria-label={de.openclaw.drilldownOpen}
+          className="w-full rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm font-medium text-zinc-200 transition hover:bg-white/[.06] focus:outline-none focus:ring-2 focus:ring-[var(--hc-accent-border)]"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenDrilldown?.();
+          }}
+        >
+          {de.openclaw.drilldownOpen}
+        </button>
+      ) : null}
     </article>
+  );
+}
+
+function hasDrilldownContent(agent: AgentLive): boolean {
+  const drilldown = agent.drilldown;
+  if (!drilldown) return false;
+  return Boolean(
+    drilldown.highlights.length ||
+    drilldown.decisions.length ||
+    drilldown.timeline.length ||
+    drilldown.artifacts.length ||
+    drilldown.sources.length
   );
 }
 

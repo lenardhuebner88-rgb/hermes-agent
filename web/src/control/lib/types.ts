@@ -99,6 +99,34 @@ export interface FleetHealth {
   lastOutput: string;
 }
 
+export interface DrilldownDecision {
+  id?: string;
+  label: string;
+  detail: string;
+}
+
+export interface DrilldownArtifact {
+  label: string;
+  value: string;
+  source?: string;
+}
+
+export interface DrilldownTimelineItem {
+  id?: string;
+  at: string;
+  kind?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface Drilldown {
+  decisions: DrilldownDecision[];
+  artifacts: DrilldownArtifact[];
+  timeline: DrilldownTimelineItem[];
+  highlights: string[];
+  sources: string[];
+}
+
 export interface AgentLive {
   id: AgentId;
   name: string;
@@ -126,6 +154,7 @@ export interface AgentLive {
   throughputTruth?: string | null;
   currentToolTruth?: string | null;
   currentTaskTruth?: string | null;
+  drilldown?: Drilldown;
 }
 
 export interface AgentsResponse {

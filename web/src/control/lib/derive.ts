@@ -190,3 +190,11 @@ export function fmtClock(epochSec: number): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+
+/** Nur Uhrzeit "HH:MM" aus ISO-8601-String ODER epoch-Sekunden; leer/ungültig → "–". */
+export function fmtClockTime(at: string | number): string {
+  if (at === "") return "–";
+  const value = typeof at === 'number' ? at * 1000 : Date.parse(at);
+  if (!Number.isFinite(value)) return "–";
+  return new Date(value).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}

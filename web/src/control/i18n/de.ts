@@ -32,6 +32,17 @@ export const de = {
     details: "Details",
     copyPath: "Pfad kopieren",
   },
+  openclaw: {
+    drilldownTitle: "Verlauf & Kontext",
+    drilldownOpen: "Verlauf ansehen",
+    drilldownEmpty: "Kein Verlauf gemeldet.",
+    sectionHighlights: "Highlights",
+    sectionDecisions: "Entscheidungen",
+    sectionTimeline: "Verlauf",
+    sectionArtifacts: "Artefakte",
+    sectionSources: "Quellen",
+    close: "Schliessen",
+  },
   worker: {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
     actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten", confirm: "Bestätigen", cancel: "Abbrechen" },

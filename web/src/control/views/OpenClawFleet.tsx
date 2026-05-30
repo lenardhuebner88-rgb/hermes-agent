@@ -7,12 +7,14 @@ import { agentIsProblem, agentSortRank, nowSec } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { AgentCard } from "../components/AgentCard";
+import { AgentDrilldownDrawer } from "../components/AgentDrilldownDrawer";
 import { StatusPill, ToneCallout } from "../components/atoms";
 
 export function OpenClawFleet({ density }: { density: Density }) {
   const agents = useOpenClawAgents();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
+  const [drillId, setDrillId] = useState<string | null>(null);
   const list = (agents.data?.agents ?? []).slice().sort((a, b) => agentSortRank(b) - agentSortRank(a));
   const active = list.filter((a) => ["active", "monitoring", "ready"].includes(a.status) && !a.stuckSignal).length;
   const problems = list.filter(agentIsProblem).length;
@@ -25,10 +27,17 @@ export function OpenClawFleet({ density }: { density: Density }) {
       const key = event.key.toLowerCase();
       if (KEYMAP.list.next.includes(key as "j")) { event.preventDefault(); setSelected((idx) => Math.min(list.length - 1, idx + 1)); }
       if (KEYMAP.list.prev.includes(key as "k")) { event.preventDefault(); setSelected((idx) => Math.max(0, idx - 1)); }
+      if (key === "o" || event.key === "Enter") {
+        const agent = list[activeIndex];
+        if (agent) {
+          event.preventDefault();
+          setDrillId(agent.id);
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [list.length]);
+  }, [activeIndex, list]);
 
   return (
     <div className="space-y-5">
@@ -40,8 +49,9 @@ export function OpenClawFleet({ density }: { density: Density }) {
       {agents.data?.error ? <ToneCallout tone="amber">MC nicht erreichbar: {agents.data.error}</ToneCallout> : null}
       {list.length === 0 && !agents.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Shield className="h-5 w-5" />MC nicht erreichbar oder keine Agenten gemeldet.</div> : null}
       <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
-        {list.map((agent, index) => <div key={agent.id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><AgentCard agent={agent} density={density} now={now} /></div>)}
+        {list.map((agent, index) => <div key={agent.id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><AgentCard agent={agent} density={density} now={now} onOpenDrilldown={() => setDrillId(agent.id)} /></div>)}
       </div>
+      <AgentDrilldownDrawer agent={list.find((a) => a.id === drillId) ?? null} onClose={() => setDrillId(null)} />
     </div>
   );
 }

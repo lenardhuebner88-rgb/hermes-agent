@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, STUCK_HEARTBEAT_S,
+  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
 } from './derive';
 import type { Worker, AgentLive, Proposal } from './types';
 
@@ -127,5 +127,30 @@ describe('Datenfrische (E1)', () => {
     // 20s-Poll → Schwelle 60s
     expect(freshness(NOW - 59, 20000, NOW).stale).toBe(false);
     expect(freshness(NOW - 61, 20000, NOW).stale).toBe(true);
+  });
+});
+
+describe('fmtClockTime', () => {
+  // TZ-unabhängig: nur das HH:MM-Format prüfen, nie einen festen Wert
+  // (toLocaleTimeString hängt von der Laufzeit-Zeitzone ab).
+  it('ISO-8601 mit Z → HH:MM-Format', () => {
+    expect(fmtClockTime('2026-05-30T14:30:00Z')).toMatch(/^\d{2}:\d{2}$/);
+  });
+  it('epoch-Sekunden → HH:MM-Format', () => {
+    expect(fmtClockTime(NOW)).toMatch(/^\d{2}:\d{2}$/);
+  });
+  it('leerer String → "–"', () => {
+    expect(fmtClockTime('')).toBe('–');
+  });
+  it('unparsebarer Müll → "–"', () => {
+    expect(fmtClockTime('not-a-real-date')).toBe('–');
+  });
+});
+
+describe('fmtClock (Design-System-Format bleibt DD/MM/YYYY, HH:mm)', () => {
+  // Regression: fmtClock NICHT mit fmtClockTime verwechseln — AutoresearchView
+  // hängt am vollen Datum-Zeit-Format.
+  it('epoch-Sekunden → "DD/MM/YYYY, HH:mm"', () => {
+    expect(fmtClock(NOW)).toMatch(/^\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}$/);
   });
 });

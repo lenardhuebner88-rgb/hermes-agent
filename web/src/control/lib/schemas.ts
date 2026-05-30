@@ -157,6 +157,28 @@ const FleetHealthSchema = z.object({
   lastOutput: z.string().catch(""),
 });
 
+export const DrilldownSchema = z.object({
+  decisions: z.array(z.object({
+    id: z.string().optional(),
+    label: z.string().catch(""),
+    detail: z.string().catch(""),
+  })).catch([]),
+  artifacts: z.array(z.object({
+    label: z.string().catch(""),
+    value: z.string().catch(""),
+    source: z.string().optional(),
+  })).catch([]),
+  timeline: z.array(z.object({
+    id: z.string().optional(),
+    at: z.string().catch(""),
+    kind: z.string().optional(),
+    label: z.string().catch(""),
+    detail: z.string().optional(),
+  })).catch([]),
+  highlights: z.array(z.string()).catch([]),
+  sources: z.array(z.string()).catch([]),
+}).catch({ decisions: [], artifacts: [], timeline: [], highlights: [], sources: [] });
+
 export const AgentLiveSchema = z.object({
   id: z.enum(["main", "sre-expert", "frontend-guru", "efficiency-auditor", "spark", "james"]).catch("main"),
   name: z.string().catch("OpenClaw"),
@@ -178,6 +200,7 @@ export const AgentLiveSchema = z.object({
   throughputTruth: z.string().nullable().optional(),
   currentToolTruth: z.string().nullable().optional(),
   currentTaskTruth: z.string().nullable().optional(),
+  drilldown: DrilldownSchema.optional(),
 });
 
 export const AgentsResponseSchema = z.object({
