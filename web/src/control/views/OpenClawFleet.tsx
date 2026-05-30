@@ -8,6 +8,7 @@ import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { AgentCard } from "../components/AgentCard";
 import { AgentDrilldownDrawer } from "../components/AgentDrilldownDrawer";
+import { OpenClawAlertBanner } from "../components/OpenClawAlertBanner";
 import { StatusPill, ToneCallout } from "../components/atoms";
 
 export function OpenClawFleet({ density }: { density: Density }) {
@@ -45,6 +46,7 @@ export function OpenClawFleet({ density }: { density: Density }) {
         <div className="flex items-center gap-3"><div><p className="hc-eyebrow">OpenClaw-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{active}/{list.length} Agenten aktiv</h2></div>{problems > 0 ? <StatusPill tone="amber" label={`${problems} gestaucht/offline`} dot="warn" /> : null}</div>
         {agents.loading ? <Spinner /> : <span className="text-sm hc-soft">Read-only aus Mission Control · {agents.data?.updatedAt ? new Date(agents.data.updatedAt * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) : "kein Zeitstempel"}</span>}
       </section>
+      <OpenClawAlertBanner agents={list} />
       {agents.error ? <ToneCallout tone="red">{agents.error}</ToneCallout> : null}
       {agents.data?.error ? <ToneCallout tone="amber">MC nicht erreichbar: {agents.data.error}</ToneCallout> : null}
       {list.length === 0 && !agents.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Shield className="h-5 w-5" />MC nicht erreichbar oder keine Agenten gemeldet.</div> : null}

@@ -22,9 +22,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from fastapi.responses import JSONResponse
 
 _MISSION_CONTROL_AGENTS_URL = "http://127.0.0.1:3000/api/agents/live"
+_MISSION_CONTROL_SEND_URL = "http://127.0.0.1:3000/api/discord/send"
 _READ_HEADERS = {"x-actor-kind": "service", "x-request-class": "read"}
+_WRITE_HEADERS = {"x-actor-kind": "service", "x-request-class": "write"}
 _TIMEOUT_SECONDS = 2.5
 
 _PRIORITY_MAP = {"high": "high", "medium": "med", "med": "med", "low": "low"}
@@ -32,6 +35,22 @@ _PRIORITY_MAP = {"high": "high", "medium": "med", "med": "med", "low": "low"}
 
 def _empty_error_response(error: str) -> dict[str, Any]:
     return {"agents": [], "updatedAt": None, "error": error}
+
+
+def _ping_error_response(error: str) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"ok": False, "detail": error})
+
+
+def _reachability_ping_message(agent_id: str) -> str:
+    safe_agent_id = "".join(
+        ch if ch.isalnum() or ch in "-_." else "_"
+        for ch in str(agent_id)
+    )[:80] or "unknown"
+    return f"Reachability ping for OpenClaw agent '{safe_agent_id}'."
+
+
+def _mission_control_write_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
 
 
 def _iso_to_epoch(value: Any) -> Any:
@@ -156,9 +175,35 @@ async def read_openclaw_agents() -> dict[str, Any]:
     return _normalize_payload(data)
 
 
+async def ping_openclaw_agent(agent_id: str) -> Any:
+    """Ask Mission Control to send a fixed reachability ping for one agent.
+
+    Hermes deliberately builds the only outbound message server-side. Client
+    request bodies are ignored so arbitrary text, channel IDs, or tokens cannot
+    be smuggled through this proxy.
+    """
+    payload = {"message": _reachability_ping_message(agent_id)}
+    try:
+        async with _mission_control_write_client() as client:
+            response = await client.post(
+                _MISSION_CONTROL_SEND_URL,
+                headers=_WRITE_HEADERS,
+                json=payload,
+            )
+        response.raise_for_status()
+    except Exception as exc:
+        return _ping_error_response(str(exc))
+
+    return {"ok": True}
+
+
 def register_openclaw_routes(app: Any) -> None:
-    """Register the read-only OpenClaw API route before the SPA catch-all."""
+    """Register OpenClaw API routes before the SPA catch-all."""
 
     @app.get("/api/openclaw/agents")
     async def openclaw_agents() -> dict[str, Any]:
         return await read_openclaw_agents()
+
+    @app.post("/api/openclaw/agents/{agent_id}/ping")
+    async def openclaw_agent_ping(agent_id: str) -> Any:
+        return await ping_openclaw_agent(agent_id)

@@ -1,6 +1,8 @@
-import { useEffect } from "react";
-import { X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CheckCircle2, Send, X, XCircle } from "lucide-react";
+import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
 import { fmtClockTime } from "../lib/derive";
 import type { AgentLive, Drilldown } from "../lib/types";
 import { de } from "../i18n/de";
@@ -11,7 +13,11 @@ interface Props {
   onClose: () => void;
 }
 
+type PingStatus = "idle" | "pending" | "success" | "error";
+
 export function AgentDrilldownDrawer({ agent, onClose }: Props) {
+  const [ping, setPing] = useState<{ agentId: string; status: PingStatus; error: string | null } | null>(null);
+
   useEffect(() => {
     if (!agent) return;
 
@@ -27,6 +33,27 @@ export function AgentDrilldownDrawer({ agent, onClose }: Props) {
 
   const drilldown = agent.drilldown;
   const empty = isDrilldownEmpty(drilldown);
+  const pingState = ping?.agentId === agent.id ? ping.status : "idle";
+  const pingError = ping?.agentId === agent.id ? ping.error : null;
+  const pingPending = pingState === "pending";
+
+  const pingAgent = async () => {
+    if (pingPending) return;
+    setPing({ agentId: agent.id, status: "pending", error: null });
+    try {
+      const result = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        `/api/openclaw/agents/${encodeURIComponent(agent.id)}/ping`,
+        { method: "POST" },
+      );
+      if (result.ok === false) {
+        setPing({ agentId: agent.id, status: "error", error: result.detail || de.openclaw.pingError });
+        return;
+      }
+      setPing({ agentId: agent.id, status: "success", error: null });
+    } catch (e) {
+      setPing({ agentId: agent.id, status: "error", error: e instanceof Error ? e.message : String(e) });
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50">
@@ -59,6 +86,23 @@ export function AgentDrilldownDrawer({ agent, onClose }: Props) {
                   <StatusPill tone="violet" label={agent.roleLabel} size="sm" />
                 </div>
               </div>
+            </div>
+            <div className="mt-3 space-y-1.5">
+              <button
+                type="button"
+                aria-label={de.openclaw.pingAction}
+                disabled={pingPending}
+                className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-1.5 text-sm font-medium text-zinc-200 transition hover:bg-white/[.07] focus:outline-none focus:ring-2 focus:ring-[var(--hc-accent-border)] disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void pingAgent()}
+              >
+                {pingPending ? <Spinner /> : pingState === "success" ? <CheckCircle2 className="h-4 w-4 text-emerald-300" /> : pingState === "error" ? <XCircle className="h-4 w-4 text-red-300" /> : <Send className="h-4 w-4" />}
+                {pingPending ? de.openclaw.pingPending : de.openclaw.pingAction}
+              </button>
+              {pingState === "success" ? (
+                <p className="flex min-w-0 items-center gap-1.5 text-xs text-emerald-200"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 break-words">{de.openclaw.pingSuccess}</span></p>
+              ) : pingState === "error" ? (
+                <p className="flex min-w-0 items-start gap-1.5 text-xs text-red-200"><XCircle className="mt-px h-3.5 w-3.5 shrink-0" /><span className="min-w-0 break-words">{pingError ? `${de.openclaw.pingError}: ${pingError}` : de.openclaw.pingError}</span></p>
+              ) : null}
             </div>
           </div>
           <button

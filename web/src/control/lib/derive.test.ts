@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
+  workerHealth, buildOverview, buildOpenClawAlerts, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
 } from './derive';
 import type { Worker, AgentLive, Proposal } from './types';
 
@@ -152,5 +152,69 @@ describe('fmtClock (Design-System-Format bleibt DD/MM/YYYY, HH:mm)', () => {
   // hängt am vollen Datum-Zeit-Format.
   it('epoch-Sekunden → "DD/MM/YYYY, HH:mm"', () => {
     expect(fmtClock(NOW)).toMatch(/^\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}$/);
+  });
+});
+
+describe('buildOpenClawAlerts', () => {
+  // buildOpenClawAlerts liest nur id/status/stuckSignal — minimal valide
+  // AgentLive-Objekte genügen (Rest via Cast, nicht relevant für die Logik).
+  function mkAgent(over: { id: string; status: AgentLive['status']; stuckSignal: boolean }): AgentLive {
+    return over as unknown as AgentLive;
+  }
+
+  // (1) leeres Array → alle Counts 0
+  it('leeres Array → alle Counts 0', () => {
+    const result = buildOpenClawAlerts([]);
+    expect(result.critical).toHaveLength(0);
+    expect(result.criticalCount).toBe(0);
+    expect(result.warning).toHaveLength(0);
+    expect(result.warningCount).toBe(0);
+  });
+
+  // (2) ein Agent mit stuckSignal=true → in critical, criticalCount=1
+  it('ein Agent mit stuckSignal=true → in critical, criticalCount=1', () => {
+    const result = buildOpenClawAlerts([mkAgent({ id: 'a1', status: 'active', stuckSignal: true })]);
+    expect(result.critical).toHaveLength(1);
+    expect(result.criticalCount).toBe(1);
+    expect(result.critical[0].id).toBe('a1');
+    expect(result.warning).toHaveLength(0);
+    expect(result.warningCount).toBe(0);
+  });
+
+  // (3) ein Agent status='offline' ohne stuckSignal → in warning, warningCount=1
+  it("ein Agent status='offline' ohne stuckSignal → in warning, warningCount=1", () => {
+    const result = buildOpenClawAlerts([mkAgent({ id: 'a2', status: 'offline', stuckSignal: false })]);
+    expect(result.critical).toHaveLength(0);
+    expect(result.criticalCount).toBe(0);
+    expect(result.warning).toHaveLength(1);
+    expect(result.warningCount).toBe(1);
+    expect(result.warning[0].id).toBe('a2');
+  });
+
+  // (4) Agent mit BEIDEM (stuckSignal=true UND status='offline') → NUR critical, nicht doppelt
+  it('Agent mit stuckSignal UND offline → zählt NUR als critical, nicht doppelt', () => {
+    const result = buildOpenClawAlerts([mkAgent({ id: 'a3', status: 'offline', stuckSignal: true })]);
+    expect(result.critical).toHaveLength(1);
+    expect(result.criticalCount).toBe(1);
+    expect(result.critical[0].id).toBe('a3');
+    expect(result.warning).toHaveLength(0);
+    expect(result.warningCount).toBe(0);
+  });
+
+  // (5) gemischte Liste → korrekte Aufteilung
+  it('gemischte Liste → korrekte Aufteilung', () => {
+    const result = buildOpenClawAlerts([
+      mkAgent({ id: 'online-stuck',  status: 'active',  stuckSignal: true  }), // critical
+      mkAgent({ id: 'offline-stuck', status: 'offline', stuckSignal: true  }), // nur critical
+      mkAgent({ id: 'offline-clean', status: 'offline', stuckSignal: false }), // nur warning
+      mkAgent({ id: 'online-clean',  status: 'active',  stuckSignal: false }), // irrelevant
+    ]);
+    expect(result.critical).toHaveLength(2);
+    expect(result.criticalCount).toBe(2);
+    expect(result.critical.map((a) => a.id)).toContain('online-stuck');
+    expect(result.critical.map((a) => a.id)).toContain('offline-stuck');
+    expect(result.warning).toHaveLength(1);
+    expect(result.warningCount).toBe(1);
+    expect(result.warning[0].id).toBe('offline-clean');
   });
 });

@@ -78,6 +78,16 @@ export function agentSortRank(a: AgentLive): number {
   if (a.status === 'offline') return 2;
   return 0;
 }
+export function buildOpenClawAlerts(agents: AgentLive[]): {
+  critical: AgentLive[];
+  warning: AgentLive[];
+  criticalCount: number;
+  warningCount: number;
+} {
+  const critical = agents.filter((a) => a.stuckSignal === true);
+  const warning = agents.filter((a) => a.status === 'offline' && a.stuckSignal !== true);
+  return { critical, warning, criticalCount: critical.length, warningCount: warning.length };
+}
 /** Effektiver Ton: stuckSignal überschreibt den Status optisch (amber). */
 export function agentTone(a: AgentLive): ToneName {
   return a.stuckSignal ? 'amber' : agentStatusTone[a.status];

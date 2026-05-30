@@ -1,5 +1,8 @@
-import { AlertTriangle, Radio } from "lucide-react";
+import { useState } from "react";
+import { AlertTriangle, CheckCircle2, Radio, Send, XCircle } from "lucide-react";
+import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
 import { agentColorVar, priorityLabel, priorityTone } from "../lib/tones";
 import { STUCK_HEARTBEAT_S, agentLabel, agentTone, fmtAge } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
@@ -24,7 +27,11 @@ function truthHint(t?: string | null): string | null {
   return t && t !== "live" ? TRUTH_LABEL[t] ?? t : null;
 }
 
+type PingState = "idle" | "pending" | "success" | "error";
+
 export function AgentCard({ agent, density, now, onOpenDrilldown }: Props) {
+  const [pingState, setPingState] = useState<PingState>("idle");
+  const [pingError, setPingError] = useState<string | null>(null);
   const tone = agentTone(agent);
   const colorVar = agentColorVar[agent.id] ?? "--hc-accent";
   const heartbeat = agent.fleetHealth.heartbeat ?? agent.lastActive;
@@ -35,6 +42,28 @@ export function AgentCard({ agent, density, now, onOpenDrilldown }: Props) {
   const problem = agent.stuckSignal || agent.status === "offline";
   const taskTruth = truthHint(agent.currentTaskTruth);
   const showDrilldownButton = Boolean(onOpenDrilldown && hasDrilldownContent(agent));
+  const pingPending = pingState === "pending";
+
+  const pingAgent = async () => {
+    if (pingPending) return;
+    setPingState("pending");
+    setPingError(null);
+    try {
+      const result = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        `/api/openclaw/agents/${encodeURIComponent(agent.id)}/ping`,
+        { method: "POST" },
+      );
+      if (result.ok === false) {
+        setPingState("error");
+        setPingError(result.detail || de.openclaw.pingError);
+        return;
+      }
+      setPingState("success");
+    } catch (e) {
+      setPingState("error");
+      setPingError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3", problem && "border-amber-500/35 shadow-[0_0_0_1px_rgba(245,158,11,.12)]")}>
@@ -83,19 +112,41 @@ export function AgentCard({ agent, density, now, onOpenDrilldown }: Props) {
         </div>
       ) : null}
 
-      {showDrilldownButton ? (
-        <button
-          type="button"
-          aria-label={de.openclaw.drilldownOpen}
-          className="w-full rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm font-medium text-zinc-200 transition hover:bg-white/[.06] focus:outline-none focus:ring-2 focus:ring-[var(--hc-accent-border)]"
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpenDrilldown?.();
-          }}
-        >
-          {de.openclaw.drilldownOpen}
-        </button>
-      ) : null}
+      <div className="space-y-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            aria-label={de.openclaw.pingAction}
+            disabled={pingPending}
+            className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm font-medium text-zinc-200 transition hover:bg-white/[.06] focus:outline-none focus:ring-2 focus:ring-[var(--hc-accent-border)] disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={(event) => {
+              event.stopPropagation();
+              void pingAgent();
+            }}
+          >
+            {pingPending ? <Spinner /> : pingState === "success" ? <CheckCircle2 className="h-4 w-4 text-emerald-300" /> : pingState === "error" ? <XCircle className="h-4 w-4 text-red-300" /> : <Send className="h-4 w-4" />}
+            {pingPending ? de.openclaw.pingPending : de.openclaw.pingAction}
+          </button>
+          {showDrilldownButton ? (
+            <button
+              type="button"
+              aria-label={de.openclaw.drilldownOpen}
+              className="inline-flex min-h-10 flex-1 items-center justify-center rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm font-medium text-zinc-200 transition hover:bg-white/[.06] focus:outline-none focus:ring-2 focus:ring-[var(--hc-accent-border)]"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenDrilldown?.();
+              }}
+            >
+              {de.openclaw.drilldownOpen}
+            </button>
+          ) : null}
+        </div>
+        {pingState === "success" ? (
+          <p className="flex min-w-0 items-center gap-1.5 text-xs text-emerald-200"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 break-words">{de.openclaw.pingSuccess}</span></p>
+        ) : pingState === "error" ? (
+          <p className="flex min-w-0 items-start gap-1.5 text-xs text-red-200"><XCircle className="mt-px h-3.5 w-3.5 shrink-0" /><span className="min-w-0 break-words">{pingError ? `${de.openclaw.pingError}: ${pingError}` : de.openclaw.pingError}</span></p>
+        ) : null}
+      </div>
     </article>
   );
 }
