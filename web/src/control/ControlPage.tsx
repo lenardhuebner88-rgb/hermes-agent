@@ -33,19 +33,40 @@ export default function ControlPage() {
   const workers = useHermesWorkers();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
+  const gPendingRef = useRef<number>(0);
   const active = activeFromPath(location.pathname);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,[contenteditable='true'],[role='dialog']")) return;
       const combo = `${event.metaKey ? "Meta+" : event.ctrlKey ? "Control+" : ""}${event.key.toLowerCase()}`;
       if (combo === "Meta+k" || combo === "Control+k") {
         event.preventDefault();
         setPaletteOpen((open) => !open);
+        return;
       }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // "/" springt in die Command-Palette (Schnell-Fokus/Suche).
+      if (event.key === "/") {
+        event.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      // Zwei-Tasten-Navigation "g <x>" (g h / g a / g o / g u).
+      const key = event.key.toLowerCase();
+      const now = Date.now();
+      if (gPendingRef.current && now - gPendingRef.current < 800) {
+        const dest: Record<string, ControlTab> = { h: "hermes", a: "autoresearch", o: "openclaw", u: "overview" };
+        if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
+        gPendingRef.current = 0;
+        return;
+      }
+      gPendingRef.current = key === "g" ? now : 0;
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [navigate]);
 
   return (
     <div data-control>
@@ -61,8 +82,8 @@ export default function ControlPage() {
         onOpenCommand={() => setPaletteOpen(true)}
       >
         <Routes>
-          <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} agents={openclaw.data?.agents ?? []} />} />
-          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} agents={openclaw.data?.agents ?? []} />} />
+          <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} agents={openclaw.data?.agents ?? []} agentsLastUpdated={openclaw.lastUpdated} agentsError={openclaw.data?.error ?? openclaw.error} />} />
+          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} agents={openclaw.data?.agents ?? []} agentsLastUpdated={openclaw.lastUpdated} agentsError={openclaw.data?.error ?? openclaw.error} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
           <Route path="openclaw" element={<OpenClawFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />

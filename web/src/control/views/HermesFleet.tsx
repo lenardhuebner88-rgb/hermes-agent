@@ -59,7 +59,7 @@ export function HermesFleet({ density }: { density: Density }) {
     <div className="space-y-5">
       <section className="hc-card flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div><p className="hc-eyebrow">Hermes-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{workers.data?.count ?? list.length} aktive Läufe</h2></div>
-        {workers.loading ? <Spinner /> : <span className="text-sm hc-soft">Inspect lädt CPU/RAM pro Worker auf Knopfdruck.</span>}
+        {workers.loading ? <span className="flex items-center gap-2 text-sm hc-soft"><Spinner />Wird geladen …</span> : <span className="text-sm hc-soft">Inspect lädt CPU/RAM pro Worker auf Knopfdruck.</span>}
       </section>
       {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
       {actionError ? <ToneCallout tone="red">{actionError}</ToneCallout> : null}
@@ -71,7 +71,7 @@ export function HermesFleet({ density }: { density: Density }) {
         <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="hc-eyebrow">{de.hermes.recentResults}</p>
-            <h2 className="mt-1 text-lg font-semibold text-white">{results.data?.count ?? 0} abgeschlossene Laeufe</h2>
+            <h2 className="mt-1 text-lg font-semibold text-white">{results.loading && results.data == null ? "…" : (results.data?.count ?? 0)} abgeschlossene Läufe</h2>
           </div>
           <span className="text-sm hc-soft">{de.hermes.recentResultsHint}</span>
         </div>

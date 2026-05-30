@@ -171,6 +171,9 @@ export const AgentLiveSchema = z.object({
   roleLabel: z.string().catch("Agent"),
   roleSummary: z.string().catch("OpenClaw-Agent"),
   escalationNote: z.string().nullable().catch(null),
+  // E4: MC-parity enrichment from the read-only proxy (optional, degrades to defaults).
+  load: z.coerce.number().catch(0),
+  heartbeatTruth: z.string().nullable().optional(),
 });
 
 export const AgentsResponseSchema = z.object({

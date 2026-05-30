@@ -3,11 +3,11 @@ import { Shield } from "lucide-react";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { useOpenClawAgents } from "../hooks/useControlData";
-import { agentSortRank, nowSec } from "../lib/derive";
+import { agentIsProblem, agentSortRank, nowSec } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { AgentCard } from "../components/AgentCard";
-import { ToneCallout } from "../components/atoms";
+import { StatusPill, ToneCallout } from "../components/atoms";
 
 export function OpenClawFleet({ density }: { density: Density }) {
   const agents = useOpenClawAgents();
@@ -15,6 +15,7 @@ export function OpenClawFleet({ density }: { density: Density }) {
   const [selected, setSelected] = useState(0);
   const list = (agents.data?.agents ?? []).slice().sort((a, b) => agentSortRank(b) - agentSortRank(a));
   const active = list.filter((a) => ["active", "monitoring", "ready"].includes(a.status) && !a.stuckSignal).length;
+  const problems = list.filter(agentIsProblem).length;
   const activeIndex = Math.min(selected, Math.max(0, list.length - 1));
 
   useEffect(() => {
@@ -32,7 +33,7 @@ export function OpenClawFleet({ density }: { density: Density }) {
   return (
     <div className="space-y-5">
       <section className="hc-card flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div><p className="hc-eyebrow">OpenClaw-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{active}/{list.length} Agenten aktiv</h2></div>
+        <div className="flex items-center gap-3"><div><p className="hc-eyebrow">OpenClaw-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{active}/{list.length} Agenten aktiv</h2></div>{problems > 0 ? <StatusPill tone="amber" label={`${problems} gestaucht/offline`} dot="warn" /> : null}</div>
         {agents.loading ? <Spinner /> : <span className="text-sm hc-soft">Read-only aus Mission Control · {agents.data?.updatedAt ? new Date(agents.data.updatedAt * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) : "kein Zeitstempel"}</span>}
       </section>
       {agents.error ? <ToneCallout tone="red">{agents.error}</ToneCallout> : null}
