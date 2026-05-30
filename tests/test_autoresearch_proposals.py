@@ -1129,6 +1129,32 @@ def test_usage_filter_exactly_at_threshold_is_included(tmp_home):
     assert skipped == 0
 
 
+def test_usage_threshold_env_lever_widens_candidate_net(tmp_home, monkeypatch):
+    # B: HERMES_AUTORESEARCH_MIN_USE_COUNT lowers the bar so lightly-used skills
+    # become research candidates. Default (unset) keeps the historical 5.
+    skills_root = tmp_home / "skills"
+    _write_skill(skills_root, "lightly", "# Lightly\n\nThin.\n", use_count=2)
+
+    runner = proposals._runner()
+    usage = proposals._load_skill_usage_from_root(skills_root)
+
+    # Unset → use_count 2 is below the default 5 → skipped.
+    monkeypatch.delenv("HERMES_AUTORESEARCH_MIN_USE_COUNT", raising=False)
+    skills, _paths, _skipped = proposals._skills_for_capability_research([skills_root], runner, usage)
+    assert "lightly" not in {name for name, _ in skills}
+
+    # Lever lowered to 2 → now included.
+    monkeypatch.setenv("HERMES_AUTORESEARCH_MIN_USE_COUNT", "2")
+    skills, _paths, _skipped = proposals._skills_for_capability_research([skills_root], runner, usage)
+    assert "lightly" in {name for name, _ in skills}
+
+
+def test_usage_threshold_env_lever_ignores_garbage(tmp_home, monkeypatch):
+    # A non-numeric env value falls back to the default 5 instead of crashing.
+    monkeypatch.setenv("HERMES_AUTORESEARCH_MIN_USE_COUNT", "not-a-number")
+    assert proposals._usage_min_use_count() == 5.0
+
+
 def test_usage_loader_tolerates_missing_sidecar(tmp_home):
     # No .usage.json present → empty map, never a crash; every skill then reads
     # as below threshold and is skipped.

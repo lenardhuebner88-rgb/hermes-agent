@@ -267,6 +267,71 @@ def test_draft_fix_model_exception_is_fallbackable(monkeypatch):
     assert "RuntimeError" in res["reason"]
 
 
+# --------------------------------------------------------------------------
+# AR3 draft_fix: absence categories (missing_trigger/missing_section) take the
+# additive path — no verbatim evidence required, fix must ADD content.
+# --------------------------------------------------------------------------
+def _absence_finding(category="missing_trigger", **over):
+    base = {
+        "skill": "beta",
+        "category": category,
+        "evidence": "",  # absence findings carry no quotable evidence
+        "problem": "Der Skill sagt nirgends, WANN er benutzt werden soll.",
+        "fix_hint": "Add a concrete when-to-use trigger.",
+    }
+    base.update(over)
+    return base
+
+
+def test_draft_fix_absence_accepts_additive_fix_without_evidence(monkeypatch):
+    # missing_trigger with empty evidence: a fix that appends a concrete trigger
+    # section (keeping the old text) is accepted via the additive path.
+    added = _SKILL_FIX.rstrip() + (
+        "\n\n## Trigger\n\nUse beta when ingesting the nightly export "
+        "before the report job runs.\n"
+    )
+    reply = json.dumps({"text": added, "rationale": "Added the missing trigger."})
+    res = _draft_fix(monkeypatch, reply, finding=_absence_finding())
+    assert res["ok"] is True, res["reason"]
+    assert "report job" in res["text"]
+    assert "Use beta sometimes for stuff." in res["text"]  # existing text preserved
+
+
+def test_draft_fix_absence_rejects_shortening_fix(monkeypatch):
+    # An "additive" fix that actually shrinks/rewrites the skill is rejected.
+    reply = json.dumps({"text": "# Beta\n\n## Trigger\n\nUse it.\n", "rationale": "x"})
+    res = _draft_fix(monkeypatch, reply, finding=_absence_finding())
+    assert res["ok"] is False
+    assert "add content" in res["reason"] or "preserve" in res["reason"]
+
+
+def test_draft_fix_absence_rejects_dropping_existing_text(monkeypatch):
+    # Long enough to pass the length gate, but it replaces the body instead of
+    # preserving it → must be rejected by the preserve-existing check.
+    reply = json.dumps({
+        "text": (
+            "# Beta\n\n## Trigger\n\nUse beta when ingesting the nightly export "
+            "before the very long report job runs every single night.\n"
+        ),
+        "rationale": "rewrote instead of appending",
+    })
+    res = _draft_fix(monkeypatch, reply, finding=_absence_finding())
+    assert res["ok"] is False
+    assert "preserve" in res["reason"]
+
+
+def test_validate_fix_absence_path_is_category_gated():
+    # A non-absence finding with empty evidence still hard-fails (regression guard
+    # that the absence branch did not weaken the evidence-bearing path).
+    ok, _text, reason = writer.validate_fix(
+        _SKILL_FIX + "\nextra\n",
+        {"category": "unclear_trigger", "evidence": ""},
+        _SKILL_FIX,
+    )
+    assert ok is False
+    assert "evidence" in reason
+
+
 # ==========================================================================
 # AR3 judge_fix: resolved && no_regression → apply (both true); else closed gate
 # ==========================================================================

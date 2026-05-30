@@ -52,10 +52,10 @@ import autoresearch_request as arr  # noqa: E402  (sibling script)
 import eval_local_skills as evals  # noqa: E402  (sibling script)
 from hermes_cli import capability_researcher  # noqa: E402
 from hermes_cli.autoresearch_proposals import (  # noqa: E402
-    _USAGE_MIN_USE_COUNT,
     _VALID_STATUS,
     _build_proposal_for_finding,
     _load_skill_usage_from_root,
+    _usage_min_use_count,
     load_proposal,
     save_proposal,
 )
@@ -346,12 +346,13 @@ def discover_capability_candidates(
     """
     usage = _load_skill_usage_from_root(_skills_root())
     researched = researched_skills if researched_skills is not None else set()
+    min_use = _usage_min_use_count()
     # Highest-usage skills first so the most-used get researched earliest.
     candidates_meta: list[tuple[float, str, Path]] = []
     for path in _visible_skill_paths(roots):
         skill = path.parent.name
         use = float(usage.get(skill, 0.0))
-        if use < _USAGE_MIN_USE_COUNT:
+        if use < min_use:
             continue
         if skill in researched:
             continue

@@ -30,6 +30,15 @@ MAX_CHARS = 2200
 MAX_LINES = 60
 MAX_FIX_CHARS = 80_000
 
+# Absence categories carry no quotable evidence (the thing they flag is missing),
+# so they take the additive fix path instead of the verbatim-grounding path.
+# Kept in sync with capability_researcher._ABSENCE_CATEGORIES; imported lazily to
+# avoid a heavy import at module load, with a literal fallback.
+try:  # pragma: no cover - exercised indirectly
+    from hermes_cli.capability_researcher import _ABSENCE_CATEGORIES
+except Exception:  # pragma: no cover - defensive
+    _ABSENCE_CATEGORIES = frozenset({"missing_trigger", "missing_section"})
+
 _HEADER_RE = re.compile(r"^##\s+.+$", re.M)
 _FRONTMATTER_LINE_RE = re.compile(r"^---\s*$", re.M)
 _PLACEHOLDER_RE = re.compile(r"\b(?:todo|placeholder|lorem ipsum)\b", re.I)
@@ -168,15 +177,22 @@ def validate_fix(
     skill_text: str,
 ) -> tuple[bool, str | None, str | None]:
     body = (text or "").strip()
+    category = str(finding.get("category") or "").strip()
+    is_absence = category in _ABSENCE_CATEGORIES
     evidence = str(
         finding.get("evidence")
         or finding.get("evidence_quote")
         or ""
     ).strip()
-    if not evidence:
-        return False, None, "missing verbatim evidence quote"
-    if _norm_ws(evidence) not in _norm_ws(skill_text):
-        return False, None, "evidence quote is not verbatim in skill text"
+    # Absence findings (missing_trigger/missing_section) describe something that
+    # is *not* in the skill, so they carry no quotable evidence. The verbatim
+    # grounding check is meaningless there; instead the fix must ADD content.
+    # Every other category must still quote the skill verbatim and anchor on it.
+    if not is_absence:
+        if not evidence:
+            return False, None, "missing verbatim evidence quote"
+        if _norm_ws(evidence) not in _norm_ws(skill_text):
+            return False, None, "evidence quote is not verbatim in skill text"
     if not body:
         return False, None, "empty fix"
     if body == skill_text.strip():
@@ -192,6 +208,15 @@ def validate_fix(
     if _SECRET_RE.search(body):
         return False, None, "leaked secret value not allowed"
     normalised = body.rstrip() + "\n"
+    if is_absence:
+        # The fix must genuinely add the missing trigger/section, not rewrite or
+        # shrink the skill: require it to be a strict superset in length and to
+        # keep the existing text intact.
+        if len(normalised.strip()) <= len(skill_text.strip()):
+            return False, None, "absence fix must add content, not shorten the skill"
+        if _norm_ws(skill_text.strip()) not in _norm_ws(normalised):
+            return False, None, "absence fix must preserve the existing skill text"
+        return True, normalised, None
     if not _fix_touches_evidence(skill_text, normalised, evidence):
         return False, None, "fix is not grounded in the evidence quote"
     return True, normalised, None
@@ -419,29 +444,52 @@ def draft_fix(
 ) -> dict:
     """Ask MiniMax-M2.7 to write a grounded fix for one AR3 finding."""
     category = str(finding.get("category") or "").strip()
+    is_absence = category in _ABSENCE_CATEGORIES
     evidence = str(finding.get("evidence") or finding.get("evidence_quote") or "").strip()
     fix_hint = str(finding.get("fix_hint") or "").strip()
     problem = str(finding.get("problem") or "").strip()
-    if not evidence:
-        return {"ok": False, "text": None, "rationale": None, "reason": "missing verbatim evidence quote"}
-    if _norm_ws(evidence) not in _norm_ws(skill_text):
-        return {"ok": False, "text": None, "rationale": None, "reason": "evidence quote is not verbatim in skill text"}
-    system = (
-        "Du reparierst eine konkrete Schwaeche in einer Hermes SKILL.md. "
-        "Nutze denselben skills_hub-Slot wie der Abschnittsschreiber. "
-        "Der Fix MUSS am angegebenen evidence-Zitat ansetzen; aendere keine "
-        "unabhaengigen Stellen. Antworte bevorzugt als JSON mit `text` "
-        "(vollstaendiger neuer SKILL.md-Inhalt) und `rationale`. Alternativ "
-        "darfst du JSON mit `old_text`, `new_text`, `rationale` liefern, wobei "
-        "`old_text` das evidence-Zitat enthalten muss. Kein Markdown-Fence um JSON. "
-        "Keine destruktiven Shell-Befehle, kein `sudo`, kein pipe-to-shell, keine "
-        "echten Secret-/Token-Werte, keine Platzhalter oder TODOs."
+    # Absence findings legitimately have no evidence quote (the thing is missing);
+    # only enforce the verbatim guard for evidence-bearing categories.
+    if not is_absence:
+        if not evidence:
+            return {"ok": False, "text": None, "rationale": None, "reason": "missing verbatim evidence quote"}
+        if _norm_ws(evidence) not in _norm_ws(skill_text):
+            return {"ok": False, "text": None, "rationale": None, "reason": "evidence quote is not verbatim in skill text"}
+    if is_absence:
+        system = (
+            "Du ergaenzt eine FEHLENDE Stelle in einer Hermes SKILL.md "
+            "(missing_trigger: es fehlt JEDE Angabe, WANN der Skill benutzt wird; "
+            "missing_section: ein empfohlener Abschnitt fehlt ganz). Es gibt KEIN "
+            "evidence-Zitat, weil das Gesuchte noch nicht existiert. Fuege den "
+            "fehlenden Inhalt HINZU, ohne bestehenden Text zu loeschen oder "
+            "umzuschreiben. Antworte als JSON mit `text` (vollstaendiger neuer "
+            "SKILL.md-Inhalt = bisheriger Text PLUS Ergaenzung) und `rationale`. "
+            "Kein Markdown-Fence um JSON. Keine destruktiven Shell-Befehle, kein "
+            "`sudo`, kein pipe-to-shell, keine echten Secret-/Token-Werte, keine "
+            "Platzhalter oder TODOs."
+        )
+    else:
+        system = (
+            "Du reparierst eine konkrete Schwaeche in einer Hermes SKILL.md. "
+            "Nutze denselben skills_hub-Slot wie der Abschnittsschreiber. "
+            "Der Fix MUSS am angegebenen evidence-Zitat ansetzen; aendere keine "
+            "unabhaengigen Stellen. Antworte bevorzugt als JSON mit `text` "
+            "(vollstaendiger neuer SKILL.md-Inhalt) und `rationale`. Alternativ "
+            "darfst du JSON mit `old_text`, `new_text`, `rationale` liefern, wobei "
+            "`old_text` das evidence-Zitat enthalten muss. Kein Markdown-Fence um JSON. "
+            "Keine destruktiven Shell-Befehle, kein `sudo`, kein pipe-to-shell, keine "
+            "echten Secret-/Token-Werte, keine Platzhalter oder TODOs."
+        )
+    evidence_line = (
+        "Evidence: (keine — die Stelle fehlt; ergaenze sie additiv)\n\n"
+        if is_absence
+        else f"Evidence verbatim:\n{evidence}\n\n"
     )
     user = (
         f"Skill: {skill_name}\n"
         f"Kategorie: {category}\n"
         f"Problem: {problem}\n"
-        f"Evidence verbatim:\n{evidence}\n\n"
+        f"{evidence_line}"
         f"Fix-Hinweis:\n{fix_hint}\n\n"
         "Vollstaendiger bisheriger Skill-Text:\n"
         f"{skill_text}\n\n"

@@ -114,6 +114,21 @@ _RANK_W_SUBSTANCE = 0.5
 _RANK_W_USAGE = 1.0
 # use_count at/above which a skill reads as "frequently used" in the reason text
 _RANK_USAGE_FREQUENT = 50.0
+def _usage_min_use_count() -> float:
+    """Minimum use_count for a skill to be an AR3 research candidate. Env-tunable
+    (``HERMES_AUTORESEARCH_MIN_USE_COUNT``) so the operator can widen the net to
+    lightly-used skills without a code change; defaults to the historical 5."""
+    raw = os.environ.get("HERMES_AUTORESEARCH_MIN_USE_COUNT")
+    if raw is None or not raw.strip():
+        return 5.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 5.0
+
+
+# Back-compat constant: the historical default. Live filtering reads
+# _usage_min_use_count() so the env lever takes effect; tests still import this.
 _USAGE_MIN_USE_COUNT = 5
 
 
@@ -456,7 +471,7 @@ def _skills_for_capability_research(
     skipped_low_usage = 0
     for path in _visible_skill_paths(roots, runner):
         skill = path.parent.name
-        if float(usage.get(skill, 0.0)) < _USAGE_MIN_USE_COUNT:
+        if float(usage.get(skill, 0.0)) < _usage_min_use_count():
             skipped_low_usage += 1
             continue
         try:
