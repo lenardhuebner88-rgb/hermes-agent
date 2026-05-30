@@ -24,7 +24,8 @@ describe("autoresearch loop display", () => {
   it("clamps loop iterations to the bounded runner range", () => {
     expect(clampLoopIterations(0)).toBe(1);
     expect(clampLoopIterations(3)).toBe(3);
-    expect(clampLoopIterations(99)).toBe(5);
+    expect(clampLoopIterations(99)).toBe(50);
+    expect(clampLoopIterations(50)).toBe(50);
   });
 
   it("does not show 0/0 when idle", () => {

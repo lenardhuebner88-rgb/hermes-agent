@@ -494,8 +494,8 @@ def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
     if state in {"running", "stopping"}:
         raise HTTPException(status_code=409, detail="a run is already in progress")
 
-    mi = max(1, min(int(max_iterations), 5))
     arr = _load_request_module()
+    mi = max(1, min(int(max_iterations), arr.MAX_ITERATIONS))
     requests_dir = _audit_dir() / "run-requests"
     try:
         request_path = arr.create_request(

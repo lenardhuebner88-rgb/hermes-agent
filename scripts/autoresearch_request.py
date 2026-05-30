@@ -17,7 +17,9 @@ REQUESTS_DIR = AUDIT / "run-requests"
 DEFAULT_HERMES_HOME = get_hermes_home()
 SCHEMA = "autoresearch-run-request-v1"
 ALLOWED_MODES = {"skills", "tests", "code", "docs", "research_qa"}
-MAX_ITERATIONS = 5
+# AR3 sweeps one skill per iteration, so the cap is "skills per run". Raised from
+# the scaffold-era 5 so a single (cron) run can cover the whole used-skill set.
+MAX_ITERATIONS = 50
 AREA_ROOTS = {
     "all": ("skills",),
     "github": ("skills/github",),

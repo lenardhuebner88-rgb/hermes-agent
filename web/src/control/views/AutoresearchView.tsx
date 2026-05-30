@@ -152,7 +152,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
           <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
             <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
-            <input id="loop-iterations" type="number" min={1} max={5} value={maxIterations} onChange={(event) => setMaxIterations(clampLoopIterations(Number(event.target.value)))} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(clampLoopIterations(Number(event.target.value)))} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>

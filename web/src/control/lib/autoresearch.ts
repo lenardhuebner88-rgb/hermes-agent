@@ -18,9 +18,12 @@ export interface RankedProposalQueue {
   summary: { total: number; shown: number; remaining: number };
 }
 
+// AR3 sweeps one skill per iteration; the ceiling mirrors the backend
+// MAX_ITERATIONS so a manual run can cover the whole used-skill set.
+export const MAX_LOOP_ITERATIONS = 50;
 export function clampLoopIterations(value: number): number {
   if (!Number.isFinite(value)) return 1;
-  return Math.max(1, Math.min(5, Math.round(value)));
+  return Math.max(1, Math.min(MAX_LOOP_ITERATIONS, Math.round(value)));
 }
 
 export function describeLoopStatus(status: AutoresearchStatus | null) {
