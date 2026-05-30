@@ -208,9 +208,12 @@ export interface Proposal {
   target: string;
   section: string | null;
   title?: string | null;
+  category?: string | null;
+  evidence?: string | null;
   new_text?: string | null;
   rationale_plain: string;
   diff_before_after: string;
+  rank_score?: number | null;
   mode: ProposalMode;
   status: ProposalStatus;
   last_outcome?: ProposalLastOutcome;

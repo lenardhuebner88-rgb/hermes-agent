@@ -10,12 +10,9 @@ operator actually cares about:
 * ``missing_trigger``  — no "when to use" / activation trigger at all
 * ``unclear_trigger``  — a trigger exists but is vague / un-actionable
 * ``incomplete_steps`` — the procedure stops mid-way / has an obvious gap
-* ``missing_section``  — a recommended section is absent. RESERVED category: it
-                         carries a severity weight so the deterministic AR0
-                         signal from ``run_autoresearch_request.discover_candidates``
-                         can be *folded in* later, but THIS module does not emit
-                         it yet — it is purely model-driven today and complements
-                         (does not replace) ``discover_candidates``.
+* ``missing_section``  — a recommended section is absent. Lowest-severity AR3
+                         category; section-scaffold discovery is no longer the
+                         live proposal source.
 
 The semantic categories are detected by the **MiniMax-M2.7** model over the
 existing ``skills_hub`` auxiliary slot (``agent.auxiliary_client.call_llm(
@@ -156,10 +153,11 @@ _SYSTEM_PROMPT = (
     "- missing_trigger: es fehlt JEDE Angabe, WANN der Skill benutzt wird\n"
     "- unclear_trigger: ein Trigger existiert, ist aber vage / nicht handlungsleitend\n"
     "- incomplete_steps: die Schritt-/Prozess-Anleitung bricht ab oder hat eine offensichtliche Lücke\n"
+    "- missing_section: ein empfohlener Abschnitt fehlt; nur nutzen, wenn keine konkretere Kategorie passt\n"
     "Antworte mit GENAU EINEM JSON-Objekt, sonst nichts:\n"
     f"{_JSON_SHAPE}\n"
     "Für contradiction/stale/unclear_trigger/incomplete_steps MUSS evidence ein wörtliches "
-    "Zitat aus dem Skill sein. Für missing_trigger darf evidence leer sein. "
+    "Zitat aus dem Skill sein. Für missing_trigger/missing_section darf evidence leer sein. "
     'Wenn der Skill solide ist, gib {"findings": []} zurück. Erfinde NICHTS. Höchstens 4 Funde.'
 )
 
@@ -324,9 +322,14 @@ def research_skills(
     usage: dict[str, float] | None = None,
     max_per_skill: int = _DEFAULT_MAX_FINDINGS,
     limit: int | None = None,
+    on_skill: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the capability researcher over ``(skill_name, skill_text)`` pairs,
     dedupe, rank, and cap. Read-only: returns a report, writes nothing.
+
+    ``on_skill(skill_name)`` is invoked just BEFORE each (slow) per-skill model
+    call so a caller can emit a heartbeat and not be falsely reported as crashed
+    while a long sweep is in progress. It must never raise.
 
     Returns ``{"ok", "findings", "skills_seen", "skills_with_findings",
     "dropped", "errors"}``."""
@@ -336,6 +339,11 @@ def research_skills(
     errors = 0
     for skill_name, skill_text in skills:
         skills_seen += 1
+        if on_skill is not None:
+            try:
+                on_skill(skill_name)
+            except Exception:  # a heartbeat hiccup must never sink the sweep
+                pass
         res = research_skill(skill_name, skill_text, call_llm=call_llm, max_findings=max_per_skill)
         if not res.get("ok"):
             errors += 1

@@ -101,6 +101,11 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(audit))
     runner = _load("run_autoresearch_request", RUNNER)
     monkeypatch.setattr(runner, "_call_auxiliary_llm", lambda **_kwargs: _Resp())
+    # These fixtures exercise the LEGACY section-scaffold loop path, which is now
+    # opt-in (default off: "kein Schein"). Enable it explicitly so the scaffold
+    # apply/revert assertions below still run. (AR3 is a no-op here anyway: the
+    # demo skills carry no usage, so the use_count>=5 filter excludes them.)
+    monkeypatch.setattr(runner, "_ENABLE_SECTION_SCAFFOLD_DISCOVERY", True)
     arr = _load("autoresearch_request", REQUEST_SCRIPT)
     return {
         "runner": runner, "arr": arr, "home": home, "skills": skills,

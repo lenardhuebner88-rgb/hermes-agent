@@ -48,10 +48,11 @@ from typing import Any
 # This module is only imported by the dashboard, where fastapi is guaranteed.
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
 from hermes_cli import autoresearch_proposals as _proposals
+from scripts import autoresearch_writer as _writer
 
 # hermes-agent repo root (this file lives in hermes_cli/).
 _REPO = Path(__file__).resolve().parents[1]
@@ -378,8 +379,107 @@ class ApplyProposalBody(BaseModel):
     confirm: bool = True
 
 
+class ConfirmBatchBody(BaseModel):
+    ids: list[str]
+    confirm: bool = True
+
+
 class SkipProposalBody(BaseModel):
     id: str
+
+
+def _finding_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "proposal_id": proposal.get("id"),
+        "proposal_type": proposal.get("proposal_type"),
+        "skill": proposal.get("target"),
+        "section": proposal.get("section"),
+        "category": proposal.get("category"),
+        "title": proposal.get("title"),
+        "problem": proposal.get("rationale_plain"),
+        "evidence": proposal.get("evidence"),
+        "fix_hint": proposal.get("fix_hint"),
+        "writer_rationale": proposal.get("writer_rationale"),
+    }
+
+
+def confirm_batch_proposals(ids: list[str], *, confirm: bool = True) -> dict[str, Any]:
+    """Judge and apply skill proposals by id through the existing apply path."""
+    results: list[dict[str, Any]] = []
+    if not confirm:
+        for pid in ids:
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": "batch confirm requires confirm=true",
+            })
+        return {"ok": False, "results": results}
+
+    for pid in ids:
+        proposal = _proposals.load_proposal(pid)
+        if proposal is None:
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": f"no such proposal: {pid}",
+            })
+            continue
+        if proposal.get("status") != "proposed":
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": f"proposal is '{proposal.get('status')}', not actionable",
+            })
+            continue
+        if proposal.get("mode") != "skill":
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": "batch confirm only supports skill proposals",
+            })
+            continue
+        before_text = proposal.get("before_text")
+        after_text = proposal.get("after_text")
+        if not isinstance(before_text, str) or not isinstance(after_text, str):
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": "proposal is malformed (missing before_text/after_text)",
+            })
+            continue
+
+        judge = _writer.judge_fix(before_text, after_text, _finding_from_proposal(proposal))
+        if not (judge.get("resolved") is True and judge.get("no_regression") is True):
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": str(judge.get("reason") or "judge rejected proposal"),
+                "judge": judge,
+            })
+            continue
+
+        applied = _proposals.apply_proposal(pid, confirm=True, judged=True)
+        if applied.get("ok") is True:
+            results.append({
+                "id": pid,
+                "status": "applied",
+                "reason": str(applied.get("result") or "applied"),
+                "judge": judge,
+                "apply_result": applied,
+            })
+        else:
+            results.append({
+                "id": pid,
+                "status": "skipped",
+                "reason": str(applied.get("detail") or applied.get("result") or "apply failed"),
+                "judge": judge,
+                "apply_result": applied,
+            })
+
+    return {
+        "ok": all(item["status"] == "applied" for item in results) if results else True,
+        "results": results,
+    }
 
 
 def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
@@ -579,6 +679,7 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
     <h2>💡 Verbesserungs-Vorschläge <span class="badge badge-info" id="propOpenCount"></span></h2>
     <div class="prop-toolbar">
       <button class="btn btn-primary" id="btnGenerate">✨ Verbesserungen holen</button>
+      <button class="btn" id="btnGenerateCode" title="Allowlisted Hermes-Code mit MiniMax prüfen">Code-Schwächen suchen</button>
       <span class="spacer"></span>
       <button class="btn btn-apply" id="btnApplyAll" title="Alle offenen Skill-Vorschläge übernehmen">✓ Alle übernehmen</button>
     </div>
@@ -850,14 +951,29 @@ async function generateProposals(){
   }catch(e){toast('generate fehlgeschlagen: '+e,'err');}
   loadProposals();
 }
+async function generateCodeWeaknessProposals(){
+  toast('suche Code-Schwächen…');
+  try{
+    const d=await(await fetch(BASE+'/autoresearch/generate-code-weaknesses',{method:'POST'})).json();
+    toast(d.created_count?('Code: '+d.created_count+' neue(r) Vorschlag/Vorschläge'):'keine neuen Code-Funde',d.created_count?'ok':null);
+  }catch(e){toast('code-finder fehlgeschlagen: '+e,'err');}
+  loadProposals();
+}
 async function applyAll(){
   const open=(gProposals.proposals||[]).filter(p=>p.status==='proposed'&&p.mode!=='code');
   if(!open.length){toast('nichts offen zum Übernehmen');return;}
   if(!confirm('Alle '+open.length+' offenen Skill-Vorschläge übernehmen? (Backup + Auto-Revert pro Stück)'))return;
-  for(const p of open){await applyProposal(p.id);}
-  toast('Alle übernommen ('+open.length+')','ok');
+  toast('prüfe Batch…');
+  try{
+    const d=await(await fetch(BASE+'/autoresearch/confirm-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:open.map(p=>p.id),confirm:true})})).json();
+    const applied=(d.results||[]).filter(r=>r.status==='applied').length;
+    const skipped=(d.results||[]).filter(r=>r.status==='skipped').length;
+    toast('Batch: '+applied+' übernommen, '+skipped+' übersprungen',applied?'ok':null);
+  }catch(e){toast('Batch fehlgeschlagen: '+e,'err');}
+  loadProposals();loadAudit();loadWorklist();
 }
 $('btnGenerate').addEventListener('click',generateProposals);
+$('btnGenerateCode').addEventListener('click',generateCodeWeaknessProposals);
 $('btnApplyAll').addEventListener('click',applyAll);
 $('btnDry').addEventListener('click',()=>trigger('dry-run'));
 $('btnApply').addEventListener('click',()=>trigger('apply'));
@@ -930,14 +1046,41 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.post("/autoresearch/generate")
     async def autoresearch_generate() -> dict[str, Any]:
         """Deterministic (A1): discover skill-improvement candidates and persist
-        them as previewable proposals. No mutation, no model."""
+        them as previewable proposals. No mutation."""
         return _proposals.generate_proposals()
+
+    @app.post("/autoresearch/generate-code-weaknesses")
+    async def autoresearch_generate_code_weaknesses() -> dict[str, Any]:
+        """MiniMax-backed, allowlisted code weakness finder. It only persists
+        mode=code proposals; applying them uses the existing code gate."""
+        return _proposals.generate_code_weakness_proposals()
 
     @app.post("/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:
         """Apply exactly one stored proposal: backup → write → eval-gate →
-        keep/auto-revert. Skill-mode only in A1; code-mode is gated to A3."""
+        keep/auto-revert. Code-mode goes through the detached test-suite gate."""
         return _proposals.apply_proposal(body.id, confirm=body.confirm)
+
+    @app.post("/autoresearch/confirm-batch")
+    async def autoresearch_confirm_batch(request: Request) -> dict[str, Any]:
+        """Judge each skill proposal, then delegate accepted ids to apply_proposal."""
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        if isinstance(payload, list):
+            try:
+                body = ConfirmBatchBody(ids=payload)
+            except ValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        elif isinstance(payload, dict):
+            try:
+                body = ConfirmBatchBody(**payload)
+            except ValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            raise HTTPException(status_code=400, detail="body must be an id list or {ids:[...]}")
+        return confirm_batch_proposals(body.ids, confirm=body.confirm)
 
     @app.post("/autoresearch/skip")
     async def autoresearch_skip_proposal(body: SkipProposalBody) -> dict[str, Any]:

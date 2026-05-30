@@ -55,6 +55,57 @@ describe("ProposalsResponseSchema (A3 code gate)", () => {
 });
 
 
+describe("ProposalsResponseSchema (Track-C category/evidence)", () => {
+  it("preserves category and verbatim evidence on a proposal", () => {
+    const raw = {
+      count: 1, open_count: 1,
+      proposals: [{
+        id: "p-cat", target: "agent/foo.py", section: null,
+        rationale_plain: "weil", diff_before_after: "- a\n+ b",
+        category: "Sicherheit", evidence: "Zeile 42: secret im Log",
+        rank_score: 0.87,
+        mode: "code", status: "proposed",
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].category).toBe("Sicherheit");
+    expect(parsed.proposals[0].evidence).toBe("Zeile 42: secret im Log");
+    expect(parsed.proposals[0].rank_score).toBe(0.87);
+  });
+
+  it("coerces a numeric-string rank_score and tolerates a missing category/evidence", () => {
+    const raw = {
+      count: 1, open_count: 1,
+      proposals: [{
+        id: "p-min", target: "skill", section: null,
+        rationale_plain: "r", diff_before_after: "",
+        rank_score: "0.5",
+        mode: "skill", status: "proposed",
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].rank_score).toBe(0.5);
+    expect(parsed.proposals[0].category ?? null).toBeNull();
+    expect(parsed.proposals[0].evidence ?? null).toBeNull();
+  });
+
+  it("falls back to null when the backend sends a non-string category/evidence (catch contract)", () => {
+    const raw = {
+      count: 1, open_count: 1,
+      proposals: [{
+        id: "p-bad", target: "skill", section: null,
+        rationale_plain: "r", diff_before_after: "",
+        category: 123, evidence: { not: "a string" }, rank_score: "not-a-number",
+        mode: "skill", status: "proposed",
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].category).toBeNull();
+    expect(parsed.proposals[0].evidence).toBeNull();
+    expect(parsed.proposals[0].rank_score).toBeNull();
+  });
+});
+
 describe("ProposalsResponseSchema (Sprint A last_outcome counts)", () => {
   it("preserves last_outcome and the backend status split", () => {
     const raw = {

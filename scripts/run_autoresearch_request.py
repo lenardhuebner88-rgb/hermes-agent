@@ -39,6 +39,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 _SCRIPTS = Path(__file__).resolve().parent
 REPO = _SCRIPTS.parent
@@ -49,6 +50,15 @@ if str(REPO) not in sys.path:
 
 import autoresearch_request as arr  # noqa: E402  (sibling script)
 import eval_local_skills as evals  # noqa: E402  (sibling script)
+from hermes_cli import capability_researcher  # noqa: E402
+from hermes_cli.autoresearch_proposals import (  # noqa: E402
+    _USAGE_MIN_USE_COUNT,
+    _VALID_STATUS,
+    _build_proposal_for_finding,
+    _load_skill_usage_from_root,
+    load_proposal,
+    save_proposal,
+)
 from hermes_constants import get_hermes_home  # noqa: E402
 
 _DEFAULT_AUDIT = REPO / ".hermes" / "skill-audit"
@@ -59,6 +69,12 @@ RESULTS_COLUMNS = [
 MODEL_PREFERENCE = "MiniMax-M2.7-highspeed"
 MODEL_NEEDLE = "MiniMax-M2.7"
 HEARTBEAT_FRESH_S = 30.0
+# Scaffolder OFF by default (signed commitment "kein Schein"): the live loop runs
+# the AR3 capability researcher only. Flip to True (or set the env override) for
+# explicit recovery / tests that still exercise the legacy section-scaffold path.
+_ENABLE_SECTION_SCAFFOLD_DISCOVERY = (
+    os.environ.get("HERMES_AUTORESEARCH_ENABLE_SCAFFOLD", "0") == "1"
+)
 
 # Maps an eval "recommended section missing" label to a scaffold header whose
 # text contains a needle eval_local_skills.SECTION_GROUPS recognises.
@@ -249,6 +265,8 @@ def discover_candidates(roots: list[Path], attempted: set[tuple[str, str]]) -> l
     """List (skill, missing-section) candidates under the given roots.
 
     Sorted so nearly-complete skills are fixed first ("smallest high-value").
+    The live loop gates this legacy scaffolder separately; keep this helper's
+    discovery semantics stable for tests/manual recovery.
     """
     seen: set[Path] = set()
     cands: list[dict] = []
@@ -277,6 +295,100 @@ def discover_candidates(roots: list[Path], attempted: set[tuple[str, str]]) -> l
                     "n_missing": len(missing),
                 })
     cands.sort(key=lambda c: (c["n_missing"], str(c["path"]), c["label"]))
+    return cands
+
+
+def _visible_skill_paths(roots: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for root in roots:
+        for path in evals.find_skills(root):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+            paths.append(path)
+    return paths
+
+
+def _capability_finding_key(finding: dict) -> tuple[str, str, str]:
+    return (
+        str(finding.get("skill") or ""),
+        str(finding.get("category") or ""),
+        str(finding.get("evidence") or ""),
+    )
+
+
+def discover_capability_candidates(
+    roots: list[Path],
+    attempted: set[tuple[str, str, str]],
+    *,
+    max_skills: int | None = None,
+    researched_skills: set[str] | None = None,
+    heartbeat_cb: Callable[[], None] | None = None,
+) -> list[dict]:
+    """List AR3 capability weaknesses under roots, filtered to used skills.
+
+    This is the live discovery path. It is read-only: findings are reported and
+    audited, but no skill is mutated here.
+
+    Researching a skill is one (slow) model call. To keep the live loop's
+    heartbeat fresh (TTL 30s) it researches at most ``max_skills`` skills per call
+    — the loop drives one skill per iteration — and records each in
+    ``researched_skills`` so later iterations move on instead of re-sweeping the
+    whole set. ``heartbeat_cb`` is pulsed before each skill's model call. With
+    ``max_skills=None`` it sweeps everything (legacy/tests).
+    """
+    usage = _load_skill_usage_from_root(_skills_root())
+    researched = researched_skills if researched_skills is not None else set()
+    # Highest-usage skills first so the most-used get researched earliest.
+    candidates_meta: list[tuple[float, str, Path]] = []
+    for path in _visible_skill_paths(roots):
+        skill = path.parent.name
+        use = float(usage.get(skill, 0.0))
+        if use < _USAGE_MIN_USE_COUNT:
+            continue
+        if skill in researched:
+            continue
+        candidates_meta.append((use, skill, path))
+    candidates_meta.sort(key=lambda t: (-t[0], t[1]))
+    if max_skills is not None:
+        candidates_meta = candidates_meta[: max(1, int(max_skills))]
+
+    skills: list[tuple[str, str]] = []
+    path_by_skill: dict[str, Path] = {}
+    for _use, skill, path in candidates_meta:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        skills.append((skill, text))
+        path_by_skill.setdefault(skill, path)
+        researched.add(skill)  # mark even if it yields no finding, so we advance
+    if not skills:
+        return []
+
+    def _pulse(_skill_name: str) -> None:
+        if heartbeat_cb is not None:
+            heartbeat_cb()
+
+    report = capability_researcher.research_skills(skills, usage=usage, on_skill=_pulse)
+    cands: list[dict] = []
+    for finding in report.get("findings") or []:
+        key = _capability_finding_key(finding)
+        if key in attempted:
+            continue
+        path = path_by_skill.get(str(finding.get("skill") or ""))
+        if path is None:
+            continue
+        cand = dict(finding)
+        cand["path"] = path
+        cands.append(cand)
     return cands
 
 
@@ -436,6 +548,8 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
 
     set_status(state_dir, "running", route_status, note=summary.get("route_note"))
     attempted: set[tuple[str, str]] = set()
+    attempted_capabilities: set[tuple[str, str, str]] = set()
+    researched_skills: set[str] = set()  # AR3 skills already swept (one per iteration)
     # apply scans only under-skills roots; dry-run may scan all allowed roots (read-only).
     roots = [p for p in (under_skills if effective_apply else allowed) if p.exists()]
 
@@ -451,6 +565,81 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                 time.sleep(sleep_s)
             if _STOP["requested"]:
                 summary["stopped"] = True
+                break
+            # One skill per iteration with a per-skill heartbeat: a slow model
+            # sweep can no longer go >30s silent and be misreported as crashed.
+            _researched_before = len(researched_skills)
+            capability_cands = discover_capability_candidates(
+                roots,
+                attempted_capabilities,
+                max_skills=1,
+                researched_skills=researched_skills,
+                heartbeat_cb=lambda: heartbeat(state_dir, request_id, i, cap, "discover", None),
+            )
+            if capability_cands:
+                # Build a grounded-fix PROPOSAL per finding from the skill we just
+                # researched and queue it for the operator's judge + batch-confirm.
+                # The loop NEVER auto-writes a skill fix (signed gate) — it only
+                # fills the review queue: the "viele Loops füllen die Queue" model.
+                queued = 0
+                for cand in capability_cands:
+                    if _STOP["requested"]:
+                        summary["stopped"] = True
+                        break
+                    attempted_capabilities.add(_capability_finding_key(cand))
+                    path = cand["path"]
+                    skill = str(cand.get("skill") or path.parent.name)
+                    category = str(cand.get("category") or "weakness")
+                    category_label = capability_researcher.WEAKNESS_CATEGORIES.get(category, (0, category))[1]
+                    evidence = str(cand.get("evidence") or str(path))
+                    hypothesis = str(cand.get("problem") or f"AR3 found a {category_label} in {skill}.")
+                    fix_hint = str(cand.get("fix_hint") or "Gezielt präzisieren.")
+                    heartbeat(state_dir, request_id, i, cap, "draft_fix", None)
+
+                    proposal = _build_proposal_for_finding(cand, path)
+                    pid = proposal["id"] if proposal else None
+                    existing = load_proposal(pid) if pid else None
+                    if proposal is None:
+                        decision = "no_grounded_fix"
+                        eval_result = "AR3 finding had no valid grounded fix — skipped"
+                    elif existing is not None and existing.get("status") in _VALID_STATUS:
+                        decision = "already_queued"
+                        eval_result = f"proposal {pid} already {existing.get('status')}"
+                    else:
+                        save_proposal(proposal)
+                        decision = "proposed"
+                        eval_result = "AR3 grounded fix queued for judge + batch-confirm"
+                        summary["proposed"] += 1
+                        queued += 1
+
+                    append_result({
+                        "timestamp": _utc_now(), "mode": summary["mode"],
+                        "target": f"{skill}:{category}",
+                        "hypothesis": hypothesis,
+                        "change": f"AR3 {category_label}; fix_hint: {fix_hint}",
+                        "eval_command": "capability_researcher.research_skills + draft_fix",
+                        "eval_result": eval_result, "decision": decision,
+                        "risk": "medium", "evidence": evidence,
+                    })
+                    summary["steps"].append({
+                        "target": f"{skill}:{category_label}", "hypothesis": hypothesis,
+                        "decision": decision, "eval_result": eval_result,
+                    })
+                summary["iterations"] = i
+                heartbeat(state_dir, request_id, i, cap, "eval", f"queued={queued}")
+                if _STOP["requested"]:
+                    summary["stopped"] = True
+                    break
+                continue
+
+            # The skill(s) we just researched yielded no groundable finding, but
+            # more un-researched skills may remain — keep sweeping until AR3
+            # discovery is exhausted (a pass that researched nothing new).
+            if len(researched_skills) > _researched_before:
+                summary["iterations"] = i
+                continue
+
+            if not _ENABLE_SECTION_SCAFFOLD_DISCOVERY:
                 break
             cands = discover_candidates(roots, attempted)
             if not cands:

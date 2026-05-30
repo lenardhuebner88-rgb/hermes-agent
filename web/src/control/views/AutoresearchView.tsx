@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { FlaskConical, GitPullRequestArrow, Play, RotateCw, Square } from "lucide-react";
+import { CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Square, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, describeLoopStatus, rankAutoresearchProposals, splitAutoresearchProposals } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, pruneProposalSelection, rankAutoresearchReviewQueue, selectVisibleProposals, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -22,12 +22,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const reverted = split.reverted;
   const applied = split.applied;
   const skipped = split.skipped;
-  const relevanceQueue = useMemo(() => rankAutoresearchProposals(open, 10), [open]);
+  const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(open, 10), [open]);
+  const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
+  // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
+  // operator actually sees, never the backlog hidden in the collapsed <details>.
+  const visibleProposalIds = useMemo(() => relevanceQueue.shortlist.map((item) => item.proposal.id), [relevanceQueue.shortlist]);
+  const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
   const [maxIterations, setMaxIterations] = useState(2);
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
+  const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
+  const batchBusy = store.busy === "confirm-batch";
 
   const startLoop = async () => {
     setLoopBusy("start");
@@ -81,6 +88,23 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, relevanceQueue.shortlist, store]);
+
+  useEffect(() => {
+    setSelectedProposalIds((current) => {
+      const next = new Set(pruneProposalSelection(current, queueProposalIds));
+      return next.size === current.size ? current : next;
+    });
+  }, [queueProposalIds]);
+
+  const toggleSelection = (proposalId: string, selected: boolean) => {
+    setSelectedProposalIds((current) => toggleProposalSelection(current, proposalId, selected));
+  };
+
+  const selectQueue = () => setSelectedProposalIds(selectVisibleProposals(visibleProposalIds));
+  const clearSelection = () => setSelectedProposalIds(clearProposalSelection());
+  const confirmSelected = async () => {
+    await store.confirmBatch(selectedIds);
+  };
 
   return (
     <div className="space-y-5">
@@ -145,17 +169,59 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
             <p className="mt-1 text-sm hc-soft">{open.length} offen · {reverted.length} zurückgerollt</p>
           </div>
-          {store.loading ? <Spinner /> : null}
+          <div className="flex flex-col gap-2 sm:items-end">
+            {store.loading ? <Spinner /> : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
+              <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
+                {de.autoresearch.selectAllVisible}
+              </Button>
+              <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
+                {de.autoresearch.clearSelection}
+              </Button>
+              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={selectedIds.length === 0 || batchBusy} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+                {de.autoresearch.batchConfirm}
+              </Button>
+            </div>
+          </div>
         </div>
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
-          {relevanceQueue.shortlist.map((item) => <ProposalCard key={item.proposal.id} proposal={item.proposal} priorityGroup={item.group} density={density} busy={store.busy === item.proposal.id} onApply={store.apply} onSkip={store.skip} />)}
+          {relevanceQueue.shortlist.map((item) => (
+            <ProposalCard
+              key={item.proposal.id}
+              proposal={item.proposal}
+              priorityGroup={item.group}
+              density={density}
+              busy={store.busy === item.proposal.id}
+              selectable
+              selected={selectedProposalIds.has(item.proposal.id)}
+              batchStatus={store.batchConfirmById[item.proposal.id]}
+              onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
+              onApply={store.apply}
+              onSkip={store.skip}
+            />
+          ))}
         </div>
         {relevanceQueue.backlog.length > 0 ? (
           <details className="hc-card p-4">
             <summary className="cursor-pointer text-sm font-medium text-white">Weitere Vorschläge ({relevanceQueue.summary.remaining}) anzeigen</summary>
             <div className="mt-4 grid gap-4">
-              {relevanceQueue.backlog.map((item) => <ProposalCard key={item.proposal.id} proposal={item.proposal} priorityGroup={item.group} density={density} busy={store.busy === item.proposal.id} onApply={store.apply} onSkip={store.skip} />)}
+              {relevanceQueue.backlog.map((item) => (
+                <ProposalCard
+                  key={item.proposal.id}
+                  proposal={item.proposal}
+                  priorityGroup={item.group}
+                  density={density}
+                  busy={store.busy === item.proposal.id}
+                  selectable
+                  selected={selectedProposalIds.has(item.proposal.id)}
+                  batchStatus={store.batchConfirmById[item.proposal.id]}
+                  onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
+                  onApply={store.apply}
+                  onSkip={store.skip}
+                />
+              ))}
             </div>
           </details>
         ) : null}

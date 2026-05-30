@@ -8,15 +8,17 @@ before/after → applies exactly that one by id, live, reversibly.
 
 Locked decisions it honours:
 
-* **Content is deterministic here** (A1) — the generator reuses the same
-  conservative "recommended section missing → scaffold block" candidates the
-  Phase-5 runner already detects. Zero model risk. The MiniMax writer (A2) and
-  the ``mode='code'`` test-suite gate (A3) slot into this same store later.
+* **Skill content is deterministic here** (A1) — the legacy generator reuses
+  the same conservative "recommended section missing → scaffold block"
+  candidates the Phase-5 runner already detects. Code-weakness proposals are a
+  separate MiniMax-authored path, constrained to a tight repo allowlist and
+  applied only through the code-mode test-suite gate.
 * **Reversibility is the safety**, not a token (single operator). Apply does:
   backup → write → eval-gate → keep or auto-revert. The preview itself is the
   human approval; an explicit ``confirm`` is the one "are you sure" step.
-* **Mutation only under ~/.hermes/skills.** ``mode='code'`` apply is refused
-  until A3 wires the hard test-suite gate.
+* **Mutation is gated.** Skill proposals are eval-gated by the skill checker;
+  code proposals are restricted to an explicit allowlist and applied only
+  through the detached test-suite gate.
 
 A proposal (``autoresearch-proposal-v1``) is one JSON file under
 ``<audit>/proposals/<id>.json``::
@@ -30,6 +32,8 @@ A proposal (``autoresearch-proposal-v1``) is one JSON file under
 from __future__ import annotations
 
 import difflib
+import fnmatch
+import hashlib
 import importlib.util
 import json
 import os
@@ -49,7 +53,8 @@ _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from scripts.autoresearch_writer import draft_section  # noqa: E402
+from scripts.autoresearch_writer import _call_llm as _writer_call_llm, draft_fix, draft_section  # noqa: E402
+from hermes_cli import capability_researcher  # noqa: E402
 
 PROPOSAL_SCHEMA = "autoresearch-proposal-v1"
 _VALID_MODES = {"skill", "code"}
@@ -70,6 +75,30 @@ _GATE_SELF_PROTECT = frozenset({
     "tests/conftest.py",
 })
 
+# Code-weakness finder scope. This is intentionally a small, explicit repo
+# allowlist: no free repository traversal, no tests, no generated web bundles,
+# no migrations, and no gate/self-editing surfaces.
+_CODE_ALLOWLIST = (
+    "hermes_cli/capability_researcher.py",
+    "hermes_cli/commands.py",
+    "hermes_cli/model_normalize.py",
+    "hermes_cli/skin_engine.py",
+)
+_CODE_ALLOWLIST_DENY_PARTS = frozenset({
+    ".git",
+    "tests",
+    "web_dist",
+    "migrations",
+    "migration",
+})
+_CODE_WEAKNESS_CATEGORIES = {
+    "bug_risk": (4, "Bug-Risiko"),
+    "dead_logic": (3, "Tote oder unerreichbare Logik"),
+    "error_handling": (2, "Unklare Fehlerbehandlung"),
+}
+_CODE_FINDER_MAX_FILE_CHARS = 45_000
+_CODE_FINDER_MAX_FINDINGS_PER_FILE = 1
+
 # AR2 relevance ranking. Section criticality is a fixed, easily-tuned weight:
 # a missing Safety or trigger (When-to-Use) section costs an agent system far
 # more than a missing Output contract, so those get drafted first.
@@ -85,6 +114,7 @@ _RANK_W_SUBSTANCE = 0.5
 _RANK_W_USAGE = 1.0
 # use_count at/above which a skill reads as "frequently used" in the reason text
 _RANK_USAGE_FREQUENT = 50.0
+_USAGE_MIN_USE_COUNT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +214,7 @@ _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
     "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "last_outcome", "result",
     "created_at", "applied_at", "rank_score", "rank_reason", "gate",
+    "proposal_type", "category", "evidence", "fix_hint", "apply_blocked_reason",
 )
 
 
@@ -281,8 +312,11 @@ def backfill_last_outcome(*, dry_run: bool = True) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Generate. Reuses the runner's candidate discovery.
 # ---------------------------------------------------------------------------
-def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any]:
+def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any] | None:
     path: Path = cand["path"]
+    if "category" in cand and "evidence" in cand:
+        return _build_proposal_for_finding(cand, path)
+
     label: str = cand["label"]
     skill: str = cand["skill"]
     header = runner._SCAFFOLD[label]
@@ -367,9 +401,16 @@ def _load_skill_usage() -> dict[str, float]:
     over a missing/broken sidecar, it just loses the usage factor. Read-only;
     we never write telemetry here."""
     try:
-        usage_file = _runner()._skills_root() / ".usage.json"
+        return _load_skill_usage_from_root(_runner()._skills_root())
+    except AttributeError:
+        return {}
+
+
+def _load_skill_usage_from_root(skills_root: Path) -> dict[str, float]:
+    try:
+        usage_file = skills_root / ".usage.json"
         data = json.loads(usage_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -385,6 +426,108 @@ def _load_skill_usage() -> dict[str, float]:
         if count > out.get(leaf, 0.0):
             out[leaf] = count
     return out
+
+
+def _visible_skill_paths(roots: list[Path], runner) -> list[Path]:
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for root in roots:
+        for path in runner.evals.find_skills(root):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+            paths.append(path)
+    return paths
+
+
+def _skills_for_capability_research(
+    roots: list[Path],
+    runner,
+    usage: dict[str, float],
+) -> tuple[list[tuple[str, str]], dict[str, Path], int]:
+    skills: list[tuple[str, str]] = []
+    path_by_skill: dict[str, Path] = {}
+    skipped_low_usage = 0
+    for path in _visible_skill_paths(roots, runner):
+        skill = path.parent.name
+        if float(usage.get(skill, 0.0)) < _USAGE_MIN_USE_COUNT:
+            skipped_low_usage += 1
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        skills.append((skill, text))
+        path_by_skill.setdefault(skill, path)
+    return skills, path_by_skill, skipped_low_usage
+
+
+def _proposal_id_for_finding(finding: dict[str, Any]) -> str:
+    skill = str(finding.get("skill") or "skill")
+    category = str(finding.get("category") or "weakness")
+    evidence = str(finding.get("evidence") or "")
+    digest = hashlib.sha1(
+        f"{skill}\0{category}\0{evidence}".encode("utf-8")
+    ).hexdigest()[:10]
+    return f"{_slug(skill)}-{_slug(category)}-{digest}"
+
+
+def _build_proposal_for_finding(finding: dict[str, Any], path: Path) -> dict[str, Any] | None:
+    skill = str(finding.get("skill") or path.parent.name)
+    category = str(finding.get("category") or "")
+    category_label = capability_researcher.WEAKNESS_CATEGORIES.get(category, (0, category))[1]
+    evidence = str(finding.get("evidence") or "")
+    problem = str(finding.get("problem") or "Konkrete Skill-Schwäche gefunden.")
+    fix_hint = str(finding.get("fix_hint") or "Gezielt präzisieren, ohne neue generische Abschnitte zu scaffolden.")
+    before = path.read_text(encoding="utf-8")
+    try:
+        writer_res = draft_fix(skill, finding, before)
+    except Exception as exc:
+        writer_res = {"ok": False, "reason": f"writer failed: {type(exc).__name__}"}
+    if not writer_res.get("ok") or not isinstance(writer_res.get("text"), str):
+        return None
+    after = str(writer_res["text"])
+    if after == before:
+        return None
+    rank_reason = finding.get("rank_reason")
+    rationale = (
+        f"Priorität: {rank_reason}. {problem}" if rank_reason else problem
+    )
+    writer_rationale = writer_res.get("rationale") or "MiniMax hat einen grounded AR3-Fix vorgeschlagen."
+    return {
+        "id": _proposal_id_for_finding(finding),
+        "schema": PROPOSAL_SCHEMA,
+        "mode": "skill",
+        "proposal_type": "capability_research",
+        "target": skill,
+        "target_path": str(path),
+        "section": None,
+        "eval_label": None,
+        "category": category,
+        "evidence": evidence,
+        "fix_hint": fix_hint,
+        "title": f"Skill-Schwäche in {skill}: {category_label}",
+        "rationale_plain": rationale,
+        "before_text": before,
+        "after_text": after,
+        "new_text": after,
+        "writer": "minimax-ar3-fix-writer",
+        "writer_rationale": writer_rationale,
+        "diff_before_after": _make_diff(before, after, f"{skill}/SKILL.md"),
+        "status": "proposed",
+        "last_outcome": None,
+        "created_at": _utc_now(),
+        "applied_at": None,
+        "result": None,
+        "rank_score": finding.get("rank_score"),
+        "rank_reason": rank_reason,
+    }
 
 
 def _candidate_content_len(cand: dict[str, Any]) -> int:
@@ -465,6 +608,17 @@ def generate_proposals(*, limit: int = 10) -> dict[str, Any]:
     proposal. Idempotent per (skill, section); ranking the cap means the model
     writer runs on the highest-value gaps, not the alphabetically-first ones."""
     runner = _runner()
+    # Scaffolder off by default ("kein Schein"): the instant deterministic button
+    # must not mint flat "add a missing section" proposals. Real AR3 weakness
+    # research is slow (a model pass per used skill) and runs detached via the
+    # research loop (/autoresearch/trigger), not synchronously here.
+    if not getattr(runner, "_ENABLE_SECTION_SCAFFOLD_DISCOVERY", False):
+        return {
+            "ok": True, "created": [], "created_count": 0,
+            "skipped_existing": 0, "candidates_seen": 0, "ranked_drafted": 0,
+            "note": "Section-Scaffolder ist aus. AR3-Substanzfunde liefert der "
+                    "Research-Loop (Button „Research-Loop starten“).",
+        }
     skills_root = runner._skills_root()
     roots = [skills_root] if skills_root.exists() else []
     cands = runner.discover_candidates(roots, attempted=set()) if roots else []
@@ -483,7 +637,6 @@ def generate_proposals(*, limit: int = 10) -> dict[str, Any]:
     ranked = rank_candidates(
         cands, limit=max(1, int(limit)), usage=usage, exclude_ids=exclude_ids
     )
-
     created: list[str] = []
     for cand in ranked:
         proposal = _build_proposal_for_candidate(cand, runner)
@@ -497,6 +650,292 @@ def generate_proposals(*, limit: int = 10) -> dict[str, Any]:
         "skipped_existing": len(exclude_ids),
         "candidates_seen": len(cands),
         "ranked_drafted": len(ranked),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Code weakness finder (MiniMax, allowlisted, proposal-only)
+# ---------------------------------------------------------------------------
+def _repo_relative_name(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_REPO.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.as_posix()
+
+
+def _code_allowlisted(path: Path) -> tuple[bool, str]:
+    try:
+        rp = path.resolve()
+        rel = rp.relative_to(_REPO.resolve()).as_posix()
+    except (ValueError, OSError):
+        return False, f"refused: code finder target must live inside the repo ({_REPO})"
+    parts = set(Path(rel).parts)
+    if parts & _CODE_ALLOWLIST_DENY_PARTS:
+        return False, "refused: code finder target is in a denied path family"
+    if rel in _GATE_SELF_PROTECT:
+        return False, "refused: code finder may not target the gate's own harness"
+    for pattern in _CODE_ALLOWLIST:
+        if fnmatch.fnmatchcase(rel, pattern):
+            return True, ""
+    return False, "refused: code finder target is outside _CODE_ALLOWLIST"
+
+
+def _iter_code_allowlist_paths() -> list[Path]:
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for pattern in _CODE_ALLOWLIST:
+        candidates = sorted(_REPO.glob(pattern)) if any(ch in pattern for ch in "*?[") else [_REPO / pattern]
+        for path in candidates:
+            try:
+                rp = path.resolve()
+            except OSError:
+                continue
+            if rp in seen or not rp.exists() or not rp.is_file():
+                continue
+            ok, _why = _code_allowlisted(rp)
+            if not ok:
+                continue
+            seen.add(rp)
+            paths.append(rp)
+    paths.sort(key=_repo_relative_name)
+    return paths
+
+
+def _strip_llm_json_fence(text: str) -> str:
+    body = re.sub(r"\A\s*<think>.*?</think>\s*", "", text or "", flags=re.I | re.S).strip()
+    if body.startswith("```"):
+        body = re.sub(r"\A```(?:json)?\s*", "", body, flags=re.I).strip()
+        body = re.sub(r"\s*```\s*\Z", "", body).strip()
+    return body
+
+
+def _loads_llm_json(text: str) -> Any:
+    body = _strip_llm_json_fence(text)
+    try:
+        return json.loads(body)
+    except ValueError:
+        start = body.find("{")
+        end = body.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(body[start:end + 1])
+        raise
+
+
+def _extract_llm_content(resp) -> str:
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _normalise_code_finding(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("finding") is None and not raw.get("findings"):
+        return None
+    if isinstance(raw.get("finding"), dict):
+        return raw["finding"]
+    findings = raw.get("findings")
+    if isinstance(findings, list):
+        for item in findings:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _validate_code_weakness_finding(
+    finding: dict[str, Any],
+    *,
+    path: Path,
+    before: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    category = str(finding.get("category") or "").strip()
+    if category not in _CODE_WEAKNESS_CATEGORIES:
+        return None, "unknown category"
+    title = str(finding.get("title") or _CODE_WEAKNESS_CATEGORIES[category][1]).strip()
+    problem = str(finding.get("problem") or "").strip()
+    evidence = str(finding.get("evidence_quote") or finding.get("evidence") or "").strip()
+    old_snippet = str(finding.get("old_snippet") or "").strip("\n")
+    new_snippet = str(finding.get("new_snippet") or "").strip("\n")
+    fix_hint = str(finding.get("fix_hint") or finding.get("fix_summary") or "").strip()
+    if not problem or not evidence or not old_snippet or not new_snippet:
+        return None, "missing required grounded fields"
+    if evidence not in before:
+        return None, "evidence quote is not verbatim in target"
+    if old_snippet not in before:
+        return None, "old snippet is not verbatim in target"
+    if before.count(old_snippet) != 1:
+        return None, "old snippet must match exactly once"
+    if evidence not in old_snippet:
+        return None, "evidence quote must be inside old snippet"
+    if old_snippet == new_snippet:
+        return None, "replacement is identical"
+    after = before.replace(old_snippet, new_snippet, 1)
+    if after == before:
+        return None, "replacement produced no change"
+    if "\0" in after:
+        return None, "replacement contains NUL byte"
+    ok, why = _code_allowlisted(path)
+    if not ok:
+        return None, why
+    return {
+        "category": category,
+        "title": title[:120],
+        "problem": problem[:800],
+        "evidence": evidence[:800],
+        "old_snippet": old_snippet,
+        "new_snippet": new_snippet,
+        "fix_hint": fix_hint[:800] or "Gezielten Code-Patch über den test-gated Proposal-Pfad anwenden.",
+        "after_text": after,
+    }, None
+
+
+def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict[str, Any]:
+    rel = _repo_relative_name(path)
+    system = (
+        "Du bist ein vorsichtiger Code-Reviewer fuer Hermes. Finde hoechstens "
+        "eine reale, kleine Code-Schwaeche in der gegebenen Python-Datei: "
+        "Bug-Risiko, tote/unerreichbare Logik oder unklare Fehlerbehandlung. "
+        "Antworte nur mit JSON. Erfinde nichts: evidence_quote und old_snippet "
+        "muessen wortwoertlich im Code stehen. Wenn kein sicherer Fund vorliegt, "
+        "antworte {\"finding\": null}. Keine Tests, keine Migrationen, keine "
+        "grossen Refactors."
+    )
+    user = (
+        "JSON-Schema:\n"
+        "{\n"
+        "  \"finding\": {\n"
+        "    \"category\": \"bug_risk|dead_logic|error_handling\",\n"
+        "    \"title\": \"kurzer Titel\",\n"
+        "    \"problem\": \"warum das real riskant ist\",\n"
+        "    \"evidence_quote\": \"kurzes wortwoertliches Zitat aus old_snippet\",\n"
+        "    \"old_snippet\": \"exakter zu ersetzender Codeausschnitt, eindeutig\",\n"
+        "    \"new_snippet\": \"vollstaendiger Ersatz fuer old_snippet\",\n"
+        "    \"fix_hint\": \"knappe Reparaturabsicht\"\n"
+        "  }\n"
+        "}\n\n"
+        f"Datei: {rel}\n\n"
+        "Code:\n"
+        "```python\n"
+        f"{text}\n"
+        "```"
+    )
+    try:
+        resp = _writer_call_llm(
+            task="skills_hub",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=2800,
+            temperature=0.2,
+            timeout=timeout,
+        )
+        return {"ok": True, "raw": _loads_llm_json(_extract_llm_content(resp)), "reason": None}
+    except Exception as exc:
+        return {"ok": False, "raw": None, "reason": f"model call failed: {type(exc).__name__}"}
+
+
+def _proposal_id_for_code_finding(path: Path, finding: dict[str, Any]) -> str:
+    rel = _repo_relative_name(path)
+    digest = hashlib.sha1(
+        "\0".join([
+            rel,
+            str(finding.get("category") or ""),
+            str(finding.get("evidence") or ""),
+            str(finding.get("old_snippet") or ""),
+        ]).encode("utf-8")
+    ).hexdigest()[:10]
+    return f"code-weakness-{_slug(rel)}-{digest}"
+
+
+def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, Any]) -> dict[str, Any]:
+    rel = _repo_relative_name(path)
+    category = str(finding["category"])
+    weight, category_label = _CODE_WEAKNESS_CATEGORIES[category]
+    evidence = str(finding["evidence"])
+    after = str(finding["after_text"])
+    title = str(finding.get("title") or category_label)
+    problem = str(finding.get("problem") or "MiniMax hat eine konkrete Code-Schwäche gefunden.")
+    fix_hint = str(finding.get("fix_hint") or "Gezielt beheben.")
+    return {
+        "id": _proposal_id_for_code_finding(path, finding),
+        "schema": PROPOSAL_SCHEMA,
+        "mode": "code",
+        "proposal_type": "code_weakness",
+        "target": rel,
+        "target_path": str(path.resolve()),
+        "section": None,
+        "eval_label": None,
+        "category": category,
+        "evidence": evidence,
+        "fix_hint": fix_hint,
+        "title": f"Code-Schwäche in {rel}: {title}",
+        "rationale_plain": f"{problem} Grounding: „{evidence}“",
+        "before_text": before,
+        "after_text": after,
+        "new_text": None,
+        "writer": "minimax-code-weakness-finder",
+        "writer_rationale": "MiniMax-M2.7 via skills_hub; verbatim old_snippet/evidence validated before proposal save.",
+        "diff_before_after": _make_diff(before, after, rel),
+        "status": "proposed",
+        "last_outcome": None,
+        "created_at": _utc_now(),
+        "applied_at": None,
+        "result": None,
+        "rank_score": float(weight),
+        "rank_reason": f"{category_label}; allowlisted code target; full test-suite gate on apply",
+    }
+
+
+def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) -> dict[str, Any]:
+    """Find real code weaknesses in a tight repo allowlist and persist them as
+    ``mode='code'`` proposals. The finder never writes target files; applying a
+    saved proposal uses the existing backup → write → test-suite gate path."""
+    created: list[str] = []
+    errors: list[dict[str, str]] = []
+    skipped_existing = 0
+    files_seen = 0
+    findings_seen = 0
+    for path in _iter_code_allowlist_paths():
+        if len(created) >= max(1, int(limit)):
+            break
+        files_seen += 1
+        try:
+            before = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append({"target": _repo_relative_name(path), "reason": f"read failed: {type(exc).__name__}"})
+            continue
+        if not before.strip() or len(before) > _CODE_FINDER_MAX_FILE_CHARS:
+            errors.append({"target": _repo_relative_name(path), "reason": "file empty or too large for code finder"})
+            continue
+        model_res = _call_code_weakness_finder(path, before, timeout=timeout)
+        if not model_res.get("ok"):
+            errors.append({"target": _repo_relative_name(path), "reason": str(model_res.get("reason") or "model failed")})
+            continue
+        raw_finding = _normalise_code_finding(model_res.get("raw"))
+        if raw_finding is None:
+            continue
+        for _idx in range(_CODE_FINDER_MAX_FINDINGS_PER_FILE):
+            valid, reason = _validate_code_weakness_finding(raw_finding, path=path, before=before)
+            if valid is None:
+                errors.append({"target": _repo_relative_name(path), "reason": reason or "invalid finding"})
+                break
+            findings_seen += 1
+            proposal = _build_code_weakness_proposal(path, before, valid)
+            existing = load_proposal(proposal["id"])
+            if existing and existing.get("status") in _VALID_STATUS:
+                skipped_existing += 1
+                break
+            save_proposal(proposal)
+            created.append(proposal["id"])
+            break
+    return {
+        "ok": True,
+        "created": created,
+        "created_count": len(created),
+        "skipped_existing": skipped_existing,
+        "files_seen": files_seen,
+        "findings_seen": findings_seen,
+        "allowlist": list(_CODE_ALLOWLIST),
+        "errors": errors,
     }
 
 
@@ -517,9 +956,16 @@ def skip_proposal(pid: str) -> dict[str, Any]:
     return {"ok": True, "status": "skipped", "id": pid}
 
 
-def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
+def apply_proposal(pid: str, *, confirm: bool = True, judged: bool = False) -> dict[str, Any]:
     """Apply exactly this proposal: backup → write after_text → eval-gate →
-    keep (status=applied) or auto-revert (status stays proposed)."""
+    keep (status=applied) or auto-revert (status stays proposed).
+
+    ``judged`` is set only by the batch-confirm caller, which has already run
+    ``judge_fix`` on a capability_research fix. An AR3 grounded fix is therefore
+    written ONLY through the judged batch path — a direct single-apply call
+    (``judged=False``) refuses it, honouring the signed decision "Skills =
+    Judge + Batch-Confirm". Scaffold/code proposals are unaffected by ``judged``.
+    """
     proposal = load_proposal(pid)
     if proposal is None:
         return {"ok": False, "detail": f"no such proposal: {pid}", "status": None}
@@ -529,6 +975,22 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
     if not confirm:
         return {"ok": False, "detail": "apply requires confirm=true (the operator 'are you sure' step)",
                 "status": "proposed"}
+    # AR3 capability_research proposals: a *detection-only* finding carries an
+    # explicit apply_blocked_reason and stays read-only. A *grounded fix* finding
+    # carries a full replacement after_text (drafted by draft_fix) and IS written
+    # here — behind a backup — via the replace-file path, NOT the section-append/
+    # scaffold-eval path below. It must be judge-gated: only the batch-confirm
+    # caller (judged=True) may write it; a direct single-apply is refused.
+    if proposal.get("proposal_type") == "capability_research":
+        if proposal.get("apply_blocked_reason"):
+            return {"ok": False,
+                    "detail": proposal["apply_blocked_reason"],
+                    "status": proposal.get("status", "proposed")}
+        if not judged:
+            return {"ok": False,
+                    "detail": "AR3-Fix nur über Batch-Confirm (judge-gated) anwendbar",
+                    "status": proposal.get("status", "proposed")}
+        return _apply_capability_fix(proposal, pid)
 
     mode = proposal.get("mode")
     if mode not in _VALID_MODES:
@@ -591,6 +1053,53 @@ def apply_proposal(pid: str, *, confirm: bool = True) -> dict[str, Any]:
     save_proposal(proposal)
     return {"ok": False, "status": "proposed", "id": pid,
             "detail": proposal["result"], "reverted": True, "eval_result": eval_result}
+
+
+def _apply_capability_fix(proposal: dict[str, Any], pid: str) -> dict[str, Any]:
+    """Write an AR3 grounded skill fix: backup → replace file with after_text → keep.
+
+    Unlike the scaffold path this REPLACES the whole skill (the fix is a full
+    rewrite, not an appendable section) and carries no section eval-gate — the
+    substantive gate is ``judge_fix``, already passed in ``confirm_batch_proposals``
+    before we get here. Reversible by construction via the backup dir.
+    """
+    runner = _runner()
+    skills_root = runner._skills_root()
+    target_path = Path(proposal.get("target_path", ""))
+    before_text = proposal.get("before_text")
+    after_text = proposal.get("after_text")
+    if not isinstance(before_text, str) or not isinstance(after_text, str):
+        return {"ok": False, "detail": "proposal malformed (missing before_text/after_text)",
+                "status": "proposed"}
+    if after_text == before_text:
+        return {"ok": False, "detail": "no-op fix (after == before)", "status": "proposed"}
+    if not target_path.exists():
+        return {"ok": False, "detail": f"target no longer exists: {target_path}", "status": "proposed"}
+    if not runner._under(target_path, skills_root):
+        return {"ok": False,
+                "detail": f"refused: target not under skills root ({skills_root})",
+                "status": "proposed"}
+    # Stale-guard: the fix was drafted+judged against before_text. If the skill
+    # changed under us, don't clobber it — kick back to the operator to regenerate.
+    current = target_path.read_text(encoding="utf-8")
+    if current != before_text:
+        return {"ok": False,
+                "detail": "Skill seit dem Entwurf geändert — Fix neu erzeugen",
+                "status": "proposed"}
+
+    backup_dir = (runner._hermes_home() / "backups"
+                  / f"skills-before-proposal-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{_slug(pid)[:16]}")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    runner._backup_file(target_path, skills_root, backup_dir)
+
+    target_path.write_text(after_text, encoding="utf-8")
+    proposal["status"] = "applied"
+    proposal["last_outcome"] = "applied"
+    proposal["result"] = "✓ übernommen — AR3-Fix geschrieben (judge-bestätigt)"
+    proposal["applied_at"] = _utc_now()
+    proposal["backup_dir"] = str(backup_dir)
+    save_proposal(proposal)
+    return {"ok": True, "status": "applied", "id": pid, "result": proposal["result"]}
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +1190,10 @@ def _apply_code_proposal(proposal: dict[str, Any], pid: str) -> dict[str, Any]:
     ok, why = _code_target_ok(target_path)
     if not ok:
         return {"ok": False, "detail": why, "status": "proposed"}
+    if proposal.get("proposal_type") == "code_weakness":
+        ok, why = _code_allowlisted(target_path)
+        if not ok:
+            return {"ok": False, "detail": why, "status": "proposed"}
 
     backup_dir = (_code_backup_root()
                   / f"code-before-proposal-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{_slug(pid)[:16]}")

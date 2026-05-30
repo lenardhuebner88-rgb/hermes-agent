@@ -98,12 +98,79 @@ function proposalCreatedAt(proposal: Proposal): number {
   return 0;
 }
 
+function proposalRankScore(proposal: Proposal): number | null {
+  const value = proposal.rank_score;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export function rankAutoresearchProposals(proposals: Proposal[], limit = 10): RankedProposalQueue {
   const boundedLimit = Math.max(1, Math.round(limit));
   const ranked = proposals
     .filter(isActionable)
     .map((proposal) => ({ proposal, group: getProposalPriorityGroup(proposal) }))
     .sort((a, b) => {
+      if (a.group.score !== b.group.score) return a.group.score - b.group.score;
+      return proposalCreatedAt(b.proposal) - proposalCreatedAt(a.proposal);
+    });
+  const shortlist = ranked.slice(0, boundedLimit);
+  const backlog = ranked.slice(boundedLimit);
+  return {
+    shortlist,
+    backlog,
+    summary: { total: ranked.length, shown: shortlist.length, remaining: backlog.length },
+  };
+}
+
+/**
+ * Pure selection helpers for the batch-confirm review queue.
+ *
+ * These were extracted out of AutoresearchView so the selection reduction is
+ * unit-testable. The BLOCKER fix lives here: "Sichtbare auswählen" must only
+ * select proposals the operator can actually see (the shortlist), never the
+ * backlog proposals hidden behind a collapsed <details>. Passing only the
+ * visible ids to `selectVisibleProposals` enforces that contract.
+ */
+
+/** Toggle a single proposal id in/out of the current selection (immutable). */
+export function toggleProposalSelection(current: ReadonlySet<string>, proposalId: string, selected: boolean): Set<string> {
+  const next = new Set(current);
+  if (selected) next.add(proposalId);
+  else next.delete(proposalId);
+  return next;
+}
+
+/**
+ * Select-all: returns a selection containing exactly the *visible* ids.
+ * BLOCKER FIX — callers must pass only the visible (shortlist) ids, never the
+ * full shortlist+backlog list, so collapsed backlog proposals can never be
+ * batch-confirmed without the operator opening them.
+ */
+export function selectVisibleProposals(visibleIds: readonly string[]): Set<string> {
+  return new Set(visibleIds);
+}
+
+/** Clear the whole selection. */
+export function clearProposalSelection(): Set<string> {
+  return new Set<string>();
+}
+
+/**
+ * Keep only ids that still exist in the queue (prunes stale selections after a
+ * reload). Order follows `validIds` so downstream batch calls stay stable.
+ */
+export function pruneProposalSelection(current: ReadonlySet<string>, validIds: readonly string[]): string[] {
+  return validIds.filter((id) => current.has(id));
+}
+
+export function rankAutoresearchReviewQueue(proposals: Proposal[], limit = 10): RankedProposalQueue {
+  const boundedLimit = Math.max(1, Math.round(limit));
+  const ranked = proposals
+    .filter(isActionable)
+    .map((proposal) => ({ proposal, group: getProposalPriorityGroup(proposal) }))
+    .sort((a, b) => {
+      const aRank = proposalRankScore(a.proposal);
+      const bRank = proposalRankScore(b.proposal);
+      if (aRank !== null || bRank !== null) return (bRank ?? Number.NEGATIVE_INFINITY) - (aRank ?? Number.NEGATIVE_INFINITY);
       if (a.group.score !== b.group.score) return a.group.score - b.group.score;
       return proposalCreatedAt(b.proposal) - proposalCreatedAt(a.proposal);
     });

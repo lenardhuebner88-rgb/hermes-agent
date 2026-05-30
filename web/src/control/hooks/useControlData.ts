@@ -12,6 +12,17 @@ import {
 import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, WorkersResponse } from "../lib/types";
 
+type BatchConfirmState = "pending" | "ok" | "fail";
+type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
+type BatchConfirmItem = { id?: string; ok?: boolean; status?: string; result?: string; detail?: string; error?: string };
+type BatchConfirmResponse = {
+  ok?: boolean;
+  detail?: string;
+  results?: Record<string, BatchConfirmItem> | BatchConfirmItem[];
+  confirmed?: string[];
+  failed?: string[];
+};
+
 type LoadState<T> = {
   data: T | null;
   error: string | null;
@@ -21,6 +32,34 @@ type LoadState<T> = {
   reload: () => Promise<void>;
   updateData: React.Dispatch<React.SetStateAction<T | null>>;
 };
+
+function batchConfirmResultForIds(ids: string[], response: BatchConfirmResponse): BatchConfirmById {
+  const next: BatchConfirmById = {};
+  const resultById = new Map<string, BatchConfirmItem>();
+  if (Array.isArray(response.results)) {
+    for (const item of response.results) {
+      if (item.id) resultById.set(item.id, item);
+    }
+  } else if (response.results && typeof response.results === "object") {
+    for (const [id, item] of Object.entries(response.results)) resultById.set(id, { id, ...item });
+  }
+  const confirmed = new Set(response.confirmed ?? []);
+  const failed = new Set(response.failed ?? []);
+
+  for (const id of ids) {
+    const item = resultById.get(id);
+    const itemFailed = failed.has(id) || item?.ok === false || item?.status === "fail" || item?.status === "failed";
+    const itemOk = confirmed.has(id) || item?.ok === true || item?.status === "ok" || item?.status === "confirmed" || item?.status === "applied";
+    if (itemFailed) {
+      next[id] = { status: "fail", detail: item?.detail ?? item?.error ?? item?.result ?? response.detail };
+    } else if (itemOk || response.ok !== false) {
+      next[id] = { status: "ok", detail: item?.detail ?? item?.result };
+    } else {
+      next[id] = { status: "fail", detail: item?.detail ?? item?.error ?? item?.result ?? response.detail };
+    }
+  }
+  return next;
+}
 
 function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<T> {
   const [data, setData] = useState<T | null>(null);
@@ -76,6 +115,7 @@ export function useAutoresearchStatus() {
 export function useProposals() {
   const [activity, setActivity] = useState<Array<{ at: number; text: string; tone: "emerald" | "amber" | "violet" | "red" }>>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [batchConfirmById, setBatchConfirmById] = useState<BatchConfirmById>({});
   const state = usePolling<ProposalsResponse>(
     async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/autoresearch/proposals"), "autoresearch/proposals"),
     6000,
@@ -162,7 +202,39 @@ export function useProposals() {
     for (const proposal of openSkillProposals) await apply(proposal);
   }, [apply, openSkillProposals]);
 
-  return { ...state, proposals, openSkillProposals, activity, busy, generate, apply, skip, applyAll };
+  const confirmBatch = useCallback(async (ids: string[]) => {
+    const selectedIds = Array.from(new Set(ids)).filter(Boolean);
+    if (selectedIds.length === 0) return;
+    setBusy("confirm-batch");
+    setBatchConfirmById((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedIds.map((id) => [id, { status: "pending" as const }])),
+    }));
+    try {
+      const result = await fetchJSON<BatchConfirmResponse>("/autoresearch/confirm-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      const next = batchConfirmResultForIds(selectedIds, result);
+      setBatchConfirmById((current) => ({ ...current, ...next }));
+      const failed = Object.values(next).filter((entry) => entry.status === "fail").length;
+      log(`${selectedIds.length - failed}/${selectedIds.length} Vorschläge bestätigt`, failed > 0 ? "amber" : "emerald");
+      await state.reload();
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      setBatchConfirmById((current) => ({
+        ...current,
+        ...Object.fromEntries(selectedIds.map((id) => [id, { status: "fail" as const, detail }])),
+      }));
+      log(`Batch-Bestätigung fehlgeschlagen: ${detail}`, "red");
+      await state.reload();
+    } finally {
+      setBusy(null);
+    }
+  }, [log, state]);
+
+  return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, apply, skip, applyAll, confirmBatch };
 }
 
 export function useHermesWorkers() {
