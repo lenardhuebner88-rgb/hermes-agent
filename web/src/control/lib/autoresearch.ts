@@ -165,6 +165,68 @@ export function pruneProposalSelection(current: ReadonlySet<string>, validIds: r
   return validIds.filter((id) => current.has(id));
 }
 
+// ---------------------------------------------------------------------------
+// f-autoresearch-tab-driver: on-demand driver helpers
+// Pure + colocated-tested. `last_run` is schema-typed as `unknown` (free-form
+// summary blob), so the four research counters are read defensively here.
+// ---------------------------------------------------------------------------
+
+/** Observability + token counters carried (un-validated) on `status.last_run`. */
+export interface LastRunCounters {
+  skillsResearched: number | null;
+  researchErrors: number | null;
+  skillsWithFindings: number | null;
+  researchTokens: number | null;
+}
+
+function coerceCounter(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Pull the four research counters out of the free-form `last_run` blob. Returns
+ * null per field when absent/non-numeric so the UI can tell "0 (real, converged)"
+ * apart from "missing" — the whole point of the observability surface.
+ */
+export function readLastRunCounters(lastRun: unknown): LastRunCounters {
+  const obj = lastRun && typeof lastRun === "object" ? (lastRun as Record<string, unknown>) : null;
+  return {
+    skillsResearched: coerceCounter(obj?.skills_researched),
+    researchErrors: coerceCounter(obj?.research_errors),
+    skillsWithFindings: coerceCounter(obj?.skills_with_findings),
+    researchTokens: coerceCounter(obj?.research_tokens),
+  };
+}
+
+/** True when any research counter is present (so the UI can show the row at all). */
+export function hasResearchCounters(counters: LastRunCounters): boolean {
+  return counters.skillsResearched !== null || counters.researchErrors !== null || counters.skillsWithFindings !== null;
+}
+
+/** Error badge shows only when the loop reported >=1 failed model call. */
+export function shouldShowResearchErrorBadge(researchErrors: number | null | undefined): boolean {
+  return typeof researchErrors === "number" && researchErrors > 0;
+}
+
+/** Token tile: real count, thousands-separated; 0/missing → "n/v" (never guess). */
+export function formatResearchTokens(tokens: number | null | undefined): string {
+  if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return "n/v";
+  return Math.round(tokens).toLocaleString("de-DE");
+}
+
+/**
+ * Parse the optional min_use_count override from the trigger input. Empty/invalid
+ * → null (don't send; backend keeps its default of 5). Only a finite value > 0
+ * passes through, mirroring the backend guard in start_runner.
+ */
+export function parseMinUseCount(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
 export function rankAutoresearchReviewQueue(proposals: Proposal[], limit = 10): RankedProposalQueue {
   const boundedLimit = Math.max(1, Math.round(limit));
   const ranked = proposals

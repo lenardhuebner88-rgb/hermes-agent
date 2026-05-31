@@ -32,7 +32,6 @@ A proposal (``autoresearch-proposal-v1``) is one JSON file under
 from __future__ import annotations
 
 import difflib
-import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -85,6 +84,7 @@ _CODE_ALLOWLIST = (
     "hermes_cli/model_normalize.py",
     "hermes_cli/skin_engine.py",
 )
+_CODE_ALLOWLIST_DIRS = ("hermes_cli",)
 _CODE_ALLOWLIST_DENY_PARTS = frozenset({
     ".git",
     "tests",
@@ -689,29 +689,34 @@ def _repo_relative_name(path: Path) -> str:
         return path.as_posix()
 
 
+def _code_allowlisted_repo_relative(rel: str) -> tuple[bool, str]:
+    parts = Path(rel).parts
+    if rel in _GATE_SELF_PROTECT:
+        return False, "refused: code finder may not target the gate's own harness"
+    if set(parts) & _CODE_ALLOWLIST_DENY_PARTS:
+        return False, "refused: code finder target is in a denied path family"
+    if not rel.endswith(".py"):
+        return False, "refused: code finder target must be a Python file"
+    if not parts or parts[0] not in _CODE_ALLOWLIST_DIRS:
+        return False, "refused: code finder target is outside _CODE_ALLOWLIST_DIRS"
+    return True, ""
+
+
 def _code_allowlisted(path: Path) -> tuple[bool, str]:
     try:
         rp = path.resolve()
         rel = rp.relative_to(_REPO.resolve()).as_posix()
     except (ValueError, OSError):
         return False, f"refused: code finder target must live inside the repo ({_REPO})"
-    parts = set(Path(rel).parts)
-    if parts & _CODE_ALLOWLIST_DENY_PARTS:
-        return False, "refused: code finder target is in a denied path family"
-    if rel in _GATE_SELF_PROTECT:
-        return False, "refused: code finder may not target the gate's own harness"
-    for pattern in _CODE_ALLOWLIST:
-        if fnmatch.fnmatchcase(rel, pattern):
-            return True, ""
-    return False, "refused: code finder target is outside _CODE_ALLOWLIST"
+    return _code_allowlisted_repo_relative(rel)
 
 
 def _iter_code_allowlist_paths() -> list[Path]:
     seen: set[Path] = set()
     paths: list[Path] = []
-    for pattern in _CODE_ALLOWLIST:
-        candidates = sorted(_REPO.glob(pattern)) if any(ch in pattern for ch in "*?[") else [_REPO / pattern]
-        for path in candidates:
+    for dirname in _CODE_ALLOWLIST_DIRS:
+        base = _REPO / dirname
+        for path in sorted(base.rglob("*.py")):
             try:
                 rp = path.resolve()
             except OSError:
@@ -749,6 +754,19 @@ def _loads_llm_json(text: str) -> Any:
 
 def _extract_llm_content(resp) -> str:
     return (resp.choices[0].message.content or "").strip()
+
+
+def _llm_total_tokens(resp: Any) -> int:
+    usage = getattr(resp, "usage", None)
+    if usage is None and isinstance(resp, dict):
+        usage = resp.get("usage")
+    total_tokens = getattr(usage, "total_tokens", None)
+    if total_tokens is None and isinstance(usage, dict):
+        total_tokens = usage.get("total_tokens")
+    try:
+        return int(total_tokens) if total_tokens is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _normalise_code_finding(raw: Any) -> dict[str, Any] | None:
@@ -854,9 +872,9 @@ def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict
             temperature=0.2,
             timeout=timeout,
         )
-        return {"ok": True, "raw": _loads_llm_json(_extract_llm_content(resp)), "reason": None}
+        return {"ok": True, "raw": _loads_llm_json(_extract_llm_content(resp)), "reason": None, "resp": resp}
     except Exception as exc:
-        return {"ok": False, "raw": None, "reason": f"model call failed: {type(exc).__name__}"}
+        return {"ok": False, "raw": None, "reason": f"model call failed: {type(exc).__name__}", "resp": None}
 
 
 def _proposal_id_for_code_finding(path: Path, finding: dict[str, Any]) -> str:
@@ -920,7 +938,9 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) 
     skipped_existing = 0
     files_seen = 0
     findings_seen = 0
-    for path in _iter_code_allowlist_paths():
+    tokens = 0
+    allowlist_paths = _iter_code_allowlist_paths()
+    for path in allowlist_paths:
         if len(created) >= max(1, int(limit)):
             break
         files_seen += 1
@@ -933,6 +953,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) 
             errors.append({"target": _repo_relative_name(path), "reason": "file empty or too large for code finder"})
             continue
         model_res = _call_code_weakness_finder(path, before, timeout=timeout)
+        tokens += _llm_total_tokens(model_res.get("resp"))
         if not model_res.get("ok"):
             errors.append({"target": _repo_relative_name(path), "reason": str(model_res.get("reason") or "model failed")})
             continue
@@ -960,7 +981,8 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) 
         "skipped_existing": skipped_existing,
         "files_seen": files_seen,
         "findings_seen": findings_seen,
-        "allowlist": list(_CODE_ALLOWLIST),
+        "tokens": tokens,
+        "allowlist": sorted(_repo_relative_name(path) for path in allowlist_paths),
         "errors": errors,
     }
 

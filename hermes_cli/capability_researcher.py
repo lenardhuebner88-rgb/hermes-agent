@@ -98,6 +98,17 @@ def _extract_content(resp) -> str:
     return _THINK_RE.sub("", raw).strip()
 
 
+def _extract_tokens(resp) -> int:
+    try:
+        usage = getattr(resp, "usage", None)
+        total = getattr(usage, "total_tokens", None)
+        if total is None and isinstance(usage, dict):
+            total = usage.get("total_tokens")
+        return int(total or 0)
+    except Exception:
+        return 0
+
+
 def _parse_findings_json(content: str) -> list[dict[str, Any]]:
     """Pull the ``findings`` array out of a model reply, tolerating prose/fences
     around the JSON. Returns ``[]`` on anything unparseable — never raises."""
@@ -192,8 +203,15 @@ def research_skill(
             temperature=0.2,
             timeout=timeout,
         )
+        tokens = _extract_tokens(resp)
     except Exception as exc:  # offline / provider error → caller falls back gracefully
-        return {"ok": False, "findings": [], "reason": f"model call failed: {type(exc).__name__}", "dropped": 0}
+        return {
+            "ok": False,
+            "findings": [],
+            "reason": f"model call failed: {type(exc).__name__}",
+            "dropped": 0,
+            "tokens": 0,
+        }
 
     raw_findings = _parse_findings_json(_extract_content(resp))
     norm_skill = _norm(skill_text)
@@ -231,7 +249,7 @@ def research_skill(
         })
         if len(kept) >= max(1, int(max_findings)):
             break
-    return {"ok": True, "findings": kept, "reason": None, "dropped": dropped}
+    return {"ok": True, "findings": kept, "reason": None, "dropped": dropped, "tokens": tokens}
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +355,7 @@ def research_skills(
     skills_seen = 0
     dropped = 0
     errors = 0
+    tokens_total = 0
     for skill_name, skill_text in skills:
         skills_seen += 1
         if on_skill is not None:
@@ -345,6 +364,7 @@ def research_skills(
             except Exception:  # a heartbeat hiccup must never sink the sweep
                 pass
         res = research_skill(skill_name, skill_text, call_llm=call_llm, max_findings=max_per_skill)
+        tokens_total += int(res.get("tokens") or 0)
         if not res.get("ok"):
             errors += 1
             continue
@@ -361,4 +381,5 @@ def research_skills(
         "skills_with_findings": skills_with,
         "dropped": dropped,
         "errors": errors,
+        "tokens": tokens_total,
     }

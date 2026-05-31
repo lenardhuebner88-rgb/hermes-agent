@@ -774,7 +774,7 @@ def _no_gate(monkeypatch):
 
 
 def test_code_weakness_apply_outside_allowlist_refused(tmp_home, tmp_repo, monkeypatch):
-    target = tmp_repo / "hermes_cli" / "not_listed.py"
+    target = tmp_repo / "agent" / "not_listed.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("x = 1\n", encoding="utf-8")
     p = proposals.build_code_proposal(target, "x = 2\n", title="outside allowlist", rationale="r")
@@ -860,7 +860,7 @@ def _no_gate_stub(pid):
 
 def test_code_finder_proposal_outside_allowlist_refused_no_write(tmp_home, tmp_repo):
     """A real finder proposal on a non-allowlisted path is refused; no write."""
-    target = tmp_repo / "hermes_cli" / "not_listed.py"
+    target = tmp_repo / "agent" / "not_listed.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("x = 1\n", encoding="utf-8")
 

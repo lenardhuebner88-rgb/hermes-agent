@@ -34,6 +34,7 @@ import asyncio
 import csv
 import html
 import json
+import math
 import os
 import re
 import signal
@@ -349,9 +350,15 @@ def _load_request_module():
     return module
 
 
-def _spawn_runner(args: list[str]) -> int:
+def _spawn_runner(args: list[str], env_extra: dict[str, str] | None = None) -> int:
     """Spawn the runner detached; return its PID. Isolated for test injection."""
     import subprocess
+
+    kwargs: dict[str, Any] = {}
+    if env_extra is not None:
+        env = os.environ.copy()
+        env.update(env_extra)
+        kwargs["env"] = env
 
     proc = subprocess.Popen(
         [sys.executable, str(_RUNNER_SCRIPT), *args],
@@ -359,6 +366,7 @@ def _spawn_runner(args: list[str]) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
+        **kwargs,
     )
     return proc.pid
 
@@ -373,6 +381,7 @@ class TriggerBody(BaseModel):
     mode: str = "dry-run"  # "dry-run" | "apply"
     confirm: bool = False
     max_iterations: int = 1
+    min_use_count: float | None = None
 
 
 class ApplyProposalBody(BaseModel):
@@ -484,7 +493,7 @@ def confirm_batch_proposals(ids: list[str], *, confirm: bool = True) -> dict[str
 
 
 def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
-                 max_iterations: int) -> dict[str, Any]:
+                 max_iterations: int, min_use_count: float | None = None) -> dict[str, Any]:
     """Create a run-request and spawn the bounded runner. No token; apply needs confirm."""
     if mode not in {"dry-run", "apply"}:
         raise HTTPException(status_code=400, detail="mode must be 'dry-run' or 'apply'")
@@ -511,7 +520,13 @@ def start_runner(*, area: str, focus: str, mode: str, confirm: bool,
     if mode == "apply":
         args += ["--apply", "--confirm"]
     args += ["--max-iterations", str(mi)]
-    pid = _spawn_runner(args)
+    env_extra = None
+    if min_use_count is not None and math.isfinite(min_use_count) and min_use_count > 0:
+        env_extra = {"HERMES_AUTORESEARCH_MIN_USE_COUNT": str(min_use_count)}
+    if env_extra is None:
+        pid = _spawn_runner(args)
+    else:
+        pid = _spawn_runner(args, env_extra=env_extra)
     return {
         "ok": True, "mode": mode, "pid": pid,
         "request_id": Path(request_path).stem, "request_path": str(request_path),
@@ -1033,6 +1048,7 @@ def register_autoresearch_routes(app: Any) -> None:
         return start_runner(
             area=body.area, focus=body.focus, mode=body.mode,
             confirm=body.confirm, max_iterations=body.max_iterations,
+            min_use_count=body.min_use_count,
         )
 
     @app.post("/autoresearch/stop")

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, getProposalPriorityGroup, isActionable, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, selectVisibleProposals, splitAutoresearchProposals, toggleProposalSelection } from "./autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, getProposalPriorityGroup, hasResearchCounters, isActionable, parseMinUseCount, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -198,5 +198,50 @@ describe("batch selection reducer helpers", () => {
 
   it("pruneProposalSelection returns empty when nothing is still valid", () => {
     expect(pruneProposalSelection(new Set(["x"]), ["a", "b"])).toEqual([]);
+  });
+});
+
+describe("autoresearch on-demand driver helpers", () => {
+  it("readLastRunCounters pulls numeric counters and distinguishes 0 from missing", () => {
+    const c = readLastRunCounters({ skills_researched: 3, research_errors: 0, skills_with_findings: 0, research_tokens: 1234 });
+    expect(c).toEqual({ skillsResearched: 3, researchErrors: 0, skillsWithFindings: 0, researchTokens: 1234 });
+    const missing = readLastRunCounters({ mode: "dry-run" });
+    expect(missing).toEqual({ skillsResearched: null, researchErrors: null, skillsWithFindings: null, researchTokens: null });
+  });
+
+  it("readLastRunCounters is null-safe for non-object / non-numeric last_run", () => {
+    expect(readLastRunCounters(null).skillsResearched).toBeNull();
+    expect(readLastRunCounters("done").researchErrors).toBeNull();
+    expect(readLastRunCounters({ research_errors: "2" }).researchErrors).toBeNull();
+  });
+
+  it("hasResearchCounters is true iff any of the three observability counters is present", () => {
+    expect(hasResearchCounters(readLastRunCounters({ skills_researched: 0 }))).toBe(true);
+    expect(hasResearchCounters(readLastRunCounters({ research_tokens: 5 }))).toBe(false); // tokens alone is not an observability counter
+    expect(hasResearchCounters(readLastRunCounters(null))).toBe(false);
+  });
+
+  it("shouldShowResearchErrorBadge only fires on a positive error count", () => {
+    expect(shouldShowResearchErrorBadge(0)).toBe(false);
+    expect(shouldShowResearchErrorBadge(null)).toBe(false);
+    expect(shouldShowResearchErrorBadge(undefined)).toBe(false);
+    expect(shouldShowResearchErrorBadge(2)).toBe(true);
+  });
+
+  it("formatResearchTokens shows a real count or 'n/v' for 0/missing — never a guess", () => {
+    expect(formatResearchTokens(0)).toBe("n/v");
+    expect(formatResearchTokens(null)).toBe("n/v");
+    expect(formatResearchTokens(undefined)).toBe("n/v");
+    expect(formatResearchTokens(1234)).toBe((1234).toLocaleString("de-DE"));
+  });
+
+  it("parseMinUseCount sends only a finite positive value, else null (keep backend default)", () => {
+    expect(parseMinUseCount("")).toBeNull();
+    expect(parseMinUseCount("   ")).toBeNull();
+    expect(parseMinUseCount("abc")).toBeNull();
+    expect(parseMinUseCount("0")).toBeNull();
+    expect(parseMinUseCount("-3")).toBeNull();
+    expect(parseMinUseCount("2")).toBe(2);
+    expect(parseMinUseCount(" 1.5 ")).toBe(1.5);
   });
 });
