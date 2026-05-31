@@ -387,7 +387,10 @@ class TriggerBody(BaseModel):
 
 class CodeWeaknessBody(BaseModel):
     scope: str = "incremental"  # "incremental" | "full"
-    max_files: int = 12
+    # Interactive default kept small so a button click stays snappy (each scanned
+    # file = one ~20s MiniMax call). The unattended nightly code lane uses the
+    # finder's own larger default (12) for broader per-night coverage.
+    max_files: int = 5
 
 
 class ApplyProposalBody(BaseModel):
