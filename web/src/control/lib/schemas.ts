@@ -239,6 +239,29 @@ export const AgentsResponseSchema = z.object({
   error: z.string().nullable().optional(),
 });
 
+// Glue #3: read-only list of dispatched ``openclaw:<agent>`` kanban tasks with
+// their latest run's MC correlation. Tolerant (.catch defaults) so a partial /
+// stale backend payload still renders the panel instead of blanking it.
+export const OpenClawDispatchedTaskSchema = z.object({
+  id: z.coerce.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  agent: z.string().nullable().catch(null),
+  status: z.string().catch("unknown"),
+  mc_task_id: z.string().nullable().catch(null),
+  workflow_id: z.string().nullable().catch(null),
+  poll_state: z.string().nullable().catch(null),
+  result_summary: z.string().nullable().catch(null),
+  updated_at: z.coerce.number().catch(0),
+});
+
+export const OpenClawDispatchedResponseSchema = z.object({
+  tasks: z.array(OpenClawDispatchedTaskSchema).catch([]),
+  stale: z.string().optional(),
+});
+
+export type OpenClawDispatchedTask = z.infer<typeof OpenClawDispatchedTaskSchema>;
+export type OpenClawDispatchedResponse = z.infer<typeof OpenClawDispatchedResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

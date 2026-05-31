@@ -4797,6 +4797,12 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    openclaw_dispatched: list[tuple[str, str]] = field(default_factory=list)
+    """Tasks routed to OpenClaw (Mission-Control) instead of a local spawn,
+    as ``(task_id, operation)`` pairs. The task stays ``running`` while MC
+    executes; ``poll_openclaw_results`` polls it back to done/blocked on a
+    later tick. Separate bucket so a cross-system dispatch is never confused
+    with a local worker spawn in telemetry."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -5801,6 +5807,557 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# OpenClaw cross-system dispatch (Mission-Control via HMAC-signed envelopes)
+# ---------------------------------------------------------------------------
+#
+# A kanban task whose free-text ``assignee`` is ``openclaw:<agent>`` is not a
+# Hermes profile and would normally be bucketed as ``skipped_nonspawnable``.
+# Instead the dispatcher intercepts it BEFORE the profile_exists gate, signs a
+# Mission-Control envelope via the EXISTING signer module
+# (``mc_mutation_triage_server`` under ~/.hermes/mcp) and POSTs it to MC. The
+# task stays ``running``; ``poll_openclaw_results`` polls MC and closes the
+# task to done/blocked on a later tick. No DB migration: the correlation state
+# lives on ``task_runs.metadata`` JSON under the ``openclaw`` key.
+
+OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
+
+# Map the OpenClaw agent name (the part after ``openclaw:``) to the MC
+# operation the signer knows how to build/validate. Mirrors the MC
+# operation->agent routing map. atlas/forge/pixel are wired in a later slice;
+# lens is the only fully-built path here.
+OPENCLAW_AGENT_TO_OPERATION = {
+    "atlas": "trigger_atlas_sprint",
+    "lens": "request_lens_audit",
+    "forge": "request_forge_review",
+    "pixel": "request_pixel_ui_qa",
+}
+
+# Default Discord channel for the audit-result aggregate (hub parent channel
+# #hermes-oc). 19 digits — matches the lens-audit ``deliver_to`` regex
+# ``^[0-9]{17,20}$``. Overridable per-dispatch (see _dispatch_to_openclaw).
+OPENCLAW_DEFAULT_DELIVER_TO = "1500203113867378789"
+
+# Where the signer module lives. Importing it is lazy + guarded so a missing
+# module never crashes the dispatcher — it degrades to a normal spawn failure.
+_MC_SIGNER_DIR = str(Path.home() / ".hermes" / "mcp")
+
+# MC task-status read endpoint (poll-back). Reuses the openclaw_view read
+# headers (service / read), 6s timeout.
+_MC_TASK_STATUS_URL = "http://127.0.0.1:3000/api/tasks/{mc_task_id}"
+_MC_READ_HEADERS = {"x-actor-kind": "service", "x-request-class": "read"}
+_MC_READ_TIMEOUT_SECONDS = 6.0
+
+
+def _parse_openclaw_assignee(assignee: Optional[str]) -> Optional[str]:
+    """Return the MC operation for an ``openclaw:<agent>`` assignee, else None.
+
+    ``openclaw:lens`` -> ``request_lens_audit``. A plain Hermes profile
+    (``coder``) or an unknown agent (``openclaw:bogus``) returns ``None`` so
+    the caller falls through to the normal dispatch path unchanged.
+    """
+    if not assignee or not isinstance(assignee, str):
+        return None
+    if not assignee.startswith(OPENCLAW_ASSIGNEE_PREFIX):
+        return None
+    agent = assignee[len(OPENCLAW_ASSIGNEE_PREFIX):].strip().lower()
+    return OPENCLAW_AGENT_TO_OPERATION.get(agent)
+
+
+def _import_mc_signer():
+    """Lazy + guarded import of the MC signer module.
+
+    Returns the module on success. Raises (ImportError/Exception) on failure;
+    the caller routes the failure through the normal spawn-failure path.
+    """
+    if _MC_SIGNER_DIR not in sys.path:
+        sys.path.insert(0, _MC_SIGNER_DIR)
+    import mc_mutation_triage_server as _signer  # noqa: WPS433 (lazy by design)
+    return _signer
+
+
+def _openclaw_deliver_to(claimed_task: "Task") -> str:
+    """Resolve the Discord channel id for the audit aggregate.
+
+    Per-task override: a ``deliver_to`` key on the task's metadata JSON wins;
+    otherwise fall back to the hub-parent default. The value is validated by
+    the signer's payload schema (``^[0-9]{17,20}$``) — we do not re-validate
+    here, we just pick the source.
+    """
+    meta = getattr(claimed_task, "metadata", None)
+    if isinstance(meta, str) and meta.strip():
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = None
+    if isinstance(meta, dict):
+        cand = meta.get("openclaw_deliver_to") or meta.get("deliver_to")
+        if isinstance(cand, str) and cand.strip():
+            return cand.strip()
+    return OPENCLAW_DEFAULT_DELIVER_TO
+
+
+def _build_lens_envelope(claimed_task: "Task", signer) -> dict:
+    """Build a fully-signed ``request_lens_audit`` envelope for ``claimed_task``."""
+    import uuid
+    from datetime import datetime, timezone
+
+    deliver_to = _openclaw_deliver_to(claimed_task)
+    # scope_query must be 4-512 chars. Build it from the task title (+ id for
+    # traceability), clamped into range.
+    title = (getattr(claimed_task, "title", None) or "").strip()
+    scope_query = f"[{claimed_task.id}] {title}".strip()
+    if len(scope_query) < 4:
+        scope_query = f"kanban-task-{claimed_task.id}"
+    scope_query = scope_query[:512]
+
+    payload = {
+        "audit_kind": "memory-pipeline",
+        "scope_query": scope_query,
+        "deliver_to": deliver_to,
+    }
+    workflow_id = f"wf-openclaw-lens-{uuid.uuid4().hex[:8]}"
+    timestamp = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    signature = signer.compute_signature(payload, workflow_id, timestamp)
+    envelope = {
+        "workflow_id": workflow_id,
+        "source": "hermes-coordinator",
+        "source_profile": "coordinator",
+        "routing_alias": "@lens",
+        "capability_id": "openclaw.lens.request_audit",
+        "operation": "request_lens_audit",
+        "risk_class": "safe-read-only",
+        "timestamp": timestamp,
+        "signature": signature,
+        "payload": payload,
+    }
+    return envelope
+
+
+def _openclaw_objective(claimed_task: "Task") -> str:
+    """Derive a scope-contract objective (8-280 chars) from the task title.
+
+    Atlas' ``scope_contract_v2.objective`` requires minLength 8; pad short
+    titles with the task id so the envelope always validates.
+    """
+    title = (getattr(claimed_task, "title", None) or "").strip()
+    objective = f"[{claimed_task.id}] {title}".strip()
+    if len(objective) < 8:
+        objective = f"kanban-task-{claimed_task.id} sprint"
+    return objective[:280]
+
+
+def _openclaw_body_lines(claimed_task: "Task") -> list[str]:
+    """Return the non-empty, stripped lines of the task body (excluding the
+    machine marker lines like ``[openclaw_deliver_to:...]``)."""
+    body = getattr(claimed_task, "body", None)
+    if not isinstance(body, str) or not body.strip():
+        return []
+    out: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("[openclaw_deliver_to:") and line.endswith("]"):
+            continue
+        out.append(line)
+    return out
+
+
+def _build_atlas_envelope(claimed_task: "Task", signer) -> dict:
+    """Build a fully-signed ``trigger_atlas_sprint`` envelope.
+
+    NOTE: atlas is the HIGHEST-RISK path — ``risk_class=gated-mutation``. Unlike
+    lens/forge/pixel (read-only / planned), an Atlas sprint can mutate. We
+    hand-build the envelope (mirroring the lens pattern) rather than calling the
+    ``simple_atlas_sprint`` convenience wrapper, so this returns the same
+    envelope shape every other agent persists and the success path is uniform.
+
+    kanban title -> ``scope_contract_v2.objective``; in_scope/out_of_scope/
+    termination_conditions/evidence_requirements are derived from the task body
+    with conservative defaults that keep the sprint tightly bounded.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    deliver_to = _openclaw_deliver_to(claimed_task)
+    objective = _openclaw_objective(claimed_task)
+    body_lines = _openclaw_body_lines(claimed_task)
+    in_scope = body_lines[:12] if body_lines else [objective]
+    payload = {
+        "sprint_kind": "audit",
+        "scope_contract_v2": {
+            "objective": objective,
+            "in_scope": in_scope,
+            "out_of_scope": [
+                "No file writes outside the stated scope",
+                "No git push / deploy / infra mutation",
+            ],
+            "termination_conditions": [
+                "Objective addressed and evidence posted",
+            ],
+            "evidence_requirements": [
+                "Summary of findings posted to the deliver_to channel",
+            ],
+        },
+        "deliver_to": deliver_to,
+        "max_parallel_tasks": 3,
+    }
+    workflow_id = f"wf-openclaw-atlas-{uuid.uuid4().hex[:8]}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    signature = signer.compute_signature(payload, workflow_id, timestamp)
+    envelope = {
+        "workflow_id": workflow_id,
+        "source": "hermes-coordinator",
+        "source_profile": "coordinator",
+        "routing_alias": "@atlas",
+        "capability_id": "openclaw.atlas.trigger_sprint",
+        "operation": "trigger_atlas_sprint",
+        "risk_class": "gated-mutation",
+        "timestamp": timestamp,
+        "signature": signature,
+        "payload": payload,
+    }
+    return envelope
+
+
+def _build_forge_envelope(claimed_task: "Task", signer) -> dict:
+    """Build a fully-signed ``request_forge_review`` envelope (safe-read-only).
+
+    ``target_paths`` are parsed from the task body lines (repo-relative paths),
+    falling back to ``["."]``; ``review_kind`` defaults to ``code-quality``.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    deliver_to = _openclaw_deliver_to(claimed_task)
+    body_lines = _openclaw_body_lines(claimed_task)
+    # Each non-empty body line is treated as a repo-relative path candidate
+    # (schema caps item length at 256 and the array at 24 items).
+    target_paths = [ln[:256] for ln in body_lines][:24] or ["."]
+    payload = {
+        "review_kind": "code-quality",
+        "target_paths": target_paths,
+        "deliver_to": deliver_to,
+    }
+    workflow_id = f"wf-openclaw-forge-{uuid.uuid4().hex[:8]}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    signature = signer.compute_signature(payload, workflow_id, timestamp)
+    envelope = {
+        "workflow_id": workflow_id,
+        "source": "hermes-coordinator",
+        "source_profile": "coordinator",
+        "routing_alias": "@forge",
+        "capability_id": "openclaw.forge.request_review",
+        "operation": "request_forge_review",
+        "risk_class": "safe-read-only",
+        "timestamp": timestamp,
+        "signature": signature,
+        "payload": payload,
+    }
+    return envelope
+
+
+def _extract_target_url(claimed_task: "Task") -> str:
+    """Pull the first http(s) URL out of the task body for Pixel UI QA.
+
+    Falls back to the local dashboard (``http://127.0.0.1:9119/control``) when
+    no URL is present, so the envelope always satisfies the pixel schema's
+    ``^https?://`` pattern. Local/staging only by contract.
+    """
+    import re
+
+    for line in _openclaw_body_lines(claimed_task):
+        m = re.search(r"https?://[A-Za-z0-9._:/-]+", line)
+        if m:
+            return m.group(0)[:512]
+    return "http://127.0.0.1:9119/control"
+
+
+def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
+    """Build a fully-signed ``request_pixel_ui_qa`` envelope (operator-lock).
+
+    ``operator_lock_acknowledged`` MUST be literal ``true`` (the signer rejects
+    the operator-lock risk class otherwise). The dashboard endpoint already
+    refuses to create a pixel task without the operator's explicit ack, so
+    reaching this builder means the lock was consciously acknowledged.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    deliver_to = _openclaw_deliver_to(claimed_task)
+    target_url = _extract_target_url(claimed_task)
+    payload = {
+        "target_url": target_url,
+        "qa_kind": "layout-check",
+        "deliver_to": deliver_to,
+        "operator_lock_acknowledged": True,
+    }
+    workflow_id = f"wf-openclaw-pixel-{uuid.uuid4().hex[:8]}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    signature = signer.compute_signature(payload, workflow_id, timestamp)
+    envelope = {
+        "workflow_id": workflow_id,
+        "source": "hermes-coordinator",
+        "source_profile": "coordinator",
+        "routing_alias": "@pixel",
+        "capability_id": "openclaw.pixel.request_ui_qa",
+        "operation": "request_pixel_ui_qa",
+        "risk_class": "operator-lock",
+        "timestamp": timestamp,
+        "signature": signature,
+        "payload": payload,
+    }
+    return envelope
+
+
+# Map each MC operation to its envelope builder. All four converge on the same
+# envelope shape so the success-persist path below (and poll_openclaw_results)
+# handle every agent identically.
+_OPENCLAW_ENVELOPE_BUILDERS = {
+    "request_lens_audit": _build_lens_envelope,
+    "trigger_atlas_sprint": _build_atlas_envelope,
+    "request_forge_review": _build_forge_envelope,
+    "request_pixel_ui_qa": _build_pixel_envelope,
+}
+
+
+def _dispatch_to_openclaw(
+    conn: sqlite3.Connection,
+    claimed_task: "Task",
+    operation: str,
+) -> None:
+    """Sign + submit an OpenClaw envelope for an already-claimed (running) task.
+
+    On success: persist the MC correlation on ``task_runs.metadata.openclaw``
+    for the task's current run, leave the task ``running``, emit an
+    ``openclaw_dispatched`` event + a human-trail comment.
+
+    On rejection or any exception: raise, so the caller routes the task
+    through the existing ``_record_spawn_failure`` path (consistent with a
+    local spawn failure — task released, failure counted).
+    """
+    signer = _import_mc_signer()  # may raise -> caller treats as spawn failure
+
+    builder = _OPENCLAW_ENVELOPE_BUILDERS.get(operation)
+    if builder is None:
+        # Unknown / mis-routed operation: raising here means it degrades
+        # through the normal spawn-failure path rather than silently stranding
+        # in ``running``.
+        raise NotImplementedError(
+            f"OpenClaw operation {operation!r} not implemented yet"
+        )
+    envelope = builder(claimed_task, signer)
+
+    result = signer.submit_to_mission_control(envelope)
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        # Structured rejection (local-validate / mc-rejected / mc-unreachable).
+        stage = (result or {}).get("stage") if isinstance(result, dict) else None
+        reason = (result or {}).get("reason") if isinstance(result, dict) else None
+        raise RuntimeError(
+            f"openclaw submit rejected (stage={stage}, reason={reason})"
+        )
+
+    mc_response = result.get("mc_response") or {}
+    # MC returns the created/idempotent task id under ``taskId`` and the
+    # workflow id it stored under ``workflowId`` (mirror the envelope's
+    # workflow_id if MC echoes nothing).
+    mc_task_id = (
+        mc_response.get("taskId")
+        or mc_response.get("task_id")
+        or mc_response.get("id")
+    )
+    workflow_id = (
+        mc_response.get("workflowId")
+        or mc_response.get("workflow_id")
+        or envelope["workflow_id"]
+    )
+    if not mc_task_id:
+        raise RuntimeError("openclaw submit ok but MC returned no taskId")
+
+    submitted_at = int(time.time())
+    openclaw_meta = {
+        "mc_task_id": str(mc_task_id),
+        "workflow_id": str(workflow_id),
+        "operation": operation,
+        "poll_state": "submitted",
+        "submitted_at": submitted_at,
+    }
+    # Persist on the in-flight run's metadata WITHOUT closing the run (the task
+    # must stay ``running`` until poll-back resolves it). Merge into any
+    # existing metadata JSON rather than clobbering it.
+    with write_txn(conn):
+        run_id = _current_run_id(conn, claimed_task.id)
+        if run_id is None:
+            raise RuntimeError(
+                f"openclaw dispatch: task {claimed_task.id} has no active run"
+            )
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        existing = {}
+        if row and row["metadata"]:
+            try:
+                parsed = json.loads(row["metadata"])
+                if isinstance(parsed, dict):
+                    existing = parsed
+            except Exception:
+                existing = {}
+        existing["openclaw"] = openclaw_meta
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ?",
+            (json.dumps(existing, ensure_ascii=False), run_id),
+        )
+        _append_event(
+            conn, claimed_task.id, "openclaw_dispatched",
+            {
+                "operation": operation,
+                "mc_task_id": str(mc_task_id),
+                "workflow_id": str(workflow_id),
+            },
+            run_id=run_id,
+        )
+    # Human trail comment (separate — add_comment opens its own txn).
+    try:
+        add_comment(
+            conn, claimed_task.id, "dispatcher",
+            f"Dispatched to OpenClaw ({operation}) → MC task {mc_task_id} "
+            f"(workflow {workflow_id}). Polling for result.",
+        )
+    except Exception:
+        # The comment is a convenience trail; never fail the dispatch on it.
+        _log.debug(
+            "openclaw dispatch: comment failed for task %s",
+            claimed_task.id, exc_info=True,
+        )
+
+
+def poll_openclaw_results(conn: sqlite3.Connection, board: Optional[str] = None) -> None:
+    """Poll Mission-Control for each in-flight OpenClaw dispatch and close it.
+
+    Selects open runs (``task_runs.ended_at IS NULL``) whose metadata JSON has
+    ``openclaw.poll_state == "submitted"`` and whose parent task is still
+    ``running``. For each, GET MC's task-status endpoint with the read headers
+    (reused from the openclaw_view proxy pattern) and a 6s timeout. All
+    exceptions are swallowed — a transient MC blip just retries next tick.
+
+    Terminal handling, idempotent:
+      * MC ``done``/``completed`` -> flip ``poll_state`` to ``completed`` on
+        the run metadata, then ``complete_task`` (run-safe via expected_run_id).
+      * MC ``failed``/``canceled``/``cancelled``/``blocked`` -> flip to
+        ``failed`` then ``block_task``.
+    The ``ended_at`` filter excludes runs we've already closed, so a second
+    tick is a no-op.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.id AS run_id, r.task_id AS task_id, r.metadata AS metadata
+          FROM task_runs r
+          JOIN tasks t ON t.id = r.task_id
+         WHERE r.ended_at IS NULL
+           AND t.status = 'running'
+           AND r.metadata LIKE '%"poll_state"%'
+        """,
+    ).fetchall()
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata"]) if row["metadata"] else {}
+        except Exception:
+            continue
+        oc = meta.get("openclaw") if isinstance(meta, dict) else None
+        if not isinstance(oc, dict) or oc.get("poll_state") != "submitted":
+            continue
+        mc_task_id = oc.get("mc_task_id")
+        if not mc_task_id:
+            continue
+        run_id = int(row["run_id"])
+        task_id = row["task_id"]
+
+        # --- MC read (best-effort, all exceptions swallowed) ---
+        try:
+            import httpx  # local import: keeps httpx out of the import-time path
+            url = _MC_TASK_STATUS_URL.format(mc_task_id=mc_task_id)
+            resp = httpx.get(
+                url, headers=_MC_READ_HEADERS, timeout=_MC_READ_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            mc_task = resp.json()
+        except Exception:
+            # Transient MC failure / unreachable / parse error: retry next tick.
+            continue
+        if not isinstance(mc_task, dict):
+            continue
+
+        mc_status = str(
+            mc_task.get("status") or mc_task.get("state") or ""
+        ).strip().lower()
+        if not mc_status:
+            continue
+
+        result_summary = (
+            mc_task.get("resultSummary")
+            or mc_task.get("result_summary")
+            or mc_task.get("summary")
+            or mc_task.get("result")
+        )
+        if isinstance(result_summary, (dict, list)):
+            result_summary = json.dumps(result_summary, ensure_ascii=False)
+        elif result_summary is not None:
+            result_summary = str(result_summary)
+
+        done_states = {"done", "completed", "complete", "succeeded", "success"}
+        failed_states = {"failed", "failure", "canceled", "cancelled", "blocked", "error"}
+
+        if mc_status in done_states:
+            terminal_state = "completed"
+        elif mc_status in failed_states:
+            terminal_state = "failed"
+        else:
+            # Still in-flight on MC (queued/running/...). Leave for next tick.
+            continue
+
+        # Idempotency: flip poll_state on the run metadata BEFORE the terminal
+        # call. complete_task / block_task close the run (ended_at set), so the
+        # ended_at filter excludes this run on every future tick regardless.
+        oc["poll_state"] = terminal_state
+        oc["mc_status"] = mc_status
+        merged = dict(meta)
+        merged["openclaw"] = oc
+        try:
+            with write_txn(conn):
+                conn.execute(
+                    "UPDATE task_runs SET metadata = ? WHERE id = ? AND ended_at IS NULL",
+                    (json.dumps(merged, ensure_ascii=False), run_id),
+                )
+        except Exception:
+            # If we can't even flip the flag, skip — next tick retries.
+            continue
+
+        try:
+            if terminal_state == "completed":
+                complete_task(
+                    conn, task_id,
+                    result=result_summary,
+                    summary=result_summary,
+                    metadata=merged,
+                    expected_run_id=run_id,
+                )
+            else:
+                block_task(
+                    conn, task_id,
+                    reason=(result_summary or f"OpenClaw MC status: {mc_status}"),
+                    expected_run_id=run_id,
+                )
+        except Exception:
+            _log.debug(
+                "poll_openclaw_results: terminal transition failed for task %s",
+                task_id, exc_info=True,
+            )
+            continue
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -5982,6 +6539,43 @@ def dispatch_once(
             else:
                 result.skipped_unassigned.append(row["id"])
                 continue
+        # ---- OpenClaw cross-system dispatch ----
+        # An ``openclaw:<agent>`` assignee is NOT a Hermes profile and would be
+        # rejected by the profile_exists gate just below. Intercept it FIRST:
+        # claim the task, sign + POST an MC envelope, and leave it ``running``
+        # for poll-back. This branch must sit BEFORE the profile_exists gate so
+        # normal assignees are 100% unaffected (they never enter this block).
+        _openclaw_op = _parse_openclaw_assignee(row_assignee)
+        if _openclaw_op is not None:
+            if dry_run:
+                # Report what WOULD be dispatched without mutating the DB.
+                result.spawned.append((row["id"], row_assignee, ""))
+                result.openclaw_dispatched.append((row["id"], _openclaw_op))
+                continue
+            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            if claimed is None:
+                continue
+            try:
+                _dispatch_to_openclaw(conn, claimed, _openclaw_op)
+                # Success: task stays ``running`` (poll-back closes it later).
+                result.openclaw_dispatched.append((claimed.id, _openclaw_op))
+                spawned += 1
+                if _per_profile_cap is not None and claimed.assignee:
+                    _per_profile_running[claimed.assignee] = (
+                        _per_profile_running.get(claimed.assignee, 0) + 1
+                    )
+            except Exception as exc:
+                # Mirror the local-spawn failure path: release the claim,
+                # count the failure, auto-block after the limit. A missing
+                # signer module, an MC rejection, or an unimplemented agent
+                # all degrade here rather than crashing the dispatcher.
+                auto = _record_spawn_failure(
+                    conn, claimed.id, f"openclaw: {exc}",
+                    failure_limit=failure_limit,
+                )
+                if auto:
+                    result.auto_blocked.append(claimed.id)
+            continue
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
         # with "Profile 'X' does not exist" when the assignee names a

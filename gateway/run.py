@@ -5631,7 +5631,7 @@ class GatewayRunner:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                return _kb.dispatch_once(
+                _dispatch_result = _kb.dispatch_once(
                     conn,
                     board=slug,
                     max_spawn=max_spawn,
@@ -5641,6 +5641,20 @@ class GatewayRunner:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                 )
+                # Poll Mission-Control for any in-flight OpenClaw dispatches on
+                # this board and close their kanban tasks to done/blocked. Runs
+                # on the same connection, inside this try (so the conn-closing
+                # finally still fires), before we return the dispatch result.
+                # Best-effort: a poll-back failure must never break dispatch, so
+                # it is guarded independently.
+                try:
+                    _kb.poll_openclaw_results(conn, board=slug)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: openclaw poll-back failed on board %s",
+                        slug, exc_info=True,
+                    )
+                return _dispatch_result
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())

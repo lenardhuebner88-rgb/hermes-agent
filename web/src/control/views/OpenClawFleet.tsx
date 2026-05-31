@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Shield } from "lucide-react";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
-import { useOpenClawAgents, useOpenClawCronErrors } from "../hooks/useControlData";
+import { useOpenClawAgents, useOpenClawCronErrors, useOpenClawDispatched } from "../hooks/useControlData";
 import { agentIsProblem, agentSortRank, fmtAge, nowSec, reconcileOpenClawFleet, type OpenClawFleetState } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
@@ -10,12 +10,15 @@ import type { Density } from "../hooks/useDensity";
 import { AgentCard } from "../components/AgentCard";
 import { AgentDrilldownDrawer } from "../components/AgentDrilldownDrawer";
 import { CronErrorsPanel } from "../components/CronErrorsPanel";
+import { OpenClawDispatchForm } from "../components/OpenClawDispatchForm";
+import { OpenClawDispatchedPanel } from "../components/OpenClawDispatchedPanel";
 import { OpenClawAlertBanner } from "../components/OpenClawAlertBanner";
 import { StatusPill, ToneCallout } from "../components/atoms";
 
 export function OpenClawFleet({ density }: { density: Density }) {
   const agents = useOpenClawAgents();
   const cronErrors = useOpenClawCronErrors();
+  const dispatched = useOpenClawDispatched();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
   const [drillId, setDrillId] = useState<string | null>(null);
@@ -56,6 +59,8 @@ export function OpenClawFleet({ density }: { density: Density }) {
       </section>
       <OpenClawAlertBanner agents={list} />
       <CronErrorsPanel data={cronErrors.data} error={cronErrors.error} now={now} />
+      <OpenClawDispatchForm onDispatched={() => void dispatched.reload()} />
+      <OpenClawDispatchedPanel data={dispatched.data} error={dispatched.error} now={now} />
       {agents.error ? <ToneCallout tone="red">{agents.error}</ToneCallout> : null}
       {stale && list.length > 0 ? <ToneCallout tone="amber">{de.openclaw.staleFleet(fmtAge(fleet?.updatedAt ?? now, now))}: {stale}</ToneCallout> : null}
       {stale && list.length === 0 ? <ToneCallout tone="amber">{de.openclaw.unreachable}: {stale}</ToneCallout> : null}

@@ -4,6 +4,7 @@ import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
   AutoresearchStatusSchema,
+  OpenClawDispatchedResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   RunInspectSchema,
@@ -11,8 +12,18 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import type { OpenClawDispatchedResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
+
+export type OpenClawDispatchBody = {
+  title: string;
+  description?: string;
+  agent: string;
+  deliver_to?: string;
+  operator_lock_acknowledged?: boolean;
+  board?: string;
+};
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -310,4 +321,22 @@ export function useOpenClawCronErrors() {
     async () => parseOrThrow(OpenClawCronErrorsResponseSchema, await fetchJSON<unknown>("/api/openclaw/cron-errors"), "openclaw/cron-errors"),
     5000,
   );
+}
+
+export function useOpenClawDispatched() {
+  return usePolling<OpenClawDispatchedResponse>(
+    async () => parseOrThrow(OpenClawDispatchedResponseSchema, await fetchJSON<unknown>("/api/openclaw/dispatched"), "openclaw/dispatched"),
+    5000,
+  );
+}
+
+/** POST a new openclaw:<agent> dispatch. Mirrors the autoresearch POST pattern
+ *  (Content-Type JSON body). No secret material on this path — the dispatcher
+ *  signs the MC envelope later. Returns the created task id. */
+export async function dispatchOpenClawTask(body: OpenClawDispatchBody): Promise<{ ok?: boolean; taskId?: string; detail?: string }> {
+  return fetchJSON<{ ok?: boolean; taskId?: string; detail?: string }>("/api/openclaw/dispatch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
