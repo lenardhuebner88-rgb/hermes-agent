@@ -28,7 +28,7 @@ export type OpenClawDispatchBody = {
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
-type BatchConfirmItem = { id?: string; ok?: boolean; status?: string; result?: string; detail?: string; error?: string };
+type BatchConfirmItem = { id?: string; ok?: boolean; status?: string; result?: string; detail?: string; error?: string; reason?: string };
 type BatchConfirmResponse = {
   ok?: boolean;
   detail?: string;
@@ -81,11 +81,11 @@ function batchConfirmResultForIds(ids: string[], response: BatchConfirmResponse)
     const itemFailed = failed.has(id) || item?.ok === false || item?.status === "fail" || item?.status === "failed";
     const itemOk = confirmed.has(id) || item?.ok === true || item?.status === "ok" || item?.status === "confirmed" || item?.status === "applied";
     if (itemFailed) {
-      next[id] = { status: "fail", detail: item?.detail ?? item?.error ?? item?.result ?? response.detail };
+      next[id] = { status: "fail", detail: item?.detail ?? item?.reason ?? item?.error ?? item?.result ?? response.detail };
     } else if (itemOk || response.ok !== false) {
       next[id] = { status: "ok", detail: item?.detail ?? item?.result };
     } else {
-      next[id] = { status: "fail", detail: item?.detail ?? item?.error ?? item?.result ?? response.detail };
+      next[id] = { status: "fail", detail: item?.detail ?? item?.reason ?? item?.error ?? item?.result ?? response.detail };
     }
   }
   return next;
@@ -269,7 +269,16 @@ export function useProposals() {
   }, [log, mutateProposal, state]);
 
   const applyAll = useCallback(async () => {
-    for (const proposal of openSkillProposals) await apply(proposal);
+    // Snapshot the actionable set up front and dedupe by id, so individual
+    // applies + their reloads churning the list under us can't re-POST a
+    // proposal that has already been submitted this run.
+    const pending = openSkillProposals.filter(isActionable);
+    const seen = new Set<string>();
+    for (const proposal of pending) {
+      if (seen.has(proposal.id)) continue;
+      seen.add(proposal.id);
+      await apply(proposal);
+    }
   }, [apply, openSkillProposals]);
 
   const confirmBatch = useCallback(async (ids: string[]) => {
@@ -335,18 +344,27 @@ export function useSystemHealth() {
 
 export function useRunInspect() {
   const [inspectByRun, setInspectByRun] = useState<Record<string, RunInspect>>({});
+  const [errorByRun, setErrorByRun] = useState<Record<string, string>>({});
   const [loadingRun, setLoadingRun] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
   const inspect = useCallback(async (runId: string) => {
     setLoadingRun(runId);
     try {
       const raw = await fetchJSON<unknown>(`/api/plugins/kanban/runs/${encodeURIComponent(runId)}/inspect`);
       const data = parseOrThrow(RunInspectSchema, raw, "run/inspect");
+      if (!aliveRef.current) return;
       setInspectByRun((prev) => ({ ...prev, [runId]: data }));
+      setErrorByRun((prev) => ({ ...prev, [runId]: "" }));
+    } catch (err) {
+      // 404 / contract error: surface it instead of leaving the button silently
+      // doing nothing (the spinner just clears in finally).
+      if (aliveRef.current) setErrorByRun((prev) => ({ ...prev, [runId]: err instanceof Error ? err.message : String(err) }));
     } finally {
-      setLoadingRun(null);
+      if (aliveRef.current) setLoadingRun(null);
     }
   }, []);
-  return { inspectByRun, loadingRun, inspect };
+  return { inspectByRun, errorByRun, loadingRun, inspect };
 }
 
 
