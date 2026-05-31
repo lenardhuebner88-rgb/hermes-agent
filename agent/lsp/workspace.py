@@ -41,6 +41,26 @@ def normalize_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _is_git_marker(git_marker: Path) -> bool:
+    """True iff ``.git`` marks a real git checkout.
+
+    A ``.git`` *file* is a gitfile (``git worktree add`` / submodule) and always
+    counts. A ``.git`` *directory* counts only if it actually holds a repo (has a
+    ``HEAD``) — an *empty* ``.git`` dir is not a repository (``git`` itself
+    rejects it). This guards against stray empty ``.git`` dirs (e.g. one left in
+    ``/tmp``) being mistaken for a workspace root, which would otherwise make
+    every temp-dir path resolve to a bogus workspace.
+    """
+    try:
+        if git_marker.is_file():
+            return True
+        if git_marker.is_dir():
+            return (git_marker / "HEAD").exists()
+    except OSError:
+        return False
+    return False
+
+
 def find_git_worktree(start: str) -> Optional[str]:
     """Walk up from ``start`` looking for a ``.git`` entry (file or dir).
 
@@ -72,7 +92,7 @@ def find_git_worktree(start: str) -> Optional[str]:
     for _ in range(64):
         git_marker = cur / ".git"
         try:
-            if git_marker.exists():
+            if _is_git_marker(git_marker):
                 resolved = str(cur)
                 _workspace_cache[str(start_path)] = (resolved, True)
                 return resolved

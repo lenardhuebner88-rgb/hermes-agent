@@ -33,6 +33,7 @@ def test_find_git_worktree_finds_dotgit(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     sub = repo / "src" / "deep"
     sub.mkdir(parents=True)
     assert find_git_worktree(str(sub)) == str(repo)
@@ -98,6 +99,7 @@ def test_nearest_root_returns_none_when_no_marker(tmp_path: Path):
 def test_resolve_workspace_for_file_uses_cwd_first(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     file_path = repo / "x.py"
     file_path.write_text("")
     # cwd is inside the repo
@@ -125,6 +127,7 @@ def test_resolve_workspace_falls_back_to_file_location(tmp_path: Path, monkeypat
 
     repo = tmp_path / "actual-repo"
     (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     f = repo / "x.py"
     f.write_text("")
 
