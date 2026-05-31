@@ -4,12 +4,13 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
-import { useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
+import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
+import type { AutoresearchRun } from "../lib/types";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { ProposalCard } from "../components/ProposalCard";
 
@@ -17,6 +18,7 @@ type ProposalStore = ReturnType<typeof useProposals>;
 
 export function AutoresearchView({ density, store }: { density: Density; store: ProposalStore }) {
   const status = useAutoresearchStatus();
+  const runs = useAutoresearchRuns();
   const split = useMemo(() => splitAutoresearchProposals(store.proposals), [store.proposals]);
   const open = split.actionable;
   const reverted = split.reverted;
@@ -131,8 +133,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <Button className="hc-hit" onClick={store.generate} disabled={!!store.busy} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>
               Vorschläge erzeugen (sofort)
             </Button>
-            <Button outlined className="hc-hit" onClick={store.generateCodeWeaknesses} disabled={!!store.busy} prefix={store.busy === "generate-code" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("incremental")} disabled={!!store.busy} prefix={store.busy === "generate-code" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
               {de.autoresearch.findCodeWeaknesses}
+            </Button>
+            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("full")} disabled={!!store.busy} prefix={store.busy === "generate-code-full" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+              {de.autoresearch.findCodeWeaknessesFull}
             </Button>
             <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({store.openSkillProposals.length})
@@ -256,6 +261,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         <details className="space-y-3"><summary className="cursor-pointer text-lg font-semibold text-white">Übersprungen ({skipped.length})</summary><div className="mt-3 grid gap-3">{skipped.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></details>
       ) : null}
 
+      <RecentRuns runs={runs.data?.runs ?? []} />
+
       <section className="hc-card p-4">
         <h2 className="mb-3 text-base font-semibold text-white">{de.autoresearch.activity}</h2>
         {store.activity.length === 0 ? <p className="text-sm hc-soft">Noch keine Aktion in dieser Ansicht.</p> : <div className="space-y-2">{store.activity.map((entry) => <div key={`${entry.at}-${entry.text}`} className={cn("flex gap-3 rounded-lg border px-3 py-2 text-sm", entry.tone === "red" ? "border-red-500/20 bg-red-500/10 text-red-100" : entry.tone === "amber" ? "border-amber-500/20 bg-amber-500/10 text-amber-100" : entry.tone === "emerald" ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100" : "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}><span className="hc-mono hc-dim">{fmtClock(entry.at)}</span><span>{entry.text}</span></div>)}</div>}
@@ -311,4 +318,46 @@ function LastRun({ status }: { status: ReturnType<typeof useAutoresearchStatus>[
 
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
   return <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft">{icon}<span>{text}</span></div>;
+}
+
+function RecentRuns({ runs }: { runs: AutoresearchRun[] }) {
+  const totalTokens = sumRunTokens(runs);
+  return (
+    <section className="hc-card p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-base font-semibold text-white">{de.autoresearch.recentRuns}</h2>
+        {totalTokens > 0 ? <span className="hc-mono text-xs hc-soft">{de.autoresearch.runsTokensTotal}: {totalTokens.toLocaleString("de-DE")}</span> : null}
+      </div>
+      {runs.length === 0 ? (
+        <p className="text-sm hc-soft">{de.autoresearch.recentRunsEmpty}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="hc-dim">
+              <tr className="border-b border-white/10">
+                <th className="py-1 pr-3 font-medium">{de.autoresearch.runsColTime}</th>
+                <th className="py-1 pr-3 font-medium">{de.autoresearch.runsColLane}</th>
+                <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColTokens}</th>
+                <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColProposed}</th>
+                <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColScanned}</th>
+                <th className="py-1 text-right font-medium">{de.autoresearch.runsColErrors}</th>
+              </tr>
+            </thead>
+            <tbody className="hc-soft">
+              {runs.map((run, i) => (
+                <tr key={`${run.at}-${run.request_id ?? i}`} className="border-b border-white/5 last:border-0">
+                  <td className="py-1 pr-3 hc-mono text-xs">{formatRunTime(run.at)}</td>
+                  <td className="py-1 pr-3"><StatusPill tone={runLaneTone(run.lane)} label={runLaneLabel(run.lane)} /></td>
+                  <td className="py-1 pr-3 text-right hc-mono">{run.tokens ? run.tokens.toLocaleString("de-DE") : "—"}</td>
+                  <td className="py-1 pr-3 text-right hc-mono">{run.proposed}</td>
+                  <td className="py-1 pr-3 text-right hc-mono">{run.scanned}</td>
+                  <td className={cn("py-1 text-right hc-mono", run.errors > 0 ? "text-red-300" : "")}>{run.errors}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }

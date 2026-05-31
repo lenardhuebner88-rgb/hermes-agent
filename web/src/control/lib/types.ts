@@ -204,6 +204,21 @@ export interface AutoresearchStatus {
   note: string | null;
 }
 
+export interface AutoresearchRun {
+  at: string;
+  lane: "skill" | "code";
+  request_id: string | null;
+  tokens: number;
+  proposed: number;
+  errors: number;
+  scanned: number;
+}
+
+export interface AutoresearchRunsResponse {
+  schema?: string;
+  runs: AutoresearchRun[];
+}
+
 export type ProposalMode = "skill" | "code";
 export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped";
 export type ProposalLastOutcome = "applied" | "reverted_no_improvement" | null;

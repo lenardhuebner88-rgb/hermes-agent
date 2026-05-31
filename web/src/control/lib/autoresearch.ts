@@ -1,4 +1,4 @@
-import type { AutoresearchStatus, Proposal, ToneName } from "./types";
+import type { AutoresearchRun, AutoresearchStatus, Proposal, ToneName } from "./types";
 
 export interface ProposalPriorityGroup {
   key: "safety" | "quick-win" | "code-gate" | "other";
@@ -225,6 +225,36 @@ export function parseMinUseCount(input: string): number | null {
   const value = Number(trimmed);
   if (!Number.isFinite(value) || value <= 0) return null;
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// f-autoresearch-intensify (P2): run-history / ROI panel helpers (pure, tested).
+// ---------------------------------------------------------------------------
+
+/** Sum of MiniMax tokens across the shown runs (for the aggregate ROI line). */
+export function sumRunTokens(runs: readonly AutoresearchRun[]): number {
+  return runs.reduce((acc, r) => acc + (Number.isFinite(r.tokens) ? r.tokens : 0), 0);
+}
+
+/** Human label + tone for a run lane. */
+export function runLaneLabel(lane: AutoresearchRun["lane"]): string {
+  return lane === "code" ? "Code" : "Skills";
+}
+
+export function runLaneTone(lane: AutoresearchRun["lane"]): ToneName {
+  return lane === "code" ? "violet" : "cyan";
+}
+
+/**
+ * Format a run timestamp for the panel. Accepts the ISO string the backend
+ * writes; returns a short local date-time, or "—" for an empty/invalid value
+ * (never throws on garbage).
+ */
+export function formatRunTime(at: string | null | undefined): string {
+  if (!at) return "—";
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
 }
 
 export function rankAutoresearchReviewQueue(proposals: Proposal[], limit = 10): RankedProposalQueue {

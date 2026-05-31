@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, getProposalPriorityGroup, hasResearchCounters, isActionable, parseMinUseCount, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "./autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, getProposalPriorityGroup, hasResearchCounters, isActionable, parseMinUseCount, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -243,5 +243,30 @@ describe("autoresearch on-demand driver helpers", () => {
     expect(parseMinUseCount("-3")).toBeNull();
     expect(parseMinUseCount("2")).toBe(2);
     expect(parseMinUseCount(" 1.5 ")).toBe(1.5);
+  });
+});
+
+describe("autoresearch run-history (ROI panel) helpers", () => {
+  const run = (over: Partial<import("./types").AutoresearchRun> = {}): import("./types").AutoresearchRun => ({
+    at: "2026-05-31T19:31:21Z", lane: "skill", request_id: "r", tokens: 0, proposed: 0, errors: 0, scanned: 0, ...over,
+  });
+
+  it("sumRunTokens totals tokens and ignores non-finite", () => {
+    expect(sumRunTokens([run({ tokens: 100 }), run({ tokens: 50 }), run({ tokens: NaN })])).toBe(150);
+    expect(sumRunTokens([])).toBe(0);
+  });
+
+  it("runLaneLabel / runLaneTone map lane to label + tone", () => {
+    expect(runLaneLabel("code")).toBe("Code");
+    expect(runLaneLabel("skill")).toBe("Skills");
+    expect(runLaneTone("code")).toBe("violet");
+    expect(runLaneTone("skill")).toBe("cyan");
+  });
+
+  it("formatRunTime returns '—' for empty/invalid and a string for valid ISO", () => {
+    expect(formatRunTime("")).toBe("—");
+    expect(formatRunTime(null)).toBe("—");
+    expect(formatRunTime("not-a-date")).toBe("—");
+    expect(formatRunTime("2026-05-31T19:31:21Z")).not.toBe("—");
   });
 });

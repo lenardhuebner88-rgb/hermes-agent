@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
+  AutoresearchRunsResponseSchema,
   AutoresearchStatusSchema,
   OpenClawDispatchedResponseSchema,
   ProposalsResponseSchema,
@@ -14,7 +15,7 @@ import {
 } from "../lib/schemas";
 import type { OpenClawDispatchedResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
-import type { AgentsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
+import type { AgentsResponse, AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
 export type OpenClawDispatchBody = {
   title: string;
@@ -141,6 +142,13 @@ export function useAutoresearchStatus() {
   );
 }
 
+export function useAutoresearchRuns() {
+  return usePolling<AutoresearchRunsResponse>(
+    async () => parseOrThrow(AutoresearchRunsResponseSchema, await fetchJSON<unknown>("/autoresearch/runs"), "autoresearch/runs"),
+    10000,
+  );
+}
+
 export function useProposals() {
   const [activity, setActivity] = useState<Array<{ at: number; text: string; tone: "emerald" | "amber" | "violet" | "red" }>>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -180,13 +188,20 @@ export function useProposals() {
   // f-autoresearch-tab-driver: MiniMax scans the (now hermes_cli/-wide) code allowlist
   // for grounded weaknesses; findings land in the queue as mode=code proposals and apply
   // through the full test-suite gate. Dry-run only — no writes here.
-  const generateCodeWeaknesses = useCallback(async () => {
-    setBusy("generate-code");
+  const generateCodeWeaknesses = useCallback(async (scope: "incremental" | "full" = "incremental") => {
+    setBusy(scope === "full" ? "generate-code-full" : "generate-code");
     try {
-      const result = await fetchJSON<{ created_count?: number; files_seen?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", { method: "POST" });
+      const result = await fetchJSON<{ created_count?: number; files_seen?: number; skipped_unchanged?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
+      });
       const created = result.created_count ?? 0;
       const scanned = result.files_seen ?? 0;
-      log(`Code-Schwächen-Suche: ${created} ${created === 1 ? "Fund" : "Funde"} (${scanned} Dateien gescannt)`, created > 0 ? "emerald" : "violet");
+      const skipped = result.skipped_unchanged ?? 0;
+      const mode = scope === "full" ? "Voll" : "inkrementell";
+      const skippedNote = scope === "incremental" && skipped > 0 ? ` · ${skipped} unverändert` : "";
+      log(`Code-Schwächen (${mode}): ${created} ${created === 1 ? "Fund" : "Funde"} · ${scanned} gescannt${skippedNote}`, created > 0 ? "emerald" : "violet");
       await state.reload();
     } catch (e) {
       log(`Code-Schwächen-Suche fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");

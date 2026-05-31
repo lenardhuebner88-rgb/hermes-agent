@@ -128,6 +128,21 @@ export const AutoresearchStatusSchema = z.object({
   note: nullableString,
 });
 
+export const AutoresearchRunSchema = z.object({
+  at: z.string().catch(""),
+  lane: z.enum(["skill", "code"]).catch("skill"),
+  request_id: z.string().nullable().catch(null),
+  tokens: z.coerce.number().catch(0),
+  proposed: z.coerce.number().catch(0),
+  errors: z.coerce.number().catch(0),
+  scanned: z.coerce.number().catch(0),
+});
+
+export const AutoresearchRunsResponseSchema = z.object({
+  schema: z.string().optional(),
+  runs: z.array(AutoresearchRunSchema).catch([]),
+});
+
 export const ProposalSchema = z.object({
   id: z.string(),
   target: z.string().catch(""),
