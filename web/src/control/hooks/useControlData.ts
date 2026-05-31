@@ -177,6 +177,24 @@ export function useProposals() {
     }
   }, [log, state]);
 
+  // f-autoresearch-tab-driver: MiniMax scans the (now hermes_cli/-wide) code allowlist
+  // for grounded weaknesses; findings land in the queue as mode=code proposals and apply
+  // through the full test-suite gate. Dry-run only — no writes here.
+  const generateCodeWeaknesses = useCallback(async () => {
+    setBusy("generate-code");
+    try {
+      const result = await fetchJSON<{ created_count?: number; files_seen?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", { method: "POST" });
+      const created = result.created_count ?? 0;
+      const scanned = result.files_seen ?? 0;
+      log(`Code-Schwächen-Suche: ${created} ${created === 1 ? "Fund" : "Funde"} (${scanned} Dateien gescannt)`, created > 0 ? "emerald" : "violet");
+      await state.reload();
+    } catch (e) {
+      log(`Code-Schwächen-Suche fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");
+    } finally {
+      setBusy(null);
+    }
+  }, [log, state]);
+
   const apply = useCallback(async (proposal: Proposal) => {
     const isCode = proposal.mode === "code";
     setBusy(proposal.id);
@@ -263,7 +281,7 @@ export function useProposals() {
     }
   }, [log, state]);
 
-  return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, apply, skip, applyAll, confirmBatch };
+  return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, generateCodeWeaknesses, apply, skip, applyAll, confirmBatch };
 }
 
 export function useHermesWorkers() {

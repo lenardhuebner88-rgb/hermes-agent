@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, pruneProposalSelection, rankAutoresearchReviewQueue, selectVisibleProposals, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -31,6 +31,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
   const [maxIterations, setMaxIterations] = useState(2);
+  const [area, setArea] = useState("all");
+  const [focus, setFocus] = useState("recommended_sections");
+  const [minUseCount, setMinUseCount] = useState("");
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
@@ -40,7 +43,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     setLoopBusy("start");
     setLoopMessage(null);
     try {
-      const body = { area: "all", focus: "recommended_sections", mode: "dry-run", confirm: false, max_iterations: clampLoopIterations(maxIterations) };
+      const body: Record<string, unknown> = { area: area.trim() || "all", focus: focus.trim() || "recommended_sections", mode: "dry-run", confirm: false, max_iterations: clampLoopIterations(maxIterations) };
+      const muc = parseMinUseCount(minUseCount);
+      if (muc !== null) body.min_use_count = muc;
       const result = await fetchJSON<{ request_id?: string; pid?: number }>("/autoresearch/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -126,6 +131,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <Button className="hc-hit" onClick={store.generate} disabled={!!store.busy} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>
               Vorschläge erzeugen (sofort)
             </Button>
+            <Button outlined className="hc-hit" onClick={store.generateCodeWeaknesses} disabled={!!store.busy} prefix={store.busy === "generate-code" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+              {de.autoresearch.findCodeWeaknesses}
+            </Button>
             <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({store.openSkillProposals.length})
             </Button>
@@ -151,6 +159,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {loopMessage ? <ToneCallout tone={loopMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{loopMessage}</ToneCallout> : null}
           </div>
           <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
+            <input id="loop-area" type="text" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <label className="text-xs hc-soft" htmlFor="loop-focus">{de.autoresearch.triggerFocus}</label>
+            <input id="loop-focus" type="text" value={focus} onChange={(event) => setFocus(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <label className="text-xs hc-soft" htmlFor="loop-min-use">{de.autoresearch.triggerMinUse}</label>
+            <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
             <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(clampLoopIterations(Number(event.target.value)))} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
@@ -268,12 +282,25 @@ function LastRun({ status }: { status: ReturnType<typeof useAutoresearchStatus>[
   const refused = typeof objectRun?.refused === "string" ? objectRun.refused : null;
   const stopped = objectRun?.stopped === true ? "Signal erhalten" : null;
   const summary = objectRun ? [mode, finishedAt ? new Date(finishedAt).toLocaleString("de-DE") : null].filter(Boolean).join(" · ") : lastRunText;
+  // f-autoresearch-tab-driver: surface the observability counters so "0 proposed"
+  // reads as converged-healthy vs broken, plus the real MiniMax token spend.
+  const counters = readLastRunCounters(lastRun);
+  const showCounters = hasResearchCounters(counters);
+  const showErrorBadge = shouldShowResearchErrorBadge(counters.researchErrors);
 
-  if (!summary && !receipt && !note) return <p className="text-sm hc-soft">Letzter Dry-Run: noch keine verwertbaren Laufdaten.</p>;
+  if (!summary && !receipt && !note && !showCounters) return <p className="text-sm hc-soft">Letzter Dry-Run: noch keine verwertbaren Laufdaten.</p>;
   return (
     <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
       <p><span className="text-white">Letzter Lauf:</span> {summary || "Backend liefert nur Statusnotiz"}</p>
       {proposed !== null || kept !== null || reverted !== null ? <p className="mt-1 hc-mono">proposed={proposed ?? "?"} · übernommen={kept ?? "?"} · zurückgerollt={reverted ?? "?"}</p> : null}
+      {showCounters ? (
+        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 hc-mono">
+          <span>{de.autoresearch.skillsResearched}={counters.skillsResearched ?? "?"} · {de.autoresearch.researchErrors}={counters.researchErrors ?? "?"} · {de.autoresearch.skillsWithFindings}={counters.skillsWithFindings ?? "?"}</span>
+          {showErrorBadge ? <span className="rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-xs text-red-200">{de.autoresearch.researchErrorBadge}</span> : null}
+        </p>
+      ) : null}
+      <p className="mt-1 hc-mono">{de.autoresearch.researchTokens}: {formatResearchTokens(counters.researchTokens)}</p>
+      {showCounters ? <p className="mt-1 text-xs hc-dim">{de.autoresearch.counterLegend}</p> : null}
       {refused ? <p className="mt-1">Abgelehnt: {refused}</p> : null}
       {stopped ? <p className="mt-1">{stopped}</p> : null}
       {receipt ? <p className="mt-1 truncate text-xs hc-dim" title={receipt}>Receipt: {receipt}</p> : null}
