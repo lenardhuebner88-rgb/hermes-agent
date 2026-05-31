@@ -13,7 +13,7 @@ export const RunInspectSchema = z.object({
   status: z.string().catch("unknown"),
   create_time: z.coerce.number().optional(),
   cmdline: z.array(z.string()).optional(),
-  alive: z.boolean().catch(true),
+  alive: z.boolean().catch(false),
 }).transform((v) => ({
   cpu_percent: v.cpu_percent,
   rss: v.rss ?? v.memory_info?.rss ?? 0,
