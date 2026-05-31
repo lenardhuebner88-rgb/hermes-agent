@@ -18,7 +18,9 @@ count, i.e. everything an operator opens MC ``/agents`` for today.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,6 +37,7 @@ _TIMEOUT_SECONDS = 2.5
 # string (httpx timeout → str(exc) == "") so nothing surfaced. Give the read its
 # own, roomier budget; the stale-retain guard on the frontend covers the rest.
 _READ_TIMEOUT_SECONDS = 6.0
+_OPENCLAW_CRON_DIR = Path.home() / ".openclaw" / "cron"
 
 _PRIORITY_MAP = {"high": "high", "medium": "med", "med": "med", "low": "low"}
 
@@ -158,6 +161,102 @@ def _normalize_payload(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _cron_errors_stale_response(reason: str) -> dict[str, Any]:
+    return {"errors": [], "stale": reason or "OpenClaw cron state unavailable"}
+
+
+def _read_cron_json(path: Path, label: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"OpenClaw cron {label} is missing"
+    except PermissionError:
+        return None, f"OpenClaw cron {label} is unreadable"
+    except UnicodeDecodeError:
+        return None, f"OpenClaw cron {label} is invalid UTF-8"
+    except json.JSONDecodeError:
+        return None, f"OpenClaw cron {label} is invalid JSON"
+    except OSError:
+        return None, f"OpenClaw cron {label} is unavailable"
+    if not isinstance(data, dict):
+        return None, f"OpenClaw cron {label} is not an object"
+    return data, None
+
+
+def _state_for_cron_job(job: dict[str, Any], persisted_jobs: dict[str, Any]) -> dict[str, Any]:
+    inline_state = job.get("state")
+    state: dict[str, Any] = dict(inline_state) if isinstance(inline_state, dict) else {}
+
+    job_id = job.get("id")
+    persisted_entry = persisted_jobs.get(job_id) if isinstance(job_id, str) else None
+    if isinstance(persisted_entry, dict) and isinstance(persisted_entry.get("state"), dict):
+        state.update(persisted_entry["state"])
+    return state
+
+
+def _cron_last_run_at_seconds(state: dict[str, Any]) -> int | None:
+    value = state.get("lastRunAtMs")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value / 1000)
+
+
+def _cron_consecutive_errors(state: dict[str, Any]) -> int:
+    value = state.get("consecutiveErrors")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def _cron_last_error(state: dict[str, Any]) -> str | None:
+    value = state.get("lastError")
+    if not isinstance(value, str) or value == "":
+        return None
+    return value
+
+
+def read_openclaw_cron_errors() -> dict[str, Any]:
+    """Read OpenClaw cron warnings from disk without exposing job payloads."""
+    jobs_data, error = _read_cron_json(_OPENCLAW_CRON_DIR / "jobs.json", "jobs.json")
+    if error:
+        return _cron_errors_stale_response(error)
+
+    state_data, error = _read_cron_json(_OPENCLAW_CRON_DIR / "jobs-state.json", "jobs-state.json")
+    if error:
+        return _cron_errors_stale_response(error)
+
+    try:
+        jobs = jobs_data.get("jobs") if jobs_data else None
+        persisted_jobs = state_data.get("jobs") if state_data else None
+        if not isinstance(jobs, list):
+            return _cron_errors_stale_response("OpenClaw cron jobs.json is missing jobs[]")
+        if not isinstance(persisted_jobs, dict):
+            return _cron_errors_stale_response("OpenClaw cron jobs-state.json is missing jobs")
+
+        errors: list[dict[str, Any]] = []
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            if job.get("enabled") is False:
+                continue
+            state = _state_for_cron_job(job, persisted_jobs)
+            if state.get("lastStatus") != "error" and state.get("lastRunStatus") != "error":
+                continue
+            job_id = job.get("id")
+            errors.append(
+                {
+                    "id": job_id if isinstance(job_id, str) else None,
+                    "name": job.get("name"),
+                    "lastError": _cron_last_error(state),
+                    "consecutiveErrors": _cron_consecutive_errors(state),
+                    "lastRunAt": _cron_last_run_at_seconds(state),
+                }
+            )
+        return {"errors": errors}
+    except Exception:
+        return _cron_errors_stale_response("OpenClaw cron state could not be read")
+
+
 async def read_openclaw_agents() -> dict[str, Any]:
     """Fetch the Mission Control live-agent payload without mutating MC state,
     normalised into the Control SPA contract (epoch seconds, ``N/h`` strings).
@@ -217,3 +316,7 @@ def register_openclaw_routes(app: Any) -> None:
     @app.post("/api/openclaw/agents/{agent_id}/ping")
     async def openclaw_agent_ping(agent_id: str) -> Any:
         return await ping_openclaw_agent(agent_id)
+
+    @app.get("/api/openclaw/cron-errors")
+    async def openclaw_cron_errors() -> dict[str, Any]:
+        return read_openclaw_cron_errors()

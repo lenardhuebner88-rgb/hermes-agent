@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { z } from "zod";
 import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
@@ -23,6 +24,22 @@ type BatchConfirmResponse = {
   confirmed?: string[];
   failed?: string[];
 };
+
+const OpenClawCronErrorSchema = z.object({
+  id: z.coerce.string(),
+  name: z.string().catch("cron"),
+  lastError: z.string().catch(""),
+  consecutiveErrors: z.coerce.number().catch(0),
+  lastRunAt: z.coerce.number().catch(0),
+});
+
+const OpenClawCronErrorsResponseSchema = z.object({
+  errors: z.array(OpenClawCronErrorSchema).catch([]),
+  stale: z.string().optional(),
+});
+
+export type OpenClawCronError = z.infer<typeof OpenClawCronErrorSchema>;
+export type OpenClawCronErrorsResponse = z.infer<typeof OpenClawCronErrorsResponseSchema>;
 
 type LoadState<T> = {
   data: T | null;
@@ -284,6 +301,13 @@ export function useRunInspect() {
 export function useOpenClawAgents() {
   return usePolling<AgentsResponse>(
     async () => parseOrThrow(AgentsResponseSchema, await fetchJSON<unknown>("/api/openclaw/agents"), "openclaw/agents"),
+    5000,
+  );
+}
+
+export function useOpenClawCronErrors() {
+  return usePolling<OpenClawCronErrorsResponse>(
+    async () => parseOrThrow(OpenClawCronErrorsResponseSchema, await fetchJSON<unknown>("/api/openclaw/cron-errors"), "openclaw/cron-errors"),
     5000,
   );
 }
