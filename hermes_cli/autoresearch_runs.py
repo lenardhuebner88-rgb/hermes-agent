@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,30 @@ def _audit_dir() -> Path:
 
 def _runs_path() -> Path:
     return _audit_dir() / "autoresearch-runs.json"
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON atomically: temp file in the same dir + os.replace (atomic on
+    POSIX). A concurrent reader/writer then sees either the old or the new file,
+    never a torn/half-written one. Mirrors the repo's auth.py/backup.py pattern.
+
+    (This removes the corruption/torn-write risk under concurrent append_run, e.g.
+    a skill-runner subprocess and a dashboard code-scan thread finishing together.
+    The benign read-modify-write race — two writers, last one wins, one record
+    dropped — is accepted for a best-effort capped log.)"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def _utc_now() -> str:
@@ -70,8 +95,6 @@ def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
             "scanned": int(scanned or 0),
         }
         runs = [record, *read_runs(_MAX_RUNS)][:_MAX_RUNS]
-        path = _runs_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"runs": runs}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _atomic_write_json(_runs_path(), {"runs": runs})
     except Exception:
         pass

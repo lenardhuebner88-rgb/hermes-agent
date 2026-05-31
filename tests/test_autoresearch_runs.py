@@ -45,6 +45,17 @@ def test_invalid_lane_defaults_to_skill(audit):
     assert autoresearch_runs.read_runs()[0]["lane"] == "skill"
 
 
+def test_append_is_atomic_no_temp_leftover(audit):
+    """append_run writes via tempfile + os.replace → no half-written temp lingers
+    and the on-disk file is always complete, valid JSON."""
+    import json as _json
+    for i in range(5):
+        autoresearch_runs.append_run(lane="code", request_id=f"c{i}", tokens=i)
+    assert list(audit.glob("autoresearch-runs.json.tmp.*")) == []  # no torn temp left behind
+    data = _json.loads((audit / "autoresearch-runs.json").read_text(encoding="utf-8"))
+    assert len(data["runs"]) == 5 and data["runs"][0]["request_id"] == "c4"
+
+
 def _load_nightly():
     spec = importlib.util.spec_from_file_location(
         "autoresearch_nightly_under_test", _ROOT / "scripts" / "autoresearch_nightly.py")
