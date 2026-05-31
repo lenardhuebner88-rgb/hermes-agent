@@ -58,6 +58,7 @@ export const de = {
     pingPending: "Ping läuft …",
     pingSuccess: "Ping gesendet.",
     pingError: "Ping fehlgeschlagen",
+    taskProgress: "Aufgabenfortschritt",
     sectionHighlights: "Highlights",
     sectionDecisions: "Entscheidungen",
     sectionTimeline: "Verlauf",

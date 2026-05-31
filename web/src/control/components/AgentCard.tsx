@@ -8,7 +8,7 @@ import { STUCK_HEARTBEAT_S, agentLabel, agentTone, fmtAge } from "../lib/derive"
 import type { Density } from "../hooks/useDensity";
 import type { AgentLive, AgentTask } from "../lib/types";
 import { de } from "../i18n/de";
-import { StatusPill, ToneCallout } from "./atoms";
+import { MeterBar, StatusPill, ToneCallout } from "./atoms";
 
 interface Props {
   agent: AgentLive;
@@ -169,11 +169,13 @@ function Metric({ label, value, sub, warn }: { label: string; value: string; sub
 
 function QueueCounter({ label, count, tasks }: { label: string; count: number; tasks: AgentTask[] }) {
   const top = tasks[0];
+  const hasProgress = top && Number.isFinite(top.progressPercent) && top.progressPercent > 0;
   return (
     <div className="min-h-16 rounded-lg border border-white/10 bg-white/[.03] px-2 py-2 text-center" title={top?.title}>
       <p className="hc-mono text-lg font-semibold text-white">{count}</p>
       <p className="text-[11px] hc-soft">{label}</p>
       {top ? <p className={cn("mt-1 truncate rounded-full border px-1 text-[10px]", priorityTone[top.priority] === "rose" ? "border-rose-500/25 text-rose-200" : priorityTone[top.priority] === "amber" ? "border-amber-500/25 text-amber-200" : "border-zinc-600/25 text-zinc-300")}>{priorityLabel[top.priority]}</p> : null}
+      {hasProgress ? <div className="mt-1 text-left"><MeterBar label={de.openclaw.taskProgress} value={top.progressPercent} max={100} /></div> : null}
     </div>
   );
 }
