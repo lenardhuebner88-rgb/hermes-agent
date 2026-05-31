@@ -54,8 +54,22 @@ def test_dashboard_all_area_count_matches_total_rows():
     assert data["area_counts"]["all"] == 2
     assert data["area_counts"]["github"] == 1
 
-    module.main()
-    text = module.OUTPUT.read_text(encoding="utf-8")
+    # Seed an inventory file whose declared total matches the "all" area count
+    # the dashboard derives from the rubric, so the consistency invariant below
+    # is actually exercised (extract_inventory returns an empty summary when the
+    # file is absent, which would make the assertion vacuous / KeyError).
+    rubric_rows = module.parse_rubric()
+    expected_all = len(rubric_rows)
+    module.INVENTORY.parent.mkdir(parents=True, exist_ok=True)
+    module.INVENTORY.write_text(
+        f"- Total SKILL.md files inventoried: {expected_all}\n",
+        encoding="utf-8",
+    )
+    try:
+        module.main()
+        text = module.OUTPUT.read_text(encoding="utf-8")
+    finally:
+        module.INVENTORY.unlink(missing_ok=True)
     match = re.search(r'<script type="application/json" id="data-autoresearch">(.+?)</script>', text)
     assert match
     embedded = json.loads(match.group(1))
