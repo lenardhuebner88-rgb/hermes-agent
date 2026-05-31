@@ -279,39 +279,46 @@ def test_dispatch_openclaw_pixel(isolated_kanban_home, monkeypatch):
     assert meta["openclaw"]["operation"] == "request_pixel_ui_qa"
     assert meta["openclaw"]["mc_task_id"] == "mc-pixel-1"
     assert env["operation"] == "request_pixel_ui_qa"
-    assert env["risk_class"] == "operator-lock"
-    # operator-lock risk class REQUIRES this literal true in the payload.
-    assert env["payload"]["operator_lock_acknowledged"] is True
+    # Pixel is a normal read-only UI worker now — same risk tier as lens/forge,
+    # no operator_lock_acknowledged in the payload.
+    assert env["risk_class"] == "safe-read-only"
+    assert "operator_lock_acknowledged" not in env["payload"]
     assert env["payload"]["target_url"] == "http://127.0.0.1:9119/control"
     assert env["payload"]["qa_kind"] == "layout-check"
 
 
 # ---------------------------------------------------------------------------
-# endpoint validation: pixel without operator_lock_acknowledged -> 400
+# endpoint validation: pixel is a normal worker — no operator-lock ack needed
 # ---------------------------------------------------------------------------
 
 
-def test_endpoint_pixel_requires_operator_lock_ack(isolated_kanban_home):
-    """POST /api/openclaw/dispatch with agent=pixel and no operator-lock ack
-    must be rejected with HTTP 400 before any task is created."""
-    from fastapi import HTTPException
+def test_endpoint_pixel_no_ack_creates_task(isolated_kanban_home):
+    """POST /api/openclaw/dispatch with agent=pixel and NO operator-lock ack
+    creates the task (pixel is a normal read-only UI worker now — the former
+    operator-lock 400 gate has been removed)."""
     from hermes_cli.openclaw_dispatch import (
         OpenClawDispatchBody,
         create_openclaw_dispatch,
     )
 
-    body = OpenClawDispatchBody(
-        title="qa the dashboard", agent="pixel",
-        operator_lock_acknowledged=False,
-    )
-    with pytest.raises(HTTPException) as exc:
-        create_openclaw_dispatch(body)
-    assert exc.value.status_code == 400
-    assert "operator_lock_acknowledged" in str(exc.value.detail)
+    kb, _ = isolated_kanban_home
+    with kb.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+
+    body = OpenClawDispatchBody(title="qa the dashboard", agent="pixel")
+    out = create_openclaw_dispatch(body)
+    assert out["ok"] is True
+    task_id = out["taskId"]
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT assignee FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    assert row["assignee"] == "openclaw:pixel"
 
 
-def test_endpoint_pixel_with_ack_creates_task(isolated_kanban_home):
-    """With the ack, the pixel task IS created (openclaw:pixel assignee)."""
+def test_endpoint_pixel_ignores_legacy_ack_field(isolated_kanban_home):
+    """The deprecated operator_lock_acknowledged field is accepted but ignored
+    (backward compatibility for older clients)."""
     from hermes_cli.openclaw_dispatch import (
         OpenClawDispatchBody,
         create_openclaw_dispatch,
@@ -323,7 +330,7 @@ def test_endpoint_pixel_with_ack_creates_task(isolated_kanban_home):
 
     body = OpenClawDispatchBody(
         title="qa the dashboard", agent="pixel",
-        operator_lock_acknowledged=True,
+        operator_lock_acknowledged=False,
     )
     out = create_openclaw_dispatch(body)
     assert out["ok"] is True

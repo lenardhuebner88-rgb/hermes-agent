@@ -38,10 +38,10 @@ from hermes_cli import kanban_db
 # later spawn-failure deep in the dispatcher.
 _VALID_AGENTS = ("atlas", "lens", "forge", "pixel")
 
-# Pixel's MC operation (request_pixel_ui_qa) runs under an operator-lock risk
-# class. Require an explicit acknowledgement from the operator before we even
-# create the task, so the lock is a conscious choice in the UI — not a default.
-_OPERATOR_LOCK_AGENTS = ("pixel",)
+# All four OpenClaw agents (atlas/lens/forge/pixel) are normal workers; none
+# requires a separate operator-lock acknowledgement. ``operator_lock_acknowledged``
+# is retained on the request body for backward compatibility but is ignored.
+_OPERATOR_LOCK_AGENTS = ()  # type: tuple[str, ...]
 
 
 class OpenClawDispatchBody(BaseModel):
@@ -50,6 +50,8 @@ class OpenClawDispatchBody(BaseModel):
     agent: str
     board: Optional[str] = None
     deliver_to: Optional[str] = None
+    # Deprecated/ignored: pixel is a normal read-only UI worker now. Kept so an
+    # older client that still sends the field does not get a 422.
     operator_lock_acknowledged: bool = False
 
 
@@ -95,7 +97,7 @@ def _compose_body(description: Optional[str], deliver_to: Optional[str]) -> Opti
 def create_openclaw_dispatch(body: OpenClawDispatchBody) -> Any:
     """Create a kanban task that the dispatcher will sign + submit to MC.
 
-    Validates agent + operator-lock + deliver_to, then creates a ``ready`` task
+    Validates agent + deliver_to, then creates a ``ready`` task
     with the ``openclaw:<agent>`` assignee. Returns ``{ok, taskId}``. Never
     touches secret/hmac material — signing happens later in the dispatcher.
     """
@@ -114,7 +116,7 @@ def create_openclaw_dispatch(body: OpenClawDispatchBody) -> Any:
         raise HTTPException(
             status_code=400,
             detail=f"agent '{agent}' requires operator_lock_acknowledged=true",
-        )
+        )  # _OPERATOR_LOCK_AGENTS is empty — retained as an inert hook.
 
     deliver_to = _validate_deliver_to(body.deliver_to)
 

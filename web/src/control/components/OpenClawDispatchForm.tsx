@@ -20,11 +20,8 @@ export function OpenClawDispatchForm({ onDispatched }: Props) {
   const [description, setDescription] = useState("");
   const [agent, setAgent] = useState<Agent>("lens");
   const [deliverTo, setDeliverTo] = useState("");
-  const [operatorLock, setOperatorLock] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "emerald" | "red"; text: string } | null>(null);
-
-  const requiresLock = agent === "pixel";
 
   const submit = async () => {
     const trimmed = title.trim();
@@ -39,7 +36,6 @@ export function OpenClawDispatchForm({ onDispatched }: Props) {
     if (desc) body.description = desc;
     const channel = deliverTo.trim();
     if (channel) body.deliver_to = channel;
-    if (requiresLock) body.operator_lock_acknowledged = operatorLock;
     try {
       const result = await dispatchOpenClawTask(body);
       if (result.ok === false) {
@@ -49,7 +45,6 @@ export function OpenClawDispatchForm({ onDispatched }: Props) {
         setTitle("");
         setDescription("");
         setDeliverTo("");
-        setOperatorLock(false);
         onDispatched?.();
       }
     } catch (e) {
@@ -108,18 +103,6 @@ export function OpenClawDispatchForm({ onDispatched }: Props) {
             />
           </label>
         </div>
-
-        {requiresLock ? (
-          <label className="flex items-center gap-2 text-sm text-amber-100">
-            <input
-              type="checkbox"
-              checked={operatorLock}
-              onChange={(e) => setOperatorLock(e.target.checked)}
-              disabled={busy}
-            />
-            <span>{de.openclaw.dispatchOperatorLock}</span>
-          </label>
-        ) : null}
 
         {notice ? <ToneCallout tone={notice.tone}>{notice.text}</ToneCallout> : null}
 

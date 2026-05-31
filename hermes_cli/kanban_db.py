@@ -5824,8 +5824,8 @@ OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
 
 # Map the OpenClaw agent name (the part after ``openclaw:``) to the MC
 # operation the signer knows how to build/validate. Mirrors the MC
-# operation->agent routing map. atlas/forge/pixel are wired in a later slice;
-# lens is the only fully-built path here.
+# operation->agent routing map. All four builders (atlas/lens/forge/pixel) are
+# live; see ``_OPENCLAW_ENVELOPE_BUILDERS`` below.
 OPENCLAW_AGENT_TO_OPERATION = {
     "atlas": "trigger_atlas_sprint",
     "lens": "request_lens_audit",
@@ -6077,12 +6077,13 @@ def _extract_target_url(claimed_task: "Task") -> str:
 
 
 def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
-    """Build a fully-signed ``request_pixel_ui_qa`` envelope (operator-lock).
+    """Build a fully-signed ``request_pixel_ui_qa`` envelope (safe-read-only).
 
-    ``operator_lock_acknowledged`` MUST be literal ``true`` (the signer rejects
-    the operator-lock risk class otherwise). The dashboard endpoint already
-    refuses to create a pixel task without the operator's explicit ack, so
-    reaching this builder means the lock was consciously acknowledged.
+    Pixel is a normal UI-QA worker doing read-only browser inspection — same
+    risk tier as lens/forge. The former ``operator-lock`` risk class (and its
+    ``operator_lock_acknowledged`` payload field) was a leftover from the
+    standalone-OpenClaw era and has been removed: the operator's task creation
+    is the authorization.
     """
     import uuid
     from datetime import datetime, timezone
@@ -6093,7 +6094,6 @@ def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
         "target_url": target_url,
         "qa_kind": "layout-check",
         "deliver_to": deliver_to,
-        "operator_lock_acknowledged": True,
     }
     workflow_id = f"wf-openclaw-pixel-{uuid.uuid4().hex[:8]}"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -6105,7 +6105,7 @@ def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
         "routing_alias": "@pixel",
         "capability_id": "openclaw.pixel.request_ui_qa",
         "operation": "request_pixel_ui_qa",
-        "risk_class": "operator-lock",
+        "risk_class": "safe-read-only",
         "timestamp": timestamp,
         "signature": signature,
         "payload": payload,

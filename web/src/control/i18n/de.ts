@@ -88,7 +88,6 @@ export const de = {
     dispatchAgentLabel: "Agent",
     dispatchDeliverToLabel: "Discord-Kanal (optional)",
     dispatchDeliverToPlaceholder: "17–20-stellige Kanal-ID",
-    dispatchOperatorLock: "Operator-Lock bestätigen (Pixel UI-QA)",
     dispatchSubmit: "Abschicken",
     dispatchSubmitting: "Wird abgeschickt …",
     dispatchSuccess: (id: string) => `Aufgabe ${id} angelegt — Dispatch beim nächsten Tick.`,
