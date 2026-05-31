@@ -188,20 +188,28 @@ export function useProposals() {
   // f-autoresearch-tab-driver: MiniMax scans the (now hermes_cli/-wide) code allowlist
   // for grounded weaknesses; findings land in the queue as mode=code proposals and apply
   // through the full test-suite gate. Dry-run only — no writes here.
-  const generateCodeWeaknesses = useCallback(async (scope: "incremental" | "full" = "incremental") => {
-    setBusy(scope === "full" ? "generate-code-full" : "generate-code");
+  const generateCodeWeaknesses = useCallback(async (variant: "incremental" | "full" | "deep" = "incremental") => {
+    const busyKey = variant === "full" ? "generate-code-full" : variant === "deep" ? "generate-code-deep" : "generate-code";
+    setBusy(busyKey);
     try {
-      const result = await fetchJSON<{ created_count?: number; files_seen?: number; skipped_unchanged?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", {
+      // Deep-Scan raises both caps (more files, more kept findings) — runs minutes,
+      // tokens visible in the ROI panel. Incremental/Full keep the snappy defaults.
+      const body = variant === "deep"
+        ? { scope: "incremental", max_files: 40, limit: 8 }
+        : { scope: variant };
+      const result = await fetchJSON<{ created_count?: number; files_seen?: number; skipped_unchanged?: number; vetoed?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope }),
+        body: JSON.stringify(body),
       });
       const created = result.created_count ?? 0;
       const scanned = result.files_seen ?? 0;
       const skipped = result.skipped_unchanged ?? 0;
-      const mode = scope === "full" ? "Voll" : "inkrementell";
-      const skippedNote = scope === "incremental" && skipped > 0 ? ` · ${skipped} unverändert` : "";
-      log(`Code-Schwächen (${mode}): ${created} ${created === 1 ? "Fund" : "Funde"} · ${scanned} gescannt${skippedNote}`, created > 0 ? "emerald" : "violet");
+      const vetoed = result.vetoed ?? 0;
+      const mode = variant === "full" ? "Voll" : variant === "deep" ? "Deep" : "inkrementell";
+      const skippedNote = variant !== "full" && skipped > 0 ? ` · ${skipped} unverändert` : "";
+      const vetoedNote = vetoed > 0 ? ` · ${vetoed} verworfen` : "";
+      log(`Code-Schwächen (${mode}): ${created} ${created === 1 ? "Fund" : "Funde"} · ${scanned} gescannt${skippedNote}${vetoedNote}`, created > 0 ? "emerald" : "violet");
       await state.reload();
     } catch (e) {
       log(`Code-Schwächen-Suche fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, "red");

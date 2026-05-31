@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, getProposalPriorityGroup, hasResearchCounters, isActionable, parseMinUseCount, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -268,5 +268,62 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
     expect(formatRunTime(null)).toBe("—");
     expect(formatRunTime("not-a-date")).toBe("—");
     expect(formatRunTime("2026-05-31T19:31:21Z")).not.toBe("—");
+  });
+});
+
+describe("severity grouping + distribution", () => {
+  it("honours a valid model-assigned severity", () => {
+    expect(getProposalSeverity(proposal({ id: "a", target: "x", severity: "critical" }))).toBe("critical");
+  });
+
+  it("falls back from category when severity is missing or invalid", () => {
+    expect(getProposalSeverity(proposal({ id: "a", target: "x", category: "bug_risk" }))).toBe("high");
+    expect(getProposalSeverity(proposal({ id: "b", target: "x", category: "contradiction" }))).toBe("critical");
+    expect(getProposalSeverity(proposal({ id: "c", target: "x", category: "missing_section" }))).toBe("low");
+    // unknown category + no severity → medium default
+    expect(getProposalSeverity(proposal({ id: "d", target: "x", category: "mystery" }))).toBe("medium");
+  });
+
+  it("ranks severities critical > high > medium > low", () => {
+    expect(severityRank(proposal({ id: "a", target: "x", severity: "critical" }))).toBeGreaterThan(
+      severityRank(proposal({ id: "b", target: "x", severity: "high" })),
+    );
+    expect(severityRank(proposal({ id: "b", target: "x", severity: "high" }))).toBeGreaterThan(
+      severityRank(proposal({ id: "c", target: "x", severity: "low" })),
+    );
+  });
+
+  it("partitions critical+high open and medium+low collapsed", () => {
+    const items = [
+      proposal({ id: "crit", target: "x", severity: "critical" }),
+      proposal({ id: "med", target: "x", severity: "medium" }),
+      proposal({ id: "high", target: "x", severity: "high" }),
+      proposal({ id: "low", target: "x", severity: "low" }),
+    ];
+    const { open, collapsed } = partitionBySeverity(items);
+    expect(open.map((p) => p.id)).toEqual(["crit", "high"]);
+    expect(collapsed.map((p) => p.id)).toEqual(["med", "low"]);
+  });
+
+  it("filters to a severity threshold for the 'nur hoch+' chip", () => {
+    const items = [
+      proposal({ id: "crit", target: "x", severity: "critical" }),
+      proposal({ id: "med", target: "x", severity: "medium" }),
+      proposal({ id: "high", target: "x", severity: "high" }),
+      proposal({ id: "low", target: "x", severity: "low" }),
+    ];
+    expect(filterBySeverityThreshold(items, "high").map((p) => p.id)).toEqual(["crit", "high"]);
+  });
+
+  it("counts proposals per severity and per category", () => {
+    const items = [
+      proposal({ id: "a", target: "x", severity: "critical", category: "bug_risk" }),
+      proposal({ id: "b", target: "x", severity: "high", category: "bug_risk" }),
+      proposal({ id: "c", target: "x", category: "missing_section" }), // → low
+    ];
+    const dist = severityDistribution(items);
+    expect(dist.total).toBe(3);
+    expect(dist.bySeverity).toEqual({ critical: 1, high: 1, medium: 0, low: 1 });
+    expect(dist.byCategory).toEqual({ bug_risk: 2, missing_section: 1 });
   });
 });

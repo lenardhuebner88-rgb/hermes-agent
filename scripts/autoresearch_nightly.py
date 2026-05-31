@@ -53,10 +53,13 @@ def _run_skill_night() -> int:
 
 def _run_code_night() -> int:
     from hermes_cli.autoresearch_proposals import generate_code_weakness_proposals
-    res = generate_code_weakness_proposals(scope="incremental")
+    # Deep caps: the unattended nightly walks far more of the allowlist and keeps
+    # more proposals than the snappy interactive default.
+    res = generate_code_weakness_proposals(scope="incremental", max_files=40, limit=8)
     print(json.dumps({
         "lane": "code", "created_count": res.get("created_count"),
         "files_seen": res.get("files_seen"), "skipped_unchanged": res.get("skipped_unchanged"),
+        "vetoed": res.get("vetoed"),
         "tokens": res.get("tokens"), "scope": res.get("scope"),
     }, indent=2))
     return 0

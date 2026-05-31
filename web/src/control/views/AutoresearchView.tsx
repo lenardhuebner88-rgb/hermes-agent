@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, shouldShowResearchErrorBadge, splitAutoresearchProposals, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -24,7 +24,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const reverted = split.reverted;
   const applied = split.applied;
   const skipped = split.skipped;
-  const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(open, 10), [open]);
+  const [severityFilter, setSeverityFilter] = useState<"all" | "high">("all");
+  const distribution = useMemo(() => severityDistribution(open), [open]);
+  const filteredOpen = useMemo(() => (severityFilter === "high" ? filterBySeverityThreshold(open, "high") : open), [open, severityFilter]);
+  const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
   // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
   // operator actually sees, never the backlog hidden in the collapsed <details>.
@@ -139,6 +142,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("full")} disabled={!!store.busy} prefix={store.busy === "generate-code-full" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
               {de.autoresearch.findCodeWeaknessesFull}
             </Button>
+            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("deep")} disabled={!!store.busy} title={de.autoresearch.deepScanHint} prefix={store.busy === "generate-code-deep" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+              {de.autoresearch.deepScan}
+            </Button>
             <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({store.openSkillProposals.length})
             </Button>
@@ -187,8 +193,25 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <p className="hc-eyebrow">Relevanz-Queue</p>
             <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
             <p className="mt-1 text-sm hc-soft">{open.length} offen · {reverted.length} zurückgerollt</p>
+            {open.length > 0 ? (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs hc-soft">{de.autoresearch.distributionHeading}:</span>
+                {distribution.bySeverity.critical > 0 ? <StatusPill tone="red" label={`${de.autoresearch.severityCritical} ${distribution.bySeverity.critical}`} /> : null}
+                {distribution.bySeverity.high > 0 ? <StatusPill tone="amber" label={`${de.autoresearch.severityHigh} ${distribution.bySeverity.high}`} /> : null}
+                {distribution.bySeverity.medium > 0 ? <StatusPill tone="sky" label={`${de.autoresearch.severityMedium} ${distribution.bySeverity.medium}`} /> : null}
+                {distribution.bySeverity.low > 0 ? <StatusPill tone="zinc" label={`${de.autoresearch.severityLow} ${distribution.bySeverity.low}`} /> : null}
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-col gap-2 sm:items-end">
+            <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
+              <button type="button" onClick={() => setSeverityFilter("all")} className={cn("px-3 py-1", severityFilter === "all" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                {de.autoresearch.severityFilterAll}
+              </button>
+              <button type="button" onClick={() => setSeverityFilter("high")} className={cn("px-3 py-1", severityFilter === "high" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                {de.autoresearch.severityFilterHighPlus}
+              </button>
+            </div>
             {store.loading ? <Spinner /> : null}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>

@@ -1,4 +1,4 @@
-import type { AutoresearchRun, AutoresearchStatus, Proposal, ToneName } from "./types";
+import type { AutoresearchRun, AutoresearchStatus, Proposal, ProposalSeverity, ToneName } from "./types";
 
 export interface ProposalPriorityGroup {
   key: "safety" | "quick-win" | "code-gate" | "other";
@@ -89,6 +89,91 @@ export function getProposalPriorityGroup(proposal: Proposal): ProposalPriorityGr
     return { key: "quick-win", label: "Quick Win", tone: "emerald", score: 1 };
   }
   return { key: "other", label: "Weitere", tone: "zinc", score: 3 };
+}
+
+// ---------------------------------------------------------------------------
+// Severity (critical|high|medium|low) — model-assigned with category fallback.
+// Display + grouping/collapse dimension only; never drops a proposal. Mirrors
+// the backend fallbacks in hermes_cli/{autoresearch_proposals,capability_researcher}.
+// ---------------------------------------------------------------------------
+export const SEVERITY_ORDER: Record<ProposalSeverity, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+const CATEGORY_SEVERITY_FALLBACK: Record<string, ProposalSeverity> = {
+  // code lane
+  bug_risk: "high",
+  dead_logic: "medium",
+  error_handling: "medium",
+  // skill lane
+  contradiction: "critical",
+  stale: "high",
+  missing_trigger: "high",
+  unclear_trigger: "medium",
+  incomplete_steps: "medium",
+  missing_section: "low",
+};
+
+const SEVERITY_TONE: Record<ProposalSeverity, ToneName> = {
+  critical: "red",
+  high: "amber",
+  medium: "sky",
+  low: "zinc",
+};
+
+export function getProposalSeverity(proposal: Proposal): ProposalSeverity {
+  const raw = proposal.severity;
+  if (raw && raw in SEVERITY_ORDER) return raw;
+  const category = proposal.category?.trim();
+  if (category && category in CATEGORY_SEVERITY_FALLBACK) return CATEGORY_SEVERITY_FALLBACK[category];
+  return "medium";
+}
+
+export function severityRank(proposal: Proposal): number {
+  return SEVERITY_ORDER[getProposalSeverity(proposal)];
+}
+
+export function severityTone(severity: ProposalSeverity): ToneName {
+  return SEVERITY_TONE[severity];
+}
+
+/** critical+high stay open; medium+low are collapsed behind a "weitere" disclosure.
+ *  Input order is preserved within each bucket (caller ranks first). */
+export function partitionBySeverity(proposals: Proposal[]): { open: Proposal[]; collapsed: Proposal[] } {
+  const open: Proposal[] = [];
+  const collapsed: Proposal[] = [];
+  for (const p of proposals) {
+    (severityRank(p) >= SEVERITY_ORDER.high ? open : collapsed).push(p);
+  }
+  return { open, collapsed };
+}
+
+/** Keep only proposals at or above a severity threshold (for the "nur hoch+" chip). */
+export function filterBySeverityThreshold(proposals: Proposal[], threshold: ProposalSeverity): Proposal[] {
+  const min = SEVERITY_ORDER[threshold];
+  return proposals.filter((p) => severityRank(p) >= min);
+}
+
+export interface SeverityDistribution {
+  bySeverity: Record<ProposalSeverity, number>;
+  byCategory: Record<string, number>;
+  total: number;
+}
+
+/** Count proposals per severity tier and per category — computed from the
+ *  already-polled list, no extra persistence. */
+export function severityDistribution(proposals: Proposal[]): SeverityDistribution {
+  const bySeverity: Record<ProposalSeverity, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+  const byCategory: Record<string, number> = {};
+  for (const p of proposals) {
+    bySeverity[getProposalSeverity(p)] += 1;
+    const category = p.category?.trim();
+    if (category) byCategory[category] = (byCategory[category] ?? 0) + 1;
+  }
+  return { bySeverity, byCategory, total: proposals.length };
 }
 
 function proposalCreatedAt(proposal: Proposal): number {

@@ -71,6 +71,42 @@ def test_grounded_finding_is_kept():
     assert res["dropped"] == 0
 
 
+def test_severity_model_assigned_is_kept():
+    reply = {"findings": [{
+        "category": "contradiction",
+        "severity": "critical",
+        "evidence": "Never deploy on Fridays.",
+        "problem": "Widerspricht der Hotfix-Regel direkt darunter.",
+        "fix_hint": "Eine der beiden Regeln präzisieren.",
+    }]}
+    res = cr.research_skill("deploy", _SKILL, call_llm=_stub(reply))
+    assert res["findings"][0]["severity"] == "critical"
+
+
+def test_severity_falls_back_to_category_default():
+    """A finding without severity gets the per-category fallback (contradiction→critical)."""
+    reply = {"findings": [{
+        "category": "contradiction",
+        "evidence": "Never deploy on Fridays.",
+        "problem": "Widerspricht der Hotfix-Regel direkt darunter.",
+        "fix_hint": "x",
+    }]}
+    res = cr.research_skill("deploy", _SKILL, call_llm=_stub(reply))
+    assert res["findings"][0]["severity"] == "critical"
+
+
+def test_severity_invalid_value_falls_back():
+    reply = {"findings": [{
+        "category": "missing_section",
+        "severity": "super-duper",
+        "evidence": "",
+        "problem": "Ein empfohlener Abschnitt fehlt.",
+        "fix_hint": "x",
+    }]}
+    res = cr.research_skill("deploy", _SKILL, call_llm=_stub(reply))
+    assert res["findings"][0]["severity"] == "low"  # missing_section fallback
+
+
 def test_missing_trigger_allows_empty_evidence():
     reply = {"findings": [{
         "category": "missing_trigger",

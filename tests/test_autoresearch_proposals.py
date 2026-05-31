@@ -647,6 +647,29 @@ def test_route_generate_code_weaknesses_creates_code_proposal(client, tmp_home, 
     assert stored["diff_before_after"]
 
 
+def test_route_code_weaknesses_passes_deepscan_caps(client, tmp_home, monkeypatch):
+    """The Deep-Scan body threads scope/max_files/limit through to the generator."""
+    captured = {}
+
+    def _fake(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "created": [], "created_count": 0}
+
+    monkeypatch.setattr(proposals, "generate_code_weakness_proposals", _fake)
+    resp = client.post("/autoresearch/generate-code-weaknesses",
+                       json={"scope": "incremental", "max_files": 40, "limit": 8})
+    assert resp.status_code == 200
+    assert captured == {"scope": "incremental", "max_files": 40, "limit": 8}
+
+
+def test_route_code_weaknesses_default_limit(client, tmp_home, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(proposals, "generate_code_weakness_proposals",
+                        lambda **k: captured.update(k) or {"ok": True, "created": [], "created_count": 0})
+    client.post("/autoresearch/generate-code-weaknesses")
+    assert captured["limit"] == 3 and captured["max_files"] == 5
+
+
 def test_route_apply_unknown_returns_ok_false(client, tmp_home):
     r = client.post("/autoresearch/apply", json={"id": "nope", "confirm": True})
     assert r.status_code == 200
@@ -703,6 +726,156 @@ def test_code_scan_incremental_caps_max_files(tmp_home, tmp_path, monkeypatch):
     monkeypatch.setattr(proposals, "_call_code_weakness_finder", _stub_no_finding)
     r = proposals.generate_code_weakness_proposals(max_files=2)
     assert r["files_seen"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Severity rating + precision veto pass (f-autoresearch-quality)
+# ---------------------------------------------------------------------------
+_DUP_KEY_OLD = (
+    '    "trinity": "arcee-ai",\n'
+    '    "nemotron": "nvidia",\n'
+    '    "llama": "meta-llama",\n'
+    '    "step": "stepfun",\n'
+    '    "trinity": "arcee-ai",'
+)
+_DUP_KEY_NEW = (
+    '    "trinity": "arcee-ai",\n'
+    '    "nemotron": "nvidia",\n'
+    '    "llama": "meta-llama",\n'
+    '    "step": "stepfun",'
+)
+
+
+def _dup_key_finder(severity=None):
+    finding = {
+        "category": "dead_logic",
+        "title": "Doppelter Vendor-Key",
+        "problem": "Der zweite identische Key ist tote Logik und verdeckt die erste Zuordnung.",
+        "evidence_quote": '"trinity": "arcee-ai",',
+        "old_snippet": _DUP_KEY_OLD,
+        "new_snippet": _DUP_KEY_NEW,
+        "fix_hint": "Entferne den doppelten Mapping-Eintrag.",
+    }
+    if severity is not None:
+        finding["severity"] = severity
+    return lambda *_a, **_k: {"ok": True, "raw": {"finding": finding}}
+
+
+def _dup_key_target(monkeypatch):
+    target = _REPO / "hermes_cli" / "model_normalize.py"
+    assert _DUP_KEY_OLD in target.read_text(encoding="utf-8")
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [target])
+    return target
+
+
+def test_code_finding_severity_fallback_from_category(tmp_home, monkeypatch):
+    """A finder that omits severity gets the per-category fallback (dead_logic→medium)."""
+    _dup_key_target(monkeypatch)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity=None))
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance",
+                        lambda *_a, **_k: {"real": True, "reason": "ok", "tokens": 0})
+    res = proposals.generate_code_weakness_proposals()
+    assert res["created_count"] == 1
+    stored = proposals.load_proposal(res["created"][0])
+    assert stored["severity"] == "medium"
+
+
+def test_code_finding_severity_model_assigned_honoured(tmp_home, monkeypatch):
+    _dup_key_target(monkeypatch)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="critical"))
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance",
+                        lambda *_a, **_k: {"real": True, "reason": "ok", "tokens": 0})
+    res = proposals.generate_code_weakness_proposals()
+    stored = proposals.load_proposal(res["created"][0])
+    assert stored["severity"] == "critical"
+
+
+def test_code_finding_veto_drops_unimportant(tmp_home, monkeypatch):
+    """A finding the precision lens rules a nitpick is not persisted; vetoed++."""
+    _dup_key_target(monkeypatch)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="low"))
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance",
+                        lambda *_a, **_k: {"real": False, "reason": "nitpick", "tokens": 7})
+    res = proposals.generate_code_weakness_proposals()
+    assert res["created_count"] == 0
+    assert res["vetoed"] == 1
+    assert res["tokens"] >= 7
+
+
+def test_code_finding_veto_keeps_important(tmp_home, monkeypatch):
+    _dup_key_target(monkeypatch)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="high"))
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance",
+                        lambda *_a, **_k: {"real": True, "reason": "real bug", "tokens": 5})
+    res = proposals.generate_code_weakness_proposals()
+    assert res["created_count"] == 1
+    assert res["vetoed"] == 0
+
+
+def test_code_finding_veto_disabled_by_env(tmp_home, monkeypatch):
+    """HERMES_AUTORESEARCH_VERIFY=0 skips the veto pass entirely."""
+    _dup_key_target(monkeypatch)
+    monkeypatch.setenv("HERMES_AUTORESEARCH_VERIFY", "0")
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="low"))
+    calls = {"n": 0}
+
+    def _verify(*_a, **_k):
+        calls["n"] += 1
+        return {"real": False, "reason": "should not run", "tokens": 0}
+
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance", _verify)
+    res = proposals.generate_code_weakness_proposals()
+    assert res["created_count"] == 1
+    assert res["vetoed"] == 0
+    assert calls["n"] == 0
+
+
+def test_code_rank_score_is_severity_dominant():
+    """critical>high>medium>low dominates the category-weight tiebreaker."""
+    target = _REPO / "hermes_cli" / "model_normalize.py"
+    before = target.read_text(encoding="utf-8")
+    after = before.replace(_DUP_KEY_OLD, _DUP_KEY_NEW, 1)
+
+    def _valid(severity, category):
+        return {
+            "category": category, "severity": severity, "title": "t",
+            "problem": "p", "evidence": '"trinity": "arcee-ai",',
+            "old_snippet": _DUP_KEY_OLD, "new_snippet": _DUP_KEY_NEW, "after_text": after,
+            "fix_hint": "f",
+        }
+
+    # low/bug_risk (highest category weight=4) must still rank below medium/error_handling (weight=2)
+    low = proposals._build_code_weakness_proposal(target, before, _valid("low", "bug_risk"))
+    medium = proposals._build_code_weakness_proposal(target, before, _valid("medium", "error_handling"))
+    critical = proposals._build_code_weakness_proposal(target, before, _valid("critical", "error_handling"))
+    assert critical["rank_score"] > medium["rank_score"] > low["rank_score"]
+
+
+def test_severity_present_in_list_card(tmp_home, monkeypatch):
+    _dup_key_target(monkeypatch)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="high"))
+    monkeypatch.setattr(proposals, "_verify_code_finding_importance",
+                        lambda *_a, **_k: {"real": True, "reason": "ok", "tokens": 0})
+    proposals.generate_code_weakness_proposals()
+    card = proposals._to_card(proposals.list_proposals()[0])
+    assert "severity" in card and card["severity"] == "high"
+
+
+def test_verify_importance_fail_open_on_error(tmp_home, monkeypatch):
+    """A verifier that raises must NOT drop the finding (fail-open)."""
+    target = _REPO / "hermes_cli" / "model_normalize.py"
+    before = target.read_text(encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(proposals, "_writer_call_llm", _boom)
+    verdict = proposals._verify_code_finding_importance(
+        target, {"category": "dead_logic", "severity": "high", "problem": "p",
+                 "evidence": "e", "old_snippet": "x"}, before, timeout=1.0,
+    )
+    assert verdict["real"] is True
+    assert verdict["reason"].startswith("verify_error")
 
 
 def test_route_runs_returns_history(client, tmp_home):

@@ -97,6 +97,22 @@ _CODE_WEAKNESS_CATEGORIES = {
     "dead_logic": (3, "Tote oder unerreichbare Logik"),
     "error_handling": (2, "Unklare Fehlerbehandlung"),
 }
+# Severity scale shared by both lanes. Model-assigned (critical|high|medium|low);
+# falls back to a per-category default when the model omits/garbles it. Drives the
+# severity-dominant rank_score and the frontend grouping/collapse — never a drop.
+_SEVERITY_ORDINAL = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+_SEVERITY_LABELS = {"critical": "kritisch", "high": "hoch", "medium": "mittel", "low": "niedrig"}
+_CODE_CATEGORY_SEVERITY = {
+    "bug_risk": "high",
+    "dead_logic": "medium",
+    "error_handling": "medium",
+}
+
+
+def _coerce_severity(value: Any, *, fallback: str) -> str:
+    """Normalise a model-supplied severity to the known scale, else fall back."""
+    sev = str(value or "").strip().lower()
+    return sev if sev in _SEVERITY_ORDINAL else fallback
 _CODE_FINDER_MAX_FILE_CHARS = 45_000
 _CODE_FINDER_MAX_FINDINGS_PER_FILE = 1
 
@@ -267,7 +283,7 @@ _LIST_FIELDS = (
     "id", "schema", "mode", "target", "section", "title",
     "rationale_plain", "diff_before_after", "writer", "writer_rationale", "status", "last_outcome", "result",
     "created_at", "applied_at", "rank_score", "rank_reason", "gate",
-    "proposal_type", "category", "evidence", "fix_hint", "apply_blocked_reason",
+    "proposal_type", "category", "severity", "evidence", "fix_hint", "apply_blocked_reason",
 )
 
 
@@ -567,6 +583,7 @@ def _build_proposal_for_finding(finding: dict[str, Any], path: Path) -> dict[str
         "section": None,
         "eval_label": None,
         "category": category,
+        "severity": finding.get("severity"),
         "evidence": evidence,
         "fix_hint": fix_hint,
         "title": f"Skill-Schwäche in {skill}: {category_label}",
@@ -850,8 +867,10 @@ def _validate_code_weakness_finding(
     ok, why = _code_allowlisted(path)
     if not ok:
         return None, why
+    severity = _coerce_severity(finding.get("severity"), fallback=_CODE_CATEGORY_SEVERITY[category])
     return {
         "category": category,
+        "severity": severity,
         "title": title[:120],
         "problem": problem[:800],
         "evidence": evidence[:800],
@@ -871,13 +890,17 @@ def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict
         "Antworte nur mit JSON. Erfinde nichts: evidence_quote und old_snippet "
         "muessen wortwoertlich im Code stehen. Wenn kein sicherer Fund vorliegt, "
         "antworte {\"finding\": null}. Keine Tests, keine Migrationen, keine "
-        "grossen Refactors."
+        "grossen Refactors. Bewerte den Schweregrad ehrlich (severity): critical = "
+        "Datenverlust/Absturz im Normalbetrieb, high = realer Bug-Pfad, medium = "
+        "riskante Unklarheit, low = Nitpick."
     )
     user = (
         "JSON-Schema:\n"
         "{\n"
         "  \"finding\": {\n"
         "    \"category\": \"bug_risk|dead_logic|error_handling\",\n"
+        "    \"severity\": \"critical|high|medium|low\",\n"
+        "    \"severity_reason\": \"ein Satz: warum dieser Schweregrad\",\n"
         "    \"title\": \"kurzer Titel\",\n"
         "    \"problem\": \"warum das real riskant ist\",\n"
         "    \"evidence_quote\": \"kurzes wortwoertliches Zitat aus old_snippet\",\n"
@@ -908,6 +931,60 @@ def _call_code_weakness_finder(path: Path, text: str, *, timeout: float) -> dict
         return {"ok": False, "raw": None, "reason": f"model call failed: {type(exc).__name__}", "resp": None}
 
 
+def _verify_code_finding_importance(
+    path: Path, finding: dict[str, Any], before: str, *, timeout: float
+) -> dict[str, Any]:
+    """Second, precision-focused lens (single LLM call) that asks whether a
+    validated finding is a *real, important* defect — not a nitpick or
+    false-positive. Returns ``{"real": bool, "reason": str, "tokens": int}``.
+
+    Fail-open: any call/parse error returns ``real=True`` with a ``verify_error``
+    reason so a flaky verifier never silently drops grounded findings. The
+    Env-Schalter ``HERMES_AUTORESEARCH_VERIFY=0`` skips this pass entirely (the
+    caller checks it; this function always runs when invoked)."""
+    rel = _repo_relative_name(path)
+    system = (
+        "Du bist ein strenger Zweit-Reviewer. Ein Erst-Reviewer hat eine "
+        "Code-Schwaeche gemeldet. Entscheide nur: ist das ein ECHTER, WICHTIGER "
+        "Defekt — oder ein Nitpick / False-Positive? Sei streng: Stil, Kosmetik, "
+        "hypothetische Randfaelle ohne realen Pfad = nicht wichtig. Antworte nur "
+        "mit JSON {\"real\": true|false, \"reason\": \"<ein knapper Satz>\"}."
+    )
+    user = (
+        f"Datei: {rel}\n"
+        f"Kategorie: {finding.get('category')}\n"
+        f"Gemeldeter Schweregrad: {finding.get('severity')}\n"
+        f"Problem: {finding.get('problem')}\n"
+        f"Beleg (woertlich aus dem Code): {finding.get('evidence')}\n\n"
+        "Betroffener Codeausschnitt:\n"
+        "```python\n"
+        f"{finding.get('old_snippet')}\n"
+        "```"
+    )
+    try:
+        resp = _writer_call_llm(
+            task="skills_hub",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=300,
+            temperature=0.1,
+            timeout=timeout,
+        )
+        tokens = _llm_total_tokens(resp)
+        raw = _loads_llm_json(_extract_llm_content(resp))
+        if not isinstance(raw, dict) or "real" not in raw:
+            return {"real": True, "reason": "verify_error: unparseable verdict", "tokens": tokens}
+        return {
+            "real": bool(raw.get("real")),
+            "reason": str(raw.get("reason") or "")[:300],
+            "tokens": tokens,
+        }
+    except Exception as exc:
+        return {"real": True, "reason": f"verify_error: {type(exc).__name__}", "tokens": 0}
+
+
 def _proposal_id_for_code_finding(path: Path, finding: dict[str, Any]) -> str:
     rel = _repo_relative_name(path)
     digest = hashlib.sha1(
@@ -925,6 +1002,9 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
     rel = _repo_relative_name(path)
     category = str(finding["category"])
     weight, category_label = _CODE_WEAKNESS_CATEGORIES[category]
+    severity = _coerce_severity(finding.get("severity"), fallback=_CODE_CATEGORY_SEVERITY[category])
+    # Severity dominates ordering; the category weight is only a within-tier tiebreaker.
+    rank_score = float(_SEVERITY_ORDINAL[severity] * 10 + weight)
     evidence = str(finding["evidence"])
     after = str(finding["after_text"])
     title = str(finding.get("title") or category_label)
@@ -940,6 +1020,7 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
         "section": None,
         "eval_label": None,
         "category": category,
+        "severity": severity,
         "evidence": evidence,
         "fix_hint": fix_hint,
         "title": f"Code-Schwäche in {rel}: {title}",
@@ -955,8 +1036,8 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
         "created_at": _utc_now(),
         "applied_at": None,
         "result": None,
-        "rank_score": float(weight),
-        "rank_reason": f"{category_label}; allowlisted code target; full test-suite gate on apply",
+        "rank_score": rank_score,
+        "rank_reason": f"{_SEVERITY_LABELS[severity]}; {category_label}; allowlisted code target; full test-suite gate on apply",
     }
 
 
@@ -971,11 +1052,13 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
     and repeated clicks walk the allowlist. ``scope='full'`` scans everything (the
     historical behaviour). Both modes refresh the content-hash state."""
     incremental = scope != "full"
+    verify_enabled = os.environ.get("HERMES_AUTORESEARCH_VERIFY", "1") != "0"
     state = _read_code_scan_state()
     created: list[str] = []
     errors: list[dict[str, str]] = []
     skipped_existing = 0
     skipped_unchanged = 0
+    vetoed = 0
     files_seen = 0
     findings_seen = 0
     tokens = 0
@@ -1015,6 +1098,13 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
                 errors.append({"target": rel, "reason": reason or "invalid finding"})
                 break
             findings_seen += 1
+            if verify_enabled:
+                verdict = _verify_code_finding_importance(path, valid, before, timeout=timeout)
+                tokens += int(verdict.get("tokens") or 0)
+                if not verdict.get("real"):
+                    vetoed += 1
+                    errors.append({"target": rel, "reason": f"vetoed: {verdict.get('reason') or 'not important'}"})
+                    break
             proposal = _build_code_weakness_proposal(path, before, valid)
             existing = load_proposal(proposal["id"])
             if existing and existing.get("status") in _VALID_STATUS:
@@ -1030,6 +1120,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         "created_count": len(created),
         "skipped_existing": skipped_existing,
         "skipped_unchanged": skipped_unchanged,
+        "vetoed": vetoed,
         "files_seen": files_seen,
         "findings_seen": findings_seen,
         "tokens": tokens,

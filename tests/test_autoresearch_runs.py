@@ -81,6 +81,17 @@ def test_nightly_lane_parity(monkeypatch):
     assert mod._is_code_night() is False
 
 
+def test_nightly_code_night_uses_deep_caps(monkeypatch):
+    """The unattended code lane raises max_files/limit beyond the interactive default."""
+    mod = _load_nightly()
+    captured = {}
+    import hermes_cli.autoresearch_proposals as arp
+    monkeypatch.setattr(arp, "generate_code_weakness_proposals",
+                        lambda **k: captured.update(k) or {"created_count": 0, "files_seen": 0})
+    assert mod._run_code_night() == 0
+    assert captured["max_files"] == 40 and captured["limit"] == 8
+
+
 def test_nightly_main_routes_by_lane(monkeypatch):
     mod = _load_nightly()
     called = {}

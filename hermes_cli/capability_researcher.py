@@ -70,6 +70,24 @@ WEAKNESS_CATEGORIES: dict[str, tuple[int, str]] = {
 # relaxed for them (you can't quote what isn't there). Everything else MUST quote.
 _ABSENCE_CATEGORIES = frozenset({"missing_trigger", "missing_section"})
 
+# Severity scale (critical|high|medium|low) for the frontend grouping/collapse.
+# Model-assigned with a per-category fallback. This is a display dimension only —
+# the existing rank_findings scorer (severity = category weight) is unchanged.
+_SEVERITY_SCALE = frozenset({"critical", "high", "medium", "low"})
+_SKILL_CATEGORY_SEVERITY = {
+    "contradiction": "critical",
+    "stale": "high",
+    "missing_trigger": "high",
+    "unclear_trigger": "medium",
+    "incomplete_steps": "medium",
+    "missing_section": "low",
+}
+
+
+def _coerce_skill_severity(value: Any, category: str) -> str:
+    sev = str(value or "").strip().lower()
+    return sev if sev in _SEVERITY_SCALE else _SKILL_CATEGORY_SEVERITY.get(category, "medium")
+
 # A semantic quote shorter than this matches almost anything → not real evidence.
 _MIN_EVIDENCE_CHARS = 12
 _MAX_EVIDENCE_CHARS = 240
@@ -150,6 +168,7 @@ def _prose_is_safe(*parts: str) -> bool:
 # ---------------------------------------------------------------------------
 _JSON_SHAPE = (
     '{"findings": [{"category": "...", '
+    '"severity": "critical|high|medium|low", '
     '"evidence": "<WÖRTLICHES Zitat aus dem Skill-Text, das die Schwäche belegt>", '
     '"problem": "<knapp, deutsch, warum das ein echtes Problem ist>", '
     '"fix_hint": "<kurze Richtung für die Behebung>"}]}'
@@ -169,6 +188,8 @@ _SYSTEM_PROMPT = (
     f"{_JSON_SHAPE}\n"
     "Für contradiction/stale/unclear_trigger/incomplete_steps MUSS evidence ein wörtliches "
     "Zitat aus dem Skill sein. Für missing_trigger/missing_section darf evidence leer sein. "
+    "Bewerte den Schweregrad (severity) ehrlich: critical = leitet den Agenten aktiv fehl, "
+    "high = wichtige Lücke, medium = unklar, low = Nebensache. "
     'Wenn der Skill solide ist, gib {"findings": []} zurück. Erfinde NICHTS. Höchstens 4 Funde.'
 )
 
@@ -242,6 +263,7 @@ def research_skill(
         kept.append({
             "skill": skill_name,
             "category": category,
+            "severity": _coerce_skill_severity(raw.get("severity"), category),
             "evidence": evidence,
             "problem": problem,
             "fix_hint": fix_hint,

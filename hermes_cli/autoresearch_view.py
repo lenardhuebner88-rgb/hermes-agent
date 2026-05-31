@@ -389,8 +389,10 @@ class CodeWeaknessBody(BaseModel):
     scope: str = "incremental"  # "incremental" | "full"
     # Interactive default kept small so a button click stays snappy (each scanned
     # file = one ~20s MiniMax call). The unattended nightly code lane uses the
-    # finder's own larger default (12) for broader per-night coverage.
+    # finder's own larger default (12) for broader per-night coverage. The
+    # "Deep-Scan" button raises both caps (e.g. max_files=40, limit=8).
     max_files: int = 5
+    limit: int = 3  # max proposals to persist this run
 
 
 class ApplyProposalBody(BaseModel):
@@ -1092,7 +1094,7 @@ def register_autoresearch_routes(app: Any) -> None:
         dashboard's event loop and stall every other request."""
         b = body or CodeWeaknessBody()
         return await asyncio.to_thread(
-            _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files,
+            _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files, limit=b.limit,
         )
 
     @app.post("/autoresearch/apply")

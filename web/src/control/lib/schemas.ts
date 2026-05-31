@@ -149,6 +149,7 @@ export const ProposalSchema = z.object({
   section: z.string().nullable().catch(null),
   title: z.string().nullable().optional(),
   category: z.string().nullable().catch(null).optional(),
+  severity: z.enum(["critical", "high", "medium", "low"]).nullable().catch(null).optional(),
   evidence: z.string().nullable().catch(null).optional(),
   new_text: z.string().nullable().optional(),
   rationale_plain: z.string().catch(""),

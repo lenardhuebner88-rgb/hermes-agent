@@ -80,6 +80,20 @@ describe("ProposalCard", () => {
     expect(plain).not.toContain('type="checkbox"');
   });
 
+  it("renders the model-assigned severity badge", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "ps1", target: "skill/foo", severity: "critical" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(html).toContain(`${de.autoresearch.severity}: ${de.autoresearch.severityCritical}`);
+  });
+
+  it("falls back to the category-derived severity badge when severity is absent", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "ps2", target: "skill/foo", category: "missing_section" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(html).toContain(`${de.autoresearch.severity}: ${de.autoresearch.severityLow}`);
+  });
+
   it("renders all three Track-C elements together (badge + evidence + fix-diff)", () => {
     const html = renderToStaticMarkup(
       <ProposalCard

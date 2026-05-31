@@ -4,10 +4,17 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
-import type { ProposalPriorityGroup } from "../lib/autoresearch";
+import { getProposalSeverity, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
 import type { Density } from "../hooks/useDensity";
-import type { Proposal } from "../lib/types";
+import type { Proposal, ProposalSeverity } from "../lib/types";
 import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
+
+const SEVERITY_LABEL: Record<ProposalSeverity, string> = {
+  critical: de.autoresearch.severityCritical,
+  high: de.autoresearch.severityHigh,
+  medium: de.autoresearch.severityMedium,
+  low: de.autoresearch.severityLow,
+};
 
 interface Props {
   proposal: Proposal;
@@ -34,6 +41,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const isReverted = proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
   const isActionable = proposal.status === "proposed";
   const category = proposal.category?.trim();
+  const severity = getProposalSeverity(proposal);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3")}>
@@ -41,6 +49,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <ModeBadge mode={proposal.mode} />
+            <StatusPill tone={severityTone(severity)} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
             {category ? <StatusPill tone="cyan" label={`${de.autoresearch.category}: ${category}`} /> : null}
             {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}
             {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]"><Spinner />{de.autoresearch.batchPending}</span> : null}
