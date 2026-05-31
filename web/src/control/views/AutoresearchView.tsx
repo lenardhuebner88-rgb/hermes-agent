@@ -35,7 +35,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
-  const [maxIterations, setMaxIterations] = useState(2);
+  const [maxIterations, setMaxIterations] = useState("2");
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
   const [minUseCount, setMinUseCount] = useState("");
@@ -48,7 +48,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     setLoopBusy("start");
     setLoopMessage(null);
     try {
-      const body: Record<string, unknown> = { area: area.trim() || "all", focus: focus.trim() || "recommended_sections", mode: "dry-run", confirm: false, max_iterations: clampLoopIterations(maxIterations) };
+      const body: Record<string, unknown> = { area: area.trim() || "all", focus: focus.trim() || "recommended_sections", mode: "dry-run", confirm: false, max_iterations: clampLoopIterations(Number(maxIterations)) };
       const muc = parseMinUseCount(minUseCount);
       if (muc !== null) body.min_use_count = muc;
       const result = await fetchJSON<{ request_id?: string; pid?: number }>("/autoresearch/trigger", {
@@ -177,7 +177,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <label className="text-xs hc-soft" htmlFor="loop-min-use">{de.autoresearch.triggerMinUse}</label>
             <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
-            <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(clampLoopIterations(Number(event.target.value)))} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
