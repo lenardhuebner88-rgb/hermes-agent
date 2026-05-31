@@ -54,6 +54,7 @@ from pydantic import BaseModel, ValidationError
 
 # Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
 from hermes_cli import autoresearch_proposals as _proposals
+from hermes_cli import autoresearch_runs as _runs
 from scripts import autoresearch_writer as _writer
 
 # hermes-agent repo root (this file lives in hermes_cli/).
@@ -382,6 +383,11 @@ class TriggerBody(BaseModel):
     confirm: bool = False
     max_iterations: int = 1
     min_use_count: float | None = None
+
+
+class CodeWeaknessBody(BaseModel):
+    scope: str = "incremental"  # "incremental" | "full"
+    max_files: int = 12
 
 
 class ApplyProposalBody(BaseModel):
@@ -1066,16 +1072,25 @@ def register_autoresearch_routes(app: Any) -> None:
         them as previewable proposals. No mutation."""
         return _proposals.generate_proposals()
 
+    @app.get("/autoresearch/runs")
+    async def autoresearch_runs() -> dict[str, Any]:
+        """P2: recent run history (skill loops + code scans) for the ROI panel."""
+        return {"schema": "autoresearch-runs-v1", "runs": _runs.read_runs()}
+
     @app.post("/autoresearch/generate-code-weaknesses")
-    async def autoresearch_generate_code_weaknesses() -> dict[str, Any]:
+    async def autoresearch_generate_code_weaknesses(body: CodeWeaknessBody | None = None) -> dict[str, Any]:
         """MiniMax-backed, allowlisted code weakness finder. It only persists
         mode=code proposals; applying them uses the existing code gate.
 
-        The finder makes one synchronous MiniMax call per allowlisted file
-        (each up to ~120s), so it runs on a worker thread — otherwise it would
-        block the dashboard's event loop for minutes and stall every other
-        request. The endpoint still returns the full result synchronously."""
-        return await asyncio.to_thread(_proposals.generate_code_weakness_proposals)
+        ``scope='incremental'`` (default) scans only changed/unscanned files up to
+        ``max_files`` (fast, repeatable); ``scope='full'`` scans the whole allowlist.
+        The finder makes one synchronous MiniMax call per scanned file (each up to
+        ~120s), so it runs on a worker thread — otherwise it would block the
+        dashboard's event loop and stall every other request."""
+        b = body or CodeWeaknessBody()
+        return await asyncio.to_thread(
+            _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files,
+        )
 
     @app.post("/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:

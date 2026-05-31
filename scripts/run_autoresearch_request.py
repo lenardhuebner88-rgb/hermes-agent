@@ -717,6 +717,15 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         receipt = write_receipt(summary)
         summary["receipt"] = str(receipt)
         _finish_status(state_dir, route_status, summary, last_receipt=str(receipt))
+        try:  # P2: best-effort ROI log for the skill lane (never sink the run)
+            from hermes_cli import autoresearch_runs
+            autoresearch_runs.append_run(
+                lane="skill", request_id=summary.get("request_id"),
+                tokens=summary.get("research_tokens", 0), proposed=summary.get("proposed", 0),
+                errors=summary.get("research_errors", 0), scanned=summary.get("skills_researched", 0),
+            )
+        except Exception:
+            pass
         release_lock(state_dir)
     return summary
 

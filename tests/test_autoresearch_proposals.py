@@ -654,6 +654,68 @@ def test_route_apply_unknown_returns_ok_false(client, tmp_home):
 
 
 # ---------------------------------------------------------------------------
+# P1: incremental code-scan (content-hash state) + P2: /runs route
+# ---------------------------------------------------------------------------
+def _stub_no_finding(*_a, **_k):
+    return {"ok": True, "raw": None, "reason": None, "resp": None}
+
+
+def test_code_scan_incremental_skips_unchanged_and_rescans_changed(tmp_home, tmp_path, monkeypatch):
+    f = tmp_path / "scan_target.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [f])
+    calls = {"n": 0}
+
+    def _finder(*_a, **_k):
+        calls["n"] += 1
+        return {"ok": True, "raw": None, "reason": None, "resp": None}
+
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _finder)
+
+    r1 = proposals.generate_code_weakness_proposals()
+    assert r1["files_seen"] == 1 and r1["scope"] == "incremental" and calls["n"] == 1
+    # unchanged content → second run skips it entirely (no MiniMax call)
+    r2 = proposals.generate_code_weakness_proposals()
+    assert r2["files_seen"] == 0 and r2["skipped_unchanged"] == 1 and calls["n"] == 1
+    # content changed → eligible again
+    f.write_text("x = 2\n", encoding="utf-8")
+    r3 = proposals.generate_code_weakness_proposals()
+    assert r3["files_seen"] == 1 and calls["n"] == 2
+
+
+def test_code_scan_full_scope_rescans_even_unchanged(tmp_home, tmp_path, monkeypatch):
+    f = tmp_path / "scan_target.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: [f])
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _stub_no_finding)
+    proposals.generate_code_weakness_proposals(scope="full")
+    r = proposals.generate_code_weakness_proposals(scope="full")
+    assert r["files_seen"] == 1 and r["scope"] == "full"
+
+
+def test_code_scan_incremental_caps_max_files(tmp_home, tmp_path, monkeypatch):
+    files = []
+    for i in range(5):
+        p = tmp_path / f"m{i}.py"
+        p.write_text(f"x = {i}\n", encoding="utf-8")
+        files.append(p)
+    monkeypatch.setattr(proposals, "_iter_code_allowlist_paths", lambda: files)
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _stub_no_finding)
+    r = proposals.generate_code_weakness_proposals(max_files=2)
+    assert r["files_seen"] == 2
+
+
+def test_route_runs_returns_history(client, tmp_home):
+    from hermes_cli import autoresearch_runs
+    autoresearch_runs.append_run(lane="code", request_id="x1", tokens=42, proposed=1)
+    resp = client.get("/autoresearch/runs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schema"] == "autoresearch-runs-v1"
+    assert any(r["request_id"] == "x1" and r["tokens"] == 42 for r in body["runs"])
+
+
+# ---------------------------------------------------------------------------
 # AR2: relevance ranking (deterministic; cap; criticality; usage; "why first")
 # ---------------------------------------------------------------------------
 def _cand(skill, label, n_missing=1, cid=None):

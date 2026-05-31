@@ -151,6 +151,37 @@ def _proposals_dir() -> Path:
     return _audit_dir() / "proposals"
 
 
+# --- P1: incremental code-scan state (content-hash per allowlisted file) -------
+def _code_scan_state_path() -> Path:
+    return _audit_dir() / "researched-code.json"
+
+
+def _content_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
+def _read_code_scan_state() -> dict[str, str]:
+    """Map repo-relative path → content-sha at last scan. Tolerant: {} on error."""
+    path = _code_scan_state_path()
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in files.items()} if isinstance(files, dict) else {}
+
+
+def _write_code_scan_state(state: dict[str, str]) -> None:
+    try:
+        path = _code_scan_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"files": state}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 _RUNNER_CACHE: dict[str, Any] = {}
 
 
@@ -929,33 +960,51 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
     }
 
 
-def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) -> dict[str, Any]:
-    """Find real code weaknesses in a tight repo allowlist and persist them as
+def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
+                                     scope: str = "incremental", max_files: int = 12) -> dict[str, Any]:
+    """Find real code weaknesses in the repo allowlist and persist them as
     ``mode='code'`` proposals. The finder never writes target files; applying a
-    saved proposal uses the existing backup → write → test-suite gate path."""
+    saved proposal uses the existing backup → write → test-suite gate path.
+
+    ``scope='incremental'`` (default) scans only files whose content changed since
+    the last scan (or were never scanned), up to ``max_files`` — so a click is fast
+    and repeated clicks walk the allowlist. ``scope='full'`` scans everything (the
+    historical behaviour). Both modes refresh the content-hash state."""
+    incremental = scope != "full"
+    state = _read_code_scan_state()
     created: list[str] = []
     errors: list[dict[str, str]] = []
     skipped_existing = 0
+    skipped_unchanged = 0
     files_seen = 0
     findings_seen = 0
     tokens = 0
+    cap = max(1, int(max_files))
     allowlist_paths = _iter_code_allowlist_paths()
     for path in allowlist_paths:
         if len(created) >= max(1, int(limit)):
             break
-        files_seen += 1
+        if incremental and files_seen >= cap:
+            break
+        rel = _repo_relative_name(path)
         try:
             before = path.read_text(encoding="utf-8")
         except OSError as exc:
-            errors.append({"target": _repo_relative_name(path), "reason": f"read failed: {type(exc).__name__}"})
+            errors.append({"target": rel, "reason": f"read failed: {type(exc).__name__}"})
             continue
+        sha = _content_sha(before)
+        if incremental and state.get(rel) == sha:
+            skipped_unchanged += 1
+            continue
+        files_seen += 1
+        state[rel] = sha  # mark scanned — won't re-scan until the file content changes
         if not before.strip() or len(before) > _CODE_FINDER_MAX_FILE_CHARS:
-            errors.append({"target": _repo_relative_name(path), "reason": "file empty or too large for code finder"})
+            errors.append({"target": rel, "reason": "file empty or too large for code finder"})
             continue
         model_res = _call_code_weakness_finder(path, before, timeout=timeout)
         tokens += _llm_total_tokens(model_res.get("resp"))
         if not model_res.get("ok"):
-            errors.append({"target": _repo_relative_name(path), "reason": str(model_res.get("reason") or "model failed")})
+            errors.append({"target": rel, "reason": str(model_res.get("reason") or "model failed")})
             continue
         raw_finding = _normalise_code_finding(model_res.get("raw"))
         if raw_finding is None:
@@ -963,7 +1012,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) 
         for _idx in range(_CODE_FINDER_MAX_FINDINGS_PER_FILE):
             valid, reason = _validate_code_weakness_finding(raw_finding, path=path, before=before)
             if valid is None:
-                errors.append({"target": _repo_relative_name(path), "reason": reason or "invalid finding"})
+                errors.append({"target": rel, "reason": reason or "invalid finding"})
                 break
             findings_seen += 1
             proposal = _build_code_weakness_proposal(path, before, valid)
@@ -974,17 +1023,27 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0) 
             save_proposal(proposal)
             created.append(proposal["id"])
             break
-    return {
+    _write_code_scan_state(state)
+    result = {
         "ok": True,
         "created": created,
         "created_count": len(created),
         "skipped_existing": skipped_existing,
+        "skipped_unchanged": skipped_unchanged,
         "files_seen": files_seen,
         "findings_seen": findings_seen,
         "tokens": tokens,
-        "allowlist": sorted(_repo_relative_name(path) for path in allowlist_paths),
+        "scope": "incremental" if incremental else "full",
+        "allowlist": sorted(_repo_relative_name(p) for p in allowlist_paths),
         "errors": errors,
     }
+    try:  # P2: best-effort ROI log for the code lane (never sink the scan)
+        from hermes_cli import autoresearch_runs
+        autoresearch_runs.append_run(lane="code", tokens=tokens, proposed=len(created),
+                                     errors=len(errors), scanned=files_seen)
+    except Exception:
+        pass
+    return result
 
 
 # ---------------------------------------------------------------------------
