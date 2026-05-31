@@ -232,6 +232,9 @@ def _build_last_run(summary: dict) -> dict:
         "kept": summary.get("kept"),
         "reverted": summary.get("reverted"),
         "proposed": summary.get("proposed"),
+        "skills_researched": summary.get("skills_researched"),
+        "research_errors": summary.get("research_errors"),
+        "skills_with_findings": summary.get("skills_with_findings"),
         "stopped": summary.get("stopped"),
         "targets": [s["target"] for s in summary.get("steps", [])],
         "request_id": summary.get("request_id"),
@@ -331,6 +334,7 @@ def discover_capability_candidates(
     max_skills: int | None = None,
     researched_skills: set[str] | None = None,
     heartbeat_cb: Callable[[], None] | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """List AR3 capability weaknesses under roots, filtered to used skills.
 
@@ -379,6 +383,10 @@ def discover_capability_candidates(
             heartbeat_cb()
 
     report = capability_researcher.research_skills(skills, usage=usage, on_skill=_pulse)
+    if stats is not None:
+        stats["skills_researched"] = int(stats.get("skills_researched", 0)) + int(report.get("skills_seen", 0) or 0)
+        stats["research_errors"] = int(stats.get("research_errors", 0)) + int(report.get("errors", 0) or 0)
+        stats["skills_with_findings"] = int(stats.get("skills_with_findings", 0)) + int(report.get("skills_with_findings", 0) or 0)
     cands: list[dict] = []
     for finding in report.get("findings") or []:
         key = _capability_finding_key(finding)
@@ -472,6 +480,7 @@ def write_receipt(summary: dict) -> Path:
         f"- route_status: {summary.get('route_status')}",
         f"- iterations: {summary.get('iterations')}",
         f"- kept: {summary.get('kept')} | reverted: {summary.get('reverted')} | proposed: {summary.get('proposed')}",
+        f"- skills_researched: {summary.get('skills_researched')} | research_errors: {summary.get('research_errors')} | skills_with_findings: {summary.get('skills_with_findings')}",
         f"- backup_dir: {summary.get('backup_dir') or '(none — dry-run)'}",
         f"- stopped_by_signal: {summary.get('stopped')}",
         "",
@@ -509,6 +518,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         "ok": True, "request_id": request_id, "mode": "dry-run",
         "route_status": route_status, "route_detail": route_detail,
         "iterations": 0, "kept": 0, "reverted": 0, "proposed": 0,
+        "skills_researched": 0, "research_errors": 0, "skills_with_findings": 0,
         "backup_dir": None, "stopped": False, "steps": [], "refused": None,
     }
 
@@ -551,6 +561,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
     attempted: set[tuple[str, str]] = set()
     attempted_capabilities: set[tuple[str, str, str]] = set()
     researched_skills: set[str] = set()  # AR3 skills already swept (one per iteration)
+    research_stats = {"skills_researched": 0, "research_errors": 0, "skills_with_findings": 0}
     # apply scans only under-skills roots; dry-run may scan all allowed roots (read-only).
     roots = [p for p in (under_skills if effective_apply else allowed) if p.exists()]
 
@@ -576,6 +587,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                 max_skills=1,
                 researched_skills=researched_skills,
                 heartbeat_cb=lambda: heartbeat(state_dir, request_id, i, cap, "discover", None),
+                stats=research_stats,
             )
             if capability_cands:
                 # Build a grounded-fix PROPOSAL per finding from the skill we just
@@ -690,6 +702,9 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                 summary["stopped"] = True
                 break
     finally:
+        summary["skills_researched"] = int(research_stats.get("skills_researched", 0))
+        summary["research_errors"] = int(research_stats.get("research_errors", 0))
+        summary["skills_with_findings"] = int(research_stats.get("skills_with_findings", 0))
         receipt = write_receipt(summary)
         summary["receipt"] = str(receipt)
         _finish_status(state_dir, route_status, summary, last_receipt=str(receipt))

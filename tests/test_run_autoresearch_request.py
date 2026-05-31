@@ -309,3 +309,50 @@ def test_sigterm_stops_loop_and_releases_lock(env):
     assert not lock.exists(), "lock not released after SIGTERM"
     status = json.loads((env["state"] / "current.status").read_text())
     assert status["state"] == "idle"
+
+
+def test_dry_run_nightly_observability_clean_research_counts(env, monkeypatch):
+    monkeypatch.setattr(env["runner"], "_usage_min_use_count", lambda: 0)
+    orig_research_skills = env["runner"].capability_researcher.research_skills
+
+    class _FindingsMsg:
+        content = '{"findings": []}'
+
+    class _FindingsChoice:
+        message = _FindingsMsg()
+
+    class _FindingsResp:
+        choices = [_FindingsChoice()]
+
+    def _ok_call_llm(**_kwargs):
+        return _FindingsResp()
+
+    def _wrapped_research_skills(skills, **kwargs):
+        return orig_research_skills(skills, call_llm=_ok_call_llm, **kwargs)
+
+    monkeypatch.setattr(env["runner"].capability_researcher, "research_skills", _wrapped_research_skills)
+
+    req = _make_request(env)
+    summary = env["runner"].run(req, apply=False, confirm=False, max_iterations=3)
+    assert summary["ok"] is True
+    assert summary["skills_researched"] >= 2
+    assert summary["research_errors"] == 0
+
+
+def test_dry_run_nightly_observability_receipt_shows_research_errors(env, monkeypatch):
+    monkeypatch.setattr(env["runner"], "_usage_min_use_count", lambda: 0)
+    orig_research_skills = env["runner"].capability_researcher.research_skills
+
+    def _boom_call_llm(**_kwargs):
+        raise RuntimeError("nightly-research-offline")
+
+    def _wrapped_research_skills(skills, **kwargs):
+        return orig_research_skills(skills, call_llm=_boom_call_llm, **kwargs)
+
+    monkeypatch.setattr(env["runner"].capability_researcher, "research_skills", _wrapped_research_skills)
+
+    req = _make_request(env)
+    summary = env["runner"].run(req, apply=False, confirm=False, max_iterations=2)
+    assert summary["research_errors"] >= 1
+    receipt_text = Path(summary["receipt"]).read_text(encoding="utf-8")
+    assert "research_errors" in receipt_text
