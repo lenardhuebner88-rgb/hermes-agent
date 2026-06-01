@@ -210,9 +210,94 @@ async def _get_backlog() -> dict[str, Any]:
         executor.shutdown(wait=True)
 
 
+def _detail_error(message: str) -> dict[str, str]:
+    return {"error": message}
+
+
+def _validate_detail_id(item_id: str) -> tuple[str | None, dict[str, str] | None]:
+    raw = str(item_id or "")
+    if not raw.strip():
+        return None, _detail_error("invalid id: expected 4 digits")
+    if "/" in raw or "\\" in raw or ".." in raw:
+        return None, _detail_error("invalid id")
+    if len(raw) != 4 or not raw.isdigit():
+        return None, _detail_error("invalid id: expected 4 digits")
+    return raw, None
+
+
+def _body_after_frontmatter(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "".join(lines[i + 1:])
+    return ""
+
+
+def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
+    valid_id, error = _validate_detail_id(item_id)
+    if error is not None:
+        return error
+
+    base = _backlog_dir().resolve()
+    try:
+        sources = _read_sources_from_git(base)
+        if sources is None:
+            return _detail_error("backlog source unavailable")
+
+        for name, text in sources:
+            if not (name.endswith(".md") and name.startswith(f"{valid_id}-")):
+                continue
+
+            stem = name[:-3]
+            fm = _parse_frontmatter(text)
+            if not fm:
+                return _detail_error("item frontmatter not found")
+
+            status = str(fm.get("status") or "").strip()
+            updated = fm.get("updated")
+            epoch = _updated_epoch(updated)
+            stale = (
+                status in ("in_progress", "blocked")
+                and epoch is not None
+                and (now - epoch) > _STALE_AFTER_S
+            )
+            return {
+                "id": stem[:4],
+                "title": str(fm.get("title") or stem),
+                "status": status,
+                "owner": str(fm.get("owner") or "unassigned"),
+                "risk": str(fm.get("risk") or ""),
+                "area": str(fm.get("area") or ""),
+                "updated": str(updated) if updated is not None else "",
+                "lane": str(fm.get("lane")) if fm.get("lane") is not None else None,
+                "result": str(fm.get("result")) if fm.get("result") is not None else None,
+                "stale": bool(stale),
+                "body": _body_after_frontmatter(text),
+            }
+        return _detail_error("item not found")
+    except Exception:
+        return _detail_error("backlog detail unavailable")
+
+
+async def _get_backlog_detail(item_id: str) -> dict[str, Any]:
+    now = int(time.time())
+    loop = asyncio.get_event_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        return await loop.run_in_executor(executor, _read_item_detail_sync, item_id, now)
+    finally:
+        executor.shutdown(wait=True)
+
+
 def register_backlog_routes(app: FastAPI) -> None:
     """Register the read-only family-organizer backlog endpoint before the SPA catch-all."""
 
     @app.get("/api/family-organizer/backlog")
     async def family_organizer_backlog() -> dict[str, Any]:
         return await _get_backlog()
+
+    @app.get("/api/family-organizer/backlog/{item_id:path}")
+    async def family_organizer_backlog_detail(item_id: str) -> dict[str, Any]:
+        return await _get_backlog_detail(item_id)

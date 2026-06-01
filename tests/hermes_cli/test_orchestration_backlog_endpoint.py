@@ -1,11 +1,14 @@
-"""Tests for the read-only Orchestrator backlog endpoint
-(``GET /api/orchestration/backlog``).
+"""Tests for the read-only Orchestrator backlog endpoints
+(``GET /api/orchestration/backlog`` and detail by id).
 
 The endpoint parses the orchestration workspace's ``backlog/*.md`` frontmatter
 (Backlog.md schema: status/priority/dependsOn/planGate/created) from the working
 tree. These tests assert the parse/counts/shape logic and the route contract
 against tmp fixtures (no real backlog, no live server).
 """
+
+import asyncio
+import json
 
 import pytest
 
@@ -23,6 +26,38 @@ def _write(dir_, name, **fm):
         lines.append(f"{key}: {value}")
     lines += ["---", "", "## Ziel", "", "body mit --- als Trennlinie"]
     (dir_ / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def _asgi_get(app, path):
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+    await app(scope, receive, send)
+
+    status = next(m["status"] for m in messages if m["type"] == "http.response.start")
+    body = b"".join(
+        m.get("body", b"") for m in messages if m["type"] == "http.response.body"
+    )
+    return status, json.loads(body.decode("utf-8"))
 
 
 def test_parse_frontmatter_keeps_colon_values_and_ignores_body_rules():
@@ -122,3 +157,87 @@ def test_route_returns_json(tmp_path, monkeypatch):
     assert data["items"][0]["id"] == "f-a"
     assert data["items"][0]["title"] == "A"
     assert data["items"][0]["status"] == "review"
+
+
+def test_detail_route_returns_item_body_gate_and_root(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+    _write(tmp_path, "f-a.md", id="f-a", title="A", status="review",
+           priority="high", dependsOn="[f-b, f-c]", planGate="true",
+           gate="venv/bin/python -m pytest -q", root="/tmp/project",
+           created="2026-06-01")
+
+    app = FastAPI()
+    register_orchestration_backlog_routes(app)
+    client = TestClient(app)
+
+    r = client.get("/api/orchestration/backlog/f-a")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["id"] == "f-a"
+    assert data["title"] == "A"
+    assert data["dependsOn"] == ["f-b", "f-c"]
+    assert data["planGate"] is True
+    assert data["gate"] == "venv/bin/python -m pytest -q"
+    assert data["root"] == "/tmp/project"
+    assert data["body"].strip()
+
+
+def test_detail_route_rejects_traversal_ids(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+
+    app = FastAPI()
+    register_orchestration_backlog_routes(app)
+    client = TestClient(app)
+
+    encoded = client.get("/api/orchestration/backlog/..%2f..%2fetc%2fpasswd")
+    assert encoded.status_code == 200
+    assert "error" in encoded.json()
+    assert "root:" not in encoded.text
+
+    status, raw = asyncio.run(_asgi_get(app, "/api/orchestration/backlog/../../etc/passwd"))
+    assert status == 200
+    assert "error" in raw
+    assert "root:" not in json.dumps(raw)
+
+
+def test_detail_route_empty_and_unknown_id_return_error(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+
+    app = FastAPI()
+    register_orchestration_backlog_routes(app)
+    client = TestClient(app)
+
+    empty = client.get("/api/orchestration/backlog/")
+    assert empty.status_code == 200
+    assert "error" in empty.json()
+
+    unknown = client.get("/api/orchestration/backlog/not-real")
+    assert unknown.status_code == 200
+    assert "error" in unknown.json()

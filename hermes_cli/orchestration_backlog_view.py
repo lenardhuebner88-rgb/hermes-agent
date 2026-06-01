@@ -98,6 +98,65 @@ def _parse_bool(value: Any) -> bool:
     return str(value).strip().lower() in ("true", "yes", "1")
 
 
+def _detail_error(message: str) -> dict[str, str]:
+    return {"error": message}
+
+
+def _body_after_frontmatter(text: str) -> str:
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[i + 1:])
+    return ""
+
+
+def _validate_backlog_item_id(item_id: str) -> str | None:
+    clean = str(item_id or "").strip()
+    if not clean:
+        return "empty backlog id"
+    if "/" in clean or "\\" in clean or ".." in clean:
+        return "invalid backlog id"
+    return None
+
+
+def _read_detail_sync(item_id: str) -> dict[str, Any]:
+    invalid = _validate_backlog_item_id(item_id)
+    if invalid:
+        return _detail_error(invalid)
+
+    clean = item_id.strip()
+    base = _backlog_dir().resolve()
+    target = (base / f"{clean}.md").resolve()
+    if not target.is_relative_to(base):
+        return _detail_error("invalid backlog item path")
+    if not target.is_file():
+        return _detail_error("backlog item not found")
+
+    text = target.read_text(encoding="utf-8")
+    fm = _parse_frontmatter(text)
+    if not fm:
+        return _detail_error("backlog item frontmatter not found")
+
+    detail: dict[str, Any] = {key: str(value) for key, value in fm.items()}
+    detail.update(
+        {
+            "id": clean,
+            "title": str(fm.get("title") or clean),
+            "status": str(fm.get("status") or ""),
+            "priority": str(fm.get("priority") or ""),
+            "dependsOn": _parse_depends_on(fm.get("dependsOn")),
+            "planGate": _parse_bool(fm.get("planGate")),
+            "gate": str(fm.get("gate") or ""),
+            "root": str(fm.get("root") or ""),
+            "created": str(fm.get("created") or ""),
+            "body": _body_after_frontmatter(text),
+        }
+    )
+    return detail
+
+
 def _created_epoch(value: Any) -> int | None:
     """Parse an ISO ``YYYY-MM-DD`` value into UTC epoch seconds, else None."""
     if value is None:
@@ -232,3 +291,11 @@ def register_orchestration_backlog_routes(app: FastAPI) -> None:
     @app.get("/api/orchestration/backlog")
     async def orchestration_backlog() -> dict[str, Any]:
         return await _get_backlog()
+
+    @app.get("/api/orchestration/backlog/{id:path}")
+    async def orchestration_backlog_detail(id: str) -> dict[str, Any]:
+        try:
+            return _read_detail_sync(id)
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            return _detail_error(message)
