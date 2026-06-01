@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
+  BacklogResponseSchema,
   AutoresearchRunsResponseSchema,
   AutoresearchStatusSchema,
   OpenClawDispatchedResponseSchema,
@@ -13,7 +14,7 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { OpenClawDispatchedResponse } from "../lib/schemas";
+import type { BacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
@@ -339,6 +340,15 @@ export function useSystemHealth() {
   return usePolling<SystemHealthResponse>(
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
     5000,
+  );
+}
+
+// Read-only family-organizer backlog board. Polled slowly — the backlog changes
+// rarely (a handful of git commits a day), so 30s keeps it fresh without churn.
+export function useBacklog() {
+  return usePolling<BacklogResponse>(
+    async () => parseOrThrow(BacklogResponseSchema, await fetchJSON<unknown>("/api/family-organizer/backlog"), "family-organizer/backlog"),
+    30000,
   );
 }
 

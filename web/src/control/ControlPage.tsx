@@ -8,10 +8,12 @@ import { CommandPalette } from "./components/CommandPalette";
 import { OverviewView } from "./views/OverviewView";
 import { HermesFleet } from "./views/HermesFleet";
 import { AutoresearchView } from "./views/AutoresearchView";
+import { BacklogView } from "./views/BacklogView";
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/hermes")) return "hermes";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
+  if (pathname.includes("/control/backlog")) return "backlog";
   return "overview";
 }
 
@@ -19,6 +21,7 @@ const tabPath: Record<ControlTab, string> = {
   overview: "/control",
   hermes: "/control/hermes",
   autoresearch: "/control/autoresearch",
+  backlog: "/control/backlog",
 };
 
 export default function ControlPage() {
@@ -82,6 +85,7 @@ export default function ControlPage() {
           <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
+          <Route path="backlog" element={<BacklogView density={density.density} />} />
           <Route path="*" element={<Navigate to="/control" replace />} />
         </Routes>
       </ControlShell>

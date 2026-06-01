@@ -1,16 +1,17 @@
-import { Bot, Command, FlaskConical, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles } from "lucide-react";
+import { Bot, Command, FlaskConical, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "hermes" | "autoresearch";
+export type ControlTab = "overview" | "hermes" | "autoresearch" | "backlog";
 
 const tabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: de.tabs.overview, path: "/control", icon: LayoutDashboard },
   { id: "hermes", label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
   { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
+  { id: "backlog", label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
 ];
 
 const secondaryNav = [

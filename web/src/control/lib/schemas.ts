@@ -276,6 +276,44 @@ export const OpenClawDispatchedResponseSchema = z.object({
 export type OpenClawDispatchedTask = z.infer<typeof OpenClawDispatchedTaskSchema>;
 export type OpenClawDispatchedResponse = z.infer<typeof OpenClawDispatchedResponseSchema>;
 
+// Read-only family-organizer backlog board. Mirrors the frontmatter "Feld-Vertrag"
+// (family-organizer backlog/README.md) served by GET /api/family-organizer/backlog.
+// Tolerant (.catch defaults) so a partial/stale payload still renders the board.
+export const BacklogItemSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  status: z.enum(["now", "next", "later", "in_progress", "blocked", "done"]).catch("now"),
+  owner: z.string().catch("unassigned"),
+  risk: z.enum(["low", "medium", "high"]).catch("low"),
+  area: z.string().catch(""),
+  updated: z.string().catch(""),
+  lane: z.string().nullable().catch(null),
+  result: z.string().nullable().catch(null),
+  stale: z.boolean().catch(false),
+});
+
+export const BacklogResponseSchema = z.object({
+  schema: z.string().catch("fo-backlog-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  items: z.array(BacklogItemSchema).catch([]),
+  counts: z.object({
+    now: z.coerce.number().catch(0),
+    next: z.coerce.number().catch(0),
+    in_progress: z.coerce.number().catch(0),
+    blocked: z.coerce.number().catch(0),
+    later: z.coerce.number().catch(0),
+    done: z.coerce.number().catch(0),
+  }).catch({ now: 0, next: 0, in_progress: 0, blocked: 0, later: 0, done: 0 }),
+  source: z.object({
+    dir: z.string().catch(""),
+    count: z.coerce.number().catch(0),
+  }).catch({ dir: "", count: 0 }),
+  error: z.string().nullable().catch(null),
+});
+
+export type BacklogItem = z.infer<typeof BacklogItemSchema>;
+export type BacklogResponse = z.infer<typeof BacklogResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

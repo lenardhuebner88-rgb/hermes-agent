@@ -7049,6 +7049,11 @@ register_openclaw_dispatch_routes(app)
 from hermes_cli.health_status import register_health_status_routes  # noqa: E402
 register_health_status_routes(app)
 
+# Read-only family-organizer backlog board (parses that repo's backlog/items
+# frontmatter from disk). Under /api/ → inherits the session-token gate.
+from hermes_cli.family_organizer_view import register_backlog_routes  # noqa: E402
+register_backlog_routes(app)
+
 mount_spa(app)
 
 
