@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -302,6 +302,19 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
     expect(codeWeaknessBusyKey("incremental")).toBe("generate-code");
     expect(codeWeaknessBusyKey("full")).toBe("generate-code-full");
     expect(codeWeaknessBusyKey("deep")).toBe("generate-code-deep");
+  });
+
+  it("describeArea returns a plain-German scope for known areas, raw value otherwise", () => {
+    expect(describeArea("all")).toBe("alle Skills");
+    expect(describeArea("dashboard")).toBe("Dashboard-Code (scripts + tests)");
+    expect(describeArea("hermes-kanban")).toBe("alle Kanban-Skills");
+    expect(describeArea("does-not-exist")).toBe("does-not-exist");
+  });
+
+  it("AUTORESEARCH_AREAS starts with 'all' and every value is a valid backend slug", () => {
+    expect(AUTORESEARCH_AREAS[0].value).toBe("all");
+    const slug = /^[a-z0-9][a-z0-9_-]*$/;
+    for (const a of AUTORESEARCH_AREAS) expect(a.value).toMatch(slug);
   });
 });
 

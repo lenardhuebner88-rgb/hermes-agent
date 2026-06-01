@@ -342,6 +342,31 @@ export function formatRunTime(at: string | null | undefined): string {
   return new Date(ms).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
 }
 
+/**
+ * The closed set of valid `area` values the Autoresearch trigger accepts
+ * (mirrors AREA_ROOTS in scripts/autoresearch_request.py — any other value is
+ * rejected with a 400). `scope` is the plain-German description of what each
+ * area researches, shown in the dropdown + the targeting preview.
+ */
+export const AUTORESEARCH_AREAS = [
+  { value: "all", scope: "alle Skills" },
+  { value: "software-development", scope: "skills/software-development" },
+  { value: "devops", scope: "skills/devops" },
+  { value: "github", scope: "skills/github" },
+  { value: "hermes-kanban", scope: "alle Kanban-Skills" },
+  { value: "research", scope: "skills/research" },
+  { value: "productivity", scope: "skills/productivity" },
+  { value: "mlops", scope: "skills/mlops" },
+  { value: "creative", scope: "skills/creative" },
+  { value: "firecrawl", scope: "skills/firecrawl" },
+  { value: "dashboard", scope: "Dashboard-Code (scripts + tests)" },
+] as const;
+
+/** Plain-German scope for an area value; falls back to the raw value if unknown. */
+export function describeArea(value: string): string {
+  return AUTORESEARCH_AREAS.find((a) => a.value === value)?.scope ?? value;
+}
+
 export type CodeWeaknessScope = "incremental" | "full" | "deep";
 
 /**

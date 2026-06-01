@@ -206,6 +206,16 @@ export const de = {
     // C — Targeting-Preset
     presetRecommended: "Empfohlen",
     presetRecommendedHint: "Setzt die günstigen Standardwerte: all · recommended_sections · 2 Iterationen.",
+    // D — Bereich-Dropdown + Fokus-Regel + „Das passiert beim Start"-Vorschau
+    triggerFocusPlaceholder: "z. B. recommended_sections",
+    triggerFocusHint: "nur Kleinbuchstaben, Ziffern, Bindestrich und Unterstrich",
+    targetingPreviewHeading: "Das passiert beim Start",
+    targetingScans: "Durchsucht",
+    targetingFocusLabel: "Fokus",
+    targetingIterations: (n: number) => `max. ${n} ${n === 1 ? "Iteration" : "Iterationen"}`,
+    targetingMinUseDefault: "Mindest-Nutzung: Standard ≥ 5",
+    targetingMinUseValue: (n: number) => `Mindest-Nutzung ≥ ${n}`,
+    targetingDryRunNote: "Probelauf — schreibt nichts, legt nur Vorschläge an.",
   },
   backlog: {
     eyebrow: "Family Organizer",

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Square, X } from "lucide-react";
+import { CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Square, Target, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
@@ -180,13 +180,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
           <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
             <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
-            <input id="loop-area" type="text" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <select id="loop-area" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+              {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[#16181d] text-white">{a.value} — {a.scope}</option>)}
+            </select>
             <label className="text-xs hc-soft" htmlFor="loop-focus">{de.autoresearch.triggerFocus}</label>
-            <input id="loop-focus" type="text" value={focus} onChange={(event) => setFocus(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <input id="loop-focus" type="text" inputMode="text" pattern="[a-z0-9][a-z0-9_-]*" placeholder={de.autoresearch.triggerFocusPlaceholder} value={focus} onChange={(event) => setFocus(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <p className="-mt-1 text-[11px] hc-dim">{de.autoresearch.triggerFocusHint}</p>
             <label className="text-xs hc-soft" htmlFor="loop-min-use">{de.autoresearch.triggerMinUse}</label>
             <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
             <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <TargetingPreview area={area} focus={focus} maxIterations={maxIterations} minUseCount={minUseCount} />
             <Button outlined className="hc-hit" onClick={() => { setArea("all"); setFocus("recommended_sections"); setMinUseCount(""); setMaxIterations("2"); }} disabled={loop.running || !!loopBusy} title={de.autoresearch.presetRecommendedHint} prefix={<RotateCw className="h-4 w-4" />}>{de.autoresearch.presetRecommended}</Button>
             <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
@@ -307,6 +311,23 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2"><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold text-white">{value}</p></div>;
+}
+
+// Live, plain-language readback of the targeting inputs so the operator sees in
+// normal German exactly what the loop will do before hitting Start — using the
+// *effective* (clamped/parsed) values, not the raw input strings.
+function TargetingPreview({ area, focus, maxIterations, minUseCount }: { area: string; focus: string; maxIterations: string; minUseCount: string }) {
+  const iters = clampLoopIterations(Number(maxIterations));
+  const muc = parseMinUseCount(minUseCount);
+  return (
+    <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2 text-xs text-[var(--hc-accent-text)]">
+      <p className="flex items-center gap-1.5 font-semibold"><Target className="h-3.5 w-3.5" />{de.autoresearch.targetingPreviewHeading}</p>
+      <p className="mt-1.5">{de.autoresearch.targetingScans} <span className="font-semibold">{describeArea(area)}</span></p>
+      <p className="mt-0.5">{de.autoresearch.targetingFocusLabel} <span className="font-semibold">{focus.trim() || "recommended_sections"}</span> · {de.autoresearch.targetingIterations(iters)}</p>
+      <p className="mt-0.5">{muc !== null ? de.autoresearch.targetingMinUseValue(muc) : de.autoresearch.targetingMinUseDefault}</p>
+      <p className="mt-1 opacity-80">{de.autoresearch.targetingDryRunNote}</p>
+    </div>
+  );
 }
 
 function LastRun({ status, latestRun }: { status: ReturnType<typeof useAutoresearchStatus>["data"]; latestRun: AutoresearchRun | null }) {
