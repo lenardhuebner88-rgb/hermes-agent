@@ -61,7 +61,10 @@
 .hc-soft { color: var(--hc-text-soft); }
 .hc-dim { color: var(--hc-text-dim); }
 .hc-eyebrow { color: var(--hc-text-dim); font-size: 10px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; }
-.hc-hit { min-height: 44px; }
+/* Labelled action buttons: the upstream Button sets line-height:0 for single-line
+   icon alignment, so a wrapped label collapses its lines on top of each other
+   (jumbled text in narrow/compact layouts). Keep these labels on one line. */
+.hc-hit { min-height: 44px; white-space: nowrap; }
 .hc-tab { min-height: 60px; }
 
 .hc-led { box-shadow: 0 0 6px currentColor; }
