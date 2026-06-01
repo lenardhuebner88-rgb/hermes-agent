@@ -3253,6 +3253,74 @@ class GatewayRunner:
         }
 
     @staticmethod
+    def _redact_session_key_for_logs(session_key: str) -> str:
+        parsed = _parse_session_key(session_key)
+        if not parsed:
+            return "unknown-session"
+        platform = parsed.get("platform") or "unknown"
+        chat_type = parsed.get("chat_type") or "unknown"
+        chat_id = str(parsed.get("chat_id") or "")
+        suffix = chat_id[-4:] if chat_id else "?"
+        thread_suffix = ":thread" if parsed.get("thread_id") else ""
+        return f"{platform}:{chat_type}:…{suffix}{thread_suffix}"
+
+    def _active_agent_diagnostics(
+        self,
+        *,
+        now: Optional[float] = None,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        current = time.time() if now is None else float(now)
+        rows: list[dict[str, Any]] = []
+        for session_key, agent in self._snapshot_running_agents().items():
+            started = float(self._running_agents_ts.get(session_key, current))
+            elapsed = max(0, int(current - started))
+            rows.append(
+                {
+                    "session": self._redact_session_key_for_logs(session_key),
+                    "elapsed": elapsed,
+                    "state": "running",
+                    "session_id": str(getattr(agent, "session_id", "") or ""),
+                    "model": str(getattr(agent, "model", "") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["elapsed"], reverse=True)
+        return rows[: max(0, int(limit))]
+
+    @staticmethod
+    def _format_active_agent_diagnostics(rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "none"
+        parts: list[str] = []
+        for idx, row in enumerate(rows, 1):
+            sid = f" session_id={row['session_id']}" if row.get("session_id") else ""
+            model = f" model={row['model']}" if row.get("model") else ""
+            parts.append(
+                f"#{idx} session={row.get('session', 'unknown')} "
+                f"state={row.get('state', 'unknown')} elapsed={int(row.get('elapsed', 0))}s"
+                f"{sid}{model}"
+            )
+        return "; ".join(parts)
+
+    def _log_drain_agent_diagnostics(
+        self,
+        phase: str,
+        *,
+        timeout: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> None:
+        rows = self._active_agent_diagnostics(now=now)
+        formatted = self._format_active_agent_diagnostics(rows)
+        timeout_part = f" timeout={float(timeout):.1f}s" if timeout is not None else ""
+        log_fn = logger.warning if phase == "timeout" else logger.info
+        log_fn(
+            "Gateway restart drain %s active-agent diagnostics:%s %s",
+            phase,
+            timeout_part,
+            formatted,
+        )
+
+    @staticmethod
     def _agent_has_active_subagents(running_agent: Any) -> bool:
         """Return True when *running_agent* is currently driving subagents
         via the ``delegate_task`` tool.
@@ -3567,11 +3635,14 @@ class GatewayRunner:
         if timeout <= 0:
             return snapshot, True
 
+        self._log_drain_agent_diagnostics("start", timeout=timeout)
         deadline = asyncio.get_running_loop().time() + timeout
         while self._running_agents and asyncio.get_running_loop().time() < deadline:
             _maybe_update_status()
             await asyncio.sleep(0.1)
         timed_out = bool(self._running_agents)
+        if timed_out:
+            self._log_drain_agent_diagnostics("timeout", timeout=timeout)
         _maybe_update_status(force=True)
         return snapshot, timed_out
 

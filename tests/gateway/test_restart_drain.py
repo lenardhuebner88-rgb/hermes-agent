@@ -345,3 +345,50 @@ async def test_shutdown_notification_uses_persisted_origin_for_colon_ids():
 
     assert adapter.send.await_count == 1
     assert adapter.send.await_args.args[0] == "!room123:example.org"
+
+
+# --- Recovered: gateway drain active-agent diagnostics (orig commit 6e705766f) ---
+def test_active_agent_diagnostics_are_redacted_and_actionable():
+    runner, _adapter = make_restart_runner()
+    session_key = "agent:main:telegram:dm:123456:thread789"
+    agent = MagicMock()
+    agent.session_id = "sess-123"
+    agent.model = "model-x"
+    runner._running_agents[session_key] = agent
+    runner._running_agents_ts[session_key] = 100.0
+
+    rows = runner._active_agent_diagnostics(now=165.0)
+
+    assert rows == [
+        {
+            "session": "telegram:dm:…3456:thread",
+            "elapsed": 65,
+            "state": "running",
+            "session_id": "sess-123",
+            "model": "model-x",
+        }
+    ]
+    assert "123456" not in rows[0]["session"]
+    assert "thread789" not in rows[0]["session"]
+
+
+def test_log_drain_agent_diagnostics_includes_timeout_and_rows(caplog):
+    runner, _adapter = make_restart_runner()
+    session_key = "agent:main:telegram:dm:999999"
+    agent = MagicMock()
+    agent.session_id = "sess-timeout"
+    agent.model = "model-y"
+    runner._running_agents[session_key] = agent
+    runner._running_agents_ts[session_key] = 10.0
+
+    with caplog.at_level("WARNING"):
+        runner._log_drain_agent_diagnostics("timeout", timeout=180.0, now=70.0)
+
+    assert "Gateway restart drain timeout active-agent diagnostics" in caplog.text
+    assert "timeout=180.0s" in caplog.text
+    assert "telegram:dm:…9999" in caplog.text
+    assert "sess-timeout" in caplog.text
+    assert "model-y" in caplog.text
+    assert "999999" not in caplog.text
+
+
