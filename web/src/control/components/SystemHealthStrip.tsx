@@ -34,7 +34,6 @@ const statusDot: Record<HealthStatus, DotKind> = {
 
 const subsystems: Array<{ key: SubsystemKey; label: string }> = [
   { key: "gateway", label: de.systemHealth.gateway },
-  { key: "openclaw", label: de.systemHealth.openclaw },
   { key: "autoresearch", label: de.systemHealth.autoresearch },
   { key: "kanban_db", label: de.systemHealth.kanban },
 ];
@@ -54,7 +53,7 @@ export function SystemHealthStrip({ data, error, now }: Props) {
           <Led kind={isUnknown ? "idle" : statusDot[data.overall]} size={9} />
           <span>{de.systemHealth.title}</span>
         </div>
-        <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-3">
           {subsystems.map((item) => (
             <SubsystemLight
               key={item.key}

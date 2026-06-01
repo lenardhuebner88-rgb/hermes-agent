@@ -9,19 +9,19 @@ const baseHealth: SystemHealthResponse = {
   overall: "healthy",
   subsystems: {
     gateway: { status: "healthy", detail: "ok", error: null, latency_ms: 12 },
-    openclaw: { status: "healthy", detail: "ok", error: null, latency_ms: 18 },
     autoresearch: { status: "healthy", detail: "fresh", error: null, heartbeat_age_s: 2 },
     kanban_db: { status: "healthy", detail: "ok", error: null, latency_ms: 4 },
   },
 };
 
 describe("SystemHealthStrip", () => {
-  it("renders all four subsystem labels with full data", () => {
+  it("renders all subsystem labels with full data", () => {
     const html = renderToStaticMarkup(<SystemHealthStrip data={baseHealth} now={120} />);
     expect(html).toContain("Hermes-Gateway");
-    expect(html).toContain("OpenClaw-Proxy");
     expect(html).toContain("Autoresearch-Loop");
     expect(html).toContain("Kanban-DB");
+    // OpenClaw wurde 2026-06-01 abgeschaltet — nicht mehr in der Ampel.
+    expect(html).not.toContain("OpenClaw-Proxy");
   });
 
   it("shows amber tone for degraded subsystems", () => {
@@ -30,7 +30,7 @@ describe("SystemHealthStrip", () => {
         data={{
           ...baseHealth,
           overall: "degraded",
-          subsystems: { ...baseHealth.subsystems, openclaw: { status: "degraded", detail: "langsam", error: null } },
+          subsystems: { ...baseHealth.subsystems, autoresearch: { status: "degraded", detail: "langsam", error: null } },
         }}
       />,
     );

@@ -100,12 +100,10 @@ export const SystemHealthResponseSchema = z.object({
   overall: HealthStatusSchema.catch("offline"),
   subsystems: z.object({
     gateway: SubsystemHealthSchema.catch(defaultSubsystemHealth),
-    openclaw: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     autoresearch: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     kanban_db: SubsystemHealthSchema.catch(defaultSubsystemHealth),
   }).catch({
     gateway: defaultSubsystemHealth,
-    openclaw: defaultSubsystemHealth,
     autoresearch: defaultSubsystemHealth,
     kanban_db: defaultSubsystemHealth,
   }),

@@ -95,7 +95,6 @@ export interface SystemHealthResponse {
   overall: HealthStatus;
   subsystems: {
     gateway: SubsystemHealth;
-    openclaw: SubsystemHealth;
     autoresearch: SubsystemHealth;
     kanban_db: SubsystemHealth;
   };

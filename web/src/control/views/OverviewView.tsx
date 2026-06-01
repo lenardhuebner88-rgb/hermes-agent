@@ -1,51 +1,59 @@
 import { useState } from "react";
-import { AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Shield } from "lucide-react";
+import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useHermesWorkers, useSystemHealth } from "../hooks/useControlData";
+import { useAutoresearchStatus, useHermesWorkers, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
-import { agentIsProblem, agentLabel, agentTone, buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
+import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
-import type { AgentLive, Proposal } from "../lib/types";
+import type { Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
 
-type Focus = "hermes" | "openclaw" | "proposals" | "warnings" | null;
+type Focus = "hermes" | "proposals" | "warnings" | null;
+
+// OpenClaw (Mission Control, :3000) wurde 2026-06-01 abgeschaltet — die Übersicht
+// zeigt nur noch die lebenden Systeme (Hermes + Autoresearch). Die frei gewordene
+// Kachel ist jetzt der Autoresearch-Loop-Status.
+const arStateLabel: Record<"idle" | "running" | "stopping" | "crashed", string> = {
+  idle: "Bereit", running: "Läuft", stopping: "Stoppt", crashed: "Fehler",
+};
 
 interface Props {
   proposals: Proposal[];
-  agents: AgentLive[];
   proposalsLoading?: boolean;
   proposalsError?: string | null;
   proposalsLastUpdated?: number | null;
-  agentsLastUpdated?: number | null;
-  agentsError?: string | null;
 }
 
-export function OverviewView({ proposals, agents, proposalsLoading, proposalsError, proposalsLastUpdated, agentsLastUpdated, agentsError }: Props) {
+export function OverviewView({ proposals, proposalsLoading, proposalsError, proposalsLastUpdated }: Props) {
   const navigate = useNavigate();
   const workers = useHermesWorkers();
   const health = useSystemHealth();
+  const autoresearch = useAutoresearchStatus();
   const now = nowSec();
-  const overview = buildOverview(workers.data?.workers ?? [], agents, proposals, now);
+  const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
   const [copied, setCopied] = useState(false);
 
   const title = overview.allHealthy ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length);
   const proposalValue = proposalsError ? "Fehler" : proposalsLoading && proposals.length === 0 ? "unbekannt" : String(overview.openProposals);
 
+  const arState = autoresearch.data?.state ?? "idle";
+  const arValue = arState === "running" ? `Iter ${autoresearch.data?.iteration ?? 0}` : arStateLabel[arState];
+
   // E1: per-source freshness. usePolling pausiert bei document.hidden → "stale"
   // ist hier eine Warnung (pausiert/veraltet), kein Fehler, kein stilles 0.
   const sources = [
     { label: de.overview.sourceHermes, fresh: freshness(workers.lastUpdated, 5000, now), err: workers.error },
-    { label: de.overview.sourceOpenClaw, fresh: freshness(agentsLastUpdated ?? null, 5000, now), err: agentsError },
     { label: de.overview.sourceAutoresearch, fresh: freshness(proposalsLastUpdated ?? null, 6000, now), err: proposalsError },
   ];
 
   const openProposals = proposals.filter(isActionable);
-  const problemWorkers = overview.warnings.filter((w) => w.kind === "hermes");
-  const problemAgents = agents.filter(agentIsProblem);
+  // Nach dem OpenClaw-Rückbau enthält warnings nur noch Hermes-Einträge; flatMap
+  // engt den Union-Typ auf die hermes-Variante ein (mit .worker/.health).
+  const hermesWarnings = overview.warnings.flatMap((w) => w.kind === "hermes" ? [w] : []);
 
   const toggle = (next: Focus) => setFocus((cur) => (cur === next ? null : next));
 
@@ -53,12 +61,9 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
     const lines = [
       `Hermes Control — Diagnose (${freshness(now, 0, now).label})`,
       `${de.overview.sourceHermes}: ${overview.hermesRunning}/${overview.hermesTotal} laufen · ${sources[0].fresh.stale ? "stale" : "frisch"} (${sources[0].fresh.label})`,
-      `${de.overview.sourceOpenClaw}: ${overview.ocActive}/${overview.ocTotal} aktiv · ${sources[1].fresh.stale ? "stale" : "frisch"} (${sources[1].fresh.label})`,
-      `${de.overview.sourceAutoresearch}: ${overview.openProposals} offen · ${sources[2].fresh.stale ? "stale" : "frisch"} (${sources[2].fresh.label})`,
-      `Warnungen (${overview.warnings.length}):`,
-      ...overview.warnings.map((w) => w.kind === "hermes"
-        ? `- [hermes] ${w.worker.task_title} — ${workerHealth(w.worker, now).label}`
-        : `- [openclaw] ${w.agent.name} — ${agentLabel(w.agent)}`),
+      `Autoresearch: ${arValue} · ${overview.openProposals} offen · ${sources[1].fresh.stale ? "stale" : "frisch"} (${sources[1].fresh.label})`,
+      `Warnungen (${hermesWarnings.length}):`,
+      ...hermesWarnings.map((w) => `- [hermes] ${w.worker.task_title} — ${workerHealth(w.worker, now).label}`),
     ];
     try {
       await navigator.clipboard.writeText(lines.join("\n"));
@@ -75,7 +80,7 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
 
       <section className="hc-card p-5 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div><p className="hc-eyebrow">System nominal</p><h2 className="mt-2 text-3xl font-semibold tracking-normal text-white">{title}</h2><p className="mt-2 max-w-2xl hc-soft">Hermes-Worker, OpenClaw-Agenten und Autoresearch laufen hier in einer Sicht zusammen.</p></div>
+          <div><p className="hc-eyebrow">System nominal</p><h2 className="mt-2 text-3xl font-semibold tracking-normal text-white">{title}</h2><p className="mt-2 max-w-2xl hc-soft">Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen.</p></div>
           <div className="flex items-center gap-2">
             <Button outlined size="sm" onClick={copyDiagnostics} className="gap-2">{copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}{copied ? de.overview.copied : de.overview.copyDiagnostics}</Button>
             <StatusPill tone={overview.allHealthy ? "emerald" : "amber"} label={overview.allHealthy ? "Ruhig" : "Aufmerksamkeit"} dot={overview.allHealthy ? "live" : "warn"} size="md" />
@@ -86,7 +91,7 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
       {/* E1: Datenfrische je Quelle */}
       <section className="hc-card p-4">
         <p className="hc-eyebrow mb-2">{de.overview.sources}</p>
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2">
           {sources.map((s) => (
             <div key={s.label} className={cn("flex items-center justify-between rounded-lg border px-3 py-2 text-sm", s.err || s.fresh.stale ? "border-amber-500/30 bg-amber-500/5" : "border-white/10")}>
               <span className="hc-soft">{s.label}</span>
@@ -98,19 +103,16 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
         </div>
       </section>
 
-      {/* E2: Kacheln sind Drilldown-Toggles */}
+      {/* E2: Kacheln sind Drilldown-Toggles (Autoresearch-Kachel navigiert direkt) */}
       <section className="grid gap-3 md:grid-cols-4">
         <Tile icon={<Bot />} label="Hermes laufen" value={`${overview.hermesRunning}/${overview.hermesTotal}`} active={focus === "hermes"} onClick={() => toggle("hermes")} />
-        <Tile icon={<Shield />} label="OpenClaw aktiv" value={`${overview.ocActive}/${overview.ocTotal}`} active={focus === "openclaw"} onClick={() => toggle("openclaw")} />
+        <Tile icon={<Activity />} label="Autoresearch" value={arValue} onClick={() => navigate("/control/autoresearch")} />
         <Tile icon={<FlaskConical />} label={de.overview.proposals} value={proposalValue} active={focus === "proposals"} onClick={() => toggle("proposals")} />
-        <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(overview.warnings.length)} active={focus === "warnings"} onClick={() => toggle("warnings")} />
+        <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(hermesWarnings.length)} active={focus === "warnings"} onClick={() => toggle("warnings")} />
       </section>
 
       {focus === "hermes" ? (
-        <Drilldown title="Hermes-Worker" tab="/control/hermes" navigate={navigate} empty={de.overview.noProblemWorkers} items={problemWorkers.map((w) => ({ key: w.worker.run_id, label: w.worker.task_title, pill: <StatusPill tone={workerHealth(w.worker, now).tone} label={workerHealth(w.worker, now).label} dot={workerHealth(w.worker, now).dot} /> }))} />
-      ) : null}
-      {focus === "openclaw" ? (
-        <Drilldown title="OpenClaw-Agenten" tab="/control/openclaw" navigate={navigate} empty={de.overview.noProblemAgents} items={problemAgents.map((a) => ({ key: a.id, label: `${a.emoji} ${a.name}`, pill: <StatusPill tone={agentTone(a)} label={agentLabel(a)} dot="warn" /> }))} />
+        <Drilldown title="Hermes-Worker" tab="/control/hermes" navigate={navigate} empty={de.overview.noProblemWorkers} items={hermesWarnings.map((w) => ({ key: w.worker.run_id, label: w.worker.task_title, pill: <StatusPill tone={workerHealth(w.worker, now).tone} label={workerHealth(w.worker, now).label} dot={workerHealth(w.worker, now).dot} /> }))} />
       ) : null}
       {focus === "proposals" ? (
         <Drilldown title={de.overview.proposals} tab="/control/autoresearch" navigate={navigate} empty={de.overview.noOpenProposals} items={openProposals.map((p) => ({ key: p.id, label: p.title ?? p.target, pill: <StatusPill tone={p.mode === "code" ? "violet" : "cyan"} label={p.mode === "code" ? "Code" : "Skill"} /> }))} />
@@ -120,7 +122,7 @@ export function OverviewView({ proposals, agents, proposalsLoading, proposalsErr
       {focus === null || focus === "warnings" ? (
         <section className="hc-card p-4">
           <h3 className="mb-3 text-lg font-semibold text-white">{de.overview.needsAttention}</h3>
-          {overview.warnings.length === 0 ? <p className="text-sm hc-soft">{de.overview.nothingUrgent}</p> : <div className="space-y-2">{overview.warnings.map((warning) => warning.kind === "hermes" ? <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button> : <button key={warning.agent.id} type="button" onClick={() => navigate("/control/openclaw")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.agent.emoji} {warning.agent.name}: {warning.agent.escalationNote || agentLabel(warning.agent)}</span><StatusPill tone={agentTone(warning.agent)} label={agentLabel(warning.agent)} dot="warn" /></button>)}</div>}
+          {hermesWarnings.length === 0 ? <p className="text-sm hc-soft">{de.overview.nothingUrgent}</p> : <div className="space-y-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>}
         </section>
       ) : null}
     </div>

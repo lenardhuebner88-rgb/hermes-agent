@@ -12,7 +12,10 @@ from fastapi import FastAPI
 
 _SCHEMA = "hermes-health-v1"
 _STATUS_RANK = {"healthy": 0, "degraded": 1, "offline": 2}
-_SUBSYSTEM_NAMES = ("gateway", "openclaw", "autoresearch", "kanban_db")
+# OpenClaw (Mission Control, :3000) decommissioned 2026-06-01 — no longer probed
+# or aggregated so the overall light is not pinned red by a system we shut down on
+# purpose. _probe_openclaw_status() is kept (unused) for a clean revert.
+_SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db")
 
 
 async def _run_blocking(callable_: Any) -> Any:
@@ -47,11 +50,21 @@ def _status_dict(
 
 
 async def _probe_gateway_status() -> dict[str, Any]:
-    """Probe the blocking gateway health helper without blocking the event loop."""
+    """Probe gateway liveness without blocking the event loop.
+
+    Same-host first: here the gateway and the dashboard share a machine, so a
+    running gateway PID is authoritative liveness — this mirrors ``/api/status``
+    and avoids the health light being pinned red just because the optional
+    cross-container ``GATEWAY_HEALTH_URL`` env isn't set (it usually isn't on a
+    single-host deploy). Falls back to the HTTP health probe for split deploys.
+    """
     start = time.perf_counter()
     try:
-        from hermes_cli.web_server import _probe_gateway_health
+        from hermes_cli.web_server import _probe_gateway_health, get_running_pid
 
+        pid = await _run_blocking(get_running_pid)
+        if pid is not None:
+            return _status_dict("healthy", "gateway running", latency_ms=_latency_ms(start))
         alive, body = await _run_blocking(_probe_gateway_health)
         latency = _latency_ms(start)
     except Exception as exc:
@@ -209,7 +222,6 @@ def _overall(subsystems: dict[str, dict[str, Any]]) -> str:
 async def _get_health_status() -> dict[str, Any]:
     results = await asyncio.gather(
         _probe_gateway_status(),
-        _probe_openclaw_status(),
         _probe_autoresearch_status(),
         _probe_kanban_db_status(),
         return_exceptions=True,

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Bot, FlaskConical, LayoutDashboard, Search, Shield } from "lucide-react";
+import { ArrowRight, Bot, FlaskConical, LayoutDashboard, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KEYMAP } from "../lib/keymap";
-import type { AgentLive, Worker } from "../lib/types";
+import type { Worker } from "../lib/types";
 
 export interface CommandItem {
   id: string;
@@ -16,7 +16,6 @@ export interface CommandItem {
 interface Props {
   open: boolean;
   workers: Worker[];
-  agents: AgentLive[];
   onClose: () => void;
   onNavigate: (path: string) => void;
   onGenerate: () => void;
@@ -34,7 +33,7 @@ const secondary = [
   ["Konfiguration", "/config"],
 ] as const;
 
-export function CommandPalette({ open, workers, agents, onClose, onNavigate, onGenerate, onApplyAll, triggerRef }: Props) {
+export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate, onApplyAll, triggerRef }: Props) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -44,7 +43,6 @@ export function CommandPalette({ open, workers, agents, onClose, onNavigate, onG
     const nav: CommandItem[] = [
       { id: "nav-overview", group: "Navigation", label: "Übersicht", hint: "/control", icon: <LayoutDashboard className="h-4 w-4" />, action: () => onNavigate("/control") },
       { id: "nav-hermes", group: "Navigation", label: "Hermes-Worker", hint: "/control/hermes", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/hermes") },
-      { id: "nav-openclaw", group: "Navigation", label: "OpenClaw-Worker", hint: "/control/openclaw", icon: <Shield className="h-4 w-4" />, action: () => onNavigate("/control/openclaw") },
       { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
     ];
     const more = secondary.map(([label, path]) => ({ id: `more-${path}`, group: "Mehr", label, hint: path, icon: <ArrowRight className="h-4 w-4" />, action: () => onNavigate(path) }));
@@ -53,9 +51,8 @@ export function CommandPalette({ open, workers, agents, onClose, onNavigate, onG
       { id: "act-apply-all", group: "Aktionen", label: "Alle übernehmen", hint: "offene Skill-Vorschläge", icon: <ArrowRight className="h-4 w-4" />, action: onApplyAll },
     ];
     const workerItems = workers.map((w) => ({ id: `worker-${w.run_id}`, group: "Worker", label: w.task_title || w.run_id, hint: w.profile, icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/hermes") }));
-    const agentItems = agents.map((a) => ({ id: `agent-${a.id}`, group: "Agenten", label: `${a.emoji} ${a.name}`, hint: a.roleLabel, icon: <Shield className="h-4 w-4" />, action: () => onNavigate("/control/openclaw") }));
-    return [...nav, ...more, ...actions, ...workerItems, ...agentItems];
-  }, [agents, onApplyAll, onGenerate, onNavigate, workers]);
+    return [...nav, ...more, ...actions, ...workerItems];
+  }, [onApplyAll, onGenerate, onNavigate, workers]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

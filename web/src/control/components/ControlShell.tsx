@@ -5,12 +5,11 @@ import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "hermes" | "openclaw" | "autoresearch";
+export type ControlTab = "overview" | "hermes" | "autoresearch";
 
 const tabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: de.tabs.overview, path: "/control", icon: LayoutDashboard },
   { id: "hermes", label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
-  { id: "openclaw", label: de.tabs.openclaw, path: "/control/openclaw", icon: Shield },
   { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
 ];
 

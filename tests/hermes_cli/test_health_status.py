@@ -45,6 +45,7 @@ def _install_probe_sources(
     gateway_alive: bool = True,
     gateway_body: dict[str, Any] | None = None,
     gateway_exc: Exception | None = None,
+    gateway_pid: int | None = None,
     autoresearch_status: dict[str, Any] | None = None,
     autoresearch_exc: Exception | None = None,
     openclaw_payload: dict[str, Any] | None = None,
@@ -76,7 +77,11 @@ def _install_probe_sources(
     monkeypatch.setitem(
         sys.modules,
         "hermes_cli.web_server",
-        _module("hermes_cli.web_server", _probe_gateway_health=gateway_probe),
+        _module(
+            "hermes_cli.web_server",
+            _probe_gateway_health=gateway_probe,
+            get_running_pid=lambda: gateway_pid,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -109,13 +114,39 @@ def test_all_subsystems_healthy(
     assert data["schema"] == "hermes-health-v1"
     assert data["overall"] == "healthy"
     assert isinstance(data["checked_at"], int)
+    # OpenClaw (Mission Control, :3000) wurde 2026-06-01 abgeschaltet und wird
+    # nicht mehr aggregiert (siehe _SUBSYSTEM_NAMES). _probe_openclaw_status bleibt
+    # erhalten (eigener Unit-Test unten) für einen sauberen Revert.
     assert set(data["subsystems"]) == {
         "gateway",
-        "openclaw",
         "autoresearch",
         "kanban_db",
     }
     assert {s["status"] for s in data["subsystems"].values()} == {"healthy"}
+
+
+def test_gateway_running_pid_is_healthy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Same-host liveness: a running gateway PID is authoritative even when the
+    # cross-container HTTP probe would report offline (no GATEWAY_HEALTH_URL).
+    _install_probe_sources(
+        monkeypatch,
+        tmp_path,
+        gateway_alive=False,
+        gateway_body={"error": "gateway down"},
+        gateway_pid=1258,
+    )
+
+    response = client.get("/api/health-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "healthy"
+    assert data["subsystems"]["gateway"]["status"] == "healthy"
+    assert data["subsystems"]["gateway"]["detail"] == "gateway running"
 
 
 def test_one_subsystem_degraded(
