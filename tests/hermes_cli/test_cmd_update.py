@@ -149,7 +149,12 @@ class TestCmdUpdateBranchFallback:
         # Mock it so the test doesn't actually shell out to ``tsc``.
         import subprocess as _subprocess
         build_ok = _subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        # Force the build-needed path so this test is independent of the local
+        # web_dist mtime: _build_web_ui short-circuits via _web_ui_build_needed
+        # when the dist is newer than sources, which would otherwise skip the
+        # build and never call _run_with_idle_timeout (mtime-dependent flake).
         with patch.object(hm, "_is_termux_env", return_value=False), \
+             patch.object(hm, "_web_ui_build_needed", return_value=True), \
              patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
             cmd_update(mock_args)
 
