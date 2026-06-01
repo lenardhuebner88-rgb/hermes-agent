@@ -180,6 +180,32 @@ export const de = {
     runsColErrors: "Fehler",
     runsColScanned: "geprüft",
     runsTokensTotal: "MiniMax-Tokens gesamt",
+    // A1 — "Warum 0" im Idle-Zustand
+    lastRunFallback: (scanned: number, proposed: number) => `Letzter Lauf: ${scanned} gescannt · ${proposed} ${proposed === 1 ? "Vorschlag" : "Vorschläge"}`,
+    lastRunZeroHint: "0 Vorschläge heißt: nichts hat die Schwelle überschritten — der Stand ist sauber/konvergiert, kein Fehler.",
+    lastRunEmpty: "Letzter Dry-Run: noch keine verwertbaren Laufdaten.",
+    // A2 — Reverts als Sicherheitsnetz framen
+    revertedExplain: "Automatisch übernommen, getestet, keine Verbesserung — sauber zurückgerollt. Nichts kaputt.",
+    revertedSummary: (n: number) => `Zurückgerollt (${n})`,
+    revertedCount: (n: number) => `${n} zurückgerollt`,
+    // A3 — ROI „Letzte 7 Tage"
+    roi7dHeading: "Letzte 7 Tage",
+    roi7dLine: (runs: number, tokens: number, proposed: number, scanned: number) => `${runs} ${runs === 1 ? "Lauf" : "Läufe"} · ${tokens.toLocaleString("de-DE")} Tokens · ${proposed} Vorschläge · ${scanned} gescannt`,
+    roi7dEmpty: "Keine Läufe in den letzten 7 Tagen.",
+    roi7dAcceptedNote: "Übernahme-Quote folgt (noch nicht pro Lauf persistiert).",
+    // B — konsolidierter Code-Scan-Button + Umfang-Schalter
+    scanButton: "Code-Schwächen finden",
+    scanScopeChanged: "Geändert",
+    scanScopeFull: "Voll",
+    scanScopeDeep: "Deep",
+    scanScopeHintChanged: "Nur geänderte Dateien — schnell.",
+    scanScopeHintFull: "Alle Dateien — gründlicher, dauert länger.",
+    scanButtonHint: "Scannt den Code auf Schwächen im gewählten Umfang. Findet, schreibt nichts.",
+    generateHint: "Erzeugt sofort neue Skill-Vorschläge aus den genutzten Skills.",
+    applyAllHint: "Übernimmt alle offenen Skill-Vorschläge auf einmal (Code läuft einzeln durchs Test-Gate).",
+    // C — Targeting-Preset
+    presetRecommended: "Empfohlen",
+    presetRecommendedHint: "Setzt die günstigen Standardwerte: all · recommended_sections · 2 Iterationen.",
   },
   backlog: {
     eyebrow: "Family Organizer",

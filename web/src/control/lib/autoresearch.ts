@@ -342,6 +342,45 @@ export function formatRunTime(at: string | null | undefined): string {
   return new Date(ms).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
 }
 
+export type CodeWeaknessScope = "incremental" | "full" | "deep";
+
+/**
+ * Busy-key for the consolidated code-scan button. MUST match the key that
+ * `generateCodeWeaknesses(variant)` sets in useControlData.ts, so the spinner
+ * shows on the button only for the variant the operator just launched.
+ */
+export function codeWeaknessBusyKey(scope: CodeWeaknessScope): string {
+  return scope === "full" ? "generate-code-full" : scope === "deep" ? "generate-code-deep" : "generate-code";
+}
+
+export interface RecentRunsSummary {
+  runs: number;
+  tokens: number;
+  proposed: number;
+  scanned: number;
+}
+
+/**
+ * Aggregate the runs whose `at` falls within the last `days` (default 7),
+ * computed client-side from the already-polled runs[]. `now` is injectable for
+ * deterministic tests. Runs with an unparseable/empty `at` are excluded; the
+ * same finite guards as sumRunTokens apply per field. Accepted-count is NOT
+ * summarized here — it is not persisted per run (backend follow-up).
+ */
+export function summarizeRecentRuns(runs: readonly AutoresearchRun[], days = 7, now: number = Date.now()): RecentRunsSummary {
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const acc: RecentRunsSummary = { runs: 0, tokens: 0, proposed: 0, scanned: 0 };
+  for (const r of runs) {
+    const ms = Date.parse(r.at);
+    if (!Number.isFinite(ms) || ms < cutoff) continue;
+    acc.runs += 1;
+    acc.tokens += Number.isFinite(r.tokens) ? r.tokens : 0;
+    acc.proposed += Number.isFinite(r.proposed) ? r.proposed : 0;
+    acc.scanned += Number.isFinite(r.scanned) ? r.scanned : 0;
+  }
+  return acc;
+}
+
 export function rankAutoresearchReviewQueue(proposals: Proposal[], limit = 10): RankedProposalQueue {
   const boundedLimit = Math.max(1, Math.round(limit));
   const ranked = proposals

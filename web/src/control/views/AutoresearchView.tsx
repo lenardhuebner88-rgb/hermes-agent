@@ -6,7 +6,8 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -39,6 +40,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
   const [minUseCount, setMinUseCount] = useState("");
+  const [codeWeaknessScope, setCodeWeaknessScope] = useState<CodeWeaknessScope>("incremental");
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
@@ -128,24 +130,31 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
             <div>
               <p className="hc-eyebrow">{de.autoresearch.nextStep}</p>
-              <p className="mt-1 max-w-2xl text-base leading-7 text-white">{open.length > 0 ? de.autoresearch.nextStepOpen(open.length) : reverted.length > 0 ? `${open.length} offen · ${reverted.length} zurückgerollt` : de.autoresearch.nextStepEmpty}</p>
+              <p className="mt-1 max-w-2xl text-base leading-7 text-white">{open.length > 0 ? de.autoresearch.nextStepOpen(open.length) : reverted.length > 0 ? <span>{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></span> : de.autoresearch.nextStepEmpty}</p>
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row lg:flex-col xl:flex-row">
-            <Button className="hc-hit" onClick={store.generate} disabled={!!store.busy} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:flex-col xl:flex-row xl:items-center">
+            <Button className="hc-hit" onClick={store.generate} disabled={!!store.busy} title={de.autoresearch.generateHint} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>
               Vorschläge erzeugen (sofort)
             </Button>
-            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("incremental")} disabled={!!store.busy} prefix={store.busy === "generate-code" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-              {de.autoresearch.findCodeWeaknesses}
-            </Button>
-            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("full")} disabled={!!store.busy} prefix={store.busy === "generate-code-full" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-              {de.autoresearch.findCodeWeaknessesFull}
-            </Button>
-            <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses("deep")} disabled={!!store.busy} title={de.autoresearch.deepScanHint} prefix={store.busy === "generate-code-deep" ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-              {de.autoresearch.deepScan}
-            </Button>
-            <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
+            <div className="flex items-center gap-2">
+              <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
+                <button type="button" onClick={() => setCodeWeaknessScope("incremental")} title={de.autoresearch.scanScopeHintChanged} className={cn("px-3 py-1", codeWeaknessScope === "incremental" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                  {de.autoresearch.scanScopeChanged}
+                </button>
+                <button type="button" onClick={() => setCodeWeaknessScope("full")} title={de.autoresearch.scanScopeHintFull} className={cn("px-3 py-1", codeWeaknessScope === "full" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                  {de.autoresearch.scanScopeFull}
+                </button>
+                <button type="button" onClick={() => setCodeWeaknessScope("deep")} title={de.autoresearch.deepScanHint} className={cn("px-3 py-1", codeWeaknessScope === "deep" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                  {de.autoresearch.scanScopeDeep}
+                </button>
+              </div>
+              <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses(codeWeaknessScope)} disabled={!!store.busy} title={de.autoresearch.scanButtonHint} prefix={store.busy === codeWeaknessBusyKey(codeWeaknessScope) ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                {de.autoresearch.scanButton}
+              </Button>
+            </div>
+            <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} title={de.autoresearch.applyAllHint} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({store.openSkillProposals.length})
             </Button>
           </div>
@@ -166,7 +175,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <Metric label="Request" value={status.data?.request_id || "-"} />
             </div>
             {loop.routeHint ? <ToneCallout tone="amber">{loop.routeHint}: {status.data?.route_status ?? "unbekannt"}</ToneCallout> : null}
-            <LastRun status={status.data} />
+            <LastRun status={status.data} latestRun={runs.data?.runs?.[0] ?? null} />
             {loopMessage ? <ToneCallout tone={loopMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{loopMessage}</ToneCallout> : null}
           </div>
           <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
@@ -178,6 +187,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
             <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <Button outlined className="hc-hit" onClick={() => { setArea("all"); setFocus("recommended_sections"); setMinUseCount(""); setMaxIterations("2"); }} disabled={loop.running || !!loopBusy} title={de.autoresearch.presetRecommendedHint} prefix={<RotateCw className="h-4 w-4" />}>{de.autoresearch.presetRecommended}</Button>
             <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
@@ -192,7 +202,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           <div>
             <p className="hc-eyebrow">Relevanz-Queue</p>
             <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
-            <p className="mt-1 text-sm hc-soft">{open.length} offen · {reverted.length} zurückgerollt</p>
+            <p className="mt-1 text-sm hc-soft">{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></p>
             {open.length > 0 ? (
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="text-xs hc-soft">{de.autoresearch.distributionHeading}:</span>
@@ -271,7 +281,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       {reverted.length > 0 ? (
         <details className="space-y-3 border-t border-white/10 pt-4">
-          <summary className="cursor-pointer text-lg font-semibold text-white">Zurückgerollt ({reverted.length})</summary>
+          <summary className="cursor-pointer text-lg font-semibold text-white" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedSummary(reverted.length)}</summary>
+          <p className="mt-1 text-sm hc-soft">{de.autoresearch.revertedExplain}</p>
           <div className="mt-3 grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
         </details>
       ) : null}
@@ -298,7 +309,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2"><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold text-white">{value}</p></div>;
 }
 
-function LastRun({ status }: { status: ReturnType<typeof useAutoresearchStatus>["data"] }) {
+function LastRun({ status, latestRun }: { status: ReturnType<typeof useAutoresearchStatus>["data"]; latestRun: AutoresearchRun | null }) {
   const receipt = status?.last_receipt;
   const note = status?.note;
   const lastRun = status?.last_run;
@@ -318,7 +329,17 @@ function LastRun({ status }: { status: ReturnType<typeof useAutoresearchStatus>[
   const showCounters = hasResearchCounters(counters);
   const showErrorBadge = shouldShowResearchErrorBadge(counters.researchErrors);
 
-  if (!summary && !receipt && !note && !showCounters) return <p className="text-sm hc-soft">Letzter Dry-Run: noch keine verwertbaren Laufdaten.</p>;
+  if (!summary && !receipt && !note && !showCounters) {
+    if (latestRun) {
+      return (
+        <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
+          <p>{de.autoresearch.lastRunFallback(latestRun.scanned, latestRun.proposed)}</p>
+          {latestRun.proposed === 0 ? <p className="mt-1 text-xs hc-dim">{de.autoresearch.lastRunZeroHint}</p> : null}
+        </div>
+      );
+    }
+    return <p className="text-sm hc-soft">{de.autoresearch.lastRunEmpty}</p>;
+  }
   return (
     <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
       <p><span className="text-white">Letzter Lauf:</span> {summary || "Backend liefert nur Statusnotiz"}</p>
@@ -345,10 +366,17 @@ function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
 
 function RecentRuns({ runs }: { runs: AutoresearchRun[] }) {
   const totalTokens = sumRunTokens(runs);
+  const recent = summarizeRecentRuns(runs, 7);
   return (
     <section className="hc-card p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-white">{de.autoresearch.recentRuns}</h2>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-white">{de.autoresearch.recentRuns}</h2>
+          <p className="mt-1 text-xs hc-soft" title={de.autoresearch.roi7dAcceptedNote}>
+            <span className="text-white">{de.autoresearch.roi7dHeading}:</span>{" "}
+            {recent.runs > 0 ? de.autoresearch.roi7dLine(recent.runs, recent.tokens, recent.proposed, recent.scanned) : de.autoresearch.roi7dEmpty}
+          </p>
+        </div>
         {totalTokens > 0 ? <span className="hc-mono text-xs hc-soft">{de.autoresearch.runsTokensTotal}: {totalTokens.toLocaleString("de-DE")}</span> : null}
       </div>
       {runs.length === 0 ? (

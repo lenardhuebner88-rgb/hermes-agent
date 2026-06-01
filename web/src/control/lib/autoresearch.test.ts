@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampLoopIterations, clearProposalSelection, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
+import { clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -268,6 +268,40 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
     expect(formatRunTime(null)).toBe("—");
     expect(formatRunTime("not-a-date")).toBe("—");
     expect(formatRunTime("2026-05-31T19:31:21Z")).not.toBe("—");
+  });
+
+  it("summarizeRecentRuns sums within the window and excludes older/invalid runs", () => {
+    const now = Date.parse("2026-06-01T12:00:00Z");
+    const inside1 = run({ at: "2026-06-01T00:00:00Z", tokens: 100, proposed: 2, scanned: 30 });
+    const inside2 = run({ at: "2026-05-28T00:00:00Z", tokens: 50, proposed: 0, scanned: 10 });
+    const older = run({ at: "2026-05-20T00:00:00Z", tokens: 999, proposed: 9, scanned: 99 }); // >7d ago
+    const summary = summarizeRecentRuns([inside1, inside2, older], 7, now);
+    expect(summary).toEqual({ runs: 2, tokens: 150, proposed: 2, scanned: 40 });
+    expect(summarizeRecentRuns([], 7, now)).toEqual({ runs: 0, tokens: 0, proposed: 0, scanned: 0 });
+  });
+
+  it("summarizeRecentRuns excludes unparseable `at` and counts non-finite fields as 0", () => {
+    const now = Date.parse("2026-06-01T12:00:00Z");
+    const bad = run({ at: "", tokens: 5 });
+    const finiteGuard = run({ at: "2026-06-01T00:00:00Z", tokens: NaN, proposed: 3, scanned: 7 });
+    const summary = summarizeRecentRuns([bad, finiteGuard], 7, now);
+    expect(summary).toEqual({ runs: 1, tokens: 0, proposed: 3, scanned: 7 });
+  });
+
+  it("summarizeRecentRuns boundary: now inclusive, now-8d excluded, custom days narrows", () => {
+    const now = Date.parse("2026-06-01T12:00:00Z");
+    const day = 24 * 60 * 60 * 1000;
+    const atNow = run({ at: new Date(now).toISOString(), tokens: 1 });
+    const eightDaysAgo = run({ at: new Date(now - 8 * day).toISOString(), tokens: 1 });
+    expect(summarizeRecentRuns([atNow, eightDaysAgo], 7, now).runs).toBe(1);
+    const twoDaysAgo = run({ at: new Date(now - 2 * day).toISOString(), tokens: 1 });
+    expect(summarizeRecentRuns([atNow, twoDaysAgo], 1, now).runs).toBe(1); // days=1 drops the 2-day-old run
+  });
+
+  it("codeWeaknessBusyKey matches the generateCodeWeaknesses handler contract", () => {
+    expect(codeWeaknessBusyKey("incremental")).toBe("generate-code");
+    expect(codeWeaknessBusyKey("full")).toBe("generate-code-full");
+    expect(codeWeaknessBusyKey("deep")).toBe("generate-code-deep");
   });
 });
 
