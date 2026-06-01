@@ -1,17 +1,18 @@
-import { Bot, Command, FlaskConical, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles } from "lucide-react";
+import { Bot, Command, FlaskConical, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "hermes" | "autoresearch" | "backlog";
+export type ControlTab = "overview" | "hermes" | "autoresearch" | "backlog" | "orchestrator";
 
 const tabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: de.tabs.overview, path: "/control", icon: LayoutDashboard },
   { id: "hermes", label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
   { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
   { id: "backlog", label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
+  { id: "orchestrator", label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
 ];
 
 const secondaryNav = [
@@ -61,7 +62,7 @@ function ShellAiry({ active, children, density, pinned, openProposals, onNavigat
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
-        <div className="grid grid-cols-4">
+        <div className="grid grid-cols-5">
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} openProposals={openProposals} onClick={() => onNavigate(tab.id)} />)}
         </div>
       </nav>

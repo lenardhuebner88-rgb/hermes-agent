@@ -314,6 +314,43 @@ export const BacklogResponseSchema = z.object({
 export type BacklogItem = z.infer<typeof BacklogItemSchema>;
 export type BacklogResponse = z.infer<typeof BacklogResponseSchema>;
 
+// Read-only Orchestrator backlog board. Mirrors the Backlog.md-style frontmatter
+// (status/priority/dependsOn/planGate/created) served by GET /api/orchestration/backlog.
+// Deliberately a separate schema/view from the family-organizer board (different
+// contract — no premature generalisation). Tolerant (.catch defaults) so a
+// partial/stale payload still renders the board.
+export const OrchestrationItemSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  status: z.enum(["backlog", "todo", "doing", "review", "done"]).catch("backlog"),
+  priority: z.enum(["low", "medium", "high"]).catch("medium"),
+  dependsOn: z.array(z.string()).catch([]),
+  planGate: z.boolean().catch(false),
+  created: z.string().catch(""),
+});
+
+export const OrchestrationBacklogResponseSchema = z.object({
+  schema: z.string().catch("orchestration-backlog-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  items: z.array(OrchestrationItemSchema).catch([]),
+  counts: z.object({
+    backlog: z.coerce.number().catch(0),
+    todo: z.coerce.number().catch(0),
+    doing: z.coerce.number().catch(0),
+    review: z.coerce.number().catch(0),
+    done: z.coerce.number().catch(0),
+  }).catch({ backlog: 0, todo: 0, doing: 0, review: 0, done: 0 }),
+  source: z.object({
+    dir: z.string().catch(""),
+    ref: z.string().catch(""),
+    count: z.coerce.number().catch(0),
+  }).catch({ dir: "", ref: "", count: 0 }),
+  error: z.string().nullable().catch(null),
+});
+
+export type OrchestrationItem = z.infer<typeof OrchestrationItemSchema>;
+export type OrchestrationBacklogResponse = z.infer<typeof OrchestrationBacklogResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

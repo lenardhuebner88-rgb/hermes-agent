@@ -7054,6 +7054,12 @@ register_health_status_routes(app)
 from hermes_cli.family_organizer_view import register_backlog_routes  # noqa: E402
 register_backlog_routes(app)
 
+# Read-only Orchestrator backlog board (parses ~/orchestration/backlog/*.md
+# frontmatter from the working tree — living planning scratch). Under /api/ →
+# inherits the session-token gate.
+from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes  # noqa: E402
+register_orchestration_backlog_routes(app)
+
 mount_spa(app)
 
 

@@ -4,6 +4,7 @@ import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
   BacklogResponseSchema,
+  OrchestrationBacklogResponseSchema,
   AutoresearchRunsResponseSchema,
   AutoresearchStatusSchema,
   OpenClawDispatchedResponseSchema,
@@ -14,7 +15,7 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
+import type { BacklogResponse, OrchestrationBacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
@@ -348,6 +349,16 @@ export function useSystemHealth() {
 export function useBacklog() {
   return usePolling<BacklogResponse>(
     async () => parseOrThrow(BacklogResponseSchema, await fetchJSON<unknown>("/api/family-organizer/backlog"), "family-organizer/backlog"),
+    30000,
+  );
+}
+
+// Read-only Orchestrator backlog board (~/orchestration/backlog working tree).
+// Polled slowly — planning scratch changes a handful of times a day; 30s keeps it
+// fresh without churn.
+export function useOrchestrationBacklog() {
+  return usePolling<OrchestrationBacklogResponse>(
+    async () => parseOrThrow(OrchestrationBacklogResponseSchema, await fetchJSON<unknown>("/api/orchestration/backlog"), "orchestration/backlog"),
     30000,
   );
 }
