@@ -4213,7 +4213,8 @@ def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_bl
     with kb.connect() as conn:
         source = kb.create_task(conn, title="implement lifecycle", assignee="coder")
         kb.claim_task(conn, source)
-        run = kb.active_run(conn, source)
+        # main renamed active_run() → latest_run(); after claim the latest run is the active one
+        run = kb.latest_run(conn, source)
         assert run is not None
         assert kb.block_task(
             conn,
