@@ -13,6 +13,7 @@ import pytest
 from hermes_cli.family_organizer_view import (
     _parse_frontmatter,
     _read_items_sync,
+    _read_sources_from_git,
     _updated_epoch,
 )
 
@@ -43,6 +44,11 @@ def test_updated_epoch():
     assert _updated_epoch(None) is None
 
 
+def test_git_source_none_for_non_repo(tmp_path):
+    # A plain tmp dir is not a git repo → git read returns None → caller falls back to FS.
+    assert _read_sources_from_git(tmp_path) is None
+
+
 def test_read_items_counts_stale_and_id_from_filename(tmp_path, monkeypatch):
     monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
     _write(tmp_path, "0001-a.md", id="0001", title="A", status="done",
@@ -58,6 +64,7 @@ def test_read_items_counts_stale_and_id_from_filename(tmp_path, monkeypatch):
 
     assert out["schema"] == "fo-backlog-v1"
     assert out["source"]["count"] == 3
+    assert out["source"]["ref"].startswith("fs:")  # tmp dir is not a git repo → working-tree fallback
     assert out["counts"]["done"] == 1
     assert out["counts"]["later"] == 1
     assert out["counts"]["in_progress"] == 1

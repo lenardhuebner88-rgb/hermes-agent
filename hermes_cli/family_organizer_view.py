@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -82,28 +83,80 @@ def _updated_epoch(value: Any) -> int | None:
     return int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp())
 
 
-def _read_items_sync(now: int) -> dict[str, Any]:
-    base = _backlog_dir().resolve()
-    counts = {s: 0 for s in _STATUSES}
-    if not base.is_dir():
-        return {
-            "schema": _SCHEMA,
-            "checked_at": now,
-            "items": [],
-            "counts": counts,
-            "source": {"dir": str(base), "count": 0},
-            "error": f"backlog dir not found: {base}",
-        }
+def _ref() -> str:
+    return os.environ.get("FAMILY_ORGANIZER_BACKLOG_REF", "origin/main")
 
-    items: list[dict[str, Any]] = []
+
+def _git(root: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=5)
+
+
+def _read_sources_from_git(base: Path) -> list[tuple[str, str]] | None:
+    """(name, text) pairs from the committed ref (default ``origin/main``).
+
+    Reads *committed* content, so a dirty or behind working tree in the canonical
+    clone (concurrent agents leave it modified/stale) can't make the board show
+    partial or out-of-date data. Returns ``None`` when ``base`` isn't inside a git
+    repo or the ref is missing — the caller then falls back to the working tree.
+    """
+    try:
+        top = _git(str(base), ["rev-parse", "--show-toplevel"])
+        if top.returncode != 0:
+            return None
+        root = top.stdout.strip()
+        rel = base.resolve().relative_to(Path(root).resolve()).as_posix()
+        ref = _ref()
+        listing = _git(root, ["ls-tree", "-r", "--name-only", ref, "--", rel])
+        if listing.returncode != 0:
+            return None
+        sources: list[tuple[str, str]] = []
+        for path in listing.stdout.splitlines():
+            if not path.endswith(".md"):
+                continue
+            blob = _git(root, ["show", f"{ref}:{path}"])
+            if blob.returncode == 0:
+                sources.append((path.rsplit("/", 1)[-1], blob.stdout))
+        return sources
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _read_sources_from_fs(base: Path) -> list[tuple[str, str]]:
+    """(name, text) pairs from the working tree — fallback when the git read fails."""
+    sources: list[tuple[str, str]] = []
     for path in sorted(base.glob("*.md")):
         rp = path.resolve()
         if not rp.is_relative_to(base):  # symlink-escape guard
             continue
         try:
-            text = rp.read_text(encoding="utf-8")
+            sources.append((path.name, rp.read_text(encoding="utf-8")))
         except OSError:
             continue
+    return sources
+
+
+def _read_items_sync(now: int) -> dict[str, Any]:
+    base = _backlog_dir().resolve()
+    counts = {s: 0 for s in _STATUSES}
+
+    sources = _read_sources_from_git(base)
+    source_ref = f"git:{_ref()}"
+    if sources is None:
+        if not base.is_dir():
+            return {
+                "schema": _SCHEMA,
+                "checked_at": now,
+                "items": [],
+                "counts": counts,
+                "source": {"dir": str(base), "ref": "missing", "count": 0},
+                "error": f"backlog dir not found: {base}",
+            }
+        sources = _read_sources_from_fs(base)
+        source_ref = "fs:working-tree"
+
+    items: list[dict[str, Any]] = []
+    for name, text in sources:
+        stem = name[:-3] if name.endswith(".md") else name
         fm = _parse_frontmatter(text)
         if not fm:
             continue
@@ -118,11 +171,11 @@ def _read_items_sync(now: int) -> dict[str, Any]:
         )
         items.append(
             {
-                # Filename prefix is the canonical 4-digit id (the family-organizer
+                # Canonical 4-digit id from the filename (the family-organizer
                 # validator enforces id == filename); the YAML-parsed `id` is not
                 # trustworthy — PyYAML coerces "0001" to the int 1 (YAML 1.1 octal).
-                "id": path.stem[:4],
-                "title": str(fm.get("title") or path.stem),
+                "id": stem[:4],
+                "title": str(fm.get("title") or stem),
                 "status": status,
                 "owner": str(fm.get("owner") or "unassigned"),
                 "risk": str(fm.get("risk") or ""),
@@ -142,7 +195,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
         "checked_at": now,
         "items": items,
         "counts": counts,
-        "source": {"dir": str(base), "count": len(items)},
+        "source": {"dir": str(base), "ref": source_ref, "count": len(items)},
         "error": None,
     }
 
