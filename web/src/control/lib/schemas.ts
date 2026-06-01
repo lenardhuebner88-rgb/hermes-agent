@@ -292,6 +292,21 @@ export const BacklogItemSchema = z.object({
   stale: z.boolean().catch(false),
 });
 
+export const BacklogDetailSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch(""),
+  status: z.string().catch(""),
+  owner: z.string().catch(""),
+  risk: z.string().catch(""),
+  area: z.string().catch(""),
+  updated: z.string().catch(""),
+  lane: z.string().nullable().catch(null),
+  result: z.string().nullable().catch(null),
+  stale: z.boolean().catch(false),
+  body: z.string().catch(""),
+  error: z.string().optional(),
+});
+
 export const BacklogResponseSchema = z.object({
   schema: z.string().catch("fo-backlog-v1"),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
@@ -312,6 +327,7 @@ export const BacklogResponseSchema = z.object({
 });
 
 export type BacklogItem = z.infer<typeof BacklogItemSchema>;
+export type BacklogDetail = z.infer<typeof BacklogDetailSchema>;
 export type BacklogResponse = z.infer<typeof BacklogResponseSchema>;
 
 // Read-only Orchestrator backlog board. Mirrors the Backlog.md-style frontmatter
@@ -327,6 +343,20 @@ export const OrchestrationItemSchema = z.object({
   dependsOn: z.array(z.string()).catch([]),
   planGate: z.boolean().catch(false),
   created: z.string().catch(""),
+});
+
+export const OrchestrationDetailSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch(""),
+  status: z.string().catch(""),
+  priority: z.string().catch(""),
+  dependsOn: z.array(z.string()).catch([]),
+  planGate: z.boolean().catch(false),
+  gate: z.string().catch(""),
+  root: z.string().catch(""),
+  created: z.string().catch(""),
+  body: z.string().catch(""),
+  error: z.string().optional(),
 });
 
 export const OrchestrationBacklogResponseSchema = z.object({
@@ -349,6 +379,7 @@ export const OrchestrationBacklogResponseSchema = z.object({
 });
 
 export type OrchestrationItem = z.infer<typeof OrchestrationItemSchema>;
+export type OrchestrationDetail = z.infer<typeof OrchestrationDetailSchema>;
 export type OrchestrationBacklogResponse = z.infer<typeof OrchestrationBacklogResponseSchema>;
 
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {

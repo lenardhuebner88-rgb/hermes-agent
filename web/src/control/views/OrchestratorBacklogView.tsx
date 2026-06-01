@@ -1,9 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
-import { useOrchestrationBacklog } from "../hooks/useControlData";
+import { useOrchestrationBacklog, useOrchestrationBacklogDetail } from "../hooks/useControlData";
+import { BacklogDetailDrawer } from "../components/BacklogDetailDrawer";
 import { StatusPill, ToneCallout } from "../components/atoms";
+import { readiness } from "../lib/orchestration";
+import type { Readiness } from "../lib/orchestration";
 import type { Density } from "../hooks/useDensity";
 import type { OrchestrationItem } from "../lib/schemas";
 import type { ToneName } from "../lib/types";
@@ -22,6 +25,16 @@ const ACTIVE_COLUMNS: Array<{ key: Exclude<Status, "done">; label: string; tone:
 
 const PRIORITY_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
 
+type DetailChip = { label: string; tone?: ToneName };
+
+function readinessChip(value: Readiness): DetailChip | null {
+  if (value.state === "ready") return { tone: "emerald", label: de.orchestrator.ready };
+  if (value.state === "blocked") {
+    return { tone: "red", label: `${de.orchestrator.blockedBy} ${value.blockedBy.join(", ")}` };
+  }
+  return null;
+}
+
 function relLabel(created: string, nowSec: number): string {
   if (!created) return "—";
   const t = Date.parse(`${created}T00:00:00Z`);
@@ -38,17 +51,43 @@ function clockLabel(nowSec: number): string {
   return new Date(nowSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
-function ItemCard({ item, nowSec }: { item: OrchestrationItem; nowSec: number }) {
+function ItemCard({
+  item,
+  allItems,
+  nowSec,
+  onOpen,
+}: {
+  item: OrchestrationItem;
+  allItems: OrchestrationItem[];
+  nowSec: number;
+  onOpen: (id: string) => void;
+}) {
+  const readyChip = readinessChip(readiness(item, allItems));
+
   return (
-    <div className="rounded-lg border border-white/10 p-3">
+    <div
+      role="button"
+      tabIndex={0}
+      className="cursor-pointer rounded-lg border border-white/10 p-3 transition hover:border-white/20 hover:bg-white/[.03] focus:outline-none focus:ring-2 focus:ring-cyan-400/60"
+      onClick={() => onOpen(item.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(item.id);
+        }
+      }}
+    >
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium leading-snug text-white">{item.title}</p>
         <span className="hc-mono shrink-0 text-[11px] hc-dim">{item.id}</span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {readyChip ? <StatusPill tone={readyChip.tone ?? "zinc"} label={readyChip.label} /> : null}
         <StatusPill tone={PRIORITY_TONE[item.priority] ?? "zinc"} label={item.priority} />
         {item.planGate ? <StatusPill tone="indigo" label={de.orchestrator.planGate} /> : null}
-        {item.dependsOn.length > 0 ? <StatusPill tone="cyan" label={de.orchestrator.dependsOn(item.dependsOn.length)} /> : null}
+        {item.dependsOn.map((id) => (
+          <StatusPill key={id} tone="cyan" label={id} />
+        ))}
         <span className="ml-auto text-[11px] hc-soft">{relLabel(item.created, nowSec)}</span>
       </div>
     </div>
@@ -57,10 +96,16 @@ function ItemCard({ item, nowSec }: { item: OrchestrationItem; nowSec: number })
 
 export function OrchestratorBacklogView({ density }: { density: Density }) {
   const backlog = useOrchestrationBacklog();
+  const { detailById, errorById, loadingId, fetch: fetchDetail } = useOrchestrationBacklogDetail();
   const [showAllDone, setShowAllDone] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
   const data = backlog.data;
   const nowSec = data?.checked_at ?? Math.floor(Date.now() / 1000);
   const gap = density === "compact" ? "gap-3" : "gap-4";
+
+  useEffect(() => {
+    if (openId) void fetchDetail(openId);
+  }, [fetchDetail, openId]);
 
   const byStatus = useMemo(() => {
     const map: Record<string, OrchestrationItem[]> = {};
@@ -77,6 +122,25 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
 
   const counts = data?.counts;
   const activeTotal = counts ? counts.doing + counts.review + counts.todo + counts.backlog : 0;
+  const allItems = data?.items ?? [];
+  const selectedItem = openId ? allItems.find((item) => item.id === openId) : undefined;
+  const detail = openId ? detailById[openId] : undefined;
+  const detailReadiness = selectedItem ? readinessChip(readiness(selectedItem, allItems)) : null;
+  const detailChips: DetailChip[] = [
+    ...(detailReadiness ? [detailReadiness] : []),
+    ...((selectedItem?.dependsOn ?? detail?.dependsOn ?? []).map((id) => ({ tone: "cyan" as const, label: id }))),
+  ];
+  const detailFields: Array<{ label: string; value: string }> = detail
+    ? ([
+        detail.priority ? { label: de.orchestrator.priority, value: detail.priority } : null,
+        { label: de.orchestrator.planGate, value: detail.planGate ? de.orchestrator.yes : de.orchestrator.no },
+        detail.gate ? { label: de.orchestrator.gate, value: detail.gate } : null,
+        detail.root ? { label: de.orchestrator.root, value: detail.root } : null,
+        detail.created ? { label: de.orchestrator.created, value: detail.created } : null,
+      ] as Array<{ label: string; value: string } | null>).filter(
+        (field): field is { label: string; value: string } => field !== null,
+      )
+    : [];
 
   return (
     <div className="space-y-5">
@@ -89,7 +153,7 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
           <p className="mt-1 text-xs hc-soft">{de.orchestrator.subtitle}</p>
         </div>
         <div className="text-right text-xs hc-soft">
-          <div>{backlog.loading && !data ? "lädt …" : de.orchestrator.updatedAt(clockLabel(nowSec))}</div>
+          <div>{backlog.loading && !data ? de.orchestrator.loading : de.orchestrator.updatedAt(clockLabel(nowSec))}</div>
           {counts ? (
             <div className="mt-1 hc-dim">
               {counts.done} erledigt · {data?.source.count ?? 0} gesamt
@@ -113,7 +177,9 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
               {items.length === 0 ? (
                 <p className="py-3 text-center text-xs hc-dim">{de.orchestrator.emptyColumn}</p>
               ) : (
-                items.map((item) => <ItemCard key={item.id} item={item} nowSec={nowSec} />)
+                items.map((item) => (
+                  <ItemCard key={item.id} item={item} allItems={allItems} nowSec={nowSec} onOpen={setOpenId} />
+                ))
               )}
             </section>
           );
@@ -142,11 +208,23 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
         ) : (
           <div className={cn("grid", gap)} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
             {(showAllDone ? doneItems : doneItems.slice(0, 5)).map((item) => (
-              <ItemCard key={item.id} item={item} nowSec={nowSec} />
+              <ItemCard key={item.id} item={item} allItems={allItems} nowSec={nowSec} onOpen={setOpenId} />
             ))}
           </div>
         )}
       </section>
+      {openId ? (
+        <BacklogDetailDrawer
+          title={selectedItem?.title ?? detail?.title ?? openId}
+          id={openId}
+          body={detail?.body ?? ""}
+          chips={detailChips}
+          fields={detailFields}
+          loading={loadingId === openId}
+          error={errorById[openId] || detail?.error}
+          onClose={() => setOpenId(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
-import { useBacklog } from "../hooks/useControlData";
+import { useBacklog, useBacklogDetail } from "../hooks/useControlData";
+import { BacklogDetailDrawer } from "../components/BacklogDetailDrawer";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import type { Density } from "../hooks/useDensity";
 import type { BacklogItem } from "../lib/schemas";
@@ -29,6 +30,14 @@ const OWNER_TONE: Record<string, ToneName> = {
   unassigned: "zinc",
 };
 const RISK_TONE: Record<string, ToneName> = { low: "zinc", medium: "amber", high: "red" };
+const STATUS_TONE: Record<string, ToneName> = {
+  now: "sky",
+  next: "indigo",
+  later: "zinc",
+  in_progress: "violet",
+  blocked: "red",
+  done: "emerald",
+};
 
 function relLabel(updated: string, nowSec: number): string {
   if (!updated) return "—";
@@ -46,9 +55,23 @@ function clockLabel(nowSec: number): string {
   return new Date(nowSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
-function ItemCard({ item, nowSec }: { item: BacklogItem; nowSec: number }) {
+function ItemCard({ item, nowSec, onOpen }: { item: BacklogItem; nowSec: number; onOpen: (id: string) => void }) {
   return (
-    <div className={cn("rounded-lg border p-3", item.stale ? "border-red-500/40 bg-red-500/10" : "border-white/10")}>
+    <div
+      role="button"
+      tabIndex={0}
+      className={cn(
+        "cursor-pointer rounded-lg border p-3 outline-none transition-colors hover:bg-white/[.04] focus-visible:ring-2 focus-visible:ring-sky-400/70",
+        item.stale ? "border-red-500/40 bg-red-500/10" : "border-white/10",
+      )}
+      onClick={() => onOpen(item.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(item.id);
+        }
+      }}
+    >
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium leading-snug text-white">{item.title}</p>
         <span className="hc-mono shrink-0 text-[11px] hc-dim">{item.id}</span>
@@ -68,10 +91,16 @@ function ItemCard({ item, nowSec }: { item: BacklogItem; nowSec: number }) {
 
 export function BacklogView({ density }: { density: Density }) {
   const backlog = useBacklog();
+  const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
   const [showAllDone, setShowAllDone] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
   const data = backlog.data;
   const nowSec = data?.checked_at ?? Math.floor(Date.now() / 1000);
   const gap = density === "compact" ? "gap-3" : "gap-4";
+
+  useEffect(() => {
+    if (openId) void fetchDetail(openId);
+  }, [fetchDetail, openId]);
 
   const byStatus = useMemo(() => {
     const map: Record<string, BacklogItem[]> = {};
@@ -90,6 +119,28 @@ export function BacklogView({ density }: { density: Density }) {
   const activeTotal = counts
     ? counts.now + counts.next + counts.in_progress + counts.blocked + counts.later
     : 0;
+  const selectedItem = openId ? data?.items.find((item) => item.id === openId) : undefined;
+  const detail = openId ? detailById[openId] : undefined;
+  const detailFields: Array<{ label: string; value: string }> = detail
+    ? ([
+        detail.owner ? { label: de.backlog.owner, value: detail.owner } : null,
+        detail.risk ? { label: de.backlog.risk, value: detail.risk } : null,
+        detail.area ? { label: de.backlog.area, value: detail.area } : null,
+        detail.lane ? { label: de.backlog.lane, value: detail.lane } : null,
+        detail.result ? { label: de.backlog.result, value: detail.result } : null,
+        detail.updated ? { label: de.backlog.updatedLabel, value: detail.updated } : null,
+      ] as Array<{ label: string; value: string } | null>).filter(
+        (field): field is { label: string; value: string } => field !== null,
+      )
+    : [];
+  const detailChips: Array<{ label: string; tone?: ToneName }> = ([
+    detail?.status || selectedItem?.status
+      ? { label: detail?.status ?? selectedItem?.status ?? "", tone: STATUS_TONE[detail?.status ?? selectedItem?.status ?? ""] }
+      : null,
+    detail?.stale ? { label: de.backlog.staleBadge, tone: "red" as const } : null,
+  ] as Array<{ label: string; tone?: ToneName } | null>).filter(
+    (chip): chip is { label: string; tone?: ToneName } => chip !== null,
+  );
 
   return (
     <div className="space-y-5">
@@ -102,7 +153,7 @@ export function BacklogView({ density }: { density: Density }) {
           <p className="mt-1 text-xs hc-soft">{de.backlog.subtitle}</p>
         </div>
         <div className="text-right text-xs hc-soft">
-          <div>{backlog.loading && !data ? "lädt …" : de.backlog.updatedAt(clockLabel(nowSec))}</div>
+          <div>{backlog.loading && !data ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
           {counts ? (
             <div className="mt-1 hc-dim">
               {counts.done} erledigt · {data?.source.count ?? 0} gesamt
@@ -126,7 +177,7 @@ export function BacklogView({ density }: { density: Density }) {
               {items.length === 0 ? (
                 <p className="py-3 text-center text-xs hc-dim">{de.backlog.emptyColumn}</p>
               ) : (
-                items.map((item) => <ItemCard key={item.id} item={item} nowSec={nowSec} />)
+                items.map((item) => <ItemCard key={item.id} item={item} nowSec={nowSec} onOpen={setOpenId} />)
               )}
             </section>
           );
@@ -155,11 +206,23 @@ export function BacklogView({ density }: { density: Density }) {
         ) : (
           <div className={cn("grid", gap)} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
             {(showAllDone ? doneItems : doneItems.slice(0, 5)).map((item) => (
-              <ItemCard key={item.id} item={item} nowSec={nowSec} />
+              <ItemCard key={item.id} item={item} nowSec={nowSec} onOpen={setOpenId} />
             ))}
           </div>
         )}
       </section>
+      {openId ? (
+        <BacklogDetailDrawer
+          title={selectedItem?.title ?? detail?.title ?? de.backlog.detailTitle}
+          id={openId}
+          body={detail?.body || (loadingId === openId ? "" : de.backlog.noBody)}
+          chips={detailChips}
+          fields={detailFields}
+          loading={loadingId === openId}
+          error={errorById[openId] || detail?.error}
+          onClose={() => setOpenId(null)}
+        />
+      ) : null}
     </div>
   );
 }

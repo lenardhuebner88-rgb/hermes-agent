@@ -3,7 +3,9 @@ import { z } from "zod";
 import { fetchJSON } from "@/lib/api";
 import {
   AgentsResponseSchema,
+  BacklogDetailSchema,
   BacklogResponseSchema,
+  OrchestrationDetailSchema,
   OrchestrationBacklogResponseSchema,
   AutoresearchRunsResponseSchema,
   AutoresearchStatusSchema,
@@ -15,7 +17,7 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogResponse, OrchestrationBacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import type { AgentsResponse, AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
@@ -361,6 +363,52 @@ export function useOrchestrationBacklog() {
     async () => parseOrThrow(OrchestrationBacklogResponseSchema, await fetchJSON<unknown>("/api/orchestration/backlog"), "orchestration/backlog"),
     30000,
   );
+}
+
+export function useOrchestrationBacklogDetail() {
+  const [detailById, setDetailById] = useState<Record<string, OrchestrationDetail>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const fetch = useCallback(async (id: string) => {
+    setLoadingId(id);
+    try {
+      const raw = await fetchJSON<unknown>(`/api/orchestration/backlog/${encodeURIComponent(id)}`);
+      const data = parseOrThrow(OrchestrationDetailSchema, raw, "orchestration/backlog/detail");
+      if (!aliveRef.current) return;
+      setDetailById((prev) => ({ ...prev, [id]: data }));
+      setErrorById((prev) => ({ ...prev, [id]: "" }));
+    } catch (err) {
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [id]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      if (aliveRef.current) setLoadingId(null);
+    }
+  }, []);
+  return { detailById, errorById, loadingId, fetch };
+}
+
+export function useBacklogDetail() {
+  const [detailById, setDetailById] = useState<Record<string, BacklogDetail>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const fetch = useCallback(async (id: string) => {
+    setLoadingId(id);
+    try {
+      const raw = await fetchJSON<unknown>(`/api/family-organizer/backlog/${encodeURIComponent(id)}`);
+      const data = parseOrThrow(BacklogDetailSchema, raw, "family-organizer/backlog/detail");
+      if (!aliveRef.current) return;
+      setDetailById((prev) => ({ ...prev, [id]: data }));
+      setErrorById((prev) => ({ ...prev, [id]: "" }));
+    } catch (err) {
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [id]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      if (aliveRef.current) setLoadingId(null);
+    }
+  }, []);
+  return { detailById, errorById, loadingId, fetch };
 }
 
 export function useRunInspect() {
