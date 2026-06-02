@@ -294,9 +294,9 @@ def scan_open_scaffolds() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# MiniMax-M2.7 self-test (harmless config-presence check; no secrets emitted)
+# Aux route self-test (harmless config-presence check; no secrets emitted)
 # ---------------------------------------------------------------------------
-_MODEL_NEEDLE = "MiniMax-M2.7"
+_AUTORESEARCH_AUX_TASK = "skills_hub"
 
 
 def _skills_root() -> Path:
@@ -317,15 +317,19 @@ def _hermes_home() -> Path:
 
 
 def self_test() -> dict[str, str]:
-    """Is the MiniMax-M2.7 route configured? config-presence only, no secrets."""
-    cfg = _hermes_home() / "config.yaml"
+    """Is the autoresearch aux route configured? Config-presence only, no secrets."""
     try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+    except Exception:
         return {"route_status": "yellow", "detail": "config.yaml unreadable"}
-    if _MODEL_NEEDLE in text:
-        return {"route_status": "configured", "detail": f"{_MODEL_NEEDLE} present in config.yaml"}
-    return {"route_status": "unavailable", "detail": f"{_MODEL_NEEDLE} not found in config.yaml"}
+    aux = cfg.get("auxiliary", {}) if isinstance(cfg, dict) else {}
+    slot = aux.get(_AUTORESEARCH_AUX_TASK, {}) if isinstance(aux, dict) else {}
+    provider = str(slot.get("provider") if isinstance(slot, dict) else "").strip()
+    if provider:
+        return {"route_status": "configured", "detail": f"{_AUTORESEARCH_AUX_TASK} aux provider configured"}
+    return {"route_status": "unavailable", "detail": f"{_AUTORESEARCH_AUX_TASK} aux provider not configured"}
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +389,7 @@ class TriggerBody(BaseModel):
 class CodeWeaknessBody(BaseModel):
     scope: str = "incremental"  # "incremental" | "full"
     # Interactive default kept small so a button click stays snappy (each scanned
-    # file = one ~20s MiniMax call). The unattended nightly code lane uses the
+    # file = one aux-model call). The unattended nightly code lane uses the
     # finder's own larger default (12) for broader per-night coverage. The
     # "Deep-Scan" button raises both caps (e.g. max_files=40, limit=8).
     max_files: int = 5
@@ -703,7 +707,7 @@ code{background:var(--panel);padding:1px 6px;border-radius:5px;font-size:12.5px;
     <h2>💡 Verbesserungs-Vorschläge <span class="badge badge-info" id="propOpenCount"></span></h2>
     <div class="prop-toolbar">
       <button class="btn btn-primary" id="btnGenerate">✨ Verbesserungen holen</button>
-      <button class="btn" id="btnGenerateCode" title="Allowlisted Hermes-Code mit MiniMax prüfen">Code-Schwächen suchen</button>
+      <button class="btn" id="btnGenerateCode" title="Allowlisted Hermes-Code mit dem Aux-Modell prüfen">Code-Schwächen suchen</button>
       <span class="spacer"></span>
       <button class="btn btn-apply" id="btnApplyAll" title="Alle offenen Skill-Vorschläge übernehmen">✓ Alle übernehmen</button>
     </div>
@@ -1079,14 +1083,20 @@ def register_autoresearch_routes(app: Any) -> None:
         """P2: recent run history (skill loops + code scans) for the ROI panel."""
         return {"schema": "autoresearch-runs-v1", "runs": _runs.read_runs()}
 
+    @app.post("/api/autoresearch/prune")
+    async def autoresearch_prune() -> dict[str, Any]:
+        """Archive closed proposals and auto-skip stale reverted proposals."""
+        result = _proposals.prune_proposals()
+        return {"ok": True, **result}
+
     @app.post("/api/autoresearch/generate-code-weaknesses")
     async def autoresearch_generate_code_weaknesses(body: CodeWeaknessBody | None = None) -> dict[str, Any]:
-        """MiniMax-backed, allowlisted code weakness finder. It only persists
+        """Aux-model-backed, allowlisted code weakness finder. It only persists
         mode=code proposals; applying them uses the existing code gate.
 
         ``scope='incremental'`` (default) scans only changed/unscanned files up to
         ``max_files`` (fast, repeatable); ``scope='full'`` scans the whole allowlist.
-        The finder makes one synchronous MiniMax call per scanned file (each up to
+        The finder makes one synchronous aux-model call per scanned file (each up to
         ~120s), so it runs on a worker thread — otherwise it would block the
         dashboard's event loop and stall every other request."""
         b = body or CodeWeaknessBody()

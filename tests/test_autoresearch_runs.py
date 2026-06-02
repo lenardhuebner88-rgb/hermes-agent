@@ -20,10 +20,14 @@ def audit(tmp_path, monkeypatch):
 
 def test_append_and_read_newest_first(audit):
     autoresearch_runs.append_run(lane="skill", request_id="r1", tokens=100, proposed=2, errors=0, scanned=3)
-    autoresearch_runs.append_run(lane="code", request_id="r2", tokens=50, proposed=1, errors=1, scanned=4)
+    autoresearch_runs.append_run(
+        lane="code", request_id="r2", tokens=50, proposed=1, errors=1,
+        scanned=4, vetoed=2, model="test-model",
+    )
     runs = autoresearch_runs.read_runs()
     assert [r["request_id"] for r in runs] == ["r2", "r1"]  # newest first
     assert runs[0]["lane"] == "code" and runs[0]["tokens"] == 50 and runs[0]["errors"] == 1
+    assert runs[0]["vetoed"] == 2 and runs[0]["model"] == "test-model"
 
 
 def test_history_capped_to_30(audit):

@@ -81,6 +81,7 @@ def read_runs(limit: int = _MAX_RUNS) -> list[dict[str, Any]]:
 
 def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
                proposed: int = 0, errors: int = 0, scanned: int = 0,
+               vetoed: int = 0, model: str | None = None,
                at: str | None = None) -> None:
     """Prepend one run record (newest first), capped to the last _MAX_RUNS.
     Best-effort: never raises — history is observability, not a source of truth."""
@@ -92,6 +93,8 @@ def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
             "tokens": int(tokens or 0),
             "proposed": int(proposed or 0),
             "errors": int(errors or 0),
+            "vetoed": int(vetoed or 0),
+            "model": str(model or "") or None,
             "scanned": int(scanned or 0),
         }
         runs = [record, *read_runs(_MAX_RUNS)][:_MAX_RUNS]

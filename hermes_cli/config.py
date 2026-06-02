@@ -1263,6 +1263,22 @@ DEFAULT_CONFIG = {
             "timeout": 600,
             "extra_body": {},
         },
+        "code_audit": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 120,
+            "extra_body": {},
+        },
+        "test_hardening": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 120,
+            "extra_body": {},
+        },
     },
     
     "display": {

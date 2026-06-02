@@ -94,7 +94,7 @@ def env(monkeypatch, tmp_path):
     (skills / "demo" / "needy-skill").mkdir(parents=True)
     (skills / "demo" / "complete-skill" / "SKILL.md").write_text(SKILL_COMPLETE, encoding="utf-8")
     (skills / "demo" / "needy-skill" / "SKILL.md").write_text(SKILL_NEEDS_PROCEDURE, encoding="utf-8")
-    (home / "config.yaml").write_text("model: MiniMax-M2.7-highspeed\n", encoding="utf-8")
+    (home / "config.yaml").write_text("model: arbitrary-aux-model\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_SKILLS_ROOT", str(skills))
     monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(state))
@@ -153,10 +153,12 @@ def test_self_test_configured_when_model_in_config(env):
     assert "skills_hub" in detail
 
 
-def test_self_test_unavailable_when_model_absent(env, monkeypatch):
+def test_self_test_configured_without_minimax_string(env, monkeypatch):
     (env["home"] / "config.yaml").write_text("model: something-else\n", encoding="utf-8")
-    status, _detail = env["runner"].self_test()
-    assert status == "unavailable"
+    status, detail = env["runner"].self_test()
+    assert status == "configured"
+    assert "skills_hub" in detail
+    assert "arbitrary-aux-model" not in detail
 
 
 def test_self_test_yellow_when_model_ping_fails(env, monkeypatch):
@@ -266,8 +268,8 @@ def test_apply_succeeds_when_request_also_lists_outside_repo_skills(env):
     assert "## Procedure" in _needy(env).read_text()
 
 
-def test_apply_downgrades_to_dry_run_when_selftest_not_configured(env):
-    (env["home"] / "config.yaml").write_text("model: other\n", encoding="utf-8")
+def test_apply_downgrades_to_dry_run_when_selftest_not_configured(env, monkeypatch):
+    monkeypatch.setattr(env["runner"], "_resolve_autoresearch_aux_slot", lambda: ("", ""))
     before = _needy(env).read_bytes()
     req = _make_request(env, approved=True)
     summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=2)

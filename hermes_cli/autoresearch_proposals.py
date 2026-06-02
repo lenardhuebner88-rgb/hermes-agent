@@ -11,7 +11,7 @@ Locked decisions it honours:
 * **Skill content is deterministic here** (A1) — the legacy generator reuses
   the same conservative "recommended section missing → scaffold block"
   candidates the Phase-5 runner already detects. Code-weakness proposals are a
-  separate MiniMax-authored path, constrained to a tight repo allowlist and
+  separate auxiliary-model-authored path, constrained to a tight repo allowlist and
   applied only through the code-mode test-suite gate.
 * **Reversibility is the safety**, not a token (single operator). Apply does:
   backup → write → eval-gate → keep or auto-revert. The preview itself is the
@@ -41,7 +41,7 @@ import re
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -107,12 +107,34 @@ _CODE_CATEGORY_SEVERITY = {
     "dead_logic": "medium",
     "error_handling": "medium",
 }
+_SKILL_CATEGORY_SEVERITY = dict(getattr(capability_researcher, "_SKILL_CATEGORY_SEVERITY", {
+    "contradiction": "high",
+    "missing_trigger": "high",
+    "unclear_trigger": "medium",
+    "incomplete_steps": "medium",
+    "missing_section": "low",
+}))
 
 
 def _coerce_severity(value: Any, *, fallback: str) -> str:
     """Normalise a model-supplied severity to the known scale, else fall back."""
     sev = str(value or "").strip().lower()
     return sev if sev in _SEVERITY_ORDINAL else fallback
+
+
+def _model_label_from_response(resp: Any, *, task: str = "skills_hub") -> str:
+    model = str(getattr(resp, "model", "") or "").strip()
+    if model:
+        return model
+    try:
+        from scripts.autoresearch_writer import _configured_aux_model
+
+        configured = _configured_aux_model(task)
+        if configured:
+            return configured
+    except Exception:
+        pass
+    return "aux-model"
 _CODE_FINDER_MAX_FILE_CHARS = 45_000
 _CODE_FINDER_MAX_FINDINGS_PER_FILE = 1
 
@@ -378,6 +400,133 @@ def backfill_last_outcome(*, dry_run: bool = True) -> dict[str, Any]:
     return {"ok": True, "dry_run": False, "would_update": len(changes), "updated": updated, "backup_dir": str(backup_dir) if backup_dir else None, "changes": changes}
 
 
+def _parse_created_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _older_than_days(value: Any, days: int, *, now: datetime | None = None) -> bool:
+    created = _parse_created_at(value)
+    if created is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return created < now - timedelta(days=max(0, int(days)))
+
+
+def _archive_destination(path: Path, archive_dir: Path) -> Path:
+    dest = archive_dir / path.name
+    if not dest.exists():
+        return dest
+    stem = path.stem
+    suffix = path.suffix
+    idx = 1
+    while True:
+        candidate = archive_dir / f"{stem}-{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def prune_proposals(archive_done_older_than_days: int = 7) -> dict[str, int]:
+    pdir = _proposals_dir()
+    if not pdir.exists():
+        return {"archived": 0, "auto_skipped": 0}
+    archive_dir = pdir / "_archive"
+    auto_skipped_paths: set[Path] = set()
+    auto_skipped = 0
+    for path in sorted(pdir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if (
+            data.get("status") == "proposed"
+            and data.get("last_outcome") == "reverted_no_improvement"
+            and _older_than_days(data.get("created_at"), 14)
+        ):
+            data["status"] = "skipped"
+            data["result"] = data.get("result") or "auto-skipped by autoresearch prune: reverted without improvement"
+            save_proposal(data)
+            auto_skipped += 1
+            auto_skipped_paths.add(path)
+
+    archived = 0
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(pdir.glob("*.json")):
+        if path in auto_skipped_paths:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("status") not in {"applied", "skipped"}:
+            continue
+        if not _older_than_days(data.get("created_at"), archive_done_older_than_days):
+            continue
+        try:
+            shutil.move(str(path), str(_archive_destination(path, archive_dir)))
+            archived += 1
+        except OSError:
+            continue
+    return {"archived": archived, "auto_skipped": auto_skipped}
+
+
+def _infer_severity_from_category(proposal: dict[str, Any]) -> str | None:
+    category = str(proposal.get("category") or "").strip()
+    if not category:
+        return None
+    if proposal.get("mode") == "code":
+        return _CODE_CATEGORY_SEVERITY.get(category)
+    return _SKILL_CATEGORY_SEVERITY.get(category) or _CODE_CATEGORY_SEVERITY.get(category)
+
+
+def backfill_missing_severity(*, dry_run: bool = True) -> dict[str, Any]:
+    pdir = _proposals_dir()
+    changes: list[dict[str, Any]] = []
+    if not pdir.exists():
+        return {"ok": True, "dry_run": dry_run, "would_update": 0, "updated": 0, "backup_dir": None, "changes": []}
+    for path in sorted(pdir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("severity"):
+            continue
+        severity = _infer_severity_from_category(data)
+        if not severity:
+            continue
+        changes.append({"path": str(path), "id": data.get("id"), "category": data.get("category"), "to": severity})
+
+    if dry_run or not changes:
+        return {"ok": True, "dry_run": dry_run, "would_update": len(changes), "updated": 0, "backup_dir": None, "changes": changes}
+
+    backup_dir = _copy_proposals_backup()
+    updated = 0
+    for change in changes:
+        path = Path(change["path"])
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("severity"):
+            continue
+        data["severity"] = change["to"]
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        updated += 1
+    return {"ok": True, "dry_run": False, "would_update": len(changes), "updated": updated, "backup_dir": str(backup_dir) if backup_dir else None, "changes": changes}
+
+
 # ---------------------------------------------------------------------------
 # Generate. Reuses the runner's candidate discovery.
 # ---------------------------------------------------------------------------
@@ -398,14 +547,14 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
         writer_res = {"ok": False, "reason": f"writer failed: {type(exc).__name__}"}
     if writer_res.get("ok") and isinstance(writer_res.get("text"), str):
         block = writer_res["text"]
-        writer = "minimax"
-        rationale = writer_res.get("rationale") or "MiniMax hat einen fertigen Abschnitt vorgeschlagen."
+        writer = "aux-section-writer"
+        rationale = writer_res.get("rationale") or "Aux-Modell hat einen fertigen Abschnitt vorgeschlagen."
     else:
         block = runner.build_scaffold_block(skill, header)
         reason = writer_res.get("reason") or "writer unavailable"
         rationale = (
             f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
-            f"Der MiniMax-Schreiber lieferte keinen validen Abschnitt ({reason}); "
+            f"Der Aux-Schreiber lieferte keinen validen Abschnitt ({reason}); "
             f"Autoresearch fällt deshalb auf das reversible Gerüst zurück."
         )
     after = before if before.endswith("\n") else before + "\n"
@@ -414,7 +563,7 @@ def _build_proposal_for_candidate(cand: dict[str, Any], runner) -> dict[str, Any
     base_rationale = (
         rationale if writer == "scaffold" else
         f"Dem Skill `{skill}` fehlt der empfohlene Abschnitt „{header}“. "
-        f"Autoresearch hat dafür einen fertigen MiniMax-Abschnitt erzeugt. "
+        f"Autoresearch hat dafür einen fertigen Aux-Modell-Abschnitt erzeugt. "
         f"Wird automatisch zurückgerollt, wenn die Skill-Prüfung dadurch nicht besser wird."
     )
     # AR2: lead with the "why this one first" so the card explains its own
@@ -572,7 +721,7 @@ def _build_proposal_for_finding(finding: dict[str, Any], path: Path) -> dict[str
     rationale = (
         f"Priorität: {rank_reason}. {problem}" if rank_reason else problem
     )
-    writer_rationale = writer_res.get("rationale") or "MiniMax hat einen grounded AR3-Fix vorgeschlagen."
+    writer_rationale = writer_res.get("rationale") or "Aux-Modell hat einen grounded AR3-Fix vorgeschlagen."
     return {
         "id": _proposal_id_for_finding(finding),
         "schema": PROPOSAL_SCHEMA,
@@ -591,7 +740,7 @@ def _build_proposal_for_finding(finding: dict[str, Any], path: Path) -> dict[str
         "before_text": before,
         "after_text": after,
         "new_text": after,
-        "writer": "minimax-ar3-fix-writer",
+        "writer": "aux-ar3-fix-writer",
         "writer_rationale": writer_rationale,
         "diff_before_after": _make_diff(before, after, f"{skill}/SKILL.md"),
         "status": "proposed",
@@ -728,7 +877,7 @@ def generate_proposals(*, limit: int = 10) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Code weakness finder (MiniMax, allowlisted, proposal-only)
+# Code weakness finder (aux model, allowlisted, proposal-only)
 # ---------------------------------------------------------------------------
 def _repo_relative_name(path: Path) -> str:
     try:
@@ -1008,8 +1157,9 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
     evidence = str(finding["evidence"])
     after = str(finding["after_text"])
     title = str(finding.get("title") or category_label)
-    problem = str(finding.get("problem") or "MiniMax hat eine konkrete Code-Schwäche gefunden.")
+    problem = str(finding.get("problem") or "Das Aux-Modell hat eine konkrete Code-Schwäche gefunden.")
     fix_hint = str(finding.get("fix_hint") or "Gezielt beheben.")
+    model_label = str(finding.get("_model_label") or "").strip() or _model_label_from_response(None)
     return {
         "id": _proposal_id_for_code_finding(path, finding),
         "schema": PROPOSAL_SCHEMA,
@@ -1028,8 +1178,8 @@ def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, An
         "before_text": before,
         "after_text": after,
         "new_text": None,
-        "writer": "minimax-code-weakness-finder",
-        "writer_rationale": "MiniMax-M2.7 via skills_hub; verbatim old_snippet/evidence validated before proposal save.",
+        "writer": "aux-code-weakness-finder",
+        "writer_rationale": f"{model_label} via skills_hub; verbatim old_snippet/evidence validated before proposal save.",
         "diff_before_after": _make_diff(before, after, rel),
         "status": "proposed",
         "last_outcome": None,
@@ -1056,12 +1206,14 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
     state = _read_code_scan_state()
     created: list[str] = []
     errors: list[dict[str, str]] = []
+    vetoes: list[dict[str, str]] = []
     skipped_existing = 0
     skipped_unchanged = 0
     vetoed = 0
     files_seen = 0
     findings_seen = 0
     tokens = 0
+    model_label = ""
     cap = max(1, int(max_files))
     allowlist_paths = _iter_code_allowlist_paths()
     for path in allowlist_paths:
@@ -1085,6 +1237,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             errors.append({"target": rel, "reason": "file empty or too large for code finder"})
             continue
         model_res = _call_code_weakness_finder(path, before, timeout=timeout)
+        model_label = _model_label_from_response(model_res.get("resp"))
         tokens += _llm_total_tokens(model_res.get("resp"))
         if not model_res.get("ok"):
             errors.append({"target": rel, "reason": str(model_res.get("reason") or "model failed")})
@@ -1097,13 +1250,14 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             if valid is None:
                 errors.append({"target": rel, "reason": reason or "invalid finding"})
                 break
+            valid["_model_label"] = model_label
             findings_seen += 1
             if verify_enabled:
                 verdict = _verify_code_finding_importance(path, valid, before, timeout=timeout)
                 tokens += int(verdict.get("tokens") or 0)
                 if not verdict.get("real"):
                     vetoed += 1
-                    errors.append({"target": rel, "reason": f"vetoed: {verdict.get('reason') or 'not important'}"})
+                    vetoes.append({"target": rel, "reason": str(verdict.get("reason") or "not important")})
                     break
             proposal = _build_code_weakness_proposal(path, before, valid)
             existing = load_proposal(proposal["id"])
@@ -1127,11 +1281,13 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         "scope": "incremental" if incremental else "full",
         "allowlist": sorted(_repo_relative_name(p) for p in allowlist_paths),
         "errors": errors,
+        "vetoes": vetoes,
     }
     try:  # P2: best-effort ROI log for the code lane (never sink the scan)
         from hermes_cli import autoresearch_runs
         autoresearch_runs.append_run(lane="code", tokens=tokens, proposed=len(created),
-                                     errors=len(errors), scanned=files_seen)
+                                     errors=len(errors), vetoed=vetoed, scanned=files_seen,
+                                     model=model_label or None)
     except Exception:
         pass
     return result

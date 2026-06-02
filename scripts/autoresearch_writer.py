@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""MiniMax-backed section writer for Hermes Autoresearch proposals.
+"""Auxiliary-model section writer for Hermes Autoresearch proposals.
 
-AR1 drafts ONE complete SKILL.md section via MiniMax-M2.7 (``skills_hub`` aux).
+AR1 drafts ONE complete SKILL.md section via the ``skills_hub`` aux task.
 
 AR1.1 made the validation *targeted* instead of a blunt word-ban: real skill
 docs legitimately mention ``token``/``curl``/``secret`` in prose and benefit
@@ -74,6 +74,25 @@ _SECRET_RE = re.compile(
 def _call_llm(**kwargs):
     from agent.auxiliary_client import call_llm
     return call_llm(**kwargs)
+
+
+def _configured_aux_model(task: str = "skills_hub") -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        aux = cfg.get("auxiliary", {}) if isinstance(cfg, dict) else {}
+        slot = aux.get(task, {}) if isinstance(aux, dict) else {}
+        if isinstance(slot, dict):
+            return str(slot.get("model") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _model_label_from_response(resp, *, task: str = "skills_hub") -> str:
+    model = str(getattr(resp, "model", "") or "").strip()
+    return model or _configured_aux_model(task) or "aux-model"
 
 
 def _extract_content(resp) -> str:
@@ -273,7 +292,7 @@ def judge_fix(
     *,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """Ask MiniMax-M2.7 to gate a proposed skill fix before applying it.
+    """Ask the aux model to gate a proposed skill fix before applying it.
 
     Returns ``{resolved: bool, no_regression: bool, reason: str}``. Any model,
     parsing, or malformed-input problem is a closed gate.
@@ -352,10 +371,10 @@ def judge_fix(
 def _slice_from_header(text: str, section_header: str) -> str:
     """Drop non-``<think>`` preamble before the section (extract net).
 
-    MiniMax-M2.7 is a reasoning model and may prepend a sentence before the
-    section. Take everything from the first ``## {header}`` (or, failing that,
-    the first level-two header); leave the text untouched if none is found so
-    validation rejects it and the caller falls back to the scaffold.
+    Reasoning models may prepend a sentence before the section. Take everything
+    from the first ``## {header}`` (or, failing that, the first level-two header);
+    leave the text untouched if none is found so validation rejects it and the
+    caller falls back to the scaffold.
     """
     body = text.strip()
     idx = body.find(f"## {section_header}")
@@ -396,7 +415,7 @@ def validate_section(text: str, section_header: str) -> tuple[bool, str | None, 
 
 def draft_section(skill_name: str, section_header: str, skill_text: str,
                   *, timeout: float = 120.0) -> dict:
-    """Ask MiniMax-M2.7 to write one complete SKILL.md section."""
+    """Ask the aux model to write one complete SKILL.md section."""
     system = (
         "Du schreibst einen fehlenden Abschnitt einer Skill-Doku fertig aus. "
         f"Antworte mit GENAU EINEM Markdown-Abschnitt, der mit `## {section_header}` beginnt. "
@@ -427,10 +446,11 @@ def draft_section(skill_name: str, section_header: str, skill_text: str,
         ok, text, reason = validate_section(content, section_header)
         if not ok:
             return {"ok": False, "text": None, "rationale": None, "reason": reason}
+        model_label = _model_label_from_response(resp)
         return {
             "ok": True,
             "text": text,
-            "rationale": "MiniMax-M2.7 drafted section via skills_hub aux",
+            "rationale": f"{model_label} drafted section via skills_hub aux",
             "reason": None,
         }
     except Exception as exc:
@@ -449,7 +469,7 @@ def draft_fix(
     *,
     timeout: float = 120.0,
 ) -> dict:
-    """Ask MiniMax-M2.7 to write a grounded fix for one AR3 finding."""
+    """Ask the aux model to write a grounded fix for one AR3 finding."""
     category = str(finding.get("category") or "").strip()
     is_absence = category in _ABSENCE_CATEGORIES
     evidence = str(finding.get("evidence") or finding.get("evidence_quote") or "").strip()
@@ -519,7 +539,8 @@ def draft_fix(
         ok, text, reason = validate_fix(after_text, finding, skill_text)
         if not ok:
             return {"ok": False, "text": None, "rationale": None, "reason": reason}
-        rationale = model_rationale or "MiniMax-M2.7 drafted grounded AR3 fix via skills_hub aux"
+        model_label = _model_label_from_response(resp)
+        rationale = model_rationale or f"{model_label} drafted grounded AR3 fix via skills_hub aux"
         if _DANGEROUS_RE.search(rationale) or _SECRET_RE.search(rationale):
             return {"ok": False, "text": None, "rationale": None, "reason": "unsafe rationale"}
         return {"ok": True, "text": text, "rationale": rationale, "reason": None}

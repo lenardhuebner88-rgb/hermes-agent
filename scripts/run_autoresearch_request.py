@@ -18,7 +18,7 @@ Modes::
     areas are refused for apply);
   * operator confirmation present (``--confirm`` or request ``approved_by_operator``)
     — the single "are you sure" step that replaces the token;
-  * MiniMax-M2.7 self-test == configured, else fall back to dry-run (route Yellow);
+  * skills_hub aux self-test == configured, else fall back to dry-run (route Yellow);
   * a timestamped backup dir is created before any edit;
   * no fresh lock already held (no double-run).
 
@@ -66,8 +66,7 @@ RESULTS_COLUMNS = [
     "timestamp", "mode", "target", "hypothesis", "change",
     "eval_command", "eval_result", "decision", "risk", "evidence",
 ]
-MODEL_PREFERENCE = "MiniMax-M2.7-highspeed"
-MODEL_NEEDLE = "MiniMax-M2.7"
+AUTORESEARCH_AUX_TASK = "skills_hub"
 HEARTBEAT_FRESH_S = 30.0
 # Scaffolder OFF by default (signed commitment "kein Schein"): the live loop runs
 # the AR3 capability researcher only. Flip to True (or set the env override) for
@@ -136,24 +135,36 @@ def _call_auxiliary_llm(**kwargs):
     return call_llm(**kwargs)
 
 
-def self_test() -> tuple[str, str]:
-    cfg = _config_yaml()
+def _resolve_autoresearch_aux_slot() -> tuple[str, str]:
     try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return "yellow", "config.yaml unreadable; route unverified"
-    if MODEL_NEEDLE not in text:
-        return "unavailable", f"{MODEL_NEEDLE} not found in config.yaml"
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        provider, model, _base_url, _api_key, _api_mode = _resolve_task_provider_model(AUTORESEARCH_AUX_TASK)
+        return str(provider or "").strip(), str(model or "").strip()
+    except Exception:
+        return "", ""
+
+
+def _response_model_label(resp, configured_model: str = "") -> str:
+    model = str(getattr(resp, "model", "") or "").strip()
+    return model or configured_model or "aux-model"
+
+
+def self_test() -> tuple[str, str]:
+    provider, configured_model = _resolve_autoresearch_aux_slot()
+    if not provider:
+        return "unavailable", f"{AUTORESEARCH_AUX_TASK} aux provider not configured"
     try:
         resp = _call_auxiliary_llm(
-            task="skills_hub",
+            task=AUTORESEARCH_AUX_TASK,
             messages=[{"role": "user", "content": "ping"}],
             max_tokens=8,
             temperature=0,
             timeout=10,
         )
         _ = (resp.choices[0].message.content or "")
-        return "configured", f"{MODEL_NEEDLE} reachable via skills_hub aux"
+        label = _response_model_label(resp, configured_model)
+        return "configured", f"{label} reachable via {AUTORESEARCH_AUX_TASK} aux"
     except Exception as exc:
         return "yellow", f"model ping failed: {type(exc).__name__}"
 

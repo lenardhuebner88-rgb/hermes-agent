@@ -41,7 +41,7 @@ def tmp_home(tmp_path, monkeypatch):
         "ok": False, "reason": "offline test fallback",
     })
     monkeypatch.setattr(proposals.capability_researcher, "research_skills", _fake_research_skills)
-    (home / "config.yaml").write_text("model: MiniMax-M2.7\n", encoding="utf-8")
+    (home / "config.yaml").write_text("model: arbitrary-aux-model\n", encoding="utf-8")
     return home
 
 
@@ -159,15 +159,19 @@ def test_payload_drops_bulky_fields_and_counts_open(tmp_home, scaffold_enabled):
     assert "before_text" not in card  # bulky field stays server-side
     assert "after_text" not in card
 
-def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None):
+def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None,
+                            category=None, severity=None, mode="skill",
+                            created_at="2026-05-29T00:00:00Z"):
     proposals.save_proposal({
         "id": pid,
         "schema": proposals.PROPOSAL_SCHEMA,
-        "mode": "skill",
+        "mode": mode,
         "target": "skill",
         "target_path": "/tmp/skill/SKILL.md",
         "section": "Output",
         "eval_label": "Output / Ergebnis",
+        "category": category,
+        "severity": severity,
         "title": pid,
         "rationale_plain": "test",
         "before_text": "",
@@ -176,7 +180,7 @@ def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=
         "diff_before_after": "",
         "status": status,
         "last_outcome": last_outcome,
-        "created_at": "2026-05-29T00:00:00Z",
+        "created_at": created_at,
         "applied_at": None,
         "result": result,
     })
@@ -222,15 +226,55 @@ def test_backfill_last_outcome_supports_dry_run_backup_and_idempotency(tmp_home)
     again = proposals.backfill_last_outcome(dry_run=False)
     assert again["updated"] == 0
 
-def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None):
+
+def test_backfill_missing_severity_from_category(tmp_home):
+    _store_minimal_proposal("skill-sev", category="unclear_trigger", severity=None)
+    _store_minimal_proposal("code-sev", mode="code", category="bug_risk", severity=None)
+    _store_minimal_proposal("already", category="missing_section", severity="critical")
+
+    dry = proposals.backfill_missing_severity(dry_run=True)
+    assert dry["would_update"] == 2
+    assert proposals.load_proposal("skill-sev").get("severity") is None
+
+    live = proposals.backfill_missing_severity(dry_run=False)
+    assert live["updated"] == 2
+    assert live["backup_dir"] and Path(live["backup_dir"]).exists()
+    assert proposals.load_proposal("skill-sev")["severity"] == "medium"
+    assert proposals.load_proposal("code-sev")["severity"] == "high"
+    assert proposals.load_proposal("already")["severity"] == "critical"
+
+
+def test_prune_archives_old_done_and_keeps_open(tmp_home):
+    old = "2026-01-01T00:00:00Z"
+    _store_minimal_proposal("old-applied", status="applied", last_outcome="applied", created_at=old)
+    _store_minimal_proposal("old-skipped", status="skipped", created_at=old)
+    _store_minimal_proposal("old-open", status="proposed", created_at=old)
+    _store_minimal_proposal(
+        "old-reverted", status="proposed", last_outcome="reverted_no_improvement", created_at=old,
+    )
+
+    result = proposals.prune_proposals(archive_done_older_than_days=7)
+
+    assert result == {"archived": 2, "auto_skipped": 1}
+    archive = tmp_home / "skill-audit" / "proposals" / "_archive"
+    assert (archive / "old-applied.json").exists()
+    assert (archive / "old-skipped.json").exists()
+    assert proposals.load_proposal("old-open")["status"] == "proposed"
+    assert proposals.load_proposal("old-reverted")["status"] == "skipped"
+
+def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None,
+                            category=None, severity=None, mode="skill",
+                            created_at="2026-05-29T00:00:00Z"):
     proposals.save_proposal({
         "id": pid,
         "schema": proposals.PROPOSAL_SCHEMA,
-        "mode": "skill",
+        "mode": mode,
         "target": "skill",
         "target_path": "/tmp/skill/SKILL.md",
         "section": "Output",
         "eval_label": "Output / Ergebnis",
+        "category": category,
+        "severity": severity,
         "title": pid,
         "rationale_plain": "test",
         "before_text": "",
@@ -239,7 +283,7 @@ def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=
         "diff_before_after": "",
         "status": status,
         "last_outcome": last_outcome,
-        "created_at": "2026-05-29T00:00:00Z",
+        "created_at": created_at,
         "applied_at": None,
         "result": result,
     })
@@ -304,7 +348,7 @@ def test_apply_keeps_and_mutates_with_backup(tmp_home):
     assert Path(stored["backup_dir"]).exists()
 
 
-def test_generate_uses_minimax_draft_when_valid(tmp_home, monkeypatch):
+def test_generate_uses_aux_draft_when_valid(tmp_home, monkeypatch):
     def _draft(_skill, header, _text, **_kwargs):
         return {
             "ok": True,
@@ -319,7 +363,7 @@ def test_generate_uses_minimax_draft_when_valid(tmp_home, monkeypatch):
     skill, pid = _store_scaffold_proposal(tmp_home / "skills", "mu", "# Mu\n\nThin.\n")
     stored = proposals.load_proposal(pid)
     assert stored["new_text"].startswith(f"\n## {stored['section']}\n\n")
-    assert stored["writer"] == "minimax"
+    assert stored["writer"] == "aux-section-writer"
     assert "concrete trigger" in stored["diff_before_after"]
     res = proposals.apply_proposal(pid, confirm=True)
     assert res["status"] == "applied"
@@ -670,6 +714,13 @@ def test_route_code_weaknesses_default_limit(client, tmp_home, monkeypatch):
     assert captured["limit"] == 3 and captured["max_files"] == 5
 
 
+def test_route_prune_returns_counts(client, tmp_home, monkeypatch):
+    monkeypatch.setattr(proposals, "prune_proposals", lambda: {"archived": 2, "auto_skipped": 1})
+    resp = client.post("/api/autoresearch/prune")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "archived": 2, "auto_skipped": 1}
+
+
 def test_route_apply_unknown_returns_ok_false(client, tmp_home):
     r = client.post("/api/autoresearch/apply", json={"id": "nope", "confirm": True})
     assert r.status_code == 200
@@ -796,10 +847,17 @@ def test_code_finding_veto_drops_unimportant(tmp_home, monkeypatch):
     monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="low"))
     monkeypatch.setattr(proposals, "_verify_code_finding_importance",
                         lambda *_a, **_k: {"real": False, "reason": "nitpick", "tokens": 7})
+    from hermes_cli import autoresearch_runs
+    captured = {}
+    monkeypatch.setattr(autoresearch_runs, "append_run", lambda **kwargs: captured.update(kwargs))
     res = proposals.generate_code_weakness_proposals()
     assert res["created_count"] == 0
     assert res["vetoed"] == 1
+    assert res["errors"] == []
+    assert res["vetoes"] == [{"target": "hermes_cli/model_normalize.py", "reason": "nitpick"}]
     assert res["tokens"] >= 7
+    assert captured["errors"] == 0
+    assert captured["vetoed"] == 1
 
 
 def test_code_finding_veto_keeps_important(tmp_home, monkeypatch):
@@ -1476,7 +1534,7 @@ def test_finding_proposal_carries_category_evidence_fix_hint(tmp_home, monkeypat
     assert proposal["fix_hint"] == finding["fix_hint"]
     # This is the grounded fix pipeline, not the legacy flat scaffold.
     assert proposal["proposal_type"] == "capability_research"
-    assert proposal["writer"] == "minimax-ar3-fix-writer"
+    assert proposal["writer"] == "aux-ar3-fix-writer"
     assert proposal["after_text"] == after
     # No legacy flat-scaffold placeholder marker in the produced text.
     assert "autoresearch-scaffold" not in proposal["after_text"]
