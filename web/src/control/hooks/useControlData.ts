@@ -113,14 +113,14 @@ function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<
 
 export function useAutoresearchStatus() {
   return usePolling<AutoresearchStatus>(
-    async () => parseOrThrow(AutoresearchStatusSchema, await fetchJSON<unknown>("/autoresearch/status"), "autoresearch/status"),
+    async () => parseOrThrow(AutoresearchStatusSchema, await fetchJSON<unknown>("/api/autoresearch/status"), "autoresearch/status"),
     5000,
   );
 }
 
 export function useAutoresearchRuns() {
   return usePolling<AutoresearchRunsResponse>(
-    async () => parseOrThrow(AutoresearchRunsResponseSchema, await fetchJSON<unknown>("/autoresearch/runs"), "autoresearch/runs"),
+    async () => parseOrThrow(AutoresearchRunsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/runs"), "autoresearch/runs"),
     10000,
   );
 }
@@ -130,7 +130,7 @@ export function useProposals() {
   const [busy, setBusy] = useState<string | null>(null);
   const [batchConfirmById, setBatchConfirmById] = useState<BatchConfirmById>({});
   const state = usePolling<ProposalsResponse>(
-    async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/autoresearch/proposals"), "autoresearch/proposals"),
+    async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/proposals"), "autoresearch/proposals"),
     6000,
   );
 
@@ -151,7 +151,7 @@ export function useProposals() {
   const generate = useCallback(async () => {
     setBusy("generate");
     try {
-      await fetchJSON<unknown>("/autoresearch/generate", { method: "POST" });
+      await fetchJSON<unknown>("/api/autoresearch/generate", { method: "POST" });
       log("Neue Vorschläge angefragt", "violet");
       await state.reload();
     } catch (e) {
@@ -173,7 +173,7 @@ export function useProposals() {
       const body = variant === "deep"
         ? { scope: "incremental", max_files: 40, limit: 8 }
         : { scope: variant };
-      const result = await fetchJSON<{ created_count?: number; files_seen?: number; skipped_unchanged?: number; vetoed?: number; tokens?: number }>("/autoresearch/generate-code-weaknesses", {
+      const result = await fetchJSON<{ created_count?: number; files_seen?: number; skipped_unchanged?: number; vetoed?: number; tokens?: number }>("/api/autoresearch/generate-code-weaknesses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -203,7 +203,7 @@ export function useProposals() {
       ? { status: "testing", result: "Test-Suite läuft …" }
       : { status: "applied", result: "übernommen" });
     try {
-      const result = await fetchJSON<{ ok?: boolean; status?: string; result?: string; detail?: string }>("/autoresearch/apply", {
+      const result = await fetchJSON<{ ok?: boolean; status?: string; result?: string; detail?: string }>("/api/autoresearch/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: proposal.id, confirm: true }),
@@ -229,7 +229,7 @@ export function useProposals() {
     setBusy(proposal.id);
     mutateProposal(proposal.id, { status: "skipped", result: "übersprungen" });
     try {
-      await fetchJSON<unknown>("/autoresearch/skip", {
+      await fetchJSON<unknown>("/api/autoresearch/skip", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: proposal.id }),
@@ -266,7 +266,7 @@ export function useProposals() {
       ...Object.fromEntries(selectedIds.map((id) => [id, { status: "pending" as const }])),
     }));
     try {
-      const result = await fetchJSON<BatchConfirmResponse>("/autoresearch/confirm-batch", {
+      const result = await fetchJSON<BatchConfirmResponse>("/api/autoresearch/confirm-batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: selectedIds }),

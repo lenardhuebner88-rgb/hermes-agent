@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """Read-only Autoresearch view for the live Hermes dashboard (9119).
 
-Phase 4 of the autoresearch-dashboard plan: add a ``/autoresearch`` surface to
-the existing FastAPI dashboard that answers "läuft ein Loop gerade — ja/nein?"
-plus the audit history, with **no mutation**.
+Phase 4 of the autoresearch-dashboard plan: add a ``/api/autoresearch`` surface
+to the existing FastAPI dashboard that answers "läuft ein Loop gerade —
+ja/nein?" plus the audit history.
 
 Routes registered by :func:`register_autoresearch_routes`:
 
-* ``GET  /autoresearch``         — self-contained HTML view (polls the JSON below)
-* ``GET  /autoresearch/status``  — live loop state from lock + heartbeat (OPEN)
-* ``GET  /autoresearch/audit``   — inventory counts + results history (OPEN)
-* ``POST /autoresearch/trigger`` — TOKEN-GATED; Phase 4 has no runner → 503
-* ``POST /autoresearch/stop``    — TOKEN-GATED; Phase 4 has no runner → 503
+* ``GET  /api/autoresearch``         — self-contained HTML view
+* ``GET  /api/autoresearch/status``  — live loop state from lock + heartbeat
+* ``GET  /api/autoresearch/audit``   — inventory counts + results history
+* ``POST /api/autoresearch/trigger`` — start the runner
+* ``POST /api/autoresearch/stop``    — stop the runner
 
-The GET routes are intentionally open: they are read-only and safe over the
-tailnet (the dashboard is fronted by Tailscale Serve). The POST routes require a
-local token (``HERMES_AUTORESEARCH_TOKEN``, injected at dashboard start, never
-written to vault/git/logs/HTML). Without a valid token they return **403**. In
-Phase 4 there is deliberately no runner, so even a valid token yields **503**
-(the applying runner + Trigger/Stop wiring is Phase 5).
+The routes live under ``/api/`` so the central dashboard middleware applies the
+existing auth gate: the session-token gate on loopback, and the OAuth gate on
+non-loopback requests.
 
 The runner-state contract (written by the Phase 5 runner, or by the tiny
 ``--dry-run`` heartbeat stub for UI testing) lives under::
@@ -803,7 +800,7 @@ function renderLastRun(lr,note){
 }
 async function poll(){
   try{
-    const d=await(await fetch(BASE+'/autoresearch/status',{headers:{'Accept':'application/json'}})).json();
+    const d=await(await fetch(BASE+'/api/autoresearch/status',{headers:{'Accept':'application/json'}})).json();
     setPill(d.state); running=(d.state==='running'||d.state==='stopping'); setControls();
     $('req').textContent=d.request_id||'—';
     $('step').textContent=d.last_step||'—';
@@ -831,7 +828,7 @@ async function poll(){
 }
 async function loadAudit(){
   try{
-    const d=await(await fetch(BASE+'/autoresearch/audit',{headers:{'Accept':'application/json'}})).json();
+    const d=await(await fetch(BASE+'/api/autoresearch/audit',{headers:{'Accept':'application/json'}})).json();
     const inv=d.inventory||{},pc=inv.priority_counts||{},dc=d.decision_counts||{};
     const cards=[['Iterations logged',d.results_count],['Kept',dc.keep||0],['Reverted',dc.discard||0],['Blocked',dc.blocked||0]];
     if(pc.high!=null){cards.push(['High priority',pc.high]);cards.push(['Medium',pc.medium||0]);cards.push(['Low',pc.low||0]);}
@@ -861,7 +858,7 @@ async function loadAudit(){
 }
 async function loadWorklist(){
   try{
-    gWorklist=await(await fetch(BASE+'/autoresearch/worklist',{headers:{'Accept':'application/json'}})).json();
+    gWorklist=await(await fetch(BASE+'/api/autoresearch/worklist',{headers:{'Accept':'application/json'}})).json();
   }catch(e){gWorklist={count:0,open_scaffolds:[]};}
   const items=(gWorklist.open_scaffolds||[]);
   $('worklistCount').textContent=items.length?(items.length+' offen'):'';
@@ -894,7 +891,7 @@ async function trigger(mode){
   if(mode==='apply'){if(!confirm('Apply will edit SKILL.md files under ~/.hermes/skills (backup + auto-revert on regression). Proceed?'))return;body.confirm=true;}
   toast('starting '+mode+'…');
   try{
-    const r=await fetch(BASE+'/autoresearch/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch(BASE+'/api/autoresearch/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const d=await r.json();
     if(r.ok)toast(mode+' started — '+d.request_id+' (pid '+d.pid+')','ok');
     else toast('error '+r.status+': '+(d.detail||''),'err');
@@ -903,7 +900,7 @@ async function trigger(mode){
 }
 async function stop(){
   toast('stopping…');
-  try{const d=await(await fetch(BASE+'/autoresearch/stop',{method:'POST'})).json();toast(d.detail||'stopped',d.ok?'ok':'err');}
+  try{const d=await(await fetch(BASE+'/api/autoresearch/stop',{method:'POST'})).json();toast(d.detail||'stopped',d.ok?'ok':'err');}
   catch(e){toast('stop failed: '+e,'err');}
   poll();
 }
@@ -951,14 +948,14 @@ function renderProposals(){
   $('proposalsOpen').querySelectorAll('[data-skip]').forEach(b=>b.addEventListener('click',()=>skipProposal(b.getAttribute('data-skip'))));
 }
 async function loadProposals(){
-  try{gProposals=await(await fetch(BASE+'/autoresearch/proposals',{headers:{'Accept':'application/json'}})).json();}
+  try{gProposals=await(await fetch(BASE+'/api/autoresearch/proposals',{headers:{'Accept':'application/json'}})).json();}
   catch(e){gProposals={proposals:[],open_count:0};}
   renderProposals();
 }
 async function applyProposal(id){
   toast('übernehme '+id+'…');
   try{
-    const r=await fetch(BASE+'/autoresearch/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,confirm:true})});
+    const r=await fetch(BASE+'/api/autoresearch/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,confirm:true})});
     const d=await r.json();
     if(d.ok)toast('✓ übernommen: '+id,'ok');
     else toast('nicht übernommen: '+(d.detail||d.result||r.status),'err');
@@ -966,14 +963,14 @@ async function applyProposal(id){
   loadProposals();loadAudit();loadWorklist();
 }
 async function skipProposal(id){
-  try{await fetch(BASE+'/autoresearch/skip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});toast('übersprungen: '+id,'ok');}
+  try{await fetch(BASE+'/api/autoresearch/skip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});toast('übersprungen: '+id,'ok');}
   catch(e){toast('skip fehlgeschlagen: '+e,'err');}
   loadProposals();
 }
 async function generateProposals(){
   toast('suche Verbesserungen…');
   try{
-    const d=await(await fetch(BASE+'/autoresearch/generate',{method:'POST'})).json();
+    const d=await(await fetch(BASE+'/api/autoresearch/generate',{method:'POST'})).json();
     toast(d.created_count?('✨ '+d.created_count+' neue(r) Vorschlag/Vorschläge'):'keine neuen Kandidaten gefunden',d.created_count?'ok':null);
   }catch(e){toast('generate fehlgeschlagen: '+e,'err');}
   loadProposals();
@@ -981,7 +978,7 @@ async function generateProposals(){
 async function generateCodeWeaknessProposals(){
   toast('suche Code-Schwächen…');
   try{
-    const d=await(await fetch(BASE+'/autoresearch/generate-code-weaknesses',{method:'POST'})).json();
+    const d=await(await fetch(BASE+'/api/autoresearch/generate-code-weaknesses',{method:'POST'})).json();
     toast(d.created_count?('Code: '+d.created_count+' neue(r) Vorschlag/Vorschläge'):'keine neuen Code-Funde',d.created_count?'ok':null);
   }catch(e){toast('code-finder fehlgeschlagen: '+e,'err');}
   loadProposals();
@@ -992,7 +989,7 @@ async function applyAll(){
   if(!confirm('Alle '+open.length+' offenen Skill-Vorschläge übernehmen? (Backup + Auto-Revert pro Stück)'))return;
   toast('prüfe Batch…');
   try{
-    const d=await(await fetch(BASE+'/autoresearch/confirm-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:open.map(p=>p.id),confirm:true})})).json();
+    const d=await(await fetch(BASE+'/api/autoresearch/confirm-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:open.map(p=>p.id),confirm:true})})).json();
     const applied=(d.results||[]).filter(r=>r.status==='applied').length;
     const skipped=(d.results||[]).filter(r=>r.status==='skipped').length;
     toast('Batch: '+applied+' übernommen, '+skipped+' übersprungen',applied?'ok':null);
@@ -1024,37 +1021,37 @@ def render_autoresearch_html() -> str:
 # Route registration
 # ---------------------------------------------------------------------------
 def register_autoresearch_routes(app: Any) -> None:
-    """Register the read-only /autoresearch view + token-gated POST stubs.
+    """Register the /api/autoresearch dashboard routes.
 
     Must be called before the SPA catch-all (``/{full_path:path}``) is mounted
     so these explicit paths take precedence.
     """
 
-    @app.get("/autoresearch", include_in_schema=False)
-    @app.get("/autoresearch/", include_in_schema=False)
+    @app.get("/api/autoresearch", include_in_schema=False)
+    @app.get("/api/autoresearch/", include_in_schema=False)
     async def autoresearch_view() -> HTMLResponse:
         return HTMLResponse(
             render_autoresearch_html(),
             headers={"Cache-Control": "no-store"},
         )
 
-    @app.get("/autoresearch/status")
+    @app.get("/api/autoresearch/status")
     async def autoresearch_status() -> dict[str, Any]:
         return read_runner_status()
 
-    @app.get("/autoresearch/audit")
+    @app.get("/api/autoresearch/audit")
     async def autoresearch_audit() -> dict[str, Any]:
         return read_audit()
 
-    @app.get("/autoresearch/selftest")
+    @app.get("/api/autoresearch/selftest")
     async def autoresearch_selftest() -> dict[str, Any]:
         return self_test()
 
-    @app.get("/autoresearch/worklist")
+    @app.get("/api/autoresearch/worklist")
     async def autoresearch_worklist() -> dict[str, Any]:
         return scan_open_scaffolds()
 
-    @app.post("/autoresearch/trigger")
+    @app.post("/api/autoresearch/trigger")
     async def autoresearch_trigger(body: TriggerBody) -> dict[str, Any]:
         return start_runner(
             area=body.area, focus=body.focus, mode=body.mode,
@@ -1062,27 +1059,27 @@ def register_autoresearch_routes(app: Any) -> None:
             min_use_count=body.min_use_count,
         )
 
-    @app.post("/autoresearch/stop")
+    @app.post("/api/autoresearch/stop")
     async def autoresearch_stop() -> dict[str, Any]:
         return stop_runner()
 
     # --- Sprint A1: One-Click proposals (persistent store + apply-by-id) ---
-    @app.get("/autoresearch/proposals")
+    @app.get("/api/autoresearch/proposals")
     async def autoresearch_proposals() -> dict[str, Any]:
         return _proposals.proposals_payload()
 
-    @app.post("/autoresearch/generate")
+    @app.post("/api/autoresearch/generate")
     async def autoresearch_generate() -> dict[str, Any]:
         """Deterministic (A1): discover skill-improvement candidates and persist
         them as previewable proposals. No mutation."""
         return _proposals.generate_proposals()
 
-    @app.get("/autoresearch/runs")
+    @app.get("/api/autoresearch/runs")
     async def autoresearch_runs() -> dict[str, Any]:
         """P2: recent run history (skill loops + code scans) for the ROI panel."""
         return {"schema": "autoresearch-runs-v1", "runs": _runs.read_runs()}
 
-    @app.post("/autoresearch/generate-code-weaknesses")
+    @app.post("/api/autoresearch/generate-code-weaknesses")
     async def autoresearch_generate_code_weaknesses(body: CodeWeaknessBody | None = None) -> dict[str, Any]:
         """MiniMax-backed, allowlisted code weakness finder. It only persists
         mode=code proposals; applying them uses the existing code gate.
@@ -1097,13 +1094,13 @@ def register_autoresearch_routes(app: Any) -> None:
             _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files, limit=b.limit,
         )
 
-    @app.post("/autoresearch/apply")
+    @app.post("/api/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:
         """Apply exactly one stored proposal: backup → write → eval-gate →
         keep/auto-revert. Code-mode goes through the detached test-suite gate."""
         return _proposals.apply_proposal(body.id, confirm=body.confirm)
 
-    @app.post("/autoresearch/confirm-batch")
+    @app.post("/api/autoresearch/confirm-batch")
     async def autoresearch_confirm_batch(request: Request) -> dict[str, Any]:
         """Judge each skill proposal, then delegate accepted ids to apply_proposal."""
         try:
@@ -1124,6 +1121,6 @@ def register_autoresearch_routes(app: Any) -> None:
             raise HTTPException(status_code=400, detail="body must be an id list or {ids:[...]}")
         return confirm_batch_proposals(body.ids, confirm=body.confirm)
 
-    @app.post("/autoresearch/skip")
+    @app.post("/api/autoresearch/skip")
     async def autoresearch_skip_proposal(body: SkipProposalBody) -> dict[str, Any]:
         return _proposals.skip_proposal(body.id)

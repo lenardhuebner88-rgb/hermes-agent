@@ -53,7 +53,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       const body: Record<string, unknown> = { area: area.trim() || "all", focus: focus.trim() || "recommended_sections", mode: "dry-run", confirm: false, max_iterations: clampLoopIterations(Number(maxIterations)) };
       const muc = parseMinUseCount(minUseCount);
       if (muc !== null) body.min_use_count = muc;
-      const result = await fetchJSON<{ request_id?: string; pid?: number }>("/autoresearch/trigger", {
+      const result = await fetchJSON<{ request_id?: string; pid?: number }>("/api/autoresearch/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -71,7 +71,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     setLoopBusy("stop");
     setLoopMessage(null);
     try {
-      const result = await fetchJSON<{ ok?: boolean; detail?: string }>("/autoresearch/stop", { method: "POST" });
+      const result = await fetchJSON<{ ok?: boolean; detail?: string }>("/api/autoresearch/stop", { method: "POST" });
       setLoopMessage(result.detail || "Stop-Signal gesendet");
       await status.reload();
     } catch (e) {

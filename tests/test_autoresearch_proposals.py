@@ -546,7 +546,7 @@ def test_route_code_apply_returns_testing(client, tmp_home, tmp_repo, monkeypatc
     target.write_text("v = 1\n", encoding="utf-8")
     p = proposals.build_code_proposal(target, "v = 2\n", title="t", rationale="r")
     monkeypatch.setattr(proposals, "_spawn_code_gate", lambda pid: 4242)
-    r = client.post("/autoresearch/apply", json={"id": p["id"], "confirm": True})
+    r = client.post("/api/autoresearch/apply", json={"id": p["id"], "confirm": True})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -582,22 +582,22 @@ class _RouteClient:
 def test_routes_generate_list_apply_skip(client, tmp_home, scaffold_enabled):
     _write_skill(tmp_home / "skills", "lambda", "# Lambda\n\nThin.\n")
 
-    gen = client.post("/autoresearch/generate")
+    gen = client.post("/api/autoresearch/generate")
     assert gen.status_code == 200
     assert gen.json()["created_count"] >= 1
 
-    lst = client.get("/autoresearch/proposals")
+    lst = client.get("/api/autoresearch/proposals")
     assert lst.status_code == 200
     body = lst.json()
     assert body["count"] >= 1
     ids = [p["id"] for p in body["proposals"]]
 
-    ap = client.post("/autoresearch/apply", json={"id": ids[0], "confirm": True})
+    ap = client.post("/api/autoresearch/apply", json={"id": ids[0], "confirm": True})
     assert ap.status_code == 200
     assert ap.json()["ok"] is True
     assert ap.json()["status"] == "applied"
 
-    sk = client.post("/autoresearch/skip", json={"id": ids[0]})
+    sk = client.post("/api/autoresearch/skip", json={"id": ids[0]})
     assert sk.status_code == 200
     assert sk.json()["ok"] is False
 
@@ -635,7 +635,7 @@ def test_route_generate_code_weaknesses_creates_code_proposal(client, tmp_home, 
         },
     })
 
-    gen = client.post("/autoresearch/generate-code-weaknesses")
+    gen = client.post("/api/autoresearch/generate-code-weaknesses")
     assert gen.status_code == 200
     body = gen.json()
     assert body["created_count"] == 1
@@ -656,7 +656,7 @@ def test_route_code_weaknesses_passes_deepscan_caps(client, tmp_home, monkeypatc
         return {"ok": True, "created": [], "created_count": 0}
 
     monkeypatch.setattr(proposals, "generate_code_weakness_proposals", _fake)
-    resp = client.post("/autoresearch/generate-code-weaknesses",
+    resp = client.post("/api/autoresearch/generate-code-weaknesses",
                        json={"scope": "incremental", "max_files": 40, "limit": 8})
     assert resp.status_code == 200
     assert captured == {"scope": "incremental", "max_files": 40, "limit": 8}
@@ -666,12 +666,12 @@ def test_route_code_weaknesses_default_limit(client, tmp_home, monkeypatch):
     captured = {}
     monkeypatch.setattr(proposals, "generate_code_weakness_proposals",
                         lambda **k: captured.update(k) or {"ok": True, "created": [], "created_count": 0})
-    client.post("/autoresearch/generate-code-weaknesses")
+    client.post("/api/autoresearch/generate-code-weaknesses")
     assert captured["limit"] == 3 and captured["max_files"] == 5
 
 
 def test_route_apply_unknown_returns_ok_false(client, tmp_home):
-    r = client.post("/autoresearch/apply", json={"id": "nope", "confirm": True})
+    r = client.post("/api/autoresearch/apply", json={"id": "nope", "confirm": True})
     assert r.status_code == 200
     assert r.json()["ok"] is False
 
@@ -881,7 +881,7 @@ def test_verify_importance_fail_open_on_error(tmp_home, monkeypatch):
 def test_route_runs_returns_history(client, tmp_home):
     from hermes_cli import autoresearch_runs
     autoresearch_runs.append_run(lane="code", request_id="x1", tokens=42, proposed=1)
-    resp = client.get("/autoresearch/runs")
+    resp = client.get("/api/autoresearch/runs")
     assert resp.status_code == 200
     body = resp.json()
     assert body["schema"] == "autoresearch-runs-v1"

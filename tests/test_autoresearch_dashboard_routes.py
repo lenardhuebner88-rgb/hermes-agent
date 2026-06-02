@@ -1,4 +1,4 @@
-"""Phase 4 tests: read-only /autoresearch view + token-gated POST stubs.
+"""Phase 4 tests: /api/autoresearch dashboard routes.
 
 These exercise the route layer in isolation by registering the routes on a
 minimal FastAPI app (no heavy web_server import), plus unit tests on the pure
@@ -66,7 +66,7 @@ def _write(path, payload):
 # --------------------------------------------------------------------------
 def test_status_idle_when_no_lock(client):
     cl, _view = client
-    resp = cl.get("/autoresearch/status")
+    resp = cl.get("/api/autoresearch/status")
     assert resp.status_code == 200
     body = resp.json()
     assert body["state"] == "idle"
@@ -84,7 +84,7 @@ def test_status_running_with_fresh_lock_and_heartbeat(client):
         "iteration": 2, "max": 5, "last_step": "apply", "last_eval": "keep",
         "ts": time.time(),
     })
-    body = cl.get("/autoresearch/status").json()
+    body = cl.get("/api/autoresearch/status").json()
     assert body["state"] == "running"
     assert body["pid"] == 4321
     assert body["request_id"] == "req-abc"
@@ -103,7 +103,7 @@ def test_status_crashed_with_stale_heartbeat(client):
         "iteration": 1, "max": 5, "last_step": "eval", "last_eval": "keep",
         "ts": time.time() - 99999,  # very old
     })
-    body = cl.get("/autoresearch/status").json()
+    body = cl.get("/api/autoresearch/status").json()
     assert body["state"] == "crashed"
     assert body["heartbeat_fresh"] is False
 
@@ -114,7 +114,7 @@ def test_status_stopping_when_status_declares_stopping(client):
     _write(sd / "current.lock", {"pid": 7, "request_id": "req-stop", "started_at": "x"})
     _write(sd / "current.heartbeat", {"pid": 7, "request_id": "req-stop", "iteration": 3, "max": 5, "ts": time.time()})
     _write(sd / "current.status", {"state": "stopping", "route_status": "configured"})
-    body = cl.get("/autoresearch/status").json()
+    body = cl.get("/api/autoresearch/status").json()
     assert body["state"] == "stopping"
 
 
@@ -135,13 +135,13 @@ def spawned(view, monkeypatch):
 
 def test_selftest_route_configured(client):
     cl, _view = client
-    body = cl.get("/autoresearch/selftest").json()
+    body = cl.get("/api/autoresearch/selftest").json()
     assert body["route_status"] == "configured"
 
 
 def test_trigger_dry_run_spawns_without_apply(client, spawned):
     cl, view = client
-    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "dry-run", "max_iterations": 2})
+    resp = cl.post("/api/autoresearch/trigger", json={"area": "all", "mode": "dry-run", "max_iterations": 2})
     assert resp.status_code == 200, resp.text
     d = resp.json()
     assert d["ok"] and d["mode"] == "dry-run" and d["pid"] == 99999
@@ -152,7 +152,7 @@ def test_trigger_dry_run_spawns_without_apply(client, spawned):
 
 def test_trigger_apply_requires_confirm(client, spawned):
     cl, _view = client
-    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": False})
+    resp = cl.post("/api/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": False})
     assert resp.status_code == 400
     assert "confirm" in resp.json()["detail"]
     assert "args" not in spawned  # never spawned
@@ -160,14 +160,14 @@ def test_trigger_apply_requires_confirm(client, spawned):
 
 def test_trigger_apply_with_confirm_passes_apply_flag(client, spawned):
     cl, _view = client
-    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": True})
+    resp = cl.post("/api/autoresearch/trigger", json={"area": "all", "mode": "apply", "confirm": True})
     assert resp.status_code == 200, resp.text
     assert "--apply" in spawned["args"] and "--confirm" in spawned["args"]
 
 
 def test_trigger_rejects_bad_mode(client, spawned):
     cl, _view = client
-    resp = cl.post("/autoresearch/trigger", json={"mode": "delete-everything"})
+    resp = cl.post("/api/autoresearch/trigger", json={"mode": "delete-everything"})
     assert resp.status_code == 400
 
 
@@ -176,13 +176,13 @@ def test_trigger_409_when_already_running(client, spawned):
     sd = view._state_dir_test
     _write(sd / "current.lock", {"pid": 4321, "request_id": "busy"})
     _write(sd / "current.heartbeat", {"ts": time.time()})
-    resp = cl.post("/autoresearch/trigger", json={"area": "all", "mode": "dry-run"})
+    resp = cl.post("/api/autoresearch/trigger", json={"area": "all", "mode": "dry-run"})
     assert resp.status_code == 409
 
 
 def test_stop_idle_when_nothing_running(client):
     cl, _view = client
-    d = cl.post("/autoresearch/stop").json()
+    d = cl.post("/api/autoresearch/stop").json()
     assert d["ok"] and d["state"] == "idle"
 
 
@@ -191,7 +191,7 @@ def test_stop_signals_lock_pid(client, view, monkeypatch):
     sent = {}
     monkeypatch.setattr(v, "_signal_pid", lambda pid, sig: sent.update(pid=pid, sig=sig))
     _write(v._state_dir_test / "current.lock", {"pid": 4321, "request_id": "r"})
-    d = cl.post("/autoresearch/stop").json()
+    d = cl.post("/api/autoresearch/stop").json()
     assert d["ok"] and d["signalled"] == 4321 and sent["pid"] == 4321
 
 
@@ -207,7 +207,7 @@ def test_audit_parses_results_tsv(client):
         "2026-05-29T06:05:00Z\tskills\tdevops\ttighten safety gate\tblocked\tmed\troute yellow\n",
         encoding="utf-8",
     )
-    body = cl.get("/autoresearch/audit").json()
+    body = cl.get("/api/autoresearch/audit").json()
     assert body["results_count"] == 2
     assert body["decision_counts"]["keep"] == 1
     assert body["decision_counts"]["blocked"] == 1
@@ -216,7 +216,7 @@ def test_audit_parses_results_tsv(client):
 
 def test_audit_empty_when_no_files(client):
     cl, _view = client
-    body = cl.get("/autoresearch/audit").json()
+    body = cl.get("/api/autoresearch/audit").json()
     assert body["results_count"] == 0
     assert body["results"] == []
     assert body["inventory"] is None
@@ -227,7 +227,7 @@ def test_audit_empty_when_no_files(client):
 # --------------------------------------------------------------------------
 def test_html_view_is_readonly_and_served(client):
     cl, _view = client
-    resp = cl.get("/autoresearch")
+    resp = cl.get("/api/autoresearch")
     assert resp.status_code == 200
     text = resp.text
     assert "Hermes Autoresearch" in text
@@ -238,7 +238,7 @@ def test_html_view_is_readonly_and_served(client):
 
 def test_html_view_has_operational_controls(client):
     cl, _view = client
-    text = cl.get("/autoresearch").text
+    text = cl.get("/api/autoresearch").text
     for needle in ['id="pill"', 'id="btnDry"', 'id="btnApply"', 'id="btnStop"',
                    'id="iterbar"', 'id="weakness"', 'id="metrics"', 'id="results"',
                    'id="nextstep"', 'id="worklist"', 'id="lastrun"']:
@@ -254,7 +254,7 @@ def test_worklist_lists_open_scaffolds(client):
         "TODO: document the **Output** of `x`.\n",
         encoding="utf-8",
     )
-    d = cl.get("/autoresearch/worklist").json()
+    d = cl.get("/api/autoresearch/worklist").json()
     assert d["count"] == 1
     assert d["open_scaffolds"][0]["skill"] == "x"
     assert d["open_scaffolds"][0]["section"] == "Output"
@@ -268,7 +268,7 @@ def test_worklist_skips_archived(client):
         "# Y\n\n<!-- autoresearch-scaffold: x -->\nTODO: document the **Output** of `y`.\n",
         encoding="utf-8",
     )
-    d = cl.get("/autoresearch/worklist").json()
+    d = cl.get("/api/autoresearch/worklist").json()
     assert d["count"] == 0
 
 
@@ -284,6 +284,6 @@ def test_heartbeat_stub_drives_running_then_clear(client, monkeypatch):
         request_id="stub-1", iteration=2, max_iterations=5,
         last_step="eval", last_eval="keep",
     )
-    assert cl.get("/autoresearch/status").json()["state"] == "running"
+    assert cl.get("/api/autoresearch/status").json()["state"] == "running"
     stub.clear(view._state_dir_test)
-    assert cl.get("/autoresearch/status").json()["state"] == "idle"
+    assert cl.get("/api/autoresearch/status").json()["state"] == "idle"
