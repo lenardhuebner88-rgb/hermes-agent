@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
-import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
+import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
@@ -31,6 +31,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const status = useAutoresearchStatus();
   const runs = useAutoresearchRuns();
   const deepAudit = useDeepAudit();
+  const testFoundry = useTestFoundry();
   const split = useMemo(() => splitAutoresearchProposals(store.proposals), [store.proposals]);
   const open = split.actionable;
   const reverted = split.reverted;
@@ -55,6 +56,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [deepAuditSubsystem, setDeepAuditSubsystem] = useState("");
   const [deepAuditFocus, setDeepAuditFocus] = useState("");
   const [deepAuditMessage, setDeepAuditMessage] = useState<string | null>(null);
+  const [testFoundryTarget, setTestFoundryTarget] = useState("");
+  const [testFoundryApply, setTestFoundryApply] = useState(false);
+  const [testFoundryMessage, setTestFoundryMessage] = useState<string | null>(null);
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
   const [pruneBusy, setPruneBusy] = useState(false);
@@ -63,12 +67,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
   const batchBusy = store.busy === "confirm-batch";
   const deepAuditRunning = deepAudit.status?.state === "running";
+  const testFoundryRunning = testFoundry.status?.state === "running";
 
   useEffect(() => {
     if (!deepAuditSubsystem && deepAudit.subsystems.length > 0) {
       setDeepAuditSubsystem(deepAudit.subsystems[0]);
     }
   }, [deepAudit.subsystems, deepAuditSubsystem]);
+
+  useEffect(() => {
+    if (!testFoundryTarget && testFoundry.targets.length > 0) {
+      setTestFoundryTarget(testFoundry.targets[0]);
+    }
+  }, [testFoundry.targets, testFoundryTarget]);
 
   const startLoop = async () => {
     setLoopBusy("start");
@@ -113,6 +124,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       setDeepAuditMessage(`Deep-Audit gestartet${result.request_id ? ` · ${result.request_id}` : ""}`);
     } catch (e) {
       setDeepAuditMessage(`Deep-Audit fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const startTestFoundry = async () => {
+    if (!testFoundryTarget) return;
+    setTestFoundryMessage(null);
+    try {
+      const result = await testFoundry.trigger(testFoundryTarget, testFoundryApply);
+      setTestFoundryMessage(`Test-Foundry gestartet${result.pid ? ` · PID ${result.pid}` : ""}`);
+    } catch (e) {
+      setTestFoundryMessage(`Test-Foundry fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -262,6 +284,52 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
         </div>
         <DeepAuditFindings findings={deepAudit.findings?.findings ?? []} proposals={deepAudit.findings?.proposals ?? []} />
+      </section>
+
+      <section className="hc-card p-4 sm:p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1 space-y-3">
+            <div>
+              <p className="hc-eyebrow">Test-Foundry</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Mutation-Test-Härtung</h2>
+              <p className="mt-1 max-w-2xl text-sm hc-soft">Härtet die Test-Suite via Mutation-Testing; Läufe können einige Minuten dauern.</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Metric label="Status" value={testFoundry.status?.state ?? (testFoundry.loading ? "lädt" : "idle")} />
+              <Metric label="Target" value={testFoundry.status?.target ?? (testFoundryTarget || "-")} />
+              <Metric label="PID" value={testFoundry.status?.pid ? String(testFoundry.status.pid) : "-"} />
+            </div>
+            <ToneCallout tone={testFoundryApply ? "amber" : "cyan"}>
+              {testFoundryApply
+                ? "Auto-Apply ist an: validierte Tests werden auf dem separaten Branch f-test-foundry committet, nie auf main."
+                : "Auto-Apply ist aus: Test-Foundry erzeugt nur Vorschläge in der Queue."}
+            </ToneCallout>
+            {testFoundry.error ? <ToneCallout tone="red">{testFoundry.error}</ToneCallout> : null}
+            {testFoundryMessage ? <ToneCallout tone={testFoundryMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{testFoundryMessage}</ToneCallout> : null}
+          </div>
+          <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
+            <select id="test-foundry-target" value={testFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+              {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+            </select>
+            <TestHardeningSlotPicker />
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 bg-black/20 p-2 text-sm text-white">
+              <input
+                type="checkbox"
+                checked={testFoundryApply}
+                onChange={(event) => setTestFoundryApply(event.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--hc-accent)]"
+              />
+              <span>
+                <span className="block font-medium">Auto-Apply</span>
+                <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
+              </span>
+            </label>
+            <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !testFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+              Test-Foundry starten
+            </Button>
+          </div>
+        </div>
       </section>
 
       <section className="hc-card p-4 sm:p-5">
@@ -677,6 +745,77 @@ function CodeAuditSlotPicker() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ scope: "auxiliary", task: "code_audit", provider, model }),
+              });
+              await loadAux();
+              setRefreshKey((value) => value + 1);
+            } finally {
+              setSaving(false);
+            }
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function TestHardeningSlotPicker() {
+  const [aux, setAux] = useState<AuxiliaryModelsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadAux = async () => {
+    setLoading(true);
+    try {
+      setAux(await fetchJSON<AuxiliaryModelsResponse>("/api/model/auxiliary"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAux();
+  }, []);
+
+  const assignment = aux?.tasks.find((item) => item.task === "test_hardening") ?? null;
+  const value = !assignment?.provider || assignment.provider === "auto" ? de.autoresearch.laneModelAuto : `${assignment.provider}${assignment.model ? ` · ${assignment.model}` : ""}`;
+
+  const loadOptionsForPicker = async (): Promise<ModelOptionsResponse> => {
+    const options = await fetchJSON<ModelOptionsResponse>("/api/model/options");
+    if (!assignment?.provider || assignment.provider === "auto") return options;
+    return {
+      ...options,
+      provider: assignment.provider,
+      model: assignment.model,
+      providers: options.providers?.map((provider) => ({ ...provider, is_current: provider.slug === assignment.provider })),
+    };
+  };
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-2">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs hc-soft">Modell</span>
+        {loading ? <Spinner /> : <StatusPill tone={!assignment?.provider || assignment.provider === "auto" ? "zinc" : "cyan"} label="test_hardening" />}
+      </div>
+      <p className="hc-mono truncate text-xs hc-soft" title={value}>{value}</p>
+      <Button outlined className="hc-hit mt-2 w-full" onClick={() => setPickerOpen(true)} disabled={loading || saving} prefix={saving ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
+        {de.autoresearch.laneModelChange}
+      </Button>
+      {pickerOpen ? (
+        <ModelPickerDialog
+          key={`test-hardening-${refreshKey}`}
+          loader={loadOptionsForPicker}
+          alwaysGlobal
+          title={de.autoresearch.laneModelPickerTitle("Test-Foundry")}
+          onApply={async ({ provider, model }) => {
+            setSaving(true);
+            try {
+              await fetchJSON<unknown>("/api/model/auxiliary", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scope: "auxiliary", task: "test_hardening", provider, model }),
               });
               await loadAux();
               setRefreshKey((value) => value + 1);

@@ -65,6 +65,24 @@ export interface DeepAuditFindingsResponse {
   files: string[];
 }
 
+export interface TestFoundryStatus {
+  schema?: string;
+  state: "idle" | "running" | "error";
+  pid: number | null;
+  target: string | null;
+  started_at: string | null;
+  last_run: unknown | null;
+}
+
+export interface TestFoundryTargetsResponse {
+  schema?: string;
+  targets: string[];
+}
+
+export function testFoundryStatusPollIntervalMs(status: TestFoundryStatus | null): number | null {
+  return status?.state === "running" ? 5000 : null;
+}
+
 type LoadState<T> = {
   data: T | null;
   error: string | null;
@@ -404,6 +422,81 @@ export function useDeepAudit() {
   }, [reload]);
 
   return { status, findings, subsystems, loading, busy, error, reload, trigger };
+}
+
+export function useTestFoundry() {
+  const [status, setStatus] = useState<TestFoundryStatus | null>(null);
+  const [targets, setTargets] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const loadStatus = useCallback(async () => {
+    const data = await fetchJSON<TestFoundryStatus>("/api/autoresearch/test-foundry/status");
+    if (aliveRef.current) setStatus(data);
+    return data;
+  }, []);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      await loadStatus();
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [loadStatus]);
+
+  useEffect(() => {
+    const loadInitial = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [targetData] = await Promise.all([
+          fetchJSON<TestFoundryTargetsResponse>("/api/autoresearch/test-foundry/targets"),
+          reload(),
+        ]);
+        if (aliveRef.current) setTargets(targetData.targets ?? []);
+      } catch (e) {
+        if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (aliveRef.current) setLoading(false);
+      }
+    };
+    void loadInitial();
+  }, [reload]);
+
+  const pollIntervalMs = testFoundryStatusPollIntervalMs(status);
+  useEffect(() => {
+    if (pollIntervalMs === null) return;
+    const timer = window.setInterval(() => {
+      void reload();
+    }, pollIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [pollIntervalMs, reload]);
+
+  const trigger = useCallback(async (target: string, apply: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await fetchJSON<{ ok?: boolean; pid?: number; target?: string }>("/api/autoresearch/test-foundry/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target, apply }),
+      });
+      await reload();
+      return result;
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      setError(detail);
+      throw e;
+    } finally {
+      setBusy(false);
+    }
+  }, [reload]);
+
+  return { status, targets, loading, busy, error, reload, trigger };
 }
 
 export function useHermesWorkers() {

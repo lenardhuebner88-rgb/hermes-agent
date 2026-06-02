@@ -1,4 +1,5 @@
 import { Check, ShieldAlert, X } from "lucide-react";
+import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
@@ -36,6 +37,7 @@ function proposalTitle(proposal: Proposal): string {
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
+  const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
   const isTesting = proposal.status === "testing";
   const isDone = proposal.status === "applied" || proposal.status === "skipped";
   const isReverted = proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
@@ -49,7 +51,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <ModeBadge mode={proposal.mode} />
+            {isTestHardening ? <Badge tone="success">Test-Härtung</Badge> : <ModeBadge mode={proposal.mode === "code" ? "code" : "skill"} />}
             <StatusPill tone={severityTone(severity)} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
             {category ? <StatusPill tone="cyan" label={`${de.autoresearch.category}: ${category}`} /> : null}
             {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}

@@ -115,4 +115,22 @@ describe("ProposalCard", () => {
     expect(html).toContain(de.autoresearch.fixDiff);
     expect(html).toContain("secret = vault()");
   });
+
+  it("labels mutation-test proposals as test hardening", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "tf1",
+          target: "hermes_cli/kanban_db.py",
+          mode: "test",
+          proposal_type: "mutation_test",
+          category: "mutation_survivor",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+    expect(html).toContain("Test-Härtung");
+  });
 });

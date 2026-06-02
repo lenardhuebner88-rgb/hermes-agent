@@ -10,6 +10,11 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(runLaneTone("deep-audit")).toBe("amber");
   });
 
+  it("keeps the test-foundry run label and tone", () => {
+    expect(runLaneLabel("test")).toBe("Test-Foundry");
+    expect(runLaneTone("test")).toBe("emerald");
+  });
+
   it("renders structured findings with fileline, evidence, and proposal count", () => {
     const finding: DeepAuditFinding = {
       fileline: "hermes_cli/autoresearch_runs.py:23",

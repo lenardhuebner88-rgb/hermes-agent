@@ -201,7 +201,7 @@ export interface AutoresearchRunsResponse {
   runs: AutoresearchRun[];
 }
 
-export type ProposalMode = "skill" | "code";
+export type ProposalMode = "skill" | "code" | "test";
 export type ProposalStatus = "proposed" | "testing" | "applied" | "skipped";
 export type ProposalSeverity = "critical" | "high" | "medium" | "low";
 export type ProposalLastOutcome = "applied" | "reverted_no_improvement" | null;
@@ -232,6 +232,7 @@ export interface Proposal {
   severity?: ProposalSeverity | null;
   evidence?: string | null;
   new_text?: string | null;
+  proposal_type?: string | null;
   rationale_plain: string;
   diff_before_after: string;
   rank_score?: number | null;

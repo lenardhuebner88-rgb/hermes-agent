@@ -55,6 +55,23 @@ describe("ProposalsResponseSchema (A3 code gate)", () => {
 });
 
 
+describe("ProposalsResponseSchema (Test-Foundry)", () => {
+  it("preserves mutation-test proposals in the test lane", () => {
+    const raw = {
+      count: 1, open_count: 1,
+      proposals: [{
+        id: "test-foundry-1", target: "hermes_cli/kanban_db.py", section: null,
+        rationale_plain: "A mutation survived the suite.", diff_before_after: "- x\n+ y",
+        mode: "test", proposal_type: "mutation_test", status: "proposed",
+      }],
+    };
+    const parsed = parseOrThrow(ProposalsResponseSchema, raw, "proposals");
+    expect(parsed.proposals[0].mode).toBe("test");
+    expect(parsed.proposals[0].proposal_type).toBe("mutation_test");
+  });
+});
+
+
 describe("ProposalsResponseSchema (Track-C category/evidence)", () => {
   it("preserves category and verbatim evidence on a proposal", () => {
     const raw = {
