@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Square, Target, X } from "lucide-react";
+import { Archive, CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Settings2, Square, Target, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
+import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
+import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
@@ -16,6 +18,14 @@ import { StatusPill, ToneCallout } from "../components/atoms";
 import { ProposalCard } from "../components/ProposalCard";
 
 type ProposalStore = ReturnType<typeof useProposals>;
+type LaneModelSlot = "skills_hub" | "code_audit" | "test_hardening";
+type PruneMessage = { tone: "emerald" | "amber" | "red"; text: string };
+
+const LANE_MODEL_SLOTS: readonly { task: LaneModelSlot; lane: string; label: string; hint: string }[] = [
+  { task: "skills_hub", lane: "Skill+Code", label: "Skills Hub", hint: "Skill- und Code-Lane" },
+  { task: "code_audit", lane: "Deep-Audit", label: "Code Audit", hint: "Deep-Audit-Lane" },
+  { task: "test_hardening", lane: "Test-Foundry", label: "Test Hardening", hint: "Test-Foundry-Lane" },
+];
 
 export function AutoresearchView({ density, store }: { density: Density; store: ProposalStore }) {
   const status = useAutoresearchStatus();
@@ -43,6 +53,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [codeWeaknessScope, setCodeWeaknessScope] = useState<CodeWeaknessScope>("incremental");
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
+  const [pruneBusy, setPruneBusy] = useState(false);
+  const [pruneMessage, setPruneMessage] = useState<PruneMessage | null>(null);
+  const [bulkRevertedBusy, setBulkRevertedBusy] = useState(false);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
   const batchBusy = store.busy === "confirm-batch";
 
@@ -118,6 +131,35 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     await store.confirmBatch(selectedIds);
   };
 
+  const pruneAutoresearch = async () => {
+    setPruneBusy(true);
+    setPruneMessage(null);
+    try {
+      const result = await fetchJSON<{ ok?: boolean; archived?: number; auto_skipped?: number; detail?: string }>("/api/autoresearch/prune", { method: "POST" });
+      setPruneMessage({
+        tone: result.ok === false ? "amber" : "emerald",
+        text: de.autoresearch.pruneResult(result.archived ?? 0, result.auto_skipped ?? 0),
+      });
+      await Promise.all([store.reload(), runs.reload()]);
+    } catch (e) {
+      setPruneMessage({ tone: "red", text: `${de.autoresearch.pruneFailed}: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setPruneBusy(false);
+    }
+  };
+
+  const skipAllReverted = async () => {
+    if (reverted.length === 0) return;
+    setBulkRevertedBusy(true);
+    try {
+      for (const proposal of reverted) {
+        await store.skip(proposal);
+      }
+    } finally {
+      setBulkRevertedBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <section className="hc-card p-4 sm:p-5">
@@ -157,9 +199,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} title={de.autoresearch.applyAllHint} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
               {de.autoresearch.applyAll} ({store.openSkillProposals.length})
             </Button>
+            <Button outlined className="hc-hit" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
+              {de.autoresearch.prune}
+            </Button>
           </div>
         </div>
       </section>
+
+      {pruneMessage ? <ToneCallout tone={pruneMessage.tone}>{pruneMessage.text}</ToneCallout> : null}
+
+      <LaneModelPanel />
 
       <section className="hc-card p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -286,7 +335,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {reverted.length > 0 ? (
         <details className="space-y-3 border-t border-white/10 pt-4">
           <summary className="cursor-pointer text-lg font-semibold text-white" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedSummary(reverted.length)}</summary>
-          <p className="mt-1 text-sm hc-soft">{de.autoresearch.revertedExplain}</p>
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm hc-soft">{de.autoresearch.revertedExplain}</p>
+            <Button outlined className="hc-hit" onClick={() => void skipAllReverted()} disabled={!!store.busy || bulkRevertedBusy} prefix={bulkRevertedBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
+              {de.autoresearch.skipAllReverted}
+            </Button>
+          </div>
           <div className="mt-3 grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
         </details>
       ) : null}
@@ -299,7 +353,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         <details className="space-y-3"><summary className="cursor-pointer text-lg font-semibold text-white">Übersprungen ({skipped.length})</summary><div className="mt-3 grid gap-3">{skipped.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div></details>
       ) : null}
 
-      <RecentRuns runs={runs.data?.runs ?? []} />
+      <RecentRuns runs={runs.data?.runs ?? []} proposals={store.proposals} />
 
       <section className="hc-card p-4">
         <h2 className="mb-3 text-base font-semibold text-white">{de.autoresearch.activity}</h2>
@@ -311,6 +365,104 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2"><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold text-white">{value}</p></div>;
+}
+
+function LaneModelPanel() {
+  const [aux, setAux] = useState<AuxiliaryModelsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [pickerTask, setPickerTask] = useState<LaneModelSlot | null>(null);
+  const [savingTask, setSavingTask] = useState<LaneModelSlot | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadAux = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setAux(await fetchJSON<AuxiliaryModelsResponse>("/api/model/auxiliary"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAux();
+  }, []);
+
+  const assignmentFor = (task: LaneModelSlot) => aux?.tasks.find((item) => item.task === task) ?? null;
+  const pickerSlot = pickerTask ? LANE_MODEL_SLOTS.find((slot) => slot.task === pickerTask) ?? null : null;
+
+  const loadOptionsForPicker = async (): Promise<ModelOptionsResponse> => {
+    const options = await fetchJSON<ModelOptionsResponse>("/api/model/options");
+    const current = pickerTask ? assignmentFor(pickerTask) : null;
+    if (!current?.provider || current.provider === "auto") return options;
+    return {
+      ...options,
+      provider: current.provider,
+      model: current.model,
+      providers: options.providers?.map((provider) => ({ ...provider, is_current: provider.slug === current.provider })),
+    };
+  };
+
+  return (
+    <section className="hc-card p-4 sm:p-5">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="hc-eyebrow">{de.autoresearch.laneModelsEyebrow}</p>
+          <h2 className="text-base font-semibold text-white">{de.autoresearch.laneModelsHeading}</h2>
+        </div>
+        {loading ? <Spinner /> : null}
+      </div>
+      {error ? <ToneCallout tone="red">{de.autoresearch.laneModelsFailed}: {error}</ToneCallout> : null}
+      <div className="grid gap-3 md:grid-cols-3">
+        {LANE_MODEL_SLOTS.map((slot) => {
+          const assignment = assignmentFor(slot.task);
+          const isAuto = !assignment?.provider || assignment.provider === "auto";
+          const value = isAuto ? de.autoresearch.laneModelAuto : `${assignment?.provider}${assignment?.model ? ` · ${assignment.model}` : ""}`;
+          return (
+            <div key={slot.task} className="rounded-lg border border-white/10 bg-white/[.03] p-3">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-1.5 text-sm font-semibold text-white"><Settings2 className="h-3.5 w-3.5" />{slot.lane}</p>
+                  <p className="mt-1 text-xs hc-dim">{slot.hint}</p>
+                </div>
+                <StatusPill tone={isAuto ? "zinc" : "cyan"} label={isAuto ? "Auto" : slot.label} />
+              </div>
+              <p className="hc-mono min-h-5 truncate text-xs hc-soft" title={value}>{value}</p>
+              <Button outlined className="hc-hit mt-3 w-full" onClick={() => setPickerTask(slot.task)} disabled={loading || !!savingTask} prefix={savingTask === slot.task ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
+                {de.autoresearch.laneModelChange}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+      {pickerTask && pickerSlot ? (
+        <ModelPickerDialog
+          key={`${pickerTask}-${refreshKey}`}
+          loader={loadOptionsForPicker}
+          alwaysGlobal
+          title={de.autoresearch.laneModelPickerTitle(pickerSlot.lane)}
+          onApply={async ({ provider, model }) => {
+            setSavingTask(pickerTask);
+            try {
+              await fetchJSON<unknown>("/api/model/auxiliary", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scope: "auxiliary", task: pickerTask, provider, model }),
+              });
+              await loadAux();
+              setRefreshKey((value) => value + 1);
+            } finally {
+              setSavingTask(null);
+            }
+          }}
+          onClose={() => setPickerTask(null)}
+        />
+      ) : null}
+    </section>
+  );
 }
 
 // Live, plain-language readback of the targeting inputs so the operator sees in
@@ -385,9 +537,10 @@ function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
   return <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft">{icon}<span>{text}</span></div>;
 }
 
-function RecentRuns({ runs }: { runs: AutoresearchRun[] }) {
+function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: ProposalStore["proposals"] }) {
   const totalTokens = sumRunTokens(runs);
   const recent = summarizeRecentRuns(runs, 7);
+  const proposalRoi = summarizeProposalRoi(proposals, recent.tokens);
   return (
     <section className="hc-card p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -396,6 +549,9 @@ function RecentRuns({ runs }: { runs: AutoresearchRun[] }) {
           <p className="mt-1 text-xs hc-soft" title={de.autoresearch.roi7dAcceptedNote}>
             <span className="text-white">{de.autoresearch.roi7dHeading}:</span>{" "}
             {recent.runs > 0 ? de.autoresearch.roi7dLine(recent.runs, recent.tokens, recent.proposed, recent.scanned) : de.autoresearch.roi7dEmpty}
+          </p>
+          <p className="mt-1 text-xs hc-soft">
+            {de.autoresearch.roi7dAcceptedLine(proposalRoi.acceptanceRate, proposalRoi.applied, proposalRoi.decided, proposalRoi.tokensPerApplied)}
           </p>
         </div>
         {totalTokens > 0 ? <span className="hc-mono text-xs hc-soft">{de.autoresearch.runsTokensTotal}: {totalTokens.toLocaleString("de-DE")}</span> : null}
@@ -412,20 +568,30 @@ function RecentRuns({ runs }: { runs: AutoresearchRun[] }) {
                 <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColTokens}</th>
                 <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColProposed}</th>
                 <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColScanned}</th>
-                <th className="py-1 text-right font-medium">{de.autoresearch.runsColErrors}</th>
+                <th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColErrors}</th>
+                <th className="py-1 text-right font-medium">{de.autoresearch.runsColVetoed}</th>
               </tr>
             </thead>
             <tbody className="hc-soft">
-              {runs.map((run, i) => (
-                <tr key={`${run.at}-${run.request_id ?? i}`} className="border-b border-white/5 last:border-0">
-                  <td className="py-1 pr-3 hc-mono text-xs">{formatRunTime(run.at)}</td>
-                  <td className="py-1 pr-3"><StatusPill tone={runLaneTone(run.lane)} label={runLaneLabel(run.lane)} /></td>
-                  <td className="py-1 pr-3 text-right hc-mono">{run.tokens ? run.tokens.toLocaleString("de-DE") : "—"}</td>
-                  <td className="py-1 pr-3 text-right hc-mono">{run.proposed}</td>
-                  <td className="py-1 pr-3 text-right hc-mono">{run.scanned}</td>
-                  <td className={cn("py-1 text-right hc-mono", run.errors > 0 ? "text-red-300" : "")}>{run.errors}</td>
-                </tr>
-              ))}
+              {runs.map((run, i) => {
+                const model = runModelLabel(run);
+                return (
+                  <tr key={`${run.at}-${run.request_id ?? i}`} className="border-b border-white/5 last:border-0">
+                    <td className="py-1 pr-3 hc-mono text-xs">{formatRunTime(run.at)}</td>
+                    <td className="py-1 pr-3">
+                      <div className="flex min-w-40 flex-wrap items-center gap-1.5">
+                        <StatusPill tone={runLaneTone(run.lane)} label={runLaneLabel(run.lane)} />
+                        {model ? <span className="max-w-52 truncate rounded-full border border-zinc-600/25 bg-zinc-600/10 px-2 py-1 text-xs text-zinc-200" title={model}>{model}</span> : null}
+                      </div>
+                    </td>
+                    <td className="py-1 pr-3 text-right hc-mono">{run.tokens ? run.tokens.toLocaleString("de-DE") : "—"}</td>
+                    <td className="py-1 pr-3 text-right hc-mono">{run.proposed}</td>
+                    <td className="py-1 pr-3 text-right hc-mono">{run.scanned}</td>
+                    <td className={cn("py-1 pr-3 text-right hc-mono", run.errors > 0 ? "text-red-300" : "")}>{run.errors}</td>
+                    <td className="py-1 text-right hc-mono text-zinc-300">{runVetoedCount(run)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

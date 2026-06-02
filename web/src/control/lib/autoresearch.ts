@@ -321,13 +321,36 @@ export function sumRunTokens(runs: readonly AutoresearchRun[]): number {
   return runs.reduce((acc, r) => acc + (Number.isFinite(r.tokens) ? r.tokens : 0), 0);
 }
 
+const RUN_LANE_LABEL: Record<AutoresearchRun["lane"], string> = {
+  code: "Code",
+  skill: "Skills",
+  "deep-audit": "Deep-Audit",
+  test: "Test-Foundry",
+};
+
+const RUN_LANE_TONE: Record<AutoresearchRun["lane"], ToneName> = {
+  code: "violet",
+  skill: "cyan",
+  "deep-audit": "amber",
+  test: "emerald",
+};
+
 /** Human label + tone for a run lane. */
 export function runLaneLabel(lane: AutoresearchRun["lane"]): string {
-  return lane === "code" ? "Code" : "Skills";
+  return RUN_LANE_LABEL[lane] ?? "Skills";
 }
 
 export function runLaneTone(lane: AutoresearchRun["lane"]): ToneName {
-  return lane === "code" ? "violet" : "cyan";
+  return RUN_LANE_TONE[lane] ?? "cyan";
+}
+
+export function runVetoedCount(run: Pick<AutoresearchRun, "vetoed">): number {
+  return typeof run.vetoed === "number" && Number.isFinite(run.vetoed) ? Math.max(0, Math.round(run.vetoed)) : 0;
+}
+
+export function runModelLabel(run: Pick<AutoresearchRun, "model">): string | null {
+  const model = run.model?.trim();
+  return model ? model : null;
 }
 
 /**
@@ -385,12 +408,46 @@ export interface RecentRunsSummary {
   scanned: number;
 }
 
+export interface ProposalRoiSummary {
+  applied: number;
+  skipped: number;
+  reverted: number;
+  decided: number;
+  acceptanceRate: number | null;
+  tokensPerApplied: number | null;
+}
+
+export function proposalAgeDays(proposal: Proposal, now: number = Date.now()): number | null {
+  const created = proposalCreatedAt(proposal);
+  if (!Number.isFinite(created) || created <= 0) return null;
+  const createdMs = created < 1_000_000_000_000 ? created * 1000 : created;
+  const age = Math.floor((now - createdMs) / (24 * 60 * 60 * 1000));
+  return Number.isFinite(age) && age >= 0 ? age : null;
+}
+
+export function summarizeProposalRoi(proposals: Proposal[], tokens: number): ProposalRoiSummary {
+  const split = splitAutoresearchProposals(proposals);
+  const applied = split.applied.length;
+  const skipped = split.skipped.length;
+  const reverted = split.reverted.length;
+  const decided = applied + skipped + reverted;
+  const safeTokens = Number.isFinite(tokens) && tokens > 0 ? tokens : 0;
+  return {
+    applied,
+    skipped,
+    reverted,
+    decided,
+    acceptanceRate: decided > 0 ? applied / decided : null,
+    tokensPerApplied: applied > 0 ? safeTokens / applied : null,
+  };
+}
+
 /**
  * Aggregate the runs whose `at` falls within the last `days` (default 7),
  * computed client-side from the already-polled runs[]. `now` is injectable for
  * deterministic tests. Runs with an unparseable/empty `at` are excluded; the
- * same finite guards as sumRunTokens apply per field. Accepted-count is NOT
- * summarized here — it is not persisted per run (backend follow-up).
+ * same finite guards as sumRunTokens apply per field. Proposal acceptance is
+ * summarized separately from the current proposal store, not per run.
  */
 export function summarizeRecentRuns(runs: readonly AutoresearchRun[], days = 7, now: number = Date.now()): RecentRunsSummary {
   const cutoff = now - days * 24 * 60 * 60 * 1000;

@@ -151,6 +151,7 @@ export const de = {
     runsColTokens: "Tokens",
     runsColProposed: "Vorschläge",
     runsColErrors: "Fehler",
+    runsColVetoed: "verworfen",
     runsColScanned: "geprüft",
     runsTokensTotal: "MiniMax-Tokens gesamt",
     // A1 — "Warum 0" im Idle-Zustand
@@ -161,11 +162,28 @@ export const de = {
     revertedExplain: "Automatisch übernommen, getestet, keine Verbesserung — sauber zurückgerollt. Nichts kaputt.",
     revertedSummary: (n: number) => `Zurückgerollt (${n})`,
     revertedCount: (n: number) => `${n} zurückgerollt`,
+    skipAllReverted: "Alle zurückgerollten verwerfen",
+    ageDays: (n: number) => `vor ${n} ${n === 1 ? "Tag" : "Tagen"}`,
     // A3 — ROI „Letzte 7 Tage"
     roi7dHeading: "Letzte 7 Tage",
     roi7dLine: (runs: number, tokens: number, proposed: number, scanned: number) => `${runs} ${runs === 1 ? "Lauf" : "Läufe"} · ${tokens.toLocaleString("de-DE")} Tokens · ${proposed} Vorschläge · ${scanned} gescannt`,
     roi7dEmpty: "Keine Läufe in den letzten 7 Tagen.",
-    roi7dAcceptedNote: "Übernahme-Quote folgt (noch nicht pro Lauf persistiert).",
+    roi7dAcceptedNote: "Übernahme-Quote aus aktuellen Proposal-Status; Tokens aus den Läufen der letzten 7 Tage.",
+    roi7dAcceptedLine: (rate: number | null, applied: number, decided: number, tokensPerApplied: number | null) => {
+      const quote = rate === null ? "n/v" : `${Math.round(rate * 100)}%`;
+      const tokens = tokensPerApplied === null ? "n/v" : Math.round(tokensPerApplied).toLocaleString("de-DE");
+      return `Übernahme-Quote ${quote} (${applied}/${decided}) · ${tokens} Tokens pro übernommenem Proposal`;
+    },
+    prune: "Aufräumen",
+    pruneHint: "Archiviert erledigte Einträge und verwirft alte offene Vorschläge nach Backend-Regeln.",
+    pruneResult: (archived: number, autoSkipped: number) => `Aufgeräumt: ${archived} archiviert · ${autoSkipped} automatisch verworfen`,
+    pruneFailed: "Aufräumen fehlgeschlagen",
+    laneModelsEyebrow: "Lane-Modelle",
+    laneModelsHeading: "Modelle pro Autoresearch-Lane",
+    laneModelsFailed: "Modell-Zuweisungen konnten nicht geladen werden",
+    laneModelAuto: "Auto (Hauptmodell)",
+    laneModelChange: "Modell ändern",
+    laneModelPickerTitle: (lane: string) => `Modell für ${lane}`,
     // B — konsolidierter Code-Scan-Button + Umfang-Schalter
     scanButton: "Code-Schwächen finden",
     scanScopeChanged: "Geändert",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeRecentRuns, toggleProposalSelection, sumRunTokens, runLaneLabel, runLaneTone, formatRunTime } from "./autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, proposalAgeDays, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -8,8 +8,9 @@ const base: AutoresearchStatus = {
   heartbeat_age_s: null, heartbeat_fresh: false, last_receipt: null, last_run: null, note: null,
 };
 
-function proposal(overrides: Partial<Proposal> & Pick<Proposal, "id" | "target">): Proposal {
+function proposal(overrides: Partial<Proposal> & Pick<Proposal, "id">): Proposal {
   return {
+    target: "skill/foo",
     section: null,
     title: null,
     rationale_plain: "",
@@ -259,8 +260,20 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
   it("runLaneLabel / runLaneTone map lane to label + tone", () => {
     expect(runLaneLabel("code")).toBe("Code");
     expect(runLaneLabel("skill")).toBe("Skills");
+    expect(runLaneLabel("deep-audit")).toBe("Deep-Audit");
+    expect(runLaneLabel("test")).toBe("Test-Foundry");
     expect(runLaneTone("code")).toBe("violet");
     expect(runLaneTone("skill")).toBe("cyan");
+    expect(runLaneTone("deep-audit")).toBe("amber");
+    expect(runLaneTone("test")).toBe("emerald");
+  });
+
+  it("runVetoedCount and runModelLabel keep missing fields backward-compatible", () => {
+    expect(runVetoedCount(run())).toBe(0);
+    expect(runVetoedCount(run({ vetoed: 2 }))).toBe(2);
+    expect(runVetoedCount(run({ vetoed: NaN }))).toBe(0);
+    expect(runModelLabel(run())).toBeNull();
+    expect(runModelLabel(run({ model: "  minimax/m1  " }))).toBe("minimax/m1");
   });
 
   it("formatRunTime returns '—' for empty/invalid and a string for valid ISO", () => {
@@ -296,6 +309,32 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
     expect(summarizeRecentRuns([atNow, eightDaysAgo], 7, now).runs).toBe(1);
     const twoDaysAgo = run({ at: new Date(now - 2 * day).toISOString(), tokens: 1 });
     expect(summarizeRecentRuns([atNow, twoDaysAgo], 1, now).runs).toBe(1); // days=1 drops the 2-day-old run
+  });
+
+  it("summarizeProposalRoi calculates acceptance rate and tokens per applied proposal", () => {
+    const proposals = [
+      proposal({ id: "a", status: "applied" }),
+      proposal({ id: "s", status: "skipped" }),
+      proposal({ id: "r", status: "proposed", last_outcome: "reverted_no_improvement" }),
+      proposal({ id: "o", status: "proposed" }),
+    ];
+    expect(summarizeProposalRoi(proposals, 900)).toEqual({
+      applied: 1,
+      skipped: 1,
+      reverted: 1,
+      decided: 3,
+      acceptanceRate: 1 / 3,
+      tokensPerApplied: 900,
+    });
+    expect(summarizeProposalRoi([], 900).acceptanceRate).toBeNull();
+    expect(summarizeProposalRoi([proposal({ id: "s2", status: "skipped" })], 900).tokensPerApplied).toBeNull();
+  });
+
+  it("proposalAgeDays handles ISO strings, epoch seconds, and missing values", () => {
+    const now = Date.parse("2026-06-03T12:00:00Z");
+    expect(proposalAgeDays(proposal({ id: "age-iso", created_at: "2026-06-01T12:00:00Z" }), now)).toBe(2);
+    expect(proposalAgeDays(proposal({ id: "age-seconds", created_at: Date.parse("2026-06-02T12:00:00Z") / 1000 }), now)).toBe(1);
+    expect(proposalAgeDays(proposal({ id: "age-missing", created_at: null }), now)).toBeNull();
   });
 
   it("codeWeaknessBusyKey matches the generateCodeWeaknesses handler contract", () => {

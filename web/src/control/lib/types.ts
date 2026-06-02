@@ -186,12 +186,14 @@ export interface AutoresearchStatus {
 
 export interface AutoresearchRun {
   at: string;
-  lane: "skill" | "code";
+  lane: "skill" | "code" | "deep-audit" | "test";
   request_id: string | null;
   tokens: number;
   proposed: number;
   errors: number;
+  vetoed?: number;
   scanned: number;
+  model?: string | null;
 }
 
 export interface AutoresearchRunsResponse {

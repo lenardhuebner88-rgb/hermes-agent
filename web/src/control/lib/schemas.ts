@@ -205,12 +205,14 @@ export const AutoresearchStatusSchema = z.object({
 
 export const AutoresearchRunSchema = z.object({
   at: z.string().catch(""),
-  lane: z.enum(["skill", "code"]).catch("skill"),
+  lane: z.enum(["skill", "code", "deep-audit", "test"]).catch("skill"),
   request_id: z.string().nullable().catch(null),
   tokens: z.coerce.number().catch(0),
   proposed: z.coerce.number().catch(0),
   errors: z.coerce.number().catch(0),
+  vetoed: z.coerce.number().catch(0).optional(),
   scanned: z.coerce.number().catch(0),
+  model: z.string().nullable().catch(null).optional(),
 });
 
 export const AutoresearchRunsResponseSchema = z.object({

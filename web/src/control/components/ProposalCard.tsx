@@ -4,7 +4,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
-import { getProposalSeverity, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
+import { getProposalSeverity, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
 import type { Density } from "../hooks/useDensity";
 import type { Proposal, ProposalSeverity } from "../lib/types";
 import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
@@ -43,6 +43,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const category = proposal.category?.trim();
   const severity = getProposalSeverity(proposal);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
+  const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   return (
     <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -57,6 +58,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
             {batchStatus?.status === "fail" ? <StatusPill tone="red" label={de.autoresearch.batchFail} /> : null}
             {isTesting ? <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200"><Spinner />{de.autoresearch.testing}</span> : null}
             {isReverted ? <span className="rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2 py-0.5 text-xs text-zinc-200">Zurückgerollt</span> : null}
+            {ageDays !== null ? <span className={cn("rounded-full border px-2 py-0.5 text-xs", ageDays > 7 ? "border-amber-500/20 bg-amber-500/10 text-amber-200" : "border-zinc-500/20 bg-zinc-500/10 text-zinc-200")}>{de.autoresearch.ageDays(ageDays)}</span> : null}
             {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
           <h3 className="text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
