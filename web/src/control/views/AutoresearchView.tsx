@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, Settings2, Square, Target, X } from "lucide-react";
+import { Archive, CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, SearchCode, Settings2, Square, Target, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
-import { useAutoresearchRuns, useAutoresearchStatus, type useProposals } from "../hooks/useControlData";
+import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { de } from "../i18n/de";
@@ -30,6 +30,7 @@ const LANE_MODEL_SLOTS: readonly { task: LaneModelSlot; lane: string; label: str
 export function AutoresearchView({ density, store }: { density: Density; store: ProposalStore }) {
   const status = useAutoresearchStatus();
   const runs = useAutoresearchRuns();
+  const deepAudit = useDeepAudit();
   const split = useMemo(() => splitAutoresearchProposals(store.proposals), [store.proposals]);
   const open = split.actionable;
   const reverted = split.reverted;
@@ -51,6 +52,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [focus, setFocus] = useState("recommended_sections");
   const [minUseCount, setMinUseCount] = useState("");
   const [codeWeaknessScope, setCodeWeaknessScope] = useState<CodeWeaknessScope>("incremental");
+  const [deepAuditSubsystem, setDeepAuditSubsystem] = useState("");
+  const [deepAuditFocus, setDeepAuditFocus] = useState("");
+  const [deepAuditMessage, setDeepAuditMessage] = useState<string | null>(null);
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
   const [loopMessage, setLoopMessage] = useState<string | null>(null);
   const [pruneBusy, setPruneBusy] = useState(false);
@@ -58,6 +62,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [bulkRevertedBusy, setBulkRevertedBusy] = useState(false);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
   const batchBusy = store.busy === "confirm-batch";
+  const deepAuditRunning = deepAudit.status?.state === "running";
+
+  useEffect(() => {
+    if (!deepAuditSubsystem && deepAudit.subsystems.length > 0) {
+      setDeepAuditSubsystem(deepAudit.subsystems[0]);
+    }
+  }, [deepAudit.subsystems, deepAuditSubsystem]);
 
   const startLoop = async () => {
     setLoopBusy("start");
@@ -91,6 +102,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       setLoopMessage(`Stop fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoopBusy(null);
+    }
+  };
+
+  const startDeepAudit = async () => {
+    if (!deepAuditSubsystem) return;
+    setDeepAuditMessage(null);
+    try {
+      const result = await deepAudit.trigger(deepAuditSubsystem, deepAuditFocus.trim(), 12);
+      setDeepAuditMessage(`Deep-Audit gestartet${result.request_id ? ` · ${result.request_id}` : ""}`);
+    } catch (e) {
+      setDeepAuditMessage(`Deep-Audit fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -209,6 +231,38 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {pruneMessage ? <ToneCallout tone={pruneMessage.tone}>{pruneMessage.text}</ToneCallout> : null}
 
       <LaneModelPanel />
+
+      <section className="hc-card p-4 sm:p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1 space-y-3">
+            <div>
+              <p className="hc-eyebrow">Deep-Audit</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Subsystem-Audit</h2>
+              <p className="mt-1 max-w-2xl text-sm hc-soft">Teuer: ca. 1-2 Mio Token pro Lauf. Startet nur per Klick und schreibt keine Code-Änderungen.</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Metric label="Status" value={deepAudit.status?.state ?? (deepAudit.loading ? "lädt" : "idle")} />
+              <Metric label="Subsystem" value={deepAudit.status?.subsystem ?? (deepAuditSubsystem || "-")} />
+              <Metric label="Findings" value={String(deepAudit.findings?.findings.length ?? 0)} />
+            </div>
+            {deepAudit.error ? <ToneCallout tone="red">{deepAudit.error}</ToneCallout> : null}
+            {deepAuditMessage ? <ToneCallout tone={deepAuditMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{deepAuditMessage}</ToneCallout> : null}
+          </div>
+          <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
+            <select id="deep-audit-subsystem" value={deepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+              {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+            </select>
+            <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
+            <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+            <CodeAuditSlotPicker />
+            <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !deepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
+              Deep-Audit starten
+            </Button>
+          </div>
+        </div>
+        <DeepAuditFindings findings={deepAudit.findings?.findings ?? []} proposals={deepAudit.findings?.proposals ?? []} />
+      </section>
 
       <section className="hc-card p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -535,6 +589,106 @@ function LastRun({ status, latestRun }: { status: ReturnType<typeof useAutoresea
 
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
   return <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft">{icon}<span>{text}</span></div>;
+}
+
+export function DeepAuditFindings({ findings, proposals }: { findings: DeepAuditFinding[]; proposals: string[] }) {
+  if (findings.length === 0) {
+    return <div className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">Noch keine Deep-Audit-Findings.</div>;
+  }
+  return (
+    <div className="mt-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="hc-eyebrow">Findings</p>
+        {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
+      </div>
+      <div className="grid gap-3">
+        {findings.map((finding, index) => (
+          <article key={`${finding.fileline}-${index}`} className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill tone={severityTone(finding.severity)} label={finding.severity} />
+              <StatusPill tone="cyan" label={finding.category || "audit"} />
+              <span className="hc-mono text-xs hc-soft">{finding.fileline}</span>
+            </div>
+            <h3 className="mt-2 text-sm font-semibold text-white">{finding.title}</h3>
+            <p className="mt-1 text-sm leading-6 hc-soft">{finding.problem}</p>
+            <blockquote className="mt-2 whitespace-pre-wrap rounded border border-white/10 bg-white/[.03] px-3 py-2 text-xs text-zinc-100">{finding.evidence}</blockquote>
+            <p className="mt-2 text-xs hc-dim">{finding.fix_hint}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CodeAuditSlotPicker() {
+  const [aux, setAux] = useState<AuxiliaryModelsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadAux = async () => {
+    setLoading(true);
+    try {
+      setAux(await fetchJSON<AuxiliaryModelsResponse>("/api/model/auxiliary"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAux();
+  }, []);
+
+  const assignment = aux?.tasks.find((item) => item.task === "code_audit") ?? null;
+  const value = !assignment?.provider || assignment.provider === "auto" ? de.autoresearch.laneModelAuto : `${assignment.provider}${assignment.model ? ` · ${assignment.model}` : ""}`;
+
+  const loadOptionsForPicker = async (): Promise<ModelOptionsResponse> => {
+    const options = await fetchJSON<ModelOptionsResponse>("/api/model/options");
+    if (!assignment?.provider || assignment.provider === "auto") return options;
+    return {
+      ...options,
+      provider: assignment.provider,
+      model: assignment.model,
+      providers: options.providers?.map((provider) => ({ ...provider, is_current: provider.slug === assignment.provider })),
+    };
+  };
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-2">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs hc-soft">Modell</span>
+        {loading ? <Spinner /> : <StatusPill tone={!assignment?.provider || assignment.provider === "auto" ? "zinc" : "cyan"} label="code_audit" />}
+      </div>
+      <p className="hc-mono truncate text-xs hc-soft" title={value}>{value}</p>
+      <Button outlined className="hc-hit mt-2 w-full" onClick={() => setPickerOpen(true)} disabled={loading || saving} prefix={saving ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
+        {de.autoresearch.laneModelChange}
+      </Button>
+      {pickerOpen ? (
+        <ModelPickerDialog
+          key={`code-audit-${refreshKey}`}
+          loader={loadOptionsForPicker}
+          alwaysGlobal
+          title={de.autoresearch.laneModelPickerTitle("Deep-Audit")}
+          onApply={async ({ provider, model }) => {
+            setSaving(true);
+            try {
+              await fetchJSON<unknown>("/api/model/auxiliary", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scope: "auxiliary", task: "code_audit", provider, model }),
+              });
+              await loadAux();
+              setRefreshKey((value) => value + 1);
+            } finally {
+              setSaving(false);
+            }
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      ) : null}
+    </div>
+  );
 }
 
 function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: ProposalStore["proposals"] }) {

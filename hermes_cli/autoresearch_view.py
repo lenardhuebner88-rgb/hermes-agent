@@ -52,6 +52,7 @@ from pydantic import BaseModel, ValidationError
 # Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
 from hermes_cli import autoresearch_proposals as _proposals
 from hermes_cli import autoresearch_runs as _runs
+from hermes_cli import deep_audit as _deep_audit
 from scripts import autoresearch_writer as _writer
 
 # hermes-agent repo root (this file lives in hermes_cli/).
@@ -373,6 +374,20 @@ def _spawn_runner(args: list[str], env_extra: dict[str, str] | None = None) -> i
     return proc.pid
 
 
+def _spawn_deep_audit_runner(request_path: Path) -> int:
+    """Spawn the read-only Deep-Audit lane detached; return its PID."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "hermes_cli.deep_audit", "--request", str(request_path)],
+        cwd=str(_REPO),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
 def _signal_pid(pid: int, sig: int) -> None:
     os.kill(pid, sig)
 
@@ -394,6 +409,12 @@ class CodeWeaknessBody(BaseModel):
     # "Deep-Scan" button raises both caps (e.g. max_files=40, limit=8).
     max_files: int = 5
     limit: int = 3  # max proposals to persist this run
+
+
+class DeepAuditBody(BaseModel):
+    subsystem: str
+    focus: str | None = None
+    max_files: int = 12
 
 
 class ApplyProposalBody(BaseModel):
@@ -557,6 +578,26 @@ def stop_runner() -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         return {"ok": False, "detail": f"could not signal pid {pid}: {exc}"}
     return {"ok": True, "signalled": int(pid), "detail": "SIGTERM sent; runner finishes its step and releases the lock"}
+
+
+def trigger_deep_audit(*, subsystem: str, focus: str | None = None, max_files: int = 12) -> dict[str, Any]:
+    status = _deep_audit.read_status()
+    if status.get("state") == "running":
+        raise HTTPException(status_code=409, detail="a deep-audit run is already in progress")
+    try:
+        request = _deep_audit.write_request(subsystem=subsystem, focus=focus, max_files=max_files)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    request_path = Path(str(request["request_path"]))
+    pid = _spawn_deep_audit_runner(request_path)
+    _deep_audit.write_lock(request_id=str(request["request_id"]), subsystem=subsystem, pid=pid)
+    return {
+        "ok": True,
+        "pid": pid,
+        "request_id": request["request_id"],
+        "subsystem": subsystem,
+        "files": request["files"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1144,22 @@ def register_autoresearch_routes(app: Any) -> None:
         return await asyncio.to_thread(
             _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files, limit=b.limit,
         )
+
+    @app.get("/api/autoresearch/deep-audit/subsystems")
+    async def autoresearch_deep_audit_subsystems() -> dict[str, Any]:
+        return {"schema": "deep-audit-subsystems-v1", "subsystems": sorted(_deep_audit.SUBSYSTEM_GLOBS)}
+
+    @app.post("/api/autoresearch/deep-audit/trigger")
+    async def autoresearch_deep_audit_trigger(body: DeepAuditBody) -> dict[str, Any]:
+        return trigger_deep_audit(subsystem=body.subsystem, focus=body.focus, max_files=body.max_files)
+
+    @app.get("/api/autoresearch/deep-audit/status")
+    async def autoresearch_deep_audit_status() -> dict[str, Any]:
+        return _deep_audit.read_status()
+
+    @app.get("/api/autoresearch/deep-audit/findings")
+    async def autoresearch_deep_audit_findings() -> dict[str, Any]:
+        return _deep_audit.read_findings()
 
     @app.post("/api/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:

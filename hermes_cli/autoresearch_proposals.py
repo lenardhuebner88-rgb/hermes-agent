@@ -1147,6 +1147,68 @@ def _proposal_id_for_code_finding(path: Path, finding: dict[str, Any]) -> str:
     return f"code-weakness-{_slug(rel)}-{digest}"
 
 
+def _deep_audit_target_from_fileline(fileline: str) -> tuple[str, Path]:
+    match = re.match(r"^(.+?):\d+(?::\d+)?$", str(fileline or "").strip())
+    rel = match.group(1) if match else "unknown"
+    return rel, (_REPO / rel).resolve()
+
+
+def _proposal_id_for_deep_audit_finding(finding: dict[str, Any]) -> str:
+    fileline = str(finding.get("fileline") or "")
+    digest = hashlib.sha1(
+        "\0".join([
+            fileline,
+            str(finding.get("category") or ""),
+            str(finding.get("evidence") or ""),
+        ]).encode("utf-8")
+    ).hexdigest()[:10]
+    return f"deep-audit-{_slug(fileline)}-{digest}"
+
+
+def _build_deep_audit_proposal(finding: dict[str, Any]) -> dict[str, Any]:
+    """Build a detection-only code proposal from a read-only Deep-Audit finding."""
+    fileline = str(finding.get("fileline") or "").strip()
+    rel, target_path = _deep_audit_target_from_fileline(fileline)
+    severity = _coerce_severity(finding.get("severity"), fallback="medium")
+    category = str(finding.get("category") or "bug_risk").strip() or "bug_risk"
+    evidence = str(finding.get("evidence") or "").strip()
+    title = str(finding.get("title") or "Deep-Audit-Befund").strip()
+    problem = str(finding.get("problem") or "Deep-Audit hat einen manuellen Prüffund gemeldet.").strip()
+    fix_hint = str(finding.get("fix_hint") or "Manuell prüfen und gezielt beheben.").strip()
+    model_label = str(finding.get("_model_label") or "").strip() or _model_label_from_response(None)
+    rank_score = float(_SEVERITY_ORDINAL[severity] * 10)
+    return {
+        "id": _proposal_id_for_deep_audit_finding(finding),
+        "schema": PROPOSAL_SCHEMA,
+        "mode": "code",
+        "proposal_type": "deep_audit",
+        "target": rel,
+        "target_path": str(target_path),
+        "section": None,
+        "eval_label": None,
+        "category": category,
+        "severity": severity,
+        "evidence": evidence,
+        "fix_hint": fix_hint,
+        "title": f"Deep-Audit in {fileline}: {title}",
+        "rationale_plain": f"{problem} Grounding: „{evidence}“",
+        "before_text": None,
+        "after_text": None,
+        "new_text": None,
+        "writer": "aux-deep-audit",
+        "writer_rationale": f"{model_label} via code_audit; read-only subsystem audit with verbatim evidence validation.",
+        "diff_before_after": "",
+        "status": "proposed",
+        "last_outcome": None,
+        "created_at": _utc_now(),
+        "applied_at": None,
+        "result": None,
+        "apply_blocked_reason": "Deep-Audit-Befund — Fix manuell",
+        "rank_score": rank_score,
+        "rank_reason": f"{_SEVERITY_LABELS[severity]}; read-only Deep-Audit finding; manual fix required",
+    }
+
+
 def _build_code_weakness_proposal(path: Path, before: str, finding: dict[str, Any]) -> dict[str, Any]:
     rel = _repo_relative_name(path)
     category = str(finding["category"])
@@ -1329,6 +1391,10 @@ def apply_proposal(pid: str, *, confirm: bool = True, judged: bool = False) -> d
     if not confirm:
         return {"ok": False, "detail": "apply requires confirm=true (the operator 'are you sure' step)",
                 "status": "proposed"}
+    if proposal.get("apply_blocked_reason"):
+        return {"ok": False,
+                "detail": proposal["apply_blocked_reason"],
+                "status": proposal.get("status", "proposed")}
     # AR3 capability_research proposals: a *detection-only* finding carries an
     # explicit apply_blocked_reason and stays read-only. A *grounded fix* finding
     # carries a full replacement after_text (drafted by draft_fix) and IS written
@@ -1336,10 +1402,6 @@ def apply_proposal(pid: str, *, confirm: bool = True, judged: bool = False) -> d
     # scaffold-eval path below. It must be judge-gated: only the batch-confirm
     # caller (judged=True) may write it; a direct single-apply is refused.
     if proposal.get("proposal_type") == "capability_research":
-        if proposal.get("apply_blocked_reason"):
-            return {"ok": False,
-                    "detail": proposal["apply_blocked_reason"],
-                    "status": proposal.get("status", "proposed")}
         if not judged:
             return {"ok": False,
                     "detail": "AR3-Fix nur über Batch-Confirm (judge-gated) anwendbar",

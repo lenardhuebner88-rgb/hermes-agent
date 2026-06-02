@@ -32,6 +32,38 @@ type BatchConfirmResponse = {
   confirmed?: string[];
   failed?: string[];
 };
+export interface DeepAuditFinding {
+  fileline: string;
+  severity: "critical" | "high" | "medium" | "low";
+  category: string;
+  title: string;
+  problem: string;
+  evidence: string;
+  fix_hint: string;
+}
+
+export interface DeepAuditStatus {
+  state: "idle" | "running";
+  pid: number | null;
+  request_id: string | null;
+  subsystem: string | null;
+  started_at: string | null;
+  last_run: unknown | null;
+}
+
+export interface DeepAuditFindingsResponse {
+  ok: boolean;
+  subsystem: string | null;
+  model: string | null;
+  tokens: number;
+  iterations: number;
+  reason: string;
+  findings: DeepAuditFinding[];
+  proposals: string[];
+  created_at?: string | null;
+  request_id?: string | null;
+  files: string[];
+}
 
 type LoadState<T> = {
   data: T | null;
@@ -291,6 +323,87 @@ export function useProposals() {
   }, [log, state]);
 
   return { ...state, proposals, openSkillProposals, activity, busy, batchConfirmById, generate, generateCodeWeaknesses, apply, skip, applyAll, confirmBatch };
+}
+
+export function useDeepAudit() {
+  const [status, setStatus] = useState<DeepAuditStatus | null>(null);
+  const [findings, setFindings] = useState<DeepAuditFindingsResponse | null>(null);
+  const [subsystems, setSubsystems] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const loadStatus = useCallback(async () => {
+    const data = await fetchJSON<DeepAuditStatus>("/api/autoresearch/deep-audit/status");
+    if (aliveRef.current) setStatus(data);
+    return data;
+  }, []);
+
+  const loadFindings = useCallback(async () => {
+    const data = await fetchJSON<DeepAuditFindingsResponse>("/api/autoresearch/deep-audit/findings");
+    if (aliveRef.current) setFindings(data);
+    return data;
+  }, []);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      await Promise.all([loadStatus(), loadFindings()]);
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [loadFindings, loadStatus]);
+
+  useEffect(() => {
+    const loadInitial = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [subsystemData] = await Promise.all([
+          fetchJSON<{ subsystems?: string[] }>("/api/autoresearch/deep-audit/subsystems"),
+          reload(),
+        ]);
+        if (aliveRef.current) setSubsystems(subsystemData.subsystems ?? []);
+      } catch (e) {
+        if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (aliveRef.current) setLoading(false);
+      }
+    };
+    void loadInitial();
+  }, [reload]);
+
+  useEffect(() => {
+    if (status?.state !== "running") return;
+    const timer = window.setInterval(() => {
+      void reload();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [reload, status?.state]);
+
+  const trigger = useCallback(async (subsystem: string, focus: string, maxFiles = 12) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await fetchJSON<{ ok?: boolean; request_id?: string }>("/api/autoresearch/deep-audit/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subsystem, focus, max_files: maxFiles }),
+      });
+      await reload();
+      return result;
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      setError(detail);
+      throw e;
+    } finally {
+      setBusy(false);
+    }
+  }, [reload]);
+
+  return { status, findings, subsystems, loading, busy, error, reload, trigger };
 }
 
 export function useHermesWorkers() {

@@ -20,7 +20,7 @@ from typing import Any
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
 _MAX_RUNS = 30
-_VALID_LANES = ("skill", "code")
+_VALID_LANES = ("skill", "code", "deep-audit")
 
 
 def _audit_dir() -> Path:
