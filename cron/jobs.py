@@ -1168,6 +1168,40 @@ def list_output_files(job_id: str) -> List[Dict[str, Any]]:
     return files
 
 
+def latest_output_meta(job_id: str) -> Optional[Dict[str, Any]]:
+    """Cheap latest-output summary: {filename, mtime, size_bytes, run_count}.
+
+    Unlike :func:`list_output_files` this does NOT stat every output file — it
+    lists names via ``os.scandir`` (no per-entry stat) and stats only the newest.
+    For a job with dozens of runs that turns ~N stats into one. Returns ``None``
+    when the job has no output yet.
+    """
+    job_output_dir = _job_output_dir(job_id)
+    if not job_output_dir.is_dir():
+        return None
+    names: List[str] = []
+    try:
+        with os.scandir(job_output_dir) as it:
+            for entry in it:
+                name = entry.name
+                if name.endswith(".md") and entry.is_file():
+                    names.append(name)
+    except OSError:
+        return None
+    if not names:
+        return None
+    names.sort(reverse=True)  # timestamp filenames sort lexically == chronologically
+    newest_name = names[0]
+    meta: Dict[str, Any] = {"filename": newest_name, "mtime": None, "size_bytes": None, "run_count": len(names)}
+    try:
+        stat = (job_output_dir / newest_name).stat()
+        meta["mtime"] = int(stat.st_mtime)
+        meta["size_bytes"] = int(stat.st_size)
+    except OSError:
+        pass
+    return meta
+
+
 def list_jobs_with_output(include_disabled: bool = False) -> List[Dict[str, Any]]:
     """Like :func:`list_jobs`, but annotates each job with its latest-output meta.
 
@@ -1178,18 +1212,8 @@ def list_jobs_with_output(include_disabled: bool = False) -> List[Dict[str, Any]
     jobs = list_jobs(include_disabled)
     for job in jobs:
         try:
-            files = list_output_files(str(job.get("id") or ""))
+            job["latest_output"] = latest_output_meta(str(job.get("id") or ""))
         except Exception:
-            files = []
-        if files:
-            newest = files[0]
-            job["latest_output"] = {
-                "filename": newest.get("filename"),
-                "mtime": newest.get("mtime"),
-                "size_bytes": newest.get("size_bytes"),
-                "run_count": len(files),
-            }
-        else:
             job["latest_output"] = None
     return jobs
 
