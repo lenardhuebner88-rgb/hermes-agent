@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
+import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
 import {
   BacklogDetailSchema,
   BacklogResponseSchema,
@@ -40,6 +41,9 @@ type LoadState<T> = {
   lastUpdated: number | null;
   reload: () => Promise<void>;
   updateData: React.Dispatch<React.SetStateAction<T | null>>;
+  /** Additive (back-compat): structured error + stale-while-error flag. */
+  errorObj?: StructuredError | null;
+  isStale?: boolean;
 };
 
 function batchConfirmResultForIds(ids: string[], response: BatchConfirmResponse): BatchConfirmById {
@@ -70,52 +74,44 @@ function batchConfirmResultForIds(ids: string[], response: BatchConfirmResponse)
   return next;
 }
 
-function usePolling<T>(loader: () => Promise<T>, intervalMs: number): LoadState<T> {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+// Backed by the shared pollingStore: subscribers on the same `key` dedupe to one
+// timer + one request, get 5xx backoff and stale-while-error for free. The
+// public LoadState shape is UNCHANGED (errorObj/isStale are additive) so no view
+// needs to change. updateData patches the local snapshot for optimistic edits;
+// the next poll/reload overwrites it with server truth (same as before).
+function usePolling<T>(key: string, loader: () => Promise<T>, intervalMs: number): LoadState<T> {
+  const [snap, setSnap] = useState<StoreSnapshot<T>>(() => getSnapshot<T>(key) ?? {
+    data: null, error: null, errorObj: null, loading: true, lastUpdated: null, isStale: false,
+  });
   const loaderRef = useRef(loader);
-
   useEffect(() => {
     loaderRef.current = loader;
   }, [loader]);
 
-  const reload = useCallback(async () => {
-    try {
-      const next = await loaderRef.current();
-      setData(next);
-      setError(null);
-      setLastUpdated(Math.floor(Date.now() / 1000));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    return subscribe<T>(key, () => loaderRef.current(), intervalMs, setSnap);
+  }, [key, intervalMs]);
+
+  const reload = useCallback(() => refresh(key), [key]);
+  const updateData = useCallback<React.Dispatch<React.SetStateAction<T | null>>>((action) => {
+    setSnap((s) => ({ ...s, data: typeof action === "function" ? (action as (prev: T | null) => T | null)(s.data) : action }));
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    const run = async () => {
-      if (!alive || document.hidden) return;
-      await reload();
-    };
-    void run();
-    const timer = window.setInterval(run, intervalMs);
-    const onVisible = () => { if (!document.hidden) void run(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [intervalMs, reload]);
-
-  return { data, error, loading, lastUpdated, reload, updateData: setData };
+  return {
+    data: snap.data,
+    error: snap.error,
+    errorObj: snap.errorObj,
+    loading: snap.loading,
+    lastUpdated: snap.lastUpdated,
+    isStale: snap.isStale,
+    reload,
+    updateData,
+  };
 }
 
 export function useAutoresearchStatus() {
   return usePolling<AutoresearchStatus>(
+    "autoresearch/status",
     async () => parseOrThrow(AutoresearchStatusSchema, await fetchJSON<unknown>("/api/autoresearch/status"), "autoresearch/status"),
     5000,
   );
@@ -123,6 +119,7 @@ export function useAutoresearchStatus() {
 
 export function useAutoresearchRuns() {
   return usePolling<AutoresearchRunsResponse>(
+    "autoresearch/runs",
     async () => parseOrThrow(AutoresearchRunsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/runs"), "autoresearch/runs"),
     10000,
   );
@@ -133,6 +130,7 @@ export function useProposals() {
   const [busy, setBusy] = useState<string | null>(null);
   const [batchConfirmById, setBatchConfirmById] = useState<BatchConfirmById>({});
   const state = usePolling<ProposalsResponse>(
+    "autoresearch/proposals",
     async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/proposals"), "autoresearch/proposals"),
     6000,
   );
@@ -297,6 +295,7 @@ export function useProposals() {
 
 export function useHermesWorkers() {
   return usePolling<WorkersResponse>(
+    "workers/active",
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
     5000,
   );
@@ -305,6 +304,7 @@ export function useHermesWorkers() {
 
 export function useHermesRecentResults() {
   return usePolling<RecentResultsResponse>(
+    "runs/recent-results",
     async () => parseOrThrow(
       RecentResultsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/recent-results?limit=12&since_hours=48&outcome=completed"),
@@ -316,6 +316,7 @@ export function useHermesRecentResults() {
 
 export function useSystemHealth() {
   return usePolling<SystemHealthResponse>(
+    "health-status",
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
     5000,
   );
@@ -324,6 +325,7 @@ export function useSystemHealth() {
 // In-process self-metrics (per route-group latency/error rates). 5s like health.
 export function useMetricsLite() {
   return usePolling<MetricsLiteResponse>(
+    "metrics-lite",
     async () => parseOrThrow(MetricsLiteResponseSchema, await fetchJSON<unknown>("/api/metrics-lite"), "metrics-lite"),
     5000,
   );
@@ -333,6 +335,7 @@ export function useMetricsLite() {
 // rarely (a handful of git commits a day), so 30s keeps it fresh without churn.
 export function useBacklog() {
   return usePolling<BacklogResponse>(
+    "family-organizer/backlog",
     async () => parseOrThrow(BacklogResponseSchema, await fetchJSON<unknown>("/api/family-organizer/backlog"), "family-organizer/backlog"),
     30000,
   );
@@ -343,6 +346,7 @@ export function useBacklog() {
 // fresh without churn.
 export function useOrchestrationBacklog() {
   return usePolling<OrchestrationBacklogResponse>(
+    "orchestration/backlog",
     async () => parseOrThrow(OrchestrationBacklogResponseSchema, await fetchJSON<unknown>("/api/orchestration/backlog"), "orchestration/backlog"),
     30000,
   );
@@ -404,6 +408,7 @@ export function useCronObservability() {
   const [busyJob, setBusyJob] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const state = usePolling<CronObservabilityResponse>(
+    "cron/observability",
     async () => parseOrThrow(CronObservabilityResponseSchema, await fetchJSON<unknown>("/api/cron/observability"), "cron/observability"),
     30000,
   );

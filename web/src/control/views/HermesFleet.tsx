@@ -15,7 +15,7 @@ import { ToneCallout } from "../components/atoms";
 export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const results = useHermesRecentResults();
-  const { inspectByRun, loadingRun, inspect } = useRunInspect();
+  const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
   const [busyRun, setBusyRun] = useState<string | null>(null);
@@ -63,6 +63,12 @@ export function HermesFleet({ density }: { density: Density }) {
       </section>
       {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
       {actionError ? <ToneCallout tone="red">{actionError}</ToneCallout> : null}
+      {(() => {
+        // Surface Inspect failures (404 / contract) instead of leaving the
+        // button silently clearing its spinner — previously errorByRun was dropped.
+        const inspectError = list[activeIndex] ? errorByRun[list[activeIndex].run_id] : "";
+        return inspectError ? <ToneCallout tone="amber">{de.worker.actionFailed}: {inspectError}</ToneCallout> : null;
+      })()}
       {list.length === 0 && !workers.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Bot className="h-5 w-5" />Keine aktiven Worker.</div> : null}
       <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
         {list.map((worker, index) => <div key={worker.run_id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><WorkerCard worker={worker} health={workerHealth(worker, now)} density={density} now={now} inspectLoading={loadingRun === worker.run_id} onInspect={inspect} onAction={onAction} actionBusy={busyRun === worker.run_id} /></div>)}
