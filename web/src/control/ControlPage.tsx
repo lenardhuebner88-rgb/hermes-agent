@@ -10,12 +10,14 @@ import { HermesFleet } from "./views/HermesFleet";
 import { AutoresearchView } from "./views/AutoresearchView";
 import { BacklogView } from "./views/BacklogView";
 import { OrchestratorBacklogView } from "./views/OrchestratorBacklogView";
+import { CronView } from "./views/CronView";
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/hermes")) return "hermes";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
+  if (pathname.includes("/control/crons")) return "crons";
   return "overview";
 }
 
@@ -25,6 +27,7 @@ const tabPath: Record<ControlTab, string> = {
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
+  crons: "/control/crons",
 };
 
 export default function ControlPage() {
@@ -90,6 +93,7 @@ export default function ControlPage() {
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
           <Route path="backlog" element={<BacklogView density={density.density} />} />
           <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
+          <Route path="crons" element={<CronView density={density.density} />} />
           <Route path="*" element={<Navigate to="/control" replace />} />
         </Routes>
       </ControlShell>

@@ -109,6 +109,58 @@ export const SystemHealthResponseSchema = z.object({
   }),
 });
 
+const CronLatestOutputSchema = z.object({
+  filename: z.string().nullable().catch(null),
+  mtime: z.coerce.number().nullable().catch(null),
+  size_bytes: z.coerce.number().nullable().catch(null),
+  run_count: z.coerce.number().catch(0),
+});
+
+export const CronJobSchema = z.object({
+  id: z.coerce.string().catch(""),
+  name: z.string().catch(""),
+  enabled: z.boolean().catch(false),
+  state: z.string().catch(""),
+  paused_at: z.coerce.number().nullable().catch(null),
+  paused_reason: z.string().nullable().catch(null),
+  schedule_display: z.string().catch(""),
+  repeat: z.string().nullable().catch(null),
+  next_run_at: z.coerce.number().nullable().catch(null),
+  last_run_at: z.coerce.number().nullable().catch(null),
+  last_status: z.string().nullable().catch(null),
+  last_error: z.string().nullable().catch(null),
+  last_delivery_error: z.string().nullable().catch(null),
+  deliver: z.string().nullable().catch(null),
+  skill: z.string().nullable().catch(null),
+  model: z.string().nullable().catch(null),
+  profile: z.string().catch("default"),
+  is_default_profile: z.boolean().catch(true),
+  has_script: z.boolean().catch(false),
+  has_prompt: z.boolean().catch(false),
+  latest_output: CronLatestOutputSchema.nullable().catch(null),
+});
+
+export const CronObservabilityResponseSchema = z.object({
+  schema: z.string().catch("hermes-cron-obs-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  gateway: z.object({
+    running: z.boolean().catch(false),
+    pids: z.array(z.coerce.number()).catch([]),
+    error: z.string().nullable().catch(null).optional(),
+  }).catch({ running: false, pids: [] }),
+  // A single malformed job must never empty the whole list (WorkerSchema lesson).
+  jobs: z.array(CronJobSchema).catch([]),
+  error: z.string().nullable().catch(null).optional(),
+});
+
+export const CronOutputSchema = z.object({
+  job_id: z.string().catch(""),
+  filename: z.string().nullable().catch(null),
+  text: z.string().nullable().catch(null),
+  truncated: z.boolean().catch(false),
+  mtime: z.coerce.number().nullable().catch(null),
+});
+
 export const AutoresearchStatusSchema = z.object({
   schema: z.string().optional(),
   state: z.enum(["idle", "running", "stopping", "crashed"]).catch("idle"),

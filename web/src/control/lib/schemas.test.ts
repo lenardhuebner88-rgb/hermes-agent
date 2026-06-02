@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { CronObservabilityResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -168,5 +168,53 @@ describe("SystemHealthResponseSchema", () => {
     expect(parsed.subsystems.gateway.latency_ms).toBe(8);
     expect(parsed.subsystems.autoresearch.heartbeat_age_s).toBe(12);
     expect(parsed.subsystems.kanban_db.status).toBe("offline");
+  });
+});
+
+
+describe("CronObservabilityResponseSchema", () => {
+  it("parses a full payload with gateway + per-job output meta", () => {
+    const raw = {
+      schema: "hermes-cron-obs-v1",
+      checked_at: 100,
+      gateway: { running: true, pids: [42, "99"] },
+      jobs: [{
+        id: "j1", name: "Morgenbrief", enabled: true, state: "scheduled",
+        schedule_display: "07:00", next_run_at: 1000, last_run_at: 900,
+        last_status: "ok", last_delivery_error: null, deliver: "discord:1",
+        profile: "research", has_prompt: true, has_script: false,
+        latest_output: { filename: "x.md", mtime: 1, size_bytes: 3, run_count: 2 },
+      }],
+    };
+    const parsed = parseOrThrow(CronObservabilityResponseSchema, raw, "cron/observability");
+    expect(parsed.gateway.running).toBe(true);
+    expect(parsed.gateway.pids).toEqual([42, 99]);
+    expect(parsed.jobs).toHaveLength(1);
+    expect(parsed.jobs[0].latest_output?.run_count).toBe(2);
+  });
+
+  it("keeps the other jobs when one job is malformed (does not empty the list)", () => {
+    const raw = {
+      schema: "hermes-cron-obs-v1",
+      checked_at: 100,
+      gateway: { running: false, pids: [] },
+      jobs: [
+        { id: "good", name: "ok", enabled: true },
+        { id: "bad", enabled: "not-a-boolean", latest_output: "garbage" },
+      ],
+    };
+    const parsed = parseOrThrow(CronObservabilityResponseSchema, raw, "cron/observability");
+    expect(parsed.jobs).toHaveLength(2);
+    expect(parsed.jobs[0].id).toBe("good");
+    // The malformed job degrades to defaults rather than throwing or vanishing.
+    expect(parsed.jobs[1].id).toBe("bad");
+    expect(parsed.jobs[1].enabled).toBe(false);
+    expect(parsed.jobs[1].latest_output).toBeNull();
+  });
+
+  it("falls back to an empty list/offline gateway on a broken payload", () => {
+    const parsed = parseOrThrow(CronObservabilityResponseSchema, { jobs: "nope", gateway: 5 }, "cron/observability");
+    expect(parsed.jobs).toEqual([]);
+    expect(parsed.gateway.running).toBe(false);
   });
 });

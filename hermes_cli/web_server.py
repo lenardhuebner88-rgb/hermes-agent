@@ -4290,11 +4290,33 @@ def _find_cron_job_profile(job_id: str) -> Optional[str]:
     return None
 
 
+def _redact_cron_job_list(jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Strip ``prompt``/``script`` from a bulk job listing.
+
+    The bulk list is consumed for at-a-glance display; the full prompt/script
+    is only needed when editing a single job, which fetches the detail endpoint
+    (``GET /api/cron/jobs/{job_id}``). Keeping prompt/script out of the list
+    avoids exposing every job's full instructions in one response.
+    """
+    redacted: List[Dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            redacted.append(job)
+            continue
+        safe = dict(job)
+        safe.pop("prompt", None)
+        safe.pop("script", None)
+        safe["has_prompt"] = bool(job.get("prompt"))
+        safe["has_script"] = bool(job.get("script"))
+        redacted.append(safe)
+    return redacted
+
+
 @app.get("/api/cron/jobs")
 async def list_cron_jobs(profile: str = "all"):
     requested = (profile or "all").strip()
     if requested.lower() != "all":
-        return _call_cron_for_profile(requested, "list_jobs", True)
+        return _redact_cron_job_list(_call_cron_for_profile(requested, "list_jobs", True))
 
     jobs: List[Dict[str, Any]] = []
     for item in _cron_profile_dicts():
@@ -4305,7 +4327,7 @@ async def list_cron_jobs(profile: str = "all"):
             jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
         except Exception:
             _log.exception("Failed to list cron jobs for profile %s", name)
-    return jobs
+    return _redact_cron_job_list(jobs)
 
 
 @app.get("/api/cron/jobs/{job_id}")
@@ -7708,6 +7730,12 @@ register_autoresearch_routes(app)
 
 from hermes_cli.health_status import register_health_status_routes  # noqa: E402
 register_health_status_routes(app)
+
+# Read-only cron observability (redacted jobs + gateway liveness + real run
+# output). Under /api/ → inherits the session-token gate; never in
+# PUBLIC_API_PATHS. See hermes_cli/cron_observability.py.
+from hermes_cli.cron_observability import register_cron_observability_routes  # noqa: E402
+register_cron_observability_routes(app)
 
 # Read-only family-organizer backlog board (parses that repo's backlog/items
 # frontmatter from disk). Under /api/ → inherits the session-token gate.

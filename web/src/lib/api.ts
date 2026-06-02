@@ -339,6 +339,12 @@ export const api = {
   // Cron jobs
   getCronJobs: (profile = "all") =>
     fetchJSON<CronJob[]>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`),
+  // Single-job detail INCLUDING prompt/script (the bulk list redacts those).
+  getCronJob: (id: string, profile?: string) =>
+    fetchJSON<CronJob>(
+      `/api/cron/jobs/${encodeURIComponent(id)}` +
+        (profile ? `?profile=${encodeURIComponent(profile)}` : ""),
+    ),
   createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string }, profile = "default") =>
     fetchJSON<CronJob>(`/api/cron/jobs?profile=${encodeURIComponent(profile)}`, {
       method: "POST",

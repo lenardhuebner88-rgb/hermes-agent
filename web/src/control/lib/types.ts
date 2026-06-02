@@ -100,6 +100,53 @@ export interface SystemHealthResponse {
   };
 }
 
+export interface CronLatestOutput {
+  filename: string | null;
+  mtime: number | null;
+  size_bytes: number | null;
+  run_count: number;
+}
+
+export interface CronJob {
+  id: string;
+  name: string;
+  enabled: boolean;
+  state: string;
+  paused_at: number | null;
+  paused_reason: string | null;
+  schedule_display: string;
+  repeat: string | null;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_status: string | null;
+  last_error: string | null;
+  last_delivery_error: string | null;
+  deliver: string | null;
+  skill: string | null;
+  model: string | null;
+  profile: string;
+  is_default_profile: boolean;
+  has_script: boolean;
+  has_prompt: boolean;
+  latest_output: CronLatestOutput | null;
+}
+
+export interface CronObservabilityResponse {
+  schema: string;
+  checked_at: number;
+  gateway: { running: boolean; pids: number[]; error?: string | null };
+  jobs: CronJob[];
+  error?: string | null;
+}
+
+export interface CronOutput {
+  job_id: string;
+  filename: string | null;
+  text: string | null;
+  truncated: boolean;
+  mtime: number | null;
+}
+
 export type Priority = "high" | "med" | "low";
 
 export type AutoresearchState = "idle" | "running" | "stopping" | "crashed";

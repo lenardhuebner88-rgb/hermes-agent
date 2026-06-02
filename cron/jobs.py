@@ -1139,6 +1139,80 @@ def save_job_output(job_id: str, output: str):
     return output_file
 
 
+def list_output_files(job_id: str) -> List[Dict[str, Any]]:
+    """List a job's saved output files, newest first.
+
+    Reuses :func:`_job_output_dir` for path-escape protection. Returns an empty
+    list (never raises) when the job has no output directory yet.
+    """
+    job_output_dir = _job_output_dir(job_id)
+    if not job_output_dir.is_dir():
+        return []
+    files: List[Dict[str, Any]] = []
+    for entry in job_output_dir.iterdir():
+        if not entry.is_file() or entry.suffix != ".md":
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        files.append(
+            {
+                "filename": entry.name,
+                "mtime": int(stat.st_mtime),
+                "size_bytes": int(stat.st_size),
+            }
+        )
+    # Timestamp filenames (YYYY-MM-DD_HH-MM-SS.md) sort lexically == chronologically.
+    files.sort(key=lambda f: f["filename"], reverse=True)
+    return files
+
+
+def read_output_file(
+    job_id: str,
+    filename: Optional[str] = None,
+    max_bytes: int = 65536,
+) -> Optional[Dict[str, Any]]:
+    """Read a job's saved output (newest by default), clipped to ``max_bytes``.
+
+    ``job_id`` is validated via :func:`_job_output_dir`; ``filename`` must be a
+    single safe ``*.md`` path component. Returns ``None`` when no output exists.
+    """
+    job_output_dir = _job_output_dir(job_id)
+    if filename is None:
+        available = list_output_files(job_id)
+        if not available:
+            return None
+        target_name = available[0]["filename"]
+    else:
+        target_name = str(filename or "").strip()
+        if (
+            not target_name
+            or target_name in {".", ".."}
+            or "/" in target_name
+            or "\\" in target_name
+            or not target_name.endswith(".md")
+        ):
+            raise ValueError(f"Invalid cron output filename: {filename!r}")
+    target = job_output_dir / target_name
+    if not target.is_file():
+        return None
+    try:
+        stat = target.stat()
+        raw = target.read_bytes()
+    except OSError:
+        return None
+    truncated = len(raw) > max_bytes
+    text = raw[:max_bytes].decode("utf-8", errors="replace")
+    return {
+        "filename": target_name,
+        "text": text,
+        "truncated": truncated,
+        "mtime": int(stat.st_mtime),
+        "size_bytes": int(stat.st_size),
+    }
+
+
 # =============================================================================
 # Skill reference rewriting (curator integration)
 # =============================================================================

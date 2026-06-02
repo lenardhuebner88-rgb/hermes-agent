@@ -132,15 +132,26 @@ export default function CronPage() {
     onClose: closeEditModal,
   });
 
-  const openEditModal = useCallback((job: CronJob) => {
-    setEditJob(job);
-    setEditPrompt(getJobPrompt(job));
-    setEditSchedule(
-      asText(job.schedule?.expr) || asText(job.schedule_display) || "",
-    );
-    setEditName(getJobName(job));
-    setEditDeliver(asText(job.deliver) || "local");
-  }, []);
+  const openEditModal = useCallback(
+    (job: CronJob) => {
+      setEditJob(job);
+      // The bulk list redacts prompt/script; populate the immediately-known
+      // fields, then fetch full detail to fill the prompt for editing.
+      setEditPrompt(getJobPrompt(job));
+      setEditSchedule(
+        asText(job.schedule?.expr) || asText(job.schedule_display) || "",
+      );
+      setEditName(getJobName(job));
+      setEditDeliver(asText(job.deliver) || "local");
+      api
+        .getCronJob(job.id, getJobProfile(job))
+        .then((full) => {
+          setEditPrompt(getJobPrompt(full));
+        })
+        .catch(() => showToast(t.common.loading, "error"));
+    },
+    [showToast, t.common.loading],
+  );
 
   const loadJobs = useCallback(() => {
     api
