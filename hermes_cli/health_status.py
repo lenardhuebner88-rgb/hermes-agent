@@ -12,9 +12,6 @@ from fastapi import FastAPI
 
 _SCHEMA = "hermes-health-v1"
 _STATUS_RANK = {"healthy": 0, "degraded": 1, "offline": 2}
-# OpenClaw (Mission Control, :3000) decommissioned 2026-06-01 — no longer probed
-# or aggregated so the overall light is not pinned red by a system we shut down on
-# purpose. _probe_openclaw_status() is kept (unused) for a clean revert.
 _SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db")
 
 
@@ -87,36 +84,6 @@ async def _probe_gateway_status() -> dict[str, Any]:
         latency_ms=latency,
         error=error or "no response",
     )
-
-
-async def _probe_openclaw_status() -> dict[str, Any]:
-    """Probe Mission Control through the existing OpenClaw read helper."""
-    start = time.perf_counter()
-    try:
-        from hermes_cli.openclaw_view import read_openclaw_agents
-
-        result = await read_openclaw_agents()
-        latency = _latency_ms(start)
-    except Exception as exc:
-        return _status_dict(
-            "offline",
-            "openclaw probe failed",
-            latency_ms=_latency_ms(start),
-            error=str(exc),
-        )
-
-    error = result.get("error") if isinstance(result, dict) else "non-object response"
-    if error:
-        return _status_dict(
-            "offline",
-            "Mission Control error",
-            latency_ms=latency,
-            error=str(error),
-        )
-
-    if latency >= 3000:
-        return _status_dict("degraded", "slow response", latency_ms=latency)
-    return _status_dict("healthy", "agents retrieved", latency_ms=latency)
 
 
 async def _probe_autoresearch_status() -> dict[str, Any]:

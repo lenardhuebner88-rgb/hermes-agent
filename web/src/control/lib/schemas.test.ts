@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentLiveSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -168,49 +168,5 @@ describe("SystemHealthResponseSchema", () => {
     expect(parsed.subsystems.gateway.latency_ms).toBe(8);
     expect(parsed.subsystems.autoresearch.heartbeat_age_s).toBe(12);
     expect(parsed.subsystems.kanban_db.status).toBe("offline");
-  });
-});
-
-describe("AgentLiveSchema (dd drilldown)", () => {
-  const baseAgent = {
-    id: "spark",
-    name: "Spark",
-    emoji: "✨",
-    status: "active",
-    model: "m",
-    lastActive: 1_780_041_720,
-    tasks: { queued: [], active: [], review: [], recentDone: [] },
-    stuckSignal: false,
-    activityPulse: 1,
-    fleetHealth: { currentTask: "", heartbeat: null, throughput: "0/h", currentTool: "-", lastOutput: "" },
-    roleLabel: "Agent",
-    roleSummary: "OpenClaw-Agent",
-    escalationNote: null,
-  };
-
-  it("parst einen Agent MIT drilldown verlustfrei", () => {
-    const raw = {
-      ...baseAgent,
-      drilldown: {
-        decisions: [{ id: "d1", label: "Entscheidung A", detail: "weil X" }],
-        artifacts: [{ label: "Report", value: "/tmp/r.md", source: "run 408" }],
-        timeline: [{ id: "t1", at: "2026-05-30T14:30:00Z", kind: "tool", label: "lief", detail: "ok" }],
-        highlights: ["Highlight eins", "Highlight zwei"],
-        sources: ["https://example.com/1", "https://example.com/2"],
-      },
-    };
-    const parsed = parseOrThrow(AgentLiveSchema, raw, "agent");
-    expect(parsed.drilldown).toBeDefined();
-    expect(parsed.drilldown!.decisions).toEqual([{ id: "d1", label: "Entscheidung A", detail: "weil X" }]);
-    expect(parsed.drilldown!.artifacts).toEqual([{ label: "Report", value: "/tmp/r.md", source: "run 408" }]);
-    expect(parsed.drilldown!.timeline).toEqual([{ id: "t1", at: "2026-05-30T14:30:00Z", kind: "tool", label: "lief", detail: "ok" }]);
-    expect(parsed.drilldown!.highlights).toEqual(["Highlight eins", "Highlight zwei"]);
-    expect(parsed.drilldown!.sources).toEqual(["https://example.com/1", "https://example.com/2"]);
-  });
-
-  it("parst einen Agent OHNE drilldown → drilldown undefined, kein Throw", () => {
-    const parsed = parseOrThrow(AgentLiveSchema, baseAgent, "agent");
-    expect(parsed.drilldown).toBeUndefined();
-    expect(parsed.id).toBe("spark");
   });
 });

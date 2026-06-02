@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -48,8 +47,6 @@ def _install_probe_sources(
     gateway_pid: int | None = None,
     autoresearch_status: dict[str, Any] | None = None,
     autoresearch_exc: Exception | None = None,
-    openclaw_payload: dict[str, Any] | None = None,
-    openclaw_exc: Exception | None = None,
     kanban_path: Path | None = None,
 ) -> None:
     def gateway_probe() -> tuple[bool, dict[str, Any] | None]:
@@ -65,11 +62,6 @@ def _install_probe_sources(
             "heartbeat_fresh": False,
             "heartbeat_age_s": None,
         }
-
-    async def read_openclaw_agents() -> dict[str, Any]:
-        if openclaw_exc is not None:
-            raise openclaw_exc
-        return openclaw_payload or {"agents": []}
 
     if kanban_path is None:
         kanban_path = _create_sqlite_db(tmp_path / "kanban.db")
@@ -87,11 +79,6 @@ def _install_probe_sources(
         sys.modules,
         "hermes_cli.autoresearch_view",
         _module("hermes_cli.autoresearch_view", read_runner_status=read_runner_status),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.openclaw_view",
-        _module("hermes_cli.openclaw_view", read_openclaw_agents=read_openclaw_agents),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -114,9 +101,6 @@ def test_all_subsystems_healthy(
     assert data["schema"] == "hermes-health-v1"
     assert data["overall"] == "healthy"
     assert isinstance(data["checked_at"], int)
-    # OpenClaw (Mission Control, :3000) wurde 2026-06-01 abgeschaltet und wird
-    # nicht mehr aggregiert (siehe _SUBSYSTEM_NAMES). _probe_openclaw_status bleibt
-    # erhalten (eigener Unit-Test unten) für einen sauberen Revert.
     assert set(data["subsystems"]) == {
         "gateway",
         "autoresearch",
@@ -239,27 +223,6 @@ def test_autoresearch_crashed_state(
     assert data["overall"] == "offline"
     assert autoresearch["status"] == "offline"
     assert autoresearch["detail"] == "crashed"
-
-
-def test_openclaw_slow_roundtrip_degraded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.openclaw_view",
-        _module(
-            "hermes_cli.openclaw_view",
-            read_openclaw_agents=AsyncMock(return_value={"agents": []}),
-        ),
-    )
-    perf_values = iter([10.0, 13.0])
-    monkeypatch.setattr(hs.time, "perf_counter", lambda: next(perf_values))
-
-    result = asyncio.run(hs._probe_openclaw_status())
-
-    assert result["status"] == "degraded"
-    assert result["latency_ms"] == 3000
-    assert result["error"] is None
 
 
 def test_kanban_db_missing_file_offline(

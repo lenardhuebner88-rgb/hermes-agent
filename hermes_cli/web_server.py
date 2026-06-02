@@ -7706,18 +7706,6 @@ app.include_router(_dashboard_auth_router)
 from hermes_cli.autoresearch_view import register_autoresearch_routes  # noqa: E402
 register_autoresearch_routes(app)
 
-# Read-only OpenClaw live-agent proxy for Hermes Control. The route itself is
-# still protected by the dashboard session-token middleware under /api/.
-from hermes_cli.openclaw_view import register_openclaw_routes  # noqa: E402
-register_openclaw_routes(app)
-
-# OpenClaw dispatch routes (Glue #3): create an ``openclaw:<agent>`` kanban task
-# the dispatcher signs + submits to MC, and a read-only list of dispatched tasks
-# for the dashboard tab. Behind the same /api/ session-token middleware. No
-# secret/hmac material on the create path — signing happens later in dispatch.
-from hermes_cli.openclaw_dispatch import register_openclaw_dispatch_routes  # noqa: E402
-register_openclaw_dispatch_routes(app)
-
 from hermes_cli.health_status import register_health_status_routes  # noqa: E402
 register_health_status_routes(app)
 

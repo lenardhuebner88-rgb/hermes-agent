@@ -1,15 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { z } from "zod";
 import { fetchJSON } from "@/lib/api";
 import {
-  AgentsResponseSchema,
   BacklogDetailSchema,
   BacklogResponseSchema,
   OrchestrationDetailSchema,
   OrchestrationBacklogResponseSchema,
   AutoresearchRunsResponseSchema,
   AutoresearchStatusSchema,
-  OpenClawDispatchedResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   RunInspectSchema,
@@ -17,18 +14,9 @@ import {
   WorkersResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, OpenClawDispatchedResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
-import type { AgentsResponse, AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
-
-export type OpenClawDispatchBody = {
-  title: string;
-  description?: string;
-  agent: string;
-  deliver_to?: string;
-  operator_lock_acknowledged?: boolean;
-  board?: string;
-};
+import type { AutoresearchRunsResponse, AutoresearchStatus, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -40,22 +28,6 @@ type BatchConfirmResponse = {
   confirmed?: string[];
   failed?: string[];
 };
-
-const OpenClawCronErrorSchema = z.object({
-  id: z.coerce.string(),
-  name: z.string().catch("cron"),
-  lastError: z.string().catch(""),
-  consecutiveErrors: z.coerce.number().catch(0),
-  lastRunAt: z.coerce.number().catch(0),
-});
-
-const OpenClawCronErrorsResponseSchema = z.object({
-  errors: z.array(OpenClawCronErrorSchema).catch([]),
-  stale: z.string().optional(),
-});
-
-export type OpenClawCronError = z.infer<typeof OpenClawCronErrorSchema>;
-export type OpenClawCronErrorsResponse = z.infer<typeof OpenClawCronErrorsResponseSchema>;
 
 type LoadState<T> = {
   data: T | null;
@@ -434,37 +406,4 @@ export function useRunInspect() {
     }
   }, []);
   return { inspectByRun, errorByRun, loadingRun, inspect };
-}
-
-
-export function useOpenClawAgents() {
-  return usePolling<AgentsResponse>(
-    async () => parseOrThrow(AgentsResponseSchema, await fetchJSON<unknown>("/api/openclaw/agents"), "openclaw/agents"),
-    5000,
-  );
-}
-
-export function useOpenClawCronErrors() {
-  return usePolling<OpenClawCronErrorsResponse>(
-    async () => parseOrThrow(OpenClawCronErrorsResponseSchema, await fetchJSON<unknown>("/api/openclaw/cron-errors"), "openclaw/cron-errors"),
-    5000,
-  );
-}
-
-export function useOpenClawDispatched() {
-  return usePolling<OpenClawDispatchedResponse>(
-    async () => parseOrThrow(OpenClawDispatchedResponseSchema, await fetchJSON<unknown>("/api/openclaw/dispatched"), "openclaw/dispatched"),
-    5000,
-  );
-}
-
-/** POST a new openclaw:<agent> dispatch. Mirrors the autoresearch POST pattern
- *  (Content-Type JSON body). No secret material on this path — the dispatcher
- *  signs the MC envelope later. Returns the created task id. */
-export async function dispatchOpenClawTask(body: OpenClawDispatchBody): Promise<{ ok?: boolean; taskId?: string; detail?: string }> {
-  return fetchJSON<{ ok?: boolean; taskId?: string; detail?: string }>("/api/openclaw/dispatch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
 }

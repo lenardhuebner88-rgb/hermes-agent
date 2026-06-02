@@ -8,7 +8,7 @@
  */
 import { isActionable } from './autoresearch';
 import type {
-  Worker, AgentLive, AgentsResponse, Proposal, WorkerHealth, ToneName,
+  Worker, Proposal, WorkerHealth,
 } from './types';
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -61,82 +61,9 @@ export const workerRemaining = (w: Worker, now: number = nowSec()) =>
 export const workerHeartbeatAge = (w: Worker, now: number = nowSec()) =>
   now - w.last_heartbeat_at;
 
-/* ── Agenten-Ableitungen ───────────────────────────────────────────────── */
-
-export const agentStatusTone: Record<AgentLive['status'], ToneName> = {
-  active: 'cyan', monitoring: 'amber', ready: 'sky', idle: 'zinc', offline: 'zinc',
-};
-export const agentStatusLabel: Record<AgentLive['status'], string> = {
-  active: 'Aktiv', monitoring: 'Beobachtet', ready: 'Bereit', idle: 'Inaktiv', offline: 'Offline',
-};
-
-export function agentIsProblem(a: AgentLive): boolean {
-  return a.stuckSignal || a.status === 'offline';
-}
-export function agentSortRank(a: AgentLive): number {
-  if (a.stuckSignal) return 3;
-  if (a.status === 'offline') return 2;
-  return 0;
-}
-export function buildOpenClawAlerts(agents: AgentLive[]): {
-  critical: AgentLive[];
-  warning: AgentLive[];
-  criticalCount: number;
-  warningCount: number;
-} {
-  const critical = agents.filter((a) => a.stuckSignal === true);
-  const warning = agents.filter((a) => a.status === 'offline' && a.stuckSignal !== true);
-  return { critical, warning, criticalCount: critical.length, warningCount: warning.length };
-}
-/* ── OpenClaw „stale statt leer" ───────────────────────────────────────── */
-export interface OpenClawFleetState {
-  agents: AgentLive[];
-  updatedAt: number | null;
-  /** Non-null = wir zeigen ABSICHTLICH den letzten guten Stand (veraltet), weil
-   *  der jüngste Poll leer-mit-Fehler zurückkam. Hält den Fehlertext fürs Badge. */
-  staleError: string | null;
-}
-
-/**
- * „Stale statt leer": eine transiente MC-Verzögerung liefert `agents:[]` plus
- * einen Fehlertext (Proxy erreicht MC nicht rechtzeitig). Den Flaggschiff-Tab bei
- * jedem solchen Aussetzer zu blanken ist der Hauptgrund, warum er „kaputt" wirkt.
- * Also: letzten nicht-leeren Stand halten und als veraltet markieren, statt
- * „0 Agenten" aufblitzen zu lassen.
- *  - frischer nicht-leerer Poll  → übernehmen, Stale-Flag löschen
- *  - leer + Fehler + Vorstand    → Vorstand halten, staleError setzen
- *  - leer + Fehler, kein Vorstand → leer, Fehler zeigen (wirklich noch nichts da)
- *  - leer ohne Fehler            → leer übernehmen (MC meldet ehrlich null Agenten)
- */
-export function reconcileOpenClawFleet(
-  prev: OpenClawFleetState | null,
-  resp: AgentsResponse | null,
-): OpenClawFleetState {
-  const base = prev ?? { agents: [], updatedAt: null, staleError: null };
-  if (!resp) return base;
-  const err = resp.error ?? null;
-  if (resp.agents.length > 0) {
-    return { agents: resp.agents, updatedAt: resp.updatedAt, staleError: null };
-  }
-  if (err && prev && prev.agents.length > 0) {
-    return { agents: prev.agents, updatedAt: prev.updatedAt, staleError: err };
-  }
-  return { agents: [], updatedAt: resp.updatedAt, staleError: err };
-}
-
-/** Effektiver Ton: stuckSignal überschreibt den Status optisch (amber). */
-export function agentTone(a: AgentLive): ToneName {
-  return a.stuckSignal ? 'amber' : agentStatusTone[a.status];
-}
-export function agentLabel(a: AgentLive): string {
-  return a.stuckSignal ? 'Stuck' : agentStatusLabel[a.status];
-}
-
 /* ── Übersichts-Aggregation („Ist alles gesund?") ──────────────────────── */
 
-export type Warning =
-  | { kind: 'hermes'; worker: Worker; health: WorkerHealth }
-  | { kind: 'openclaw'; agent: AgentLive };
+export type Warning = { kind: 'hermes'; worker: Worker; health: WorkerHealth };
 
 export interface Overview {
   hermesTotal: number;
@@ -152,27 +79,24 @@ export interface Overview {
 
 export function buildOverview(
   workers: Worker[],
-  agents: AgentLive[],
+  _agents: unknown[],
   proposals: Proposal[],
   now: number = nowSec(),
 ): Overview {
   const hProblem = workers.filter((w) =>
     ['stuck', 'blocked', 'offline'].includes(workerHealth(w, now).key));
-  const ocProblem = agents.filter(agentIsProblem);
 
   const warnings: Warning[] = [
     ...hProblem.map((w): Warning => ({ kind: 'hermes', worker: w, health: workerHealth(w, now) })),
-    ...ocProblem.map((a): Warning => ({ kind: 'openclaw', agent: a })),
   ];
 
   return {
     hermesTotal: workers.length,
     hermesHealthy: workers.filter((w) => workerHealth(w, now).key === 'healthy').length,
     hermesRunning: workers.filter((w) => w.run_status === 'running').length,
-    ocTotal: agents.length,
-    ocHealthy: agents.filter((a) =>
-      ['active', 'monitoring', 'ready'].includes(a.status) && !a.stuckSignal).length,
-    ocActive: agents.filter((a) => a.status === 'active').length,
+    ocTotal: 0,
+    ocHealthy: 0,
+    ocActive: 0,
     openProposals: proposals.filter(isActionable).length,
     warnings,
     allHealthy: warnings.length === 0,

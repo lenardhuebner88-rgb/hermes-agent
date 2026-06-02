@@ -5,10 +5,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  workerHealth, buildOverview, buildOpenClawAlerts, reconcileOpenClawFleet, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
+  workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
 } from './derive';
-import type { OpenClawFleetState } from './derive';
-import type { Worker, AgentLive, AgentsResponse, Proposal } from './types';
+import type { Worker, Proposal } from './types';
 
 const NOW = 1_780_041_720;
 
@@ -58,36 +57,26 @@ describe('workerHealth', () => {
 });
 
 describe('buildOverview', () => {
-  const agents: AgentLive[] = [
-    { id: 'main', name: 'Main', emoji: '🦅', status: 'active', model: 'm', lastActive: NOW,
-      tasks: { queued: [], active: [], review: [], recentDone: [] }, stuckSignal: false,
-      activityPulse: 1, fleetHealth: { currentTask: '', heartbeat: NOW, throughput: '', currentTool: '', lastOutput: '' },
-      roleLabel: '', roleSummary: '', escalationNote: null },
-    { id: 'james', name: 'James', emoji: '🔬', status: 'active', model: 'm', lastActive: NOW,
-      tasks: { queued: [], active: [], review: [], recentDone: [] }, stuckSignal: true,
-      activityPulse: 0, fleetHealth: { currentTask: '', heartbeat: NOW, throughput: '', currentTool: '', lastOutput: '' },
-      roleLabel: '', roleSummary: '', escalationNote: 'hängt' },
-  ];
   const proposals: Proposal[] = [
     { id: 'p1', target: 's', section: '', rationale_plain: '', diff_before_after: "", mode: 'skill', status: 'proposed' },
     { id: 'p2', target: 's', section: '', rationale_plain: '', diff_before_after: "", mode: 'code', status: 'applied' },
   ];
 
-  it('zählt nur actionable Vorschläge, aktive Agenten und sammelt Warnungen', () => {
+  it('zählt nur actionable Vorschläge und sammelt Worker-Warnungen', () => {
     const mixedProposals = [
       ...proposals,
       { id: 'p3', target: 's', section: '', rationale_plain: '', diff_before_after: "", mode: 'skill', status: 'proposed', last_outcome: 'reverted_no_improvement' },
     ] satisfies Proposal[];
-    const o = buildOverview([mkWorker(), mkWorker({ run_status: 'blocked' })], agents, mixedProposals, NOW);
+    const o = buildOverview([mkWorker(), mkWorker({ run_status: 'blocked' })], [], mixedProposals, NOW);
     expect(o.openProposals).toBe(1);
-    expect(o.ocActive).toBe(2);
-    expect(o.ocHealthy).toBe(1);          // james ist stuck → nicht gesund
-    expect(o.warnings.length).toBe(2);    // 1 blockierter Worker + 1 stuck Agent
+    expect(o.ocActive).toBe(0);
+    expect(o.ocHealthy).toBe(0);
+    expect(o.warnings.length).toBe(1);
     expect(o.allHealthy).toBe(false);
   });
 
   it('allHealthy=true wenn nichts auffällt', () => {
-    const o = buildOverview([mkWorker()], [agents[0]], [], NOW);
+    const o = buildOverview([mkWorker()], [], [], NOW);
     expect(o.allHealthy).toBe(true);
   });
 });
@@ -153,117 +142,5 @@ describe('fmtClock (Design-System-Format bleibt DD/MM/YYYY, HH:mm)', () => {
   // hängt am vollen Datum-Zeit-Format.
   it('epoch-Sekunden → "DD/MM/YYYY, HH:mm"', () => {
     expect(fmtClock(NOW)).toMatch(/^\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}$/);
-  });
-});
-
-describe('buildOpenClawAlerts', () => {
-  // buildOpenClawAlerts liest nur id/status/stuckSignal — minimal valide
-  // AgentLive-Objekte genügen (Rest via Cast, nicht relevant für die Logik).
-  function mkAgent(over: { id: string; status: AgentLive['status']; stuckSignal: boolean }): AgentLive {
-    return over as unknown as AgentLive;
-  }
-
-  // (1) leeres Array → alle Counts 0
-  it('leeres Array → alle Counts 0', () => {
-    const result = buildOpenClawAlerts([]);
-    expect(result.critical).toHaveLength(0);
-    expect(result.criticalCount).toBe(0);
-    expect(result.warning).toHaveLength(0);
-    expect(result.warningCount).toBe(0);
-  });
-
-  // (2) ein Agent mit stuckSignal=true → in critical, criticalCount=1
-  it('ein Agent mit stuckSignal=true → in critical, criticalCount=1', () => {
-    const result = buildOpenClawAlerts([mkAgent({ id: 'a1', status: 'active', stuckSignal: true })]);
-    expect(result.critical).toHaveLength(1);
-    expect(result.criticalCount).toBe(1);
-    expect(result.critical[0].id).toBe('a1');
-    expect(result.warning).toHaveLength(0);
-    expect(result.warningCount).toBe(0);
-  });
-
-  // (3) ein Agent status='offline' ohne stuckSignal → in warning, warningCount=1
-  it("ein Agent status='offline' ohne stuckSignal → in warning, warningCount=1", () => {
-    const result = buildOpenClawAlerts([mkAgent({ id: 'a2', status: 'offline', stuckSignal: false })]);
-    expect(result.critical).toHaveLength(0);
-    expect(result.criticalCount).toBe(0);
-    expect(result.warning).toHaveLength(1);
-    expect(result.warningCount).toBe(1);
-    expect(result.warning[0].id).toBe('a2');
-  });
-
-  // (4) Agent mit BEIDEM (stuckSignal=true UND status='offline') → NUR critical, nicht doppelt
-  it('Agent mit stuckSignal UND offline → zählt NUR als critical, nicht doppelt', () => {
-    const result = buildOpenClawAlerts([mkAgent({ id: 'a3', status: 'offline', stuckSignal: true })]);
-    expect(result.critical).toHaveLength(1);
-    expect(result.criticalCount).toBe(1);
-    expect(result.critical[0].id).toBe('a3');
-    expect(result.warning).toHaveLength(0);
-    expect(result.warningCount).toBe(0);
-  });
-
-  // (5) gemischte Liste → korrekte Aufteilung
-  it('gemischte Liste → korrekte Aufteilung', () => {
-    const result = buildOpenClawAlerts([
-      mkAgent({ id: 'online-stuck',  status: 'active',  stuckSignal: true  }), // critical
-      mkAgent({ id: 'offline-stuck', status: 'offline', stuckSignal: true  }), // nur critical
-      mkAgent({ id: 'offline-clean', status: 'offline', stuckSignal: false }), // nur warning
-      mkAgent({ id: 'online-clean',  status: 'active',  stuckSignal: false }), // irrelevant
-    ]);
-    expect(result.critical).toHaveLength(2);
-    expect(result.criticalCount).toBe(2);
-    expect(result.critical.map((a) => a.id)).toContain('online-stuck');
-    expect(result.critical.map((a) => a.id)).toContain('offline-stuck');
-    expect(result.warning).toHaveLength(1);
-    expect(result.warningCount).toBe(1);
-    expect(result.warning[0].id).toBe('offline-clean');
-  });
-});
-
-describe('reconcileOpenClawFleet (stale statt leer)', () => {
-  const ag = (id: string): AgentLive => ({ id } as unknown as AgentLive);
-  const resp = (over: Partial<AgentsResponse>): AgentsResponse =>
-    ({ agents: [], updatedAt: null, ...over });
-
-  it('frischer nicht-leerer Poll → übernehmen, kein Stale', () => {
-    const out = reconcileOpenClawFleet(null, resp({ agents: [ag('a')], updatedAt: 100 }));
-    expect(out.agents.map((a) => a.id)).toEqual(['a']);
-    expect(out.updatedAt).toBe(100);
-    expect(out.staleError).toBeNull();
-  });
-
-  it('leer + Fehler + Vorstand → Vorstand halten, staleError gesetzt', () => {
-    const prev: OpenClawFleetState = { agents: [ag('a'), ag('b')], updatedAt: 100, staleError: null };
-    const out = reconcileOpenClawFleet(prev, resp({ agents: [], error: 'Mission-Control-Timeout (>6s)' }));
-    expect(out.agents.map((a) => a.id)).toEqual(['a', 'b']); // nicht geblankt
-    expect(out.updatedAt).toBe(100);                          // alter Zeitstempel bleibt
-    expect(out.staleError).toBe('Mission-Control-Timeout (>6s)');
-  });
-
-  it('leer + Fehler ohne Vorstand → leer, Fehler durchreichen', () => {
-    const out = reconcileOpenClawFleet(null, resp({ agents: [], error: 'connection refused' }));
-    expect(out.agents).toHaveLength(0);
-    expect(out.staleError).toBe('connection refused');
-  });
-
-  it('leer OHNE Fehler → leer übernehmen (MC meldet ehrlich null)', () => {
-    const prev: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: null };
-    const out = reconcileOpenClawFleet(prev, resp({ agents: [], updatedAt: 200 }));
-    expect(out.agents).toHaveLength(0);
-    expect(out.updatedAt).toBe(200);
-    expect(out.staleError).toBeNull();
-  });
-
-  it('Recovery: nach Stale kommt wieder frischer Poll → Stale gelöscht', () => {
-    const stale: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: 'timeout' };
-    const out = reconcileOpenClawFleet(stale, resp({ agents: [ag('a'), ag('c')], updatedAt: 300 }));
-    expect(out.agents.map((a) => a.id)).toEqual(['a', 'c']);
-    expect(out.updatedAt).toBe(300);
-    expect(out.staleError).toBeNull();
-  });
-
-  it('null-Response → vorherigen Stand unverändert lassen', () => {
-    const prev: OpenClawFleetState = { agents: [ag('a')], updatedAt: 100, staleError: null };
-    expect(reconcileOpenClawFleet(prev, null)).toBe(prev);
   });
 });
