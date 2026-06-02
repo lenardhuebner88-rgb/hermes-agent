@@ -116,17 +116,25 @@ const CronLatestOutputSchema = z.object({
   run_count: z.coerce.number().catch(0),
 });
 
+// next_run_at / last_run_at / paused_at arrive as ISO-8601 strings from the cron
+// normalizer (e.g. "2026-06-03T07:30:00+02:00"), but may be epoch numbers in
+// other paths — accept both without coercion (coerce.number would turn an ISO
+// string into NaN, which slips past .catch). The view normalizes to a Date.
+const CronTimestampSchema = z.union([z.number(), z.string()]).nullable().catch(null);
+
 export const CronJobSchema = z.object({
   id: z.coerce.string().catch(""),
   name: z.string().catch(""),
   enabled: z.boolean().catch(false),
   state: z.string().catch(""),
-  paused_at: z.coerce.number().nullable().catch(null),
+  paused_at: CronTimestampSchema,
   paused_reason: z.string().nullable().catch(null),
   schedule_display: z.string().catch(""),
-  repeat: z.string().nullable().catch(null),
-  next_run_at: z.coerce.number().nullable().catch(null),
-  last_run_at: z.coerce.number().nullable().catch(null),
+  // repeat may be a string ("daily") or an object ({times, completed}); only
+  // schedule_display is surfaced, so tolerate anything and drop it.
+  repeat: z.unknown().nullable().catch(null),
+  next_run_at: CronTimestampSchema,
+  last_run_at: CronTimestampSchema,
   last_status: z.string().nullable().catch(null),
   last_error: z.string().nullable().catch(null),
   last_delivery_error: z.string().nullable().catch(null),

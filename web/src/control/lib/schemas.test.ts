@@ -180,7 +180,10 @@ describe("CronObservabilityResponseSchema", () => {
       gateway: { running: true, pids: [42, "99"] },
       jobs: [{
         id: "j1", name: "Morgenbrief", enabled: true, state: "scheduled",
-        schedule_display: "07:00", next_run_at: 1000, last_run_at: 900,
+        schedule_display: "07:00",
+        // Real backend sends ISO-8601 strings here, not epoch numbers.
+        next_run_at: "2026-06-03T07:30:00+02:00", last_run_at: "2026-06-02T07:30:23+02:00",
+        repeat: { times: null, completed: 27 },
         last_status: "ok", last_delivery_error: null, deliver: "discord:1",
         profile: "research", has_prompt: true, has_script: false,
         latest_output: { filename: "x.md", mtime: 1, size_bytes: 3, run_count: 2 },
@@ -191,6 +194,8 @@ describe("CronObservabilityResponseSchema", () => {
     expect(parsed.gateway.pids).toEqual([42, 99]);
     expect(parsed.jobs).toHaveLength(1);
     expect(parsed.jobs[0].latest_output?.run_count).toBe(2);
+    // ISO timestamps survive as strings (not coerced to NaN).
+    expect(parsed.jobs[0].next_run_at).toBe("2026-06-03T07:30:00+02:00");
   });
 
   it("keeps the other jobs when one job is malformed (does not empty the list)", () => {

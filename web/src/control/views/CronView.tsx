@@ -11,6 +11,19 @@ import type { Density } from "../hooks/useDensity";
 
 const t = de.crons;
 
+/** Cron timestamps arrive as ISO-8601 strings or epoch seconds → epoch seconds. */
+function toEpoch(value: number | string | null): number | null {
+  if (value == null) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function fmtWhen(value: number | string | null): string {
+  const epoch = toEpoch(value);
+  return epoch == null ? t.never : fmtClock(epoch);
+}
+
 type JobTone = { tone: ToneName; dot: DotKind; label: string };
 
 export function jobTone(job: CronJob): JobTone {
@@ -29,6 +42,7 @@ function CronJobCard({ job, controls, output }: {
   const [open, setOpen] = useState(false);
   const status = jobTone(job);
   const now = nowSec();
+  const lastRunEpoch = toEpoch(job.last_run_at);
   const busy = controls.busyJob === job.id;
   const ref = { id: job.id, profile: job.profile };
   const loaded = output.outputById[job.id];
@@ -73,8 +87,8 @@ function CronJobCard({ job, controls, output }: {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-3 text-xs hc-soft sm:grid-cols-3">
-        <div><span className="hc-dim">{t.nextRun}</span><br /><span className="hc-mono">{job.next_run_at ? fmtClock(job.next_run_at) : t.never}</span></div>
-        <div><span className="hc-dim">{t.lastRun}</span><br /><span className="hc-mono">{job.last_run_at ? `${fmtClock(job.last_run_at)} (${fmtAge(job.last_run_at, now)})` : t.never}</span></div>
+        <div><span className="hc-dim">{t.nextRun}</span><br /><span className="hc-mono">{fmtWhen(job.next_run_at)}</span></div>
+        <div><span className="hc-dim">{t.lastRun}</span><br /><span className="hc-mono">{lastRunEpoch != null ? `${fmtClock(lastRunEpoch)} (${fmtAge(lastRunEpoch, now)})` : t.never}</span></div>
         <div><span className="hc-dim">{t.deliver}</span><br /><span className="hc-mono">{job.deliver || "—"}</span></div>
       </div>
 

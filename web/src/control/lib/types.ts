@@ -112,12 +112,12 @@ export interface CronJob {
   name: string;
   enabled: boolean;
   state: string;
-  paused_at: number | null;
+  paused_at: number | string | null;
   paused_reason: string | null;
   schedule_display: string;
-  repeat: string | null;
-  next_run_at: number | null;
-  last_run_at: number | null;
+  repeat: unknown;
+  next_run_at: number | string | null;
+  last_run_at: number | string | null;
   last_status: string | null;
   last_error: string | null;
   last_delivery_error: string | null;
