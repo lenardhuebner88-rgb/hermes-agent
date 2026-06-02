@@ -67,6 +67,17 @@ def test_read_output_file_none_when_empty(output_dir: Path) -> None:
     assert cron_jobs.read_output_file("job-1") is None
 
 
+def test_list_jobs_with_output_annotates(output_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    job_dir = output_dir / "job-1"
+    job_dir.mkdir()
+    (job_dir / "2026-06-02_08-00-00.md").write_text("hi")
+    monkeypatch.setattr(cron_jobs, "list_jobs", lambda inc=False: [{"id": "job-1"}, {"id": "job-2"}])
+    jobs = cron_jobs.list_jobs_with_output(True)
+    by_id = {j["id"]: j for j in jobs}
+    assert by_id["job-1"]["latest_output"]["run_count"] == 1
+    assert by_id["job-2"]["latest_output"] is None  # no output dir
+
+
 def test_output_helpers_reject_path_escape(output_dir: Path) -> None:
     for bad in ["../etc", "a/b", "..", ""]:
         with pytest.raises(ValueError):
@@ -123,6 +134,15 @@ class _FakeBackend:
     def call_cron_for_profile(self, profile: Optional[str], func_name: str, *args: Any):
         if func_name == "list_jobs":
             return list(self._jobs.get(profile or "", []))
+        if func_name == "list_jobs_with_output":
+            out = []
+            for job in self._jobs.get(profile or "", []):
+                annotated = dict(job)
+                annotated["latest_output"] = {
+                    "filename": "2026-06-02_08-00-00.md", "mtime": 1, "size_bytes": 3, "run_count": 1,
+                }
+                out.append(annotated)
+            return out
         if func_name == "list_output_files":
             return [{"filename": "2026-06-02_08-00-00.md", "mtime": 1, "size_bytes": 3}]
         if func_name == "read_output_file":

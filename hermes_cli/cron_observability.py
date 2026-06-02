@@ -64,24 +64,6 @@ def redact_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return redacted
 
 
-def _latest_output_meta(call_cron, profile: Optional[str], job_id: str) -> Optional[Dict[str, Any]]:
-    """Return {filename, mtime, size_bytes, run_count} for a job, or None."""
-    try:
-        files = call_cron(profile, "list_output_files", job_id)
-    except Exception:
-        _log.exception("cron observability: list_output_files failed for %s", job_id)
-        return None
-    if not files:
-        return None
-    newest = files[0]
-    return {
-        "filename": newest.get("filename"),
-        "mtime": newest.get("mtime"),
-        "size_bytes": newest.get("size_bytes"),
-        "run_count": len(files),
-    }
-
-
 def _collect_observability() -> Dict[str, Any]:
     """Build the observability bundle. Never raises — failures degrade in place."""
     from hermes_cli.web_server import _call_cron_for_profile, _cron_profile_dicts
@@ -104,15 +86,16 @@ def _collect_observability() -> Dict[str, Any]:
             if not name:
                 continue
             try:
-                raw_jobs = _call_cron_for_profile(name, "list_jobs", True)
+                # One call per profile (jobs already carry their latest-output
+                # meta) instead of an extra _call_cron_for_profile per job —
+                # avoids re-resolving the profile + lock churn 30+ times.
+                raw_jobs = _call_cron_for_profile(name, "list_jobs_with_output", True)
             except Exception:
-                _log.exception("cron observability: list_jobs failed for profile %s", name)
+                _log.exception("cron observability: list_jobs_with_output failed for profile %s", name)
                 continue
             for job in raw_jobs:
                 redacted = redact_job(job)
-                redacted["latest_output"] = _latest_output_meta(
-                    _call_cron_for_profile, name, str(job.get("id") or "")
-                )
+                redacted["latest_output"] = job.get("latest_output")
                 jobs.append(redacted)
     except Exception as exc:
         _log.exception("cron observability: bundle failed")

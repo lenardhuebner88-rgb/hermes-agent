@@ -1168,6 +1168,32 @@ def list_output_files(job_id: str) -> List[Dict[str, Any]]:
     return files
 
 
+def list_jobs_with_output(include_disabled: bool = False) -> List[Dict[str, Any]]:
+    """Like :func:`list_jobs`, but annotates each job with its latest-output meta.
+
+    Computed in one pass under a single resolved context so callers don't pay
+    per-job profile resolution. Each job gets ``latest_output`` =
+    ``{filename, mtime, size_bytes, run_count}`` or ``None``.
+    """
+    jobs = list_jobs(include_disabled)
+    for job in jobs:
+        try:
+            files = list_output_files(str(job.get("id") or ""))
+        except Exception:
+            files = []
+        if files:
+            newest = files[0]
+            job["latest_output"] = {
+                "filename": newest.get("filename"),
+                "mtime": newest.get("mtime"),
+                "size_bytes": newest.get("size_bytes"),
+                "run_count": len(files),
+            }
+        else:
+            job["latest_output"] = None
+    return jobs
+
+
 def read_output_file(
     job_id: str,
     filename: Optional[str] = None,
