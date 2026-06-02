@@ -53,6 +53,7 @@ from pydantic import BaseModel, ValidationError
 from hermes_cli import autoresearch_proposals as _proposals
 from hermes_cli import autoresearch_runs as _runs
 from hermes_cli import deep_audit as _deep_audit
+from hermes_cli import test_foundry as _test_foundry
 from scripts import autoresearch_writer as _writer
 
 # hermes-agent repo root (this file lives in hermes_cli/).
@@ -388,6 +389,20 @@ def _spawn_deep_audit_runner(request_path: Path) -> int:
     return proc.pid
 
 
+def _spawn_test_foundry_runner(request_path: Path) -> int:
+    """Spawn the mutation-test hardening lane detached; return its PID."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "hermes_cli.test_foundry", "--request", str(request_path)],
+        cwd=str(_REPO),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
 def _signal_pid(pid: int, sig: int) -> None:
     os.kill(pid, sig)
 
@@ -415,6 +430,12 @@ class DeepAuditBody(BaseModel):
     subsystem: str
     focus: str | None = None
     max_files: int = 12
+
+
+class TestFoundryBody(BaseModel):
+    target: str | None = None
+    max_mutants: int = 30
+    apply: bool = False
 
 
 class ApplyProposalBody(BaseModel):
@@ -598,6 +619,20 @@ def trigger_deep_audit(*, subsystem: str, focus: str | None = None, max_files: i
         "subsystem": subsystem,
         "files": request["files"],
     }
+
+
+def trigger_test_foundry(*, target: str | None = None, max_mutants: int = 30, apply: bool = False) -> dict[str, Any]:
+    status = _test_foundry.read_status()
+    if status.get("state") == "running":
+        raise HTTPException(status_code=409, detail="a test-foundry run is already in progress")
+    try:
+        request = _test_foundry.write_request(target=target, max_mutants=max_mutants, apply=apply)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    request_path = Path(str(request["request_path"]))
+    pid = _spawn_test_foundry_runner(request_path)
+    _test_foundry.write_lock(target=str(request["target"]), pid=pid)
+    return {"ok": True, "pid": pid, "target": request["target"], "request_id": request["request_id"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1160,6 +1195,18 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.get("/api/autoresearch/deep-audit/findings")
     async def autoresearch_deep_audit_findings() -> dict[str, Any]:
         return _deep_audit.read_findings()
+
+    @app.post("/api/autoresearch/test-foundry/trigger")
+    async def autoresearch_test_foundry_trigger(body: TestFoundryBody) -> dict[str, Any]:
+        return trigger_test_foundry(target=body.target, max_mutants=body.max_mutants, apply=body.apply)
+
+    @app.get("/api/autoresearch/test-foundry/status")
+    async def autoresearch_test_foundry_status() -> dict[str, Any]:
+        return _test_foundry.read_status()
+
+    @app.get("/api/autoresearch/test-foundry/targets")
+    async def autoresearch_test_foundry_targets() -> dict[str, Any]:
+        return {"schema": "test-foundry-targets-v1", "targets": _test_foundry.curated_targets()}
 
     @app.post("/api/autoresearch/apply")
     async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:
