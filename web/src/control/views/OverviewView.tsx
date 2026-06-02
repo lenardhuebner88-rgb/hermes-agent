@@ -3,7 +3,7 @@ import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical } from
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useAutoresearchStatus, useHermesWorkers, useSystemHealth } from "../hooks/useControlData";
+import { useAutoresearchStatus, useHermesWorkers, useMetricsLite, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -31,6 +31,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   const navigate = useNavigate();
   const workers = useHermesWorkers();
   const health = useSystemHealth();
+  const metrics = useMetricsLite();
   const autoresearch = useAutoresearchStatus();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
@@ -76,7 +77,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
 
   return (
     <div className="space-y-5">
-      <SystemHealthStrip data={health.data} error={health.error} now={now} />
+      <SystemHealthStrip data={health.data} error={health.error} now={now} metrics={metrics.data} />
 
       <section className="hc-card p-5 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">

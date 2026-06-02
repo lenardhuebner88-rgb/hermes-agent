@@ -348,6 +348,31 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# Registered LAST → outermost middleware (Starlette runs last-decorated first),
+# so it measures the TOTAL request including host/auth checks without touching
+# their logic. Pure wrapper: time + classify, response unchanged, exception
+# re-raised. Hot-path cost is one perf_counter + dict lookup + deque.append.
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    from hermes_cli import metrics_lite
+
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        try:
+            metrics_lite.record(
+                metrics_lite.route_group(request.url.path),
+                (time.perf_counter() - start) * 1000.0,
+                status_code >= 500,
+            )
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Config schema — auto-generated from DEFAULT_CONFIG
 # ---------------------------------------------------------------------------
@@ -7736,6 +7761,11 @@ register_health_status_routes(app)
 # PUBLIC_API_PATHS. See hermes_cli/cron_observability.py.
 from hermes_cli.cron_observability import register_cron_observability_routes  # noqa: E402
 register_cron_observability_routes(app)
+
+# In-process self-metrics (route-group latency/error rates) fed by
+# metrics_middleware above. Loopback-gated; never in PUBLIC_API_PATHS.
+from hermes_cli.metrics_lite import register_metrics_lite_routes  # noqa: E402
+register_metrics_lite_routes(app)
 
 # Read-only family-organizer backlog board (parses that repo's backlog/items
 # frontmatter from disk). Under /api/ → inherits the session-token gate.

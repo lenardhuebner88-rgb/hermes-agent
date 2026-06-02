@@ -30,6 +30,12 @@ export const de = {
     degraded: "Beeinträchtigt",
     offline: "Offline",
     unknown: "Status unbekannt",
+    metricsTitle: "Selbstmetriken",
+    requests: "Requests",
+    errorRate: "Fehlerquote",
+    p95: "p95",
+    metricsError: "nicht ladbar",
+    metricsErrorBadge: "Erhöhte Fehlerquote",
   },
   crons: {
     eyebrow: "Geplante Jobs",

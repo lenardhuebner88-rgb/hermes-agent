@@ -147,6 +147,22 @@ export interface CronOutput {
   mtime: number | null;
 }
 
+export interface MetricsGroup {
+  count: number;
+  error_count: number;
+  error_rate: number;
+  p50_ms: number;
+  p95_ms: number;
+}
+
+export interface MetricsLiteResponse {
+  schema: string;
+  checked_at: number;
+  uptime_seconds: number;
+  groups: Record<string, MetricsGroup>;
+  error?: string | null;
+}
+
 export type Priority = "high" | "med" | "low";
 
 export type AutoresearchState = "idle" | "running" | "stopping" | "crashed";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CronObservabilityResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { CronObservabilityResponseSchema, MetricsLiteResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -221,5 +221,23 @@ describe("CronObservabilityResponseSchema", () => {
     const parsed = parseOrThrow(CronObservabilityResponseSchema, { jobs: "nope", gateway: 5 }, "cron/observability");
     expect(parsed.jobs).toEqual([]);
     expect(parsed.gateway.running).toBe(false);
+  });
+});
+
+
+describe("MetricsLiteResponseSchema", () => {
+  it("parses a full payload and coerces numeric strings", () => {
+    const parsed = parseOrThrow(MetricsLiteResponseSchema, {
+      schema: "hermes-metrics-lite-v1", checked_at: "100", uptime_seconds: "60",
+      groups: { "/api/x": { count: "10", error_count: 1, error_rate: 0.1, p50_ms: "5", p95_ms: 40 } },
+    }, "metrics-lite");
+    expect(parsed.groups["/api/x"].count).toBe(10);
+    expect(parsed.groups["/api/x"].p50_ms).toBe(5);
+    expect(parsed.uptime_seconds).toBe(60);
+  });
+
+  it("falls back to empty groups on a broken payload without throwing", () => {
+    const parsed = parseOrThrow(MetricsLiteResponseSchema, { groups: "nope" }, "metrics-lite");
+    expect(parsed.groups).toEqual({});
   });
 });

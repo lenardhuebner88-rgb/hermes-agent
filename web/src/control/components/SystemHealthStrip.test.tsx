@@ -57,4 +57,46 @@ describe("SystemHealthStrip", () => {
     expect(html).toContain("border-zinc-600/25");
     expect(html).toContain("Status unbekannt");
   });
+
+  it("renders the metrics tile with aggregates and no badge under threshold", () => {
+    const html = renderToStaticMarkup(
+      <SystemHealthStrip
+        data={baseHealth}
+        metrics={{
+          schema: "hermes-metrics-lite-v1",
+          checked_at: 100,
+          uptime_seconds: 60,
+          groups: {
+            "/api/x": { count: 100, error_count: 1, error_rate: 0.01, p50_ms: 5, p95_ms: 40 },
+          },
+        }}
+      />,
+    );
+    expect(html).toContain("Selbstmetriken");
+    expect(html).toContain("100"); // total requests
+    expect(html).toContain("40ms"); // worst p95
+    expect(html).not.toContain("Erhöhte Fehlerquote");
+  });
+
+  it("shows the error badge when the aggregate error rate exceeds the threshold", () => {
+    const html = renderToStaticMarkup(
+      <SystemHealthStrip
+        data={baseHealth}
+        metrics={{
+          schema: "hermes-metrics-lite-v1",
+          checked_at: 100,
+          uptime_seconds: 60,
+          groups: { "/api/x": { count: 100, error_count: 20, error_rate: 0.2, p50_ms: 5, p95_ms: 90 } },
+        }}
+      />,
+    );
+    expect(html).toContain("Erhöhte Fehlerquote");
+    expect(html).toContain("text-red-300");
+  });
+
+  it("degrades the metrics tile without breaking subsystem lights when metrics is null", () => {
+    const html = renderToStaticMarkup(<SystemHealthStrip data={baseHealth} metrics={null} />);
+    expect(html).toContain("Hermes-Gateway"); // subsystem lights intact
+    expect(html).toContain("nicht ladbar"); // metrics tile degraded
+  });
 });

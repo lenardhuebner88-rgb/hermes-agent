@@ -18,6 +18,7 @@ from :mod:`hermes_cli.web_server` and :mod:`cron.jobs` rather than reimplemented
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -134,7 +135,10 @@ def register_cron_observability_routes(app: FastAPI) -> None:
     @app.get("/api/cron/observability")
     async def cron_observability() -> Dict[str, Any]:
         try:
-            return _collect_observability()
+            # _collect_observability iterates all profiles + per-job filesystem
+            # listing under a lock (~1.3s for 33 jobs). Offload so it never
+            # blocks the event loop / other dashboard requests.
+            return await asyncio.to_thread(_collect_observability)
         except Exception as exc:  # pragma: no cover - belt and suspenders
             _log.exception("GET /api/cron/observability failed")
             return {
@@ -153,11 +157,11 @@ def register_cron_observability_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         from hermes_cli.web_server import _call_cron_for_profile, _find_cron_job_profile
 
-        selected = profile or _find_cron_job_profile(job_id)
+        selected = profile or await asyncio.to_thread(_find_cron_job_profile, job_id)
         if not selected:
             raise HTTPException(status_code=404, detail="Job not found")
         try:
-            result = _call_cron_for_profile(selected, "read_output_file", job_id, filename)
+            result = await asyncio.to_thread(_call_cron_for_profile, selected, "read_output_file", job_id, filename)
         except ValueError as exc:
             # Path-escape / bad filename → explicit client error, never a 5xx leak.
             raise HTTPException(status_code=400, detail=str(exc)) from exc

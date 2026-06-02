@@ -1,16 +1,20 @@
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
-import type { HealthStatus, SubsystemHealth, SystemHealthResponse } from "../lib/types";
+import type { HealthStatus, MetricsLiteResponse, SubsystemHealth, SystemHealthResponse } from "../lib/types";
 import type { DotKind } from "../lib/tones";
 import { Led } from "./atoms";
 
 type SubsystemKey = keyof SystemHealthResponse["subsystems"];
 type HealthTone = "emerald" | "amber" | "red" | "zinc";
 
+// error_rate above this fraction turns the metrics tile red + shows a badge.
+const ERROR_RATE_THRESHOLD = 0.05;
+
 interface Props {
   data: SystemHealthResponse | null;
   error?: string | null;
   now?: number;
+  metrics?: MetricsLiteResponse | null;
 }
 
 const toneClass: Record<HealthTone, string> = {
@@ -40,7 +44,7 @@ const subsystems: Array<{ key: SubsystemKey; label: string }> = [
 
 const unknownHealth: SubsystemHealth = { status: "offline", detail: de.systemHealth.unknown, error: null };
 
-export function SystemHealthStrip({ data, error, now }: Props) {
+export function SystemHealthStrip({ data, error, now, metrics }: Props) {
   const isUnknown = !data || Boolean(error);
   const overallTone = isUnknown ? "zinc" : statusTone[data.overall];
   const checkedAge = data && now ? Math.max(0, Math.floor(now - data.checked_at)) : null;
@@ -65,7 +69,36 @@ export function SystemHealthStrip({ data, error, now }: Props) {
           ))}
         </div>
       </div>
+      {metrics !== undefined ? <MetricsTile metrics={metrics} /> : null}
     </section>
+  );
+}
+
+function MetricsTile({ metrics }: { metrics: MetricsLiteResponse | null }) {
+  if (!metrics || metrics.error) {
+    return (
+      <div className="mt-2 border-t border-white/10 pt-2 text-[11px] hc-dim">
+        {de.systemHealth.metricsTitle}: {de.systemHealth.metricsError}
+      </div>
+    );
+  }
+  const groups = Object.values(metrics.groups);
+  const totalRequests = groups.reduce((sum, g) => sum + g.count, 0);
+  const totalErrors = groups.reduce((sum, g) => sum + g.error_count, 0);
+  const errorRate = totalRequests > 0 ? totalErrors / totalRequests : 0;
+  const worstP95 = groups.reduce((max, g) => Math.max(max, g.p95_ms), 0);
+  const hot = errorRate > ERROR_RATE_THRESHOLD;
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2 text-[11px] hc-soft">
+      <span className="font-semibold uppercase tracking-normal hc-dim">{de.systemHealth.metricsTitle}</span>
+      <span>{de.systemHealth.requests}: <span className="hc-mono text-white">{totalRequests}</span></span>
+      <span className={cn(hot && "text-red-300")}>
+        {de.systemHealth.errorRate}: <span className="hc-mono">{(errorRate * 100).toFixed(1)}%</span>
+      </span>
+      <span>{de.systemHealth.p95}: <span className="hc-mono text-white">{Math.round(worstP95)}ms</span></span>
+      {hot ? <span className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-red-200">{de.systemHealth.metricsErrorBadge}</span> : null}
+    </div>
   );
 }
 

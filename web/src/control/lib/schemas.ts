@@ -161,6 +161,23 @@ export const CronObservabilityResponseSchema = z.object({
   error: z.string().nullable().catch(null).optional(),
 });
 
+const MetricsGroupSchema = z.object({
+  count: z.coerce.number().catch(0),
+  error_count: z.coerce.number().catch(0),
+  error_rate: z.coerce.number().catch(0),
+  p50_ms: z.coerce.number().catch(0),
+  p95_ms: z.coerce.number().catch(0),
+});
+
+export const MetricsLiteResponseSchema = z.object({
+  schema: z.string().catch("hermes-metrics-lite-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  uptime_seconds: z.coerce.number().catch(0),
+  // A malformed group degrades to defaults rather than emptying the record.
+  groups: z.record(z.string(), MetricsGroupSchema).catch({}),
+  error: z.string().nullable().catch(null).optional(),
+});
+
 export const CronOutputSchema = z.object({
   job_id: z.string().catch(""),
   filename: z.string().nullable().catch(null),

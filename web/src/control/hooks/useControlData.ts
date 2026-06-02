@@ -9,6 +9,7 @@ import {
   AutoresearchStatusSchema,
   CronObservabilityResponseSchema,
   CronOutputSchema,
+  MetricsLiteResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   RunInspectSchema,
@@ -18,7 +19,7 @@ import {
 } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
-import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -316,6 +317,14 @@ export function useHermesRecentResults() {
 export function useSystemHealth() {
   return usePolling<SystemHealthResponse>(
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
+    5000,
+  );
+}
+
+// In-process self-metrics (per route-group latency/error rates). 5s like health.
+export function useMetricsLite() {
+  return usePolling<MetricsLiteResponse>(
+    async () => parseOrThrow(MetricsLiteResponseSchema, await fetchJSON<unknown>("/api/metrics-lite"), "metrics-lite"),
     5000,
   );
 }
