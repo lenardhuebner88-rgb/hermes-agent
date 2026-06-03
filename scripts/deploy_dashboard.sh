@@ -30,9 +30,22 @@ done
 LB=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:9119/control/autoresearch || echo 000)
 TN=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Host: huebners.tail50819a.ts.net" http://127.0.0.1:9119/control/autoresearch || echo 000)
 echo "[deploy] health: loopback=$LB tailnet_guard=$TN  service=$(systemctl --user is-active hermes-dashboard.service)"
-PAYLOAD_OK=$(curl -fsS --max-time 8 http://127.0.0.1:9119/autoresearch/proposals | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d.get("open_count"), int) and isinstance(d.get("count"), int); print(f"count={d.get(chr(99)+chr(111)+chr(117)+chr(110)+chr(116))} open_count={d.get(chr(111)+chr(112)+chr(101)+chr(110)+chr(95)+chr(99)+chr(111)+chr(117)+chr(110)+chr(116))}")' 2>/tmp/hermes-deploy-payload.err || true)
+# Deeper-than-liveness check: a real, token-gated API route must return valid
+# data after restart — proving the backend + auth-token path work end-to-end,
+# not just that the SPA HTML loads. The proposals API lives under /api/; the
+# bare /autoresearch/proposals path falls through to the SPA catch-all and
+# returns HTML (which used to fail this check on *every* deploy). Loopback runs
+# non-gated, so the SPA injects the ephemeral session token into the /control
+# HTML as window.__HERMES_SESSION_TOKEN__; extract it and pass it as the
+# X-Hermes-Session-Token header (a bare curl to the /api/ route 401s).
+TOKEN=$(curl -fsS --max-time 8 http://127.0.0.1:9119/control | grep -oP 'window\.__HERMES_SESSION_TOKEN__="\K[^"]+' | head -n1 || true)
+if [ -z "$TOKEN" ]; then
+  echo "[deploy] FAILED — could not extract session token from /control HTML (gated mode or service down?)"
+  exit 1
+fi
+PAYLOAD_OK=$(curl -fsS --max-time 8 -H "X-Hermes-Session-Token: $TOKEN" http://127.0.0.1:9119/api/autoresearch/proposals | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("count"); o=d.get("open_count"); assert isinstance(c, int) and isinstance(o, int); print(f"count={c} open_count={o}")' 2>/tmp/hermes-deploy-payload.err || true)
 if [ -z "$PAYLOAD_OK" ]; then
-  echo "[deploy] FAILED — /autoresearch/proposals did not return valid count/open_count JSON"
+  echo "[deploy] FAILED — /api/autoresearch/proposals did not return valid count/open_count JSON"
   cat /tmp/hermes-deploy-payload.err || true
   exit 1
 fi
