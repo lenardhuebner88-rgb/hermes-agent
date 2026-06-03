@@ -228,6 +228,57 @@ def test_apply_reverts_on_regression(env, monkeypatch):
     assert _needy(env).read_bytes() == original  # restored from backup
 
 
+def test_apply_crash_restores_in_flight_file_and_reports_error(env, monkeypatch):
+    original = _needy(env).read_bytes()
+
+    def _boom(_path, _target_warning, _before_warnings):
+        raise RuntimeError("crash after mutation")
+
+    monkeypatch.setattr(env["runner"], "eval_gate", _boom)
+    req = _make_request(env, approved=True)
+
+    summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=1)
+
+    assert _needy(env).read_bytes() == original
+    assert summary["ok"] is False
+    assert summary["errored"] is True
+    assert summary["error"] == "run failed: RuntimeError"
+    receipt_text = Path(summary["receipt"]).read_text(encoding="utf-8")
+    assert "- errored: True" in receipt_text
+    assert "- error: run failed: RuntimeError" in receipt_text
+
+    assert env["runner"].main([str(req), "--apply", "--confirm", "--max-iterations", "1"]) == 2
+    assert _needy(env).read_bytes() == original
+
+
+def test_apply_crash_restores_only_in_flight_file(env, monkeypatch):
+    later = env["skills"] / "demo" / "zz-later-skill" / "SKILL.md"
+    later.parent.mkdir(parents=True)
+    later.write_text(SKILL_NEEDS_PROCEDURE.replace("needy-skill", "zz-later-skill"), encoding="utf-8")
+    first_original = _needy(env).read_text(encoding="utf-8")
+    later_original = later.read_text(encoding="utf-8")
+    original_eval_gate = env["runner"].eval_gate
+    calls = []
+
+    def _crash_second(path, target_warning, before_warnings):
+        calls.append(path)
+        if len(calls) == 2:
+            raise RuntimeError("crash after second mutation")
+        return original_eval_gate(path, target_warning, before_warnings)
+
+    monkeypatch.setattr(env["runner"], "eval_gate", _crash_second)
+    req = _make_request(env, approved=True)
+
+    summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=2)
+
+    assert summary["ok"] is False
+    assert summary["errored"] is True
+    assert len(calls) == 2
+    assert "## Procedure" in _needy(env).read_text(encoding="utf-8")
+    assert _needy(env).read_text(encoding="utf-8") != first_original
+    assert later.read_text(encoding="utf-8") == later_original
+
+
 # --------------------------------------------------------------------------
 # Apply gating
 # --------------------------------------------------------------------------

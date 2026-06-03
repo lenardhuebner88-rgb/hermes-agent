@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import shutil
 import signal
@@ -68,6 +69,7 @@ RESULTS_COLUMNS = [
 ]
 AUTORESEARCH_AUX_TASK = "skills_hub"
 HEARTBEAT_FRESH_S = 30.0
+LOGGER = logging.getLogger(__name__)
 # Scaffolder OFF by default (signed commitment "kein Schein"): the live loop runs
 # the AR3 capability researcher only. Flip to True (or set the env override) for
 # explicit recovery / tests that still exercise the legacy section-scaffold path.
@@ -496,6 +498,12 @@ def write_receipt(summary: dict) -> Path:
         f"- skills_researched: {summary.get('skills_researched')} | research_errors: {summary.get('research_errors')} | skills_with_findings: {summary.get('skills_with_findings')} | research_tokens: {summary.get('research_tokens')}",
         f"- backup_dir: {summary.get('backup_dir') or '(none — dry-run)'}",
         f"- stopped_by_signal: {summary.get('stopped')}",
+    ]
+    if summary.get("errored"):
+        lines.append(f"- errored: {summary.get('errored', False)}")
+        if summary.get("error"):
+            lines.append(f"- error: {summary.get('error')}")
+    lines.extend([
         "",
         "## Non-actions",
         "- No secrets/.env/auth.json/config.yaml/*.db touched.",
@@ -503,7 +511,7 @@ def write_receipt(summary: dict) -> Path:
         "- No push/merge/PR/dispatch. Mutation limited to ~/.hermes/skills, eval-gated, reverted on regression.",
         "",
         "## Steps",
-    ]
+    ])
     for step in summary.get("steps", []):
         lines.append(f"- [{step['decision']}] {step['target']} — {step['hypothesis']} ({step['eval_result']})")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -534,6 +542,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
         "skills_researched": 0, "research_errors": 0, "skills_with_findings": 0,
         "research_tokens": 0,
         "backup_dir": None, "stopped": False, "steps": [], "refused": None,
+        "errored": False, "error": None,
     }
 
     # Apply may only ever mutate under ~/.hermes/skills. A request's allowed_paths
@@ -583,6 +592,7 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
     }
     # apply scans only under-skills roots; dry-run may scan all allowed roots (read-only).
     roots = [p for p in (under_skills if effective_apply else allowed) if p.exists()]
+    in_flight: Path | None = None
 
     try:
         for i in range(1, cap + 1):
@@ -686,16 +696,23 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
             if effective_apply:
                 before_errs, before_warns = evals.check_skill(path)
                 _backup_file(path, skills_root, backup_dir)
-                change = apply_scaffold(path, label)
-                keep, eval_result = eval_gate(path, target_warning, before_warns)
-                if keep:
-                    decision = "keep"
-                    summary["kept"] += 1
-                else:
+                in_flight = path
+                try:
+                    change = apply_scaffold(path, label)
+                    keep, eval_result = eval_gate(path, target_warning, before_warns)
+                    if keep:
+                        decision = "keep"
+                        summary["kept"] += 1
+                        in_flight = None
+                    else:
+                        _restore_file(path, skills_root, backup_dir)
+                        decision = "discard"
+                        eval_result = f"reverted: {eval_result}"
+                        summary["reverted"] += 1
+                        in_flight = None
+                except Exception:
                     _restore_file(path, skills_root, backup_dir)
-                    decision = "discard"
-                    eval_result = f"reverted: {eval_result}"
-                    summary["reverted"] += 1
+                    raise
                 change_desc = f"append '## {_SCAFFOLD[label]}' scaffold"
             else:
                 decision = "proposed"
@@ -720,6 +737,16 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
             if _STOP["requested"]:
                 summary["stopped"] = True
                 break
+    except Exception as exc:
+        if in_flight is not None and backup_dir is not None:
+            try:
+                _restore_file(in_flight, skills_root, backup_dir)
+            except Exception:
+                LOGGER.exception("Autoresearch in-flight restore failed")
+        summary["ok"] = False
+        summary["errored"] = True
+        summary["error"] = f"run failed: {type(exc).__name__}"
+        LOGGER.exception("Autoresearch run failed")
     finally:
         summary["skills_researched"] = int(research_stats.get("skills_researched", 0))
         summary["research_errors"] = int(research_stats.get("research_errors", 0))
