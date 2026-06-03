@@ -42,6 +42,21 @@ def _load_plugin_router():
     return mod.router
 
 
+def _configure_dashboard_ws(monkeypatch, *, token="secret-xyz", bound_host=None, auth_required=False):
+    from hermes_cli import web_server
+
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", token)
+    monkeypatch.setattr(web_server.app.state, "auth_required", auth_required, raising=False)
+    monkeypatch.setattr(web_server.app.state, "bound_host", bound_host, raising=False)
+    monkeypatch.setattr(
+        web_server.app.state,
+        "extra_allowed_hosts",
+        frozenset(),
+        raising=False,
+    )
+    return web_server
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
@@ -113,6 +128,11 @@ def test_create_task_appears_on_board(client):
     assert ready["tasks"][0]["id"] == task_id
     assert "acme" in data["tenants"]
     assert "researcher" in data["assignees"]
+
+
+def test_create_task_title_over_cap_returns_422(client):
+    r = client.post("/api/plugins/kanban/tasks", json={"title": "x" * 513})
+    assert r.status_code == 422
 
 
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
@@ -731,48 +751,58 @@ def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# WebSocket auth (query-param token)
+# WebSocket auth
 # ---------------------------------------------------------------------------
 
 
-def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
-    """When _SESSION_TOKEN is set (normal dashboard context), a missing or
-    wrong ?token= query param must be rejected with policy-violation."""
+def test_ws_events_loopback_accepts_without_token(tmp_path, monkeypatch):
+    """Bare TestClient connects as loopback and remains tokenless-compatible."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
-    # Stub web_server so _check_ws_token has a token to compare against.
-    import hermes_cli
-    import types
-    stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")
-    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
-    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
+    _configure_dashboard_ws(monkeypatch)
 
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
     c = TestClient(app)
 
-    # No token → policy violation close.
+    with c.websocket_connect("/api/plugins/kanban/events") as ws:
+        assert ws is not None
+
+
+def test_ws_events_non_loopback_requires_token(tmp_path, monkeypatch):
+    """Gated/non-loopback dashboard WS upgrades need the session token."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    _configure_dashboard_ws(monkeypatch, auth_required=True)
+
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    c = TestClient(app)
+
     from starlette.websockets import WebSocketDisconnect
+
     with pytest.raises(WebSocketDisconnect) as exc:
         with c.websocket_connect("/api/plugins/kanban/events"):
             pass
     assert exc.value.code == 1008
 
-    # Wrong token → policy violation close.
     with pytest.raises(WebSocketDisconnect) as exc:
         with c.websocket_connect("/api/plugins/kanban/events?token=nope"):
             pass
     assert exc.value.code == 1008
 
-    # Correct token → accepted (connect then close cleanly from our side).
     with c.websocket_connect(
         "/api/plugins/kanban/events?token=secret-xyz"
     ) as ws:
-        assert ws is not None  # handshake succeeded
+        assert ws is not None
 
 
 def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp_path, monkeypatch):
@@ -804,12 +834,7 @@ def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp
 
     kb.set_current_board("other")
 
-    import hermes_cli
-    import types
-
-    stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")
-    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
-    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
+    _configure_dashboard_ws(monkeypatch)
 
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
@@ -1127,6 +1152,29 @@ def test_config_reads_dashboard_kanban_section(tmp_path, monkeypatch, client):
     assert data["lane_by_profile"] is False
     assert data["include_archived_by_default"] is True
     assert data["render_markdown"] is False
+
+
+def test_mutating_endpoint_500_uses_generic_detail(client, monkeypatch):
+    from hermes_cli import profiles as profiles_mod
+
+    secret = "boom /tmp/private/profile.yaml Traceback"
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(profiles_mod, "write_profile_meta", _raise)
+
+    r = client.patch(
+        "/api/plugins/kanban/profiles/default",
+        json={"description": "new operator-authored profile text"},
+    )
+
+    assert r.status_code == 500
+    body = r.text
+    assert "failed to update profile" in body
+    assert "boom" not in body
+    assert "/tmp/private/profile.yaml" not in body
+    assert "Traceback" not in body
 
 
 # ---------------------------------------------------------------------------

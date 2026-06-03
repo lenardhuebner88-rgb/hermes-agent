@@ -44,7 +44,7 @@ import sqlite3
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
@@ -56,6 +56,13 @@ from hermes_cli import kanban_diagnostics as kd
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_SHORT_TEXT_MAX_LENGTH = 512
+_FREE_TEXT_MAX_LENGTH = 20_000
+_LIST_MAX_LENGTH = 1_000
+
+ShortText = Annotated[str, Field(max_length=_SHORT_TEXT_MAX_LENGTH)]
+FreeText = Annotated[str, Field(max_length=_FREE_TEXT_MAX_LENGTH)]
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +82,42 @@ def _check_ws_token(provided: Optional[str]) -> bool:
     try:
         from hermes_cli import web_server as _ws
     except Exception:
-        # No dashboard context (tests). Accept so the tail loop is still
-        # testable; in production the dashboard module always imports
-        # cleanly because it's the caller.
-        return True
+        return False
     expected = getattr(_ws, "_SESSION_TOKEN", None)
     if not expected:
-        return True
+        return False
     return hmac.compare_digest(str(provided), str(expected))
+
+
+def _ws_host_origin_is_allowed(ws: WebSocket) -> bool:
+    """Apply the dashboard WebSocket DNS-rebinding guard."""
+    try:
+        from hermes_cli import web_server as _ws
+
+        return bool(_ws._ws_host_origin_is_allowed(ws))
+    except Exception:
+        return False
+
+
+def _ws_is_loopback_connection(ws: WebSocket) -> bool:
+    """Return True for the dashboard's tokenless loopback WebSocket mode."""
+    try:
+        from hermes_cli import web_server as _ws
+    except Exception:
+        return False
+
+    app_state = getattr(getattr(_ws, "app", None), "state", None)
+    if bool(getattr(app_state, "auth_required", False)):
+        return False
+
+    loopback_hosts = getattr(_ws, "_LOOPBACK_HOSTS", frozenset())
+    bound_host = (getattr(app_state, "bound_host", "") or "").strip().lower()
+    if bound_host and bound_host not in loopback_hosts:
+        return False
+
+    client = getattr(ws, "client", None)
+    client_host = client.host if client else ""
+    return client_host in loopback_hosts
 
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
@@ -646,18 +681,18 @@ def get_task(
 # ---------------------------------------------------------------------------
 
 class CreateTaskBody(BaseModel):
-    title: str
-    body: Optional[str] = None
-    assignee: Optional[str] = None
-    tenant: Optional[str] = None
+    title: ShortText
+    body: Optional[FreeText] = None
+    assignee: Optional[ShortText] = None
+    tenant: Optional[ShortText] = None
     priority: int = 0
-    workspace_kind: str = "scratch"
-    workspace_path: Optional[str] = None
-    parents: list[str] = Field(default_factory=list)
+    workspace_kind: ShortText = "scratch"
+    workspace_path: Optional[ShortText] = None
+    parents: list[ShortText] = Field(default_factory=list, max_length=_LIST_MAX_LENGTH)
     triage: bool = False
-    idempotency_key: Optional[str] = None
+    idempotency_key: Optional[ShortText] = None
     max_runtime_seconds: Optional[int] = None
-    skills: Optional[list[str]] = None
+    skills: Optional[list[ShortText]] = Field(default=None, max_length=_LIST_MAX_LENGTH)
     # Subscribe the new task to every configured home channel so its terminal
     # state (and, via H1 inheritance, its decompose children's) reaches the
     # team's home channel without a manual notify-subscribe. Opt-out for
@@ -827,8 +862,9 @@ async def upload_task_attachment(
                     out.write(chunk)
         except HTTPException:
             raise
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")
+        except OSError:
+            log.exception("failed to store attachment")
+            raise HTTPException(status_code=500, detail="failed to store attachment")
 
         att_id = kanban_db.add_attachment(
             conn,
@@ -892,17 +928,17 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # ---------------------------------------------------------------------------
 
 class UpdateTaskBody(BaseModel):
-    status: Optional[str] = None
-    assignee: Optional[str] = None
+    status: Optional[ShortText] = None
+    assignee: Optional[ShortText] = None
     priority: Optional[int] = None
-    title: Optional[str] = None
-    body: Optional[str] = None
-    result: Optional[str] = None
-    block_reason: Optional[str] = None
+    title: Optional[ShortText] = None
+    body: Optional[FreeText] = None
+    result: Optional[FreeText] = None
+    block_reason: Optional[FreeText] = None
     # Structured handoff fields — forwarded to complete_task when status
     # transitions to 'done'. Dashboard parity with ``hermes kanban
     # complete --summary ... --metadata ...``.
-    summary: Optional[str] = None
+    summary: Optional[FreeText] = None
     metadata: Optional[dict] = None
 
 
@@ -1172,8 +1208,8 @@ def _set_status_direct(
 # ---------------------------------------------------------------------------
 
 class CommentBody(BaseModel):
-    body: str
-    author: Optional[str] = "dashboard"
+    body: FreeText
+    author: Optional[ShortText] = "dashboard"
 
 
 @router.post("/tasks/{task_id}/comments")
@@ -1198,8 +1234,8 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
 # ---------------------------------------------------------------------------
 
 class LinkBody(BaseModel):
-    parent_id: str
-    child_id: str
+    parent_id: ShortText
+    child_id: ShortText
 
 
 @router.post("/links")
@@ -1235,13 +1271,13 @@ def delete_link(
 # ---------------------------------------------------------------------------
 
 class BulkTaskBody(BaseModel):
-    ids: list[str]
-    status: Optional[str] = None
-    assignee: Optional[str] = None  # "" or None = unassign
+    ids: list[ShortText] = Field(max_length=_LIST_MAX_LENGTH)
+    status: Optional[ShortText] = None
+    assignee: Optional[ShortText] = None  # "" or None = unassign
     priority: Optional[int] = None
     archive: bool = False
-    result: Optional[str] = None
-    summary: Optional[str] = None
+    result: Optional[FreeText] = None
+    summary: Optional[FreeText] = None
     metadata: Optional[dict] = None
     reclaim_first: bool = False
 
@@ -1655,7 +1691,7 @@ def inspect_run_endpoint(
 
 
 class TerminateRunBody(BaseModel):
-    reason: Optional[str] = None
+    reason: Optional[FreeText] = None
 
 
 @router.post("/runs/{run_id}/terminate")
@@ -1712,9 +1748,9 @@ def terminate_run_endpoint(
 # claim or dispatch logic is introduced here.
 # ---------------------------------------------------------------------------
 class WorkerActionBody(BaseModel):
-    action: str = Field(..., description="unlock | nudge | restart | dispatch")
+    action: ShortText = Field(..., description="unlock | nudge | restart | dispatch")
     confirm: bool = False
-    reason: Optional[str] = None
+    reason: Optional[FreeText] = None
 
 
 _WORKER_ACTIONS = {"unlock", "nudge", "restart", "dispatch"}
@@ -1806,7 +1842,7 @@ def worker_action_endpoint(
 # ---------------------------------------------------------------------------
 
 class ReclaimBody(BaseModel):
-    reason: Optional[str] = None
+    reason: Optional[FreeText] = None
 
 
 @router.post("/tasks/{task_id}/reclaim")
@@ -1844,7 +1880,7 @@ class SpecifyBody(BaseModel):
     dashboard — model + prompt come from ``auxiliary.triage_specifier``
     in config.yaml, same as the CLI."""
 
-    author: Optional[str] = None
+    author: Optional[ShortText] = None
 
 
 @router.post("/tasks/{task_id}/specify")
@@ -1895,9 +1931,9 @@ def specify_task_endpoint(
 
 
 class ReassignBody(BaseModel):
-    profile: Optional[str] = None  # "" or None = unassign
+    profile: Optional[ShortText] = None  # "" or None = unassign
     reclaim_first: bool = False
-    reason: Optional[str] = None
+    reason: Optional[FreeText] = None
 
 
 @router.post("/tasks/{task_id}/reassign")
@@ -2212,19 +2248,19 @@ def dispatch(
 # ---------------------------------------------------------------------------
 
 class CreateBoardBody(BaseModel):
-    slug: str
-    name: Optional[str] = None
-    description: Optional[str] = None
-    icon: Optional[str] = None
-    color: Optional[str] = None
+    slug: ShortText
+    name: Optional[ShortText] = None
+    description: Optional[FreeText] = None
+    icon: Optional[ShortText] = None
+    color: Optional[ShortText] = None
     switch: bool = False
 
 
 class RenameBoardBody(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    icon: Optional[str] = None
-    color: Optional[str] = None
+    name: Optional[ShortText] = None
+    description: Optional[FreeText] = None
+    icon: Optional[ShortText] = None
+    color: Optional[ShortText] = None
 
 
 def _board_counts(slug: str) -> dict[str, int]:
@@ -2340,7 +2376,7 @@ _EVENT_POLL_SECONDS = 0.3
 # ---------------------------------------------------------------------------
 
 class DescribeBody(BaseModel):
-    description: Optional[str] = None  # explicit user-authored text
+    description: Optional[FreeText] = None  # explicit user-authored text
 
 
 class DescribeAutoBody(BaseModel):
@@ -2359,8 +2395,9 @@ def list_profile_roster():
     try:
         from hermes_cli import profiles as profiles_mod
         profiles = profiles_mod.list_profiles()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to list profiles: {exc}")
+    except Exception:
+        log.exception("failed to list profiles")
+        raise HTTPException(status_code=500, detail="failed to list profiles")
     return {
         "profiles": [
             {
@@ -2405,8 +2442,9 @@ def update_profile_description(profile_name: str, payload: DescribeBody):
         )
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to update profile: {exc}")
+    except Exception:
+        log.exception("failed to update profile")
+        raise HTTPException(status_code=500, detail="failed to update profile")
     return {"ok": True, "profile": canon, "description": text}
 
 
@@ -2428,8 +2466,9 @@ def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
             profile_name,
             overwrite=bool(payload.overwrite),
         )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"describer crashed: {exc}")
+    except Exception:
+        log.exception("describer crashed")
+        raise HTTPException(status_code=500, detail="describer crashed")
     return {
         "ok": bool(outcome.ok),
         "profile": outcome.profile_name,
@@ -2443,7 +2482,7 @@ def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
 # ---------------------------------------------------------------------------
 
 class DecomposeBody(BaseModel):
-    author: Optional[str] = None
+    author: Optional[ShortText] = None
 
 
 @router.post("/tasks/{task_id}/decompose")
@@ -2494,8 +2533,8 @@ def decompose_task_endpoint(
 # ---------------------------------------------------------------------------
 
 class OrchestrationSettingsBody(BaseModel):
-    orchestrator_profile: Optional[str] = None
-    default_assignee: Optional[str] = None
+    orchestrator_profile: Optional[ShortText] = None
+    default_assignee: Optional[ShortText] = None
     auto_decompose: Optional[bool] = None
     auto_promote_children: Optional[bool] = None
 
@@ -2555,8 +2594,9 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
     try:
         from hermes_cli.config import load_config, save_config
         cfg = load_config() or {}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to load config: {exc}")
+    except Exception:
+        log.exception("failed to load config")
+        raise HTTPException(status_code=500, detail="failed to load config")
 
     kanban_section = cfg.setdefault("kanban", {})
     if not isinstance(kanban_section, dict):
@@ -2607,8 +2647,9 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
     try:
         save_config(cfg)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to save config: {exc}")
+    except Exception:
+        log.exception("failed to save config")
+        raise HTTPException(status_code=500, detail="failed to save config")
 
     # Echo back the resolved state (callers usually re-render from it).
     return get_orchestration_settings()
@@ -2616,11 +2657,16 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
-    # Enforce the dashboard session token as a query param — browsers can't
-    # set Authorization on a WS upgrade. This matches how the PTY bridge
-    # authenticates in hermes_cli/web_server.py.
-    token = ws.query_params.get("token")
-    if not _check_ws_token(token):
+    if not _ws_host_origin_is_allowed(ws):
+        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Browsers cannot set Authorization on WS upgrades. Genuine loopback
+    # dashboard clients are accepted tokenlessly; every non-loopback mode
+    # must present the dashboard session token in the query string.
+    if not _ws_is_loopback_connection(ws) and not _check_ws_token(
+        ws.query_params.get("token")
+    ):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
         return
     await ws.accept()
