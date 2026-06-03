@@ -328,9 +328,15 @@ def _extract_test_code(text: str) -> str:
         data = None
     if isinstance(data, dict) and isinstance(data.get("test_code"), str):
         return data["test_code"].strip() + "\n"
-    fence = re.search(r"```(?:python|py)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
-    if fence:
-        return fence.group(1).strip() + "\n"
+    # A chatty model (e.g. MiniMax) wraps reasoning prose around several code
+    # blocks — the explanation of the original/mutant first, the actual test
+    # later. Pick the block that defines a test function, not the first one.
+    blocks = re.findall(r"```(?:python|py)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
+    test_blocks = [b for b in blocks if re.search(r"def\s+test\w*\s*\(", b)]
+    if test_blocks:
+        return max(test_blocks, key=len).strip() + "\n"
+    if blocks:
+        return max(blocks, key=len).strip() + "\n"
     return stripped + ("\n" if stripped else "")
 
 
