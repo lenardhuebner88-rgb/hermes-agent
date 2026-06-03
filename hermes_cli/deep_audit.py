@@ -19,8 +19,8 @@ from typing import Any, Callable, Iterable
 
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
-_MAX_FILE_CHARS = 45_000
-_MAX_ITERATIONS = 12
+_MAX_FILE_CHARS = 12_000
+_MAX_ITERATIONS = 8
 _MAX_GREP_RESULTS = 100
 
 SUBSYSTEM_GLOBS: dict[str, tuple[str, ...]] = {
@@ -291,50 +291,113 @@ def list_dir(path: str = ".", *, allowed_files: Iterable[str | Path]) -> dict[st
     return DeepAuditSandbox(allowed_files).list_dir(path)
 
 
-def tool_schemas() -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read one allowed subsystem file with line numbers. Read-only.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
+_READONLY_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read one allowed subsystem file with line numbers. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "grep",
-                "description": "Run a regex over allowed subsystem files only. Read-only.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string"},
-                        "path": {"type": "string", "description": "Optional allowed file or directory."},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Run a regex over allowed subsystem files only. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "Optional allowed file or directory."},
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List allowed subsystem files/directories visible at a repo path. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "default": "."}},
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+_REPORTING_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "report_finding",
+            "description": (
+                "Record ONE real, grounded audit finding. Call this once per distinct "
+                "weakness you can prove from the file content. evidence MUST be a "
+                "verbatim code excerpt copied from the file (no line-number prefixes, "
+                "no paraphrase) so it can be verified against the source."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fileline": {
+                        "type": "string",
+                        "description": "repo/relative/path.py:LINE (e.g. hermes_cli/foo.py:225).",
                     },
-                    "required": ["pattern"],
-                    "additionalProperties": False,
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low"],
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Short tag, e.g. bug_risk, race, missing_validation, info_leak, dead_code, error_handling.",
+                    },
+                    "title": {"type": "string", "description": "One-line summary of the weakness."},
+                    "problem": {"type": "string", "description": "Why this is a real problem and its impact."},
+                    "evidence": {
+                        "type": "string",
+                        "description": "Verbatim code excerpt from the file (the offending lines).",
+                    },
+                    "fix_hint": {"type": "string", "description": "Concrete suggestion for how to fix it."},
                 },
+                "required": ["fileline", "severity", "category", "title", "problem", "evidence", "fix_hint"],
+                "additionalProperties": False,
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "List allowed subsystem files/directories visible at a repo path. Read-only.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "default": "."}},
-                    "additionalProperties": False,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_audit",
+            "description": (
+                "Call this exactly once when you are done — after you have reported "
+                "every real finding via report_finding (or if there are genuinely none). "
+                "Ends the audit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Optional one-line wrap-up."},
                 },
+                "additionalProperties": False,
             },
         },
-    ]
+    },
+]
+
+
+def tool_schemas() -> list[dict[str, Any]]:
+    """All tools exposed to the audit model: read-only inspection + reporting."""
+    return [*_READONLY_TOOLS, *_REPORTING_TOOLS]
 
 
 def _message_from_response(resp: Any) -> Any:
@@ -428,7 +491,10 @@ def _loads_llm_json(text: str) -> dict[str, Any]:
         data = json.loads(stripped)
     except ValueError:
         match = re.search(r"\{.*\}", stripped, re.DOTALL)
-        data = json.loads(match.group(0)) if match else {}
+        try:
+            data = json.loads(match.group(0)) if match else {}
+        except ValueError:
+            data = {}
     return data if isinstance(data, dict) else {}
 
 
@@ -442,38 +508,123 @@ def _file_from_fileline(fileline: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _normalise_ws(text: str) -> str:
+    """Collapse all runs of whitespace to single spaces for tolerant matching.
+
+    MiniMax frequently re-indents or line-wraps the evidence snippet it copies
+    out of a file, which makes a strict ``in`` substring test reject genuine
+    findings. Comparing whitespace-normalised forms keeps grounding honest (the
+    code must really contain the snippet) while tolerating reflow.
+    """
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+# Lines this short carry no proof — a per-line grounding fallback ignores them so
+# that a single trivial token (e.g. "except:") can't ground a hallucinated block.
+_MIN_GROUND_LINE_CHARS = 12
+
+
+def _strip_evidence_noise(evidence: str) -> str:
+    """Remove line-number prefixes and trailing model commentary from evidence.
+
+    read_file prepends ``NNNN: `` to every line; models sometimes copy that, and
+    sometimes append parentheticals like ``(truncated — ...)``. Both break a
+    verbatim match even though the underlying code is real.
+    """
+    lines = []
+    for line in str(evidence or "").splitlines():
+        lines.append(re.sub(r"^\s*\d{1,5}:\s?", "", line))
+    cleaned = "\n".join(lines)
+    # Drop a trailing parenthetical the model tacked on after the real snippet.
+    cleaned = re.sub(r"\s*\((?:truncated|full|omitted|etc|\.\.\.)[^)]*\)\s*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _is_grounded(evidence: str, file_text: str) -> bool:
+    """Return True if ``evidence`` is provably present in ``file_text``.
+
+    Layered, increasingly tolerant — but every layer still requires the code to
+    really be in the file, so hallucinated evidence is rejected:
+      1. exact substring,
+      2. whitespace-normalised substring (tolerates reflow/re-indent),
+      3. after stripping line-number prefixes + trailing model commentary,
+      4. per-line: at least one *substantial* evidence line is present verbatim
+         (whitespace-normalised) in the file. Catches findings where the model
+         slightly garbled the surrounding lines but quoted a real line exactly.
+    """
+    evidence = (evidence or "").strip()
+    if not evidence:
+        return False
+    norm_file = _normalise_ws(file_text)
+    for candidate in (evidence, _strip_evidence_noise(evidence)):
+        if not candidate:
+            continue
+        if candidate in file_text:
+            return True
+        norm_candidate = _normalise_ws(candidate)
+        if norm_candidate and norm_candidate in norm_file:
+            return True
+    # Per-line fallback: a single substantial verbatim line is enough proof.
+    for raw_line in _strip_evidence_noise(evidence).splitlines():
+        norm_line = _normalise_ws(raw_line)
+        if len(norm_line.replace(" ", "")) >= _MIN_GROUND_LINE_CHARS and norm_line in norm_file:
+            return True
+    return False
+
+
+def _make_finding(
+    item: dict[str, Any],
+    allowed_by_rel: dict[str, Path],
+    model_label: str | None,
+    file_text_cache: dict[str, str | None],
+) -> dict[str, Any] | None:
+    """Validate + normalise a single finding dict. Returns None if not grounded."""
+    fileline = str(item.get("fileline") or "").strip()
+    rel = _file_from_fileline(fileline)
+    if not rel or rel not in allowed_by_rel:
+        return None
+    evidence = str(item.get("evidence") or "").strip()
+    if not evidence:
+        return None
+    if rel not in file_text_cache:
+        try:
+            file_text_cache[rel] = allowed_by_rel[rel].read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            file_text_cache[rel] = None
+    text = file_text_cache[rel]
+    if text is None or not _is_grounded(evidence, text):
+        return None
+    return {
+        "fileline": fileline[:240],
+        "severity": _coerce_severity(item.get("severity")),
+        "category": str(item.get("category") or "bug_risk").strip()[:80] or "bug_risk",
+        "title": str(item.get("title") or "Deep-Audit finding").strip()[:160],
+        "problem": str(item.get("problem") or "").strip()[:1200],
+        "evidence": evidence[:1000],
+        "fix_hint": str(item.get("fix_hint") or "Manuell prüfen und gezielt beheben.").strip()[:1000],
+        "_model_label": model_label or "",
+    }
+
+
 def _normalise_findings(raw: Any, allowed_files: Iterable[Path], model_label: str | None) -> list[dict[str, Any]]:
+    """Validate a list of finding dicts (from report_finding tool-calls or JSON)."""
     allowed_by_rel = {_repo_rel(p): p for p in allowed_files}
-    findings = raw.get("findings") if isinstance(raw, dict) else None
+    if isinstance(raw, dict):
+        findings = raw.get("findings")
+    elif isinstance(raw, list):
+        findings = raw
+    else:
+        findings = None
     if not isinstance(findings, list):
         return []
+    file_text_cache: dict[str, str | None] = {}
     out: list[dict[str, Any]] = []
     for item in findings:
         if not isinstance(item, dict):
             continue
-        fileline = str(item.get("fileline") or "").strip()
-        rel = _file_from_fileline(fileline)
-        if not rel or rel not in allowed_by_rel:
-            continue
-        evidence = str(item.get("evidence") or "").strip()
-        if not evidence:
-            continue
-        try:
-            text = allowed_by_rel[rel].read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if evidence not in text:
-            continue
-        out.append({
-            "fileline": fileline[:240],
-            "severity": _coerce_severity(item.get("severity")),
-            "category": str(item.get("category") or "bug_risk").strip()[:80] or "bug_risk",
-            "title": str(item.get("title") or "Deep-Audit finding").strip()[:160],
-            "problem": str(item.get("problem") or "").strip()[:1200],
-            "evidence": evidence[:1000],
-            "fix_hint": str(item.get("fix_hint") or "Manuell prüfen und gezielt beheben.").strip()[:1000],
-            "_model_label": model_label or "",
-        })
+        finding = _make_finding(item, allowed_by_rel, model_label, file_text_cache)
+        if finding is not None:
+            out.append(finding)
     return out
 
 
@@ -505,15 +656,22 @@ def run_deep_audit(
             from agent.auxiliary_client import call_llm as llm_call
         system = (
             "Du bist ein strenger, read-only Code-Auditor fuer Hermes. "
-            "Du darfst ausschliesslich die bereitgestellten read-only Tools nutzen: read_file, grep, list_dir. "
+            "Zum Untersuchen nutzt du ausschliesslich die read-only Tools: read_file, grep, list_dir. "
             "Kein Code schreiben, keine Kommandos ausfuehren, keine Fixes anwenden. "
-            "Finde echte subsystem-uebergreifende Schwaechen: Bugs, Races, fehlende Auth/Validierung, "
-            "Info-Leaks, toten Code oder gefaehrliche Fehlerbehandlung. "
-            "Jeder Fund MUSS fileline (repo/path.py:line), severity, category, title, problem, evidence "
-            "und fix_hint enthalten. evidence MUSS ein wortwoertlicher Code-Ausschnitt aus der Datei sein. "
-            "Antworte am Ende strikt als JSON: {\"findings\":[{\"fileline\":\"...\",\"severity\":\"critical|high|medium|low\","
-            "\"category\":\"...\",\"title\":\"...\",\"problem\":\"...\",\"evidence\":\"...\",\"fix_hint\":\"...\"}]}. "
-            "Wenn nichts belastbar ist, antworte {\"findings\":[]}."
+            "Finde echte Schwaechen: Bugs, Races, fehlende Auth/Validierung, Info-Leaks, "
+            "toten Code oder gefaehrliche Fehlerbehandlung.\n"
+            "WICHTIG — so meldest du Funde: Gib KEINE Prosa-Analyse und KEIN finales JSON zurueck. "
+            "Rufe stattdessen fuer JEDEN belegten Fund das Tool report_finding auf "
+            "(fileline=repo/pfad.py:zeile, severity, category, title, problem, evidence, fix_hint). "
+            "Melde einen Fund SOFORT, sobald du ihn im Code gesehen hast — sammle sie NICHT bis zum Schluss. "
+            "Du darfst report_finding mehrfach pro Schritt aufrufen.\n"
+            "evidence MUSS ein WORTWOERTLICHER Code-Ausschnitt aus der gelesenen Datei sein: kopiere 1-4 Zeilen "
+            "EXAKT so, wie read_file sie zeigt, aber OHNE den 'NNNN: '-Zeilennummern-Prefix. "
+            "Schreibe NICHTS dazu (keine '...'-Auslassungen, keine '(truncated)'-Hinweise, keine Umformulierung) — "
+            "sonst wird der Fund als unbelegt verworfen.\n"
+            "Ablauf: erst mit read_file/grep den Code lesen, Funde via report_finding melden sobald du sie siehst, "
+            "und wenn du das Subsystem durch hast, rufe GENAU EINMAL finish_audit auf (auch wenn es keine Funde gab). "
+            "Erfinde nichts — nur was du im Code belegen kannst. Vergiss finish_audit am Ende nicht."
         )
         user = (
             f"Subsystem: {subsystem}\n"
@@ -524,33 +682,77 @@ def run_deep_audit(
         tokens = 0
         model_label = None
         iterations = 0
-        final_text = ""
+        raw_findings: list[dict[str, Any]] = []
+        finished = False
+        files_read: set[str] = set()
+        # Once the model has read enough of the subsystem (or used up most of its
+        # budget), push it into a reporting phase: MiniMax tends to browse far
+        # longer than needed and only dumps findings when told to stop. We keep
+        # re-pushing every turn it browses instead of reporting/finishing so a
+        # whole run can't end with findings still unreported.
+        read_enough_at = max(2, len(rel_files))
+        wrap_at = max(read_enough_at, _MAX_ITERATIONS - 6)
         for iterations in range(1, _MAX_ITERATIONS + 1):
+            in_report_phase = (iterations >= wrap_at) or (len(files_read) >= read_enough_at and iterations >= 3)
+            if in_report_phase and not finished:
+                last_turn = iterations >= _MAX_ITERATIONS - 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Genug untersucht. Melde JETZT jeden echten, belegten Fund mit report_finding "
+                        "(du darfst mehrere report_finding-Aufrufe in einem Schritt machen; evidence "
+                        "WORTWOERTLICH aus der Datei, ohne '...' und ohne Zusatztext). "
+                        + ("Rufe danach finish_audit auf." if not last_turn else
+                           "Dies ist dein LETZTER Schritt: melde Funde und rufe finish_audit. Keine read_file/grep mehr.")
+                    ),
+                })
             resp = llm_call(task="code_audit", tools=tool_schemas(), messages=messages, temperature=0, max_tokens=4000)
             tokens += _usage_tokens(resp)
             model_label = _model_label(resp) or model_label
             message = _message_from_response(resp)
             calls = _tool_calls(message)
             if not calls:
-                final_text = _message_content(message)
-                break
+                # No tool call: the model went off-script (e.g. emitted prose).
+                # Nudge it back onto the tool protocol and continue the loop.
+                messages.append({"role": "assistant", "content": _message_content(message) or ""})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Nutze die Tools, nicht Freitext. Melde belegte Funde via report_finding "
+                        "und beende dann mit finish_audit."
+                    ),
+                })
+                continue
             messages.append(_assistant_tool_message(message, calls))
             for i, tc in enumerate(calls):
                 call_id, name, _args_json, args = _normalise_tool_call(tc, i)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": sandbox.dispatch(name, args),
-                })
-        else:
-            return {
-                "ok": False, "findings": [], "subsystem": subsystem, "model": model_label,
-                "tokens": tokens, "iterations": _MAX_ITERATIONS, "reason": "max iterations reached",
-                "request_id": request_id, "files": rel_files,
-            }
-        raw = _loads_llm_json(final_text)
-        findings = _normalise_findings(raw, files, model_label)
+                if name == "report_finding":
+                    raw_findings.append(args if isinstance(args, dict) else {})
+                    messages.append({
+                        "role": "tool", "tool_call_id": call_id, "name": name,
+                        "content": json.dumps({"ok": True, "recorded": True}, ensure_ascii=False),
+                    })
+                elif name == "finish_audit":
+                    finished = True
+                    messages.append({
+                        "role": "tool", "tool_call_id": call_id, "name": name,
+                        "content": json.dumps({"ok": True, "done": True}, ensure_ascii=False),
+                    })
+                else:
+                    if name == "read_file":
+                        path_arg = str((args or {}).get("path") or "").strip()
+                        if path_arg:
+                            files_read.add(path_arg)
+                    messages.append({
+                        "role": "tool", "tool_call_id": call_id, "name": name,
+                        "content": sandbox.dispatch(name, args),
+                    })
+            if finished:
+                break
+        findings = _normalise_findings(raw_findings, files, model_label)
+        reason = ""
+        if not finished:
+            reason = "max iterations reached before finish_audit"
         return {
             "ok": True,
             "findings": findings,
@@ -558,7 +760,7 @@ def run_deep_audit(
             "model": model_label,
             "tokens": tokens,
             "iterations": iterations,
-            "reason": "",
+            "reason": reason,
             "request_id": request_id,
             "files": rel_files,
             "duration_s": round(time.time() - started, 3),

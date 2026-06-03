@@ -58,17 +58,18 @@ def test_subsystem_resolution_filters_forbidden_and_caps(monkeypatch):
     assert "config.yaml" not in rels
 
 
-def test_tool_loop_reads_file_then_parses_grounded_finding(monkeypatch):
+def test_tool_loop_reads_file_then_reports_grounded_finding(monkeypatch):
+    """The model investigates, reports a finding via report_finding, then finishes."""
     monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
     calls = []
 
     def fake_llm(**kwargs):
-        calls.append(kwargs["messages"])
+        calls.append([dict(m) for m in kwargs["messages"]])
         if len(calls) == 1:
             return _response(tool_calls=[_tool_call("read_file", {"path": "hermes_cli/autoresearch_runs.py"})])
-        return _response(
-            content=json.dumps({
-                "findings": [{
+        if len(calls) == 2:
+            return _response(
+                tool_calls=[_tool_call("report_finding", {
                     "fileline": "hermes_cli/autoresearch_runs.py:23",
                     "severity": "high",
                     "category": "bug_risk",
@@ -76,18 +77,133 @@ def test_tool_loop_reads_file_then_parses_grounded_finding(monkeypatch):
                     "problem": "The lane list must preserve the new audit lane.",
                     "evidence": "_VALID_LANES",
                     "fix_hint": "Keep the deep-audit lane in the allowlist.",
-                }]
-            }),
-            tokens=17,
-        )
+                }, call_id="call_2")],
+                tokens=17,
+            )
+        return _response(tool_calls=[_tool_call("finish_audit", {"summary": "done"}, call_id="call_3")], tokens=5)
 
     result = deep_audit.run_deep_audit(subsystem="unit", focus="lanes", llm_call=fake_llm)
     assert result["ok"] is True
-    assert result["tokens"] == 28
-    assert result["iterations"] == 2
+    assert result["tokens"] == 33
+    assert result["iterations"] == 3
+    assert result["reason"] == ""
     assert result["model"] == "unit-model"
+    assert len(result["findings"]) == 1
     assert result["findings"][0]["fileline"] == "hermes_cli/autoresearch_runs.py:23"
-    assert calls[1][-1]["role"] == "tool"
+    assert result["findings"][0]["severity"] == "high"
+    # The report_finding call must have been acked as a tool result with
+    # recorded=True (the loop may append a user nudge afterwards, so don't pin
+    # the ack to the last position).
+    tool_acks = [m for m in calls[2] if m.get("role") == "tool"]
+    assert tool_acks, "report_finding should be acked as a tool result"
+    assert any(json.loads(m["content"]).get("recorded") is True for m in tool_acks)
+
+
+def test_report_finding_grounding_tolerates_whitespace_reflow(monkeypatch):
+    """Evidence that differs only by whitespace/indentation still grounds."""
+    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
+
+    def fake_llm(**kwargs):
+        # Reflowed evidence: collapse "_VALID_LANES" context with odd spacing.
+        return _response(tool_calls=[
+            _tool_call("report_finding", {
+                "fileline": "hermes_cli/autoresearch_runs.py:1",
+                "severity": "medium",
+                "category": "bug_risk",
+                "title": "reflowed evidence",
+                "problem": "whitespace differs from source",
+                "evidence": "_VALID_LANES   =",  # extra spaces vs the real "_VALID_LANES ="
+                "fix_hint": "n/a",
+            }, call_id="c1"),
+            _tool_call("finish_audit", {}, call_id="c2"),
+        ])
+
+    # Only ground if the source actually contains "_VALID_LANES =" (collapsed match).
+    src = (_REPO / "hermes_cli" / "autoresearch_runs.py").read_text(encoding="utf-8")
+    expect_grounded = "_VALID_LANES" in deep_audit._normalise_ws(src)
+    result = deep_audit.run_deep_audit(subsystem="unit", llm_call=fake_llm)
+    assert result["ok"] is True
+    if expect_grounded:
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["title"] == "reflowed evidence"
+
+
+def test_ungrounded_finding_is_discarded(monkeypatch):
+    """A finding whose evidence is not present in the file must be dropped."""
+    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
+
+    def fake_llm(**kwargs):
+        return _response(tool_calls=[
+            _tool_call("report_finding", {
+                "fileline": "hermes_cli/autoresearch_runs.py:1",
+                "severity": "critical",
+                "category": "bug_risk",
+                "title": "hallucinated",
+                "problem": "made up",
+                "evidence": "def this_symbol_does_not_exist_anywhere_xyz():",
+                "fix_hint": "n/a",
+            }, call_id="c1"),
+            _tool_call("finish_audit", {}, call_id="c2"),
+        ])
+
+    result = deep_audit.run_deep_audit(subsystem="unit", llm_call=fake_llm)
+    assert result["ok"] is True
+    assert result["findings"] == []
+
+
+def test_loop_nudges_prose_then_recovers(monkeypatch):
+    """A prose (no-tool) turn does not end the run; the loop nudges and continues."""
+    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
+    calls = []
+
+    def fake_llm(**kwargs):
+        calls.append([dict(m) for m in kwargs["messages"]])
+        if len(calls) == 1:
+            # MiniMax-style markdown prose instead of a tool call.
+            return _response(content="## autoresearch_runs.py\nLine 23: `_VALID_LANES` looks fishy.")
+        if len(calls) == 2:
+            return _response(tool_calls=[_tool_call("report_finding", {
+                "fileline": "hermes_cli/autoresearch_runs.py:23",
+                "severity": "low",
+                "category": "bug_risk",
+                "title": "recovered after nudge",
+                "problem": "x",
+                "evidence": "_VALID_LANES",
+                "fix_hint": "y",
+            }, call_id="c1")])
+        return _response(tool_calls=[_tool_call("finish_audit", {}, call_id="c2")])
+
+    result = deep_audit.run_deep_audit(subsystem="unit", llm_call=fake_llm)
+    assert result["ok"] is True
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["title"] == "recovered after nudge"
+    # The nudge after the prose turn must be a user message asking for tools.
+    assert calls[1][-1]["role"] == "user"
+    assert "report_finding" in calls[1][-1]["content"]
+
+
+def test_max_iter_without_finish_sets_reason(monkeypatch):
+    """If the model never calls finish_audit, the run still returns collected findings."""
+    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
+
+    def fake_llm(**kwargs):
+        # Always report the same grounded finding, never finish — exhausts iterations.
+        return _response(tool_calls=[_tool_call("report_finding", {
+            "fileline": "hermes_cli/autoresearch_runs.py:1",
+            "severity": "medium",
+            "category": "bug_risk",
+            "title": "loops forever",
+            "problem": "x",
+            "evidence": "_VALID_LANES",
+            "fix_hint": "y",
+        }, call_id="c1")])
+
+    result = deep_audit.run_deep_audit(subsystem="unit", llm_call=fake_llm)
+    assert result["ok"] is True
+    assert result["iterations"] == deep_audit._MAX_ITERATIONS
+    assert result["reason"] == "max iterations reached before finish_audit"
+    # De-dup is not required, but every recorded finding is grounded and kept.
+    assert len(result["findings"]) == deep_audit._MAX_ITERATIONS
 
 
 def test_run_request_file_persists_detection_only_proposal(tmp_path, monkeypatch):

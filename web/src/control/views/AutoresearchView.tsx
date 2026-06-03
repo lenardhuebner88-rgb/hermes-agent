@@ -569,7 +569,7 @@ function LaneModelPanel() {
           onApply={async ({ provider, model }) => {
             setSavingTask(pickerTask);
             try {
-              await fetchJSON<unknown>("/api/model/auxiliary", {
+              await fetchJSON<unknown>("/api/model/set", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ scope: "auxiliary", task: pickerTask, provider, model }),
@@ -741,7 +741,7 @@ function CodeAuditSlotPicker() {
           onApply={async ({ provider, model }) => {
             setSaving(true);
             try {
-              await fetchJSON<unknown>("/api/model/auxiliary", {
+              await fetchJSON<unknown>("/api/model/set", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ scope: "auxiliary", task: "code_audit", provider, model }),
@@ -812,7 +812,7 @@ function TestHardeningSlotPicker() {
           onApply={async ({ provider, model }) => {
             setSaving(true);
             try {
-              await fetchJSON<unknown>("/api/model/auxiliary", {
+              await fetchJSON<unknown>("/api/model/set", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ scope: "auxiliary", task: "test_hardening", provider, model }),

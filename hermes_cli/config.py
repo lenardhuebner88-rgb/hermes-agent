@@ -1263,17 +1263,22 @@ DEFAULT_CONFIG = {
             "timeout": 600,
             "extra_body": {},
         },
+        # Default to a chat.completions model (MiniMax): both lanes run an
+        # agentic tool-loop that sends role="tool" result messages, which the
+        # Responses API (gpt-5.5 via 'auto') rejects with a 400. The operator can
+        # switch the model per lane in the dashboard, but the default must be
+        # tool-capable so the loops work out of the box.
         "code_audit": {
-            "provider": "auto",
-            "model": "",
+            "provider": "minimax",
+            "model": "MiniMax-M2.7",
             "base_url": "",
             "api_key": "",
             "timeout": 120,
             "extra_body": {},
         },
         "test_hardening": {
-            "provider": "auto",
-            "model": "",
+            "provider": "minimax",
+            "model": "MiniMax-M2.7",
             "base_url": "",
             "api_key": "",
             "timeout": 120,
