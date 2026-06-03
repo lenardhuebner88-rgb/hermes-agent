@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,9 +11,12 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from hermes_cli.error_sanitize import scrub_detail
+
 _SCHEMA = "hermes-health-v1"
 _STATUS_RANK = {"healthy": 0, "degraded": 1, "offline": 2}
 _SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db")
+_log = logging.getLogger(__name__)
 
 
 async def _run_blocking(callable_: Any) -> Any:
@@ -65,11 +69,12 @@ async def _probe_gateway_status() -> dict[str, Any]:
         alive, body = await _run_blocking(_probe_gateway_health)
         latency = _latency_ms(start)
     except Exception as exc:
+        _log.exception("gateway health probe failed")
         return _status_dict(
             "offline",
             "gateway probe failed",
             latency_ms=_latency_ms(start),
-            error=str(exc),
+            error=scrub_detail(str(exc)),
         )
 
     if alive:
@@ -93,12 +98,13 @@ async def _probe_autoresearch_status() -> dict[str, Any]:
 
         runner_status = read_runner_status()
     except Exception as exc:
+        _log.exception("autoresearch health probe failed")
         return _status_dict(
             "offline",
             "failed to read status",
             heartbeat_age_s=None,
             include_heartbeat_age=True,
-            error=str(exc),
+            error=scrub_detail(str(exc)),
         )
 
     state = str(runner_status.get("state") or "unknown")
@@ -135,7 +141,7 @@ def _probe_kanban_db_sync() -> dict[str, Any]:
                 "offline",
                 "database file missing",
                 latency_ms=_latency_ms(start),
-                error=f"not found: {path}",
+                error=scrub_detail(f"not found: {path}"),
             )
 
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
@@ -144,11 +150,12 @@ def _probe_kanban_db_sync() -> dict[str, Any]:
         cur.fetchone()
         latency = _latency_ms(start)
     except Exception as exc:
+        _log.exception("kanban_db health probe failed")
         return _status_dict(
             "offline",
             "query failed",
             latency_ms=_latency_ms(start),
-            error=str(exc),
+            error=scrub_detail(str(exc)),
         )
     finally:
         if conn is not None:
@@ -164,15 +171,21 @@ async def _probe_kanban_db_status() -> dict[str, Any]:
 
 
 def _offline_from_exception(name: str, exc: BaseException) -> dict[str, Any]:
+    _log.warning(
+        "%s health probe raised: %s",
+        name,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
     if name == "autoresearch":
         return _status_dict(
             "offline",
             "probe failed",
             heartbeat_age_s=None,
             include_heartbeat_age=True,
-            error=str(exc),
+            error=scrub_detail(str(exc)),
         )
-    return _status_dict("offline", "probe failed", latency_ms=0, error=str(exc))
+    return _status_dict("offline", "probe failed", latency_ms=0, error=scrub_detail(str(exc)))
 
 
 def _overall(subsystems: dict[str, dict[str, Any]]) -> str:

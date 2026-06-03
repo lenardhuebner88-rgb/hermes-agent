@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import os
 import subprocess
 import time
@@ -24,12 +25,15 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from hermes_cli.error_sanitize import scrub_detail
+
 _SCHEMA = "fo-backlog-v1"
 _DEFAULT_DIR = "/home/piet/projects/family-organizer/backlog/items"
 # in_progress/blocked items whose `updated` is older than this are flagged stale
 # (mirrors the Stale-Claim-Sweep in family-organizer backlog/README.md).
 _STALE_AFTER_S = 7 * 24 * 3600
 _STATUSES = ("now", "next", "in_progress", "blocked", "later", "done")
+_log = logging.getLogger(__name__)
 
 
 def _backlog_dir() -> Path:
@@ -149,7 +153,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "items": [],
                 "counts": counts,
                 "source": {"dir": str(base), "ref": "missing", "count": 0},
-                "error": f"backlog dir not found: {base}",
+                "error": scrub_detail(f"backlog dir not found: {base}"),
             }
         sources = _read_sources_from_fs(base)
         source_ref = "fs:working-tree"
@@ -277,8 +281,10 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
                 "body": _body_after_frontmatter(text),
             }
         return _detail_error("item not found")
-    except Exception:
-        return _detail_error("backlog detail unavailable")
+    except Exception as exc:
+        _log.exception("family organizer backlog detail unavailable")
+        message = scrub_detail(str(exc)) or "backlog detail unavailable"
+        return _detail_error(message)
 
 
 async def _get_backlog_detail(item_id: str) -> dict[str, Any]:

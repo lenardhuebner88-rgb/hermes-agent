@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import os
 import re
 import subprocess
@@ -35,9 +36,12 @@ _MD_INLINE_RE = re.compile(r"`[^`]*`|\*+|_+")
 
 from fastapi import FastAPI
 
+from hermes_cli.error_sanitize import scrub_detail
+
 _SCHEMA = "orchestration-backlog-v1"
 _DEFAULT_DIR = "/home/piet/orchestration/backlog"
 _STATUSES = ("backlog", "todo", "doing", "review", "done")
+_log = logging.getLogger(__name__)
 
 
 def _backlog_dir() -> Path:
@@ -261,7 +265,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "items": [],
                 "counts": counts,
                 "source": {"dir": str(base), "ref": "missing", "count": 0},
-                "error": f"backlog dir not found: {base}",
+                "error": scrub_detail(f"backlog dir not found: {base}"),
             }
         sources = _read_sources_from_fs(base)
         source_ref = "fs:working-tree"
@@ -328,5 +332,6 @@ def register_orchestration_backlog_routes(app: FastAPI) -> None:
         try:
             return _read_detail_sync(id)
         except Exception as exc:
-            message = str(exc).strip() or exc.__class__.__name__
+            _log.exception("orchestration backlog detail unavailable")
+            message = scrub_detail(str(exc).strip()) or exc.__class__.__name__
             return _detail_error(message)

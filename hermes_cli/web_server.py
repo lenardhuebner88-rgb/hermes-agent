@@ -56,6 +56,7 @@ from hermes_cli.config import (
     recommended_update_command_for_method,
     redact_key,
 )
+from hermes_cli.error_sanitize import safe_detail, scrub_detail
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
@@ -965,7 +966,10 @@ async def get_curator_status():
     try:
         from agent import curator
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Curator unavailable: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Curator unavailable", log=_log),
+        )
     try:
         state = curator.load_state()
     except Exception:
@@ -999,7 +1003,10 @@ async def run_curator():
     try:
         proc = _spawn_hermes_action(["curator", "run"], "curator-run")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to run curator: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run curator", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "curator-run"}
 
 
@@ -1069,7 +1076,10 @@ async def run_prompt_size():
     try:
         proc = _spawn_hermes_action(["prompt-size"], "prompt-size")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run prompt-size", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "prompt-size"}
 
 
@@ -1078,7 +1088,10 @@ async def run_dump():
     try:
         proc = _spawn_hermes_action(["dump"], "dump")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run dump", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "dump"}
 
 
@@ -1087,7 +1100,10 @@ async def run_config_migrate():
     try:
         proc = _spawn_hermes_action(["config", "migrate"], "config-migrate")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run config migration", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "config-migrate"}
 
 
@@ -1209,8 +1225,10 @@ async def restart_gateway():
     try:
         proc = _spawn_hermes_action(["gateway", "restart"], "gateway-restart")
     except Exception as exc:
-        _log.exception("Failed to spawn gateway restart")
-        raise HTTPException(status_code=500, detail=f"Failed to restart gateway: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to restart gateway", log=_log),
+        )
     return {
         "ok": True,
         "pid": proc.pid,
@@ -1237,8 +1255,10 @@ async def update_hermes():
     try:
         proc = _spawn_hermes_action(["update"], "hermes-update")
     except Exception as exc:
-        _log.exception("Failed to spawn hermes update")
-        raise HTTPException(status_code=500, detail=f"Failed to start update: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to start update", log=_log),
+        )
     return {
         "ok": True,
         "pid": proc.pid,
@@ -1364,8 +1384,10 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        _log.exception("Desktop voice transcription failed")
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Transcription failed", log=_log),
+        )
     finally:
         if temp_path:
             try:
@@ -1374,9 +1396,10 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
                 pass
 
     if not result.get("success"):
+        error = scrub_detail(str(result.get("error") or ""))
         raise HTTPException(
             status_code=400,
-            detail=result.get("error") or "Transcription failed",
+            detail=error or "Transcription failed",
         )
 
     return {
@@ -1465,8 +1488,10 @@ async def speak_text(payload: TTSSpeakRequest):
         loop = asyncio.get_running_loop()
         result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
     except Exception as exc:
-        _log.exception("Desktop voice TTS failed")
-        raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Speech synthesis failed", log=_log),
+        )
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
@@ -1474,9 +1499,10 @@ async def speak_text(payload: TTSSpeakRequest):
         raise HTTPException(status_code=500, detail="Invalid TTS response")
 
     if not result.get("success"):
+        error = scrub_detail(str(result.get("error") or ""))
         raise HTTPException(
             status_code=400,
-            detail=result.get("error") or "Speech synthesis failed",
+            detail=error or "Speech synthesis failed",
         )
 
     file_path = result.get("file_path")
@@ -1496,7 +1522,10 @@ async def speak_text(payload: TTSSpeakRequest):
         with open(file_path, "rb") as fh:
             audio_bytes = fh.read()
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read audio: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Could not read audio", log=_log),
+        )
     finally:
         try:
             os.unlink(file_path)
@@ -2158,7 +2187,7 @@ async def set_env_var(body: EnvVarUpdate):
         # on the denylist (LD_PRELOAD, PATH, PYTHONPATH, …). Surface the
         # message to the SPA so the user understands why the write was
         # refused instead of seeing an opaque 500.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=scrub_detail(str(exc)) or "Invalid environment value") from exc
     except Exception:
         _log.exception("PUT /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2245,7 +2274,7 @@ async def remove_env_var(body: EnvVarDelete):
         # remove_env_value raises ValueError for invalid key names. Surface
         # the message to the SPA so the user understands why the delete was
         # refused instead of seeing an opaque 500. Mirrors PUT /api/env.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=scrub_detail(str(exc)) or "Invalid environment value") from exc
     except Exception:
         _log.exception("DELETE /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -3168,7 +3197,8 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
         try:
             return status_fn()
         except Exception as e:
-            return {"logged_in": False, "error": str(e)}
+            _log.exception("provider status %s failed", provider_id)
+            return {"logged_in": False, "error": scrub_detail(str(e)) or "Provider status unavailable"}
     try:
         from hermes_cli import auth as hauth
         if provider_id == "nous":
@@ -3227,7 +3257,8 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
                 "last_refresh": raw.get("last_refresh"),
             }
     except Exception as e:
-        return {"logged_in": False, "error": str(e)}
+        _log.exception("provider status %s failed", provider_id)
+        return {"logged_in": False, "error": scrub_detail(str(e)) or "Provider status unavailable"}
     return {"logged_in": False}
 
 
@@ -3302,8 +3333,10 @@ async def disconnect_oauth_provider(provider_id: str, request: Request):
         _log.info("oauth/disconnect: %s (cleared=%s)", provider_id, cleared)
         return {"ok": bool(cleared), "provider": provider_id}
     except Exception as e:
-        _log.exception("disconnect %s failed", provider_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to disconnect provider", log=_log),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3533,9 +3566,10 @@ def _submit_anthropic_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
         with urllib.request.urlopen(req, timeout=20) as resp:
             result = json.loads(resp.read().decode())
     except Exception as e:
+        _log.exception("anthropic token exchange failed")
         with _oauth_sessions_lock:
             sess["status"] = "error"
-            sess["error_message"] = f"Token exchange failed: {e}"
+            sess["error_message"] = scrub_detail(f"Token exchange failed: {e}") or "Token exchange failed"
         return {"ok": False, "status": "error", "message": sess["error_message"]}
 
     access_token = result.get("access_token", "")
@@ -3551,9 +3585,10 @@ def _submit_anthropic_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
     try:
         _save_anthropic_oauth_creds(access_token, refresh_token, expires_at_ms)
     except Exception as e:
+        _log.exception("anthropic credential save failed")
         with _oauth_sessions_lock:
             sess["status"] = "error"
-            sess["error_message"] = f"Save failed: {e}"
+            sess["error_message"] = scrub_detail(f"Save failed: {e}") or "Save failed"
         return {"ok": False, "status": "error", "message": sess["error_message"]}
     with _oauth_sessions_lock:
         sess["status"] = "approved"
@@ -3839,7 +3874,8 @@ def _xai_loopback_worker(session_id: str) -> None:
             timeout_seconds=_XAI_LOOPBACK_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        _fail(f"xAI authorization timed out: {exc}")
+        _log.exception("xAI authorization timed out")
+        _fail(scrub_detail(f"xAI authorization timed out: {exc}") or "xAI authorization timed out")
         return
 
     if _cancelled():
@@ -3893,7 +3929,8 @@ def _xai_loopback_worker(session_id: str) -> None:
         )
         _add_xai_oauth_pool_entry(access_token, refresh_token, base_url, last_refresh)
     except Exception as exc:
-        _fail(f"xAI token exchange failed: {exc}")
+        _log.exception("xAI token exchange failed")
+        _fail(scrub_detail(f"xAI token exchange failed: {exc}") or "xAI token exchange failed")
         return
 
     with _oauth_sessions_lock:
@@ -4008,7 +4045,7 @@ def _nous_poller(session_id: str) -> None:
         _log.warning("nous device-code poll failed (session=%s): %s", session_id, e)
         with _oauth_sessions_lock:
             sess["status"] = "error"
-            sess["error_message"] = str(e)
+            sess["error_message"] = scrub_detail(str(e)) or "Device-code poll failed"
 
 
 def _minimax_poller(session_id: str) -> None:
@@ -4091,7 +4128,7 @@ def _minimax_poller(session_id: str) -> None:
         _log.warning("minimax device-code poll failed (session=%s): %s", session_id, e)
         with _oauth_sessions_lock:
             sess["status"] = "error"
-            sess["error_message"] = str(e)
+            sess["error_message"] = scrub_detail(str(e)) or "Device-code poll failed"
 
 
 def _codex_full_login_worker(session_id: str) -> None:
@@ -4209,7 +4246,7 @@ def _codex_full_login_worker(session_id: str) -> None:
             s = _oauth_sessions.get(session_id)
             if s:
                 s["status"] = "error"
-                s["error_message"] = str(e)
+                s["error_message"] = scrub_detail(str(e)) or "Device-code flow failed"
 
 
 @app.post("/api/providers/oauth/{provider_id}/start")
@@ -4244,8 +4281,10 @@ async def start_oauth_login(provider_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        _log.exception("oauth/start %s failed", provider_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "OAuth start failed", log=_log),
+        )
     raise HTTPException(status_code=400, detail="Unsupported flow")
 
 
@@ -4633,7 +4672,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
                 db.set_session_title(sid, body.title or "")
             except ValueError as e:
                 # Title too long, invalid characters, or already in use.
-                raise HTTPException(status_code=400, detail=str(e))
+                raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid title")
         if body.archived is not None:
             db.set_session_archived(sid, body.archived)
         result = {"ok": True, "title": db.get_session_title(sid) or ""}
@@ -4783,7 +4822,7 @@ def _cron_profile_home(profile: Optional[str]) -> Tuple[str, Path]:
         canon = profiles_mod.normalize_profile_name(raw)
         profiles_mod.validate_profile_name(canon)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     if not profiles_mod.profile_exists(canon):
         raise HTTPException(status_code=404, detail=f"Profile '{canon}' does not exist.")
     return canon, profiles_mod.get_profile_dir(canon)
@@ -4904,8 +4943,10 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
             deliver=body.deliver,
         )
     except Exception as e:
-        _log.exception("POST /api/cron/jobs failed")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=safe_detail(e, "Failed to create cron job", log=_log),
+        )
 
 
 @app.put("/api/cron/jobs/{job_id}")
@@ -4916,7 +4957,7 @@ async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[st
     try:
         job = _call_cron_for_profile(selected, "update_job", job_id, body.updates)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=scrub_detail(str(exc)) or "Invalid cron job update") from exc
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
@@ -4963,7 +5004,7 @@ async def delete_cron_job(job_id: str, profile: Optional[str] = None):
     try:
         removed = _call_cron_for_profile(selected, "remove_job", job_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=scrub_detail(str(exc)) or "Invalid cron job") from exc
     if not removed:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"ok": True}
@@ -5059,8 +5100,10 @@ async def add_mcp_server(body: MCPServerCreate):
     try:
         _save_mcp_server(name, server_config)
     except Exception as exc:
-        _log.exception("POST /api/mcp/servers failed")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=safe_detail(exc, "Failed to save MCP server", log=_log),
+        ) from exc
 
     return _mcp_server_summary(name, server_config)
 
@@ -5088,9 +5131,10 @@ async def test_mcp_server(name: str):
         # FastAPI event loop is never blocked.
         tools = await asyncio.to_thread(_probe_single_server, name, servers[name])
     except Exception as exc:
+        _log.exception("MCP server probe failed")
         return {
             "ok": False,
-            "error": str(exc),
+            "error": scrub_detail(str(exc)) or "MCP server test failed",
             "tools": [],
         }
     return {
@@ -5133,8 +5177,10 @@ async def list_mcp_catalog():
     try:
         from hermes_cli import mcp_catalog
     except Exception as exc:
-        _log.exception("mcp_catalog import failed")
-        raise HTTPException(status_code=500, detail=f"Catalog unavailable: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Catalog unavailable", log=_log),
+        )
 
     entries = []
     try:
@@ -5206,15 +5252,20 @@ async def install_mcp_catalog_entry(body: MCPCatalogInstall):
         try:
             proc = _spawn_hermes_action(["mcp", "install", name], "mcp-install")
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Install failed: {exc}")
+            raise HTTPException(
+                status_code=500,
+                detail=safe_detail(exc, "Install failed", log=_log),
+            )
         return {"ok": True, "name": name, "background": True, "action": "mcp-install"}
 
     # No git step — install synchronously via the catalog API.
     try:
         await asyncio.to_thread(mcp_catalog.install_entry, entry, enable=body.enable)
     except Exception as exc:
-        _log.exception("install_mcp_catalog_entry failed")
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=safe_detail(exc, "Install failed", log=_log),
+        )
     return {"ok": True, "name": name, "background": False}
 
 
@@ -5458,8 +5509,10 @@ async def start_gateway():
     try:
         proc = _spawn_hermes_action(["gateway", "start"], "gateway-start")
     except Exception as exc:
-        _log.exception("Failed to spawn gateway start")
-        raise HTTPException(status_code=500, detail=f"Failed to start gateway: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to start gateway", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "gateway-start"}
 
 
@@ -5468,8 +5521,10 @@ async def stop_gateway():
     try:
         proc = _spawn_hermes_action(["gateway", "stop"], "gateway-stop")
     except Exception as exc:
-        _log.exception("Failed to spawn gateway stop")
-        raise HTTPException(status_code=500, detail=f"Failed to stop gateway: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to stop gateway", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "gateway-stop"}
 
 
@@ -5566,8 +5621,10 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
         )
         pool.add_entry(entry)
     except Exception as exc:
-        _log.exception("POST /api/credentials/pool failed")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=safe_detail(exc, "Failed to add credential", log=_log),
+        ) from exc
     return {"ok": True, "provider": provider, "count": len(pool.entries())}
 
 
@@ -5581,8 +5638,10 @@ async def remove_credential_pool_entry(provider: str, index: int):
         pool = load_pool(provider)
         removed = pool.remove_index(index)
     except Exception as exc:
-        _log.exception("DELETE /api/credentials/pool failed")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=safe_detail(exc, "Failed to remove credential", log=_log),
+        ) from exc
     if removed is None:
         raise HTTPException(status_code=404, detail="No pool entry at that index")
     return {"ok": True, "provider": provider, "count": len(pool.entries())}
@@ -5688,7 +5747,10 @@ async def reset_memory(body: MemoryReset):
                 path.unlink()
                 deleted.append(fname)
             except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not delete {fname}: {exc}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=safe_detail(exc, f"Could not delete {fname}", log=_log),
+                )
     return {"ok": True, "deleted": deleted}
 
 
@@ -5710,8 +5772,10 @@ async def run_doctor():
     try:
         proc = _spawn_hermes_action(["doctor"], "doctor")
     except Exception as exc:
-        _log.exception("Failed to spawn doctor")
-        raise HTTPException(status_code=500, detail=f"Failed to run doctor: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run doctor", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "doctor"}
 
 
@@ -5720,8 +5784,10 @@ async def run_security_audit():
     try:
         proc = _spawn_hermes_action(["security", "audit"], "security-audit")
     except Exception as exc:
-        _log.exception("Failed to spawn security audit")
-        raise HTTPException(status_code=500, detail=f"Failed to run security audit: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run security audit", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "security-audit"}
 
 
@@ -5738,8 +5804,10 @@ async def run_backup(body: BackupRequest):
     try:
         proc = _spawn_hermes_action(args, "backup")
     except Exception as exc:
-        _log.exception("Failed to spawn backup")
-        raise HTTPException(status_code=500, detail=f"Failed to run backup: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run backup", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "backup"}
 
 
@@ -5757,8 +5825,10 @@ async def run_import(body: ImportRequest):
     try:
         proc = _spawn_hermes_action(["import", archive], "import")
     except Exception as exc:
-        _log.exception("Failed to spawn import")
-        raise HTTPException(status_code=500, detail=f"Failed to run import: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to run import", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "import"}
 
 
@@ -5957,8 +6027,10 @@ async def prune_checkpoints():
     try:
         proc = _spawn_hermes_action(["checkpoints", "prune"], "checkpoints-prune")
     except Exception as exc:
-        _log.exception("Failed to spawn checkpoints prune")
-        raise HTTPException(status_code=500, detail=f"Failed to prune checkpoints: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to prune checkpoints", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "checkpoints-prune"}
 
 
@@ -5984,8 +6056,10 @@ async def install_skill_hub(body: SkillInstallRequest):
     try:
         proc = _spawn_hermes_action(["skills", "install", identifier], "skills-install")
     except Exception as exc:
-        _log.exception("Failed to spawn skills install")
-        raise HTTPException(status_code=500, detail=f"Failed to install skill: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to install skill", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "skills-install"}
 
 
@@ -6001,8 +6075,10 @@ async def uninstall_skill_hub(body: SkillUninstallRequest):
     try:
         proc = _spawn_hermes_action(["skills", "uninstall", name, "--yes"], "skills-uninstall")
     except Exception as exc:
-        _log.exception("Failed to spawn skills uninstall")
-        raise HTTPException(status_code=500, detail=f"Failed to uninstall skill: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to uninstall skill", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "skills-uninstall"}
 
 
@@ -6011,8 +6087,10 @@ async def update_skills_hub():
     try:
         proc = _spawn_hermes_action(["skills", "update"], "skills-update")
     except Exception as exc:
-        _log.exception("Failed to spawn skills update")
-        raise HTTPException(status_code=500, detail=f"Failed to update skills: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Failed to update skills", log=_log),
+        )
     return {"ok": True, "pid": proc.pid, "name": "skills-update"}
 
 
@@ -6051,8 +6129,10 @@ async def search_skills_hub(q: str = "", source: str = "all", limit: int = 20):
     try:
         results = await asyncio.to_thread(_run)
     except Exception as exc:
-        _log.exception("skills hub search failed")
-        raise HTTPException(status_code=502, detail=f"Hub search failed: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail=safe_detail(exc, "Hub search failed", log=_log),
+        )
     return {"results": results}
 
 
@@ -6182,7 +6262,7 @@ def _resolve_profile_dir(name: str) -> Path:
     try:
         profiles_mod.validate_profile_name(name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     if not profiles_mod.profile_exists(name):
         raise HTTPException(status_code=404, detail=f"Profile '{name}' does not exist.")
     return profiles_mod.get_profile_dir(name)
@@ -6259,10 +6339,12 @@ async def create_profile_endpoint(body: ProfileCreate):
         if not collision:
             profiles_mod.create_wrapper_script(body.name)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     except Exception as e:
-        _log.exception("POST /api/profiles failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to create profile", log=_log),
+        )
 
     # Optional explicit model assignment for the new profile. Best-effort:
     # the profile already exists, so a model-write hiccup must not 500 the
@@ -6313,12 +6395,14 @@ async def set_active_profile_endpoint(body: ProfileActiveUpdate):
     try:
         profiles_mod.set_active_profile(body.name)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=scrub_detail(str(e)) or "Profile not found")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     except Exception as e:
-        _log.exception("POST /api/profiles/active failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to set active profile", log=_log),
+        )
     return {"ok": True, "active": profiles_mod.normalize_profile_name(body.name)}
 
 
@@ -6370,14 +6454,16 @@ async def open_profile_terminal_endpoint(name: str):
                     detail="No supported terminal emulator found",
                 )
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=scrub_detail(str(e)) or "Profile not found")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     except HTTPException:
         raise
     except Exception as e:
-        _log.exception("POST /api/profiles/%s/open-terminal failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to open profile terminal", log=_log),
+        )
     return {"ok": True, "command": command}
 
 
@@ -6387,12 +6473,14 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
     try:
         path = profiles_mod.rename_profile(name, body.new_name)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=scrub_detail(str(e)) or "Profile not found")
     except (ValueError, FileExistsError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     except Exception as e:
-        _log.exception("PATCH /api/profiles/%s failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to rename profile", log=_log),
+        )
     return {"ok": True, "name": body.new_name, "path": str(path)}
 
 
@@ -6405,12 +6493,14 @@ async def delete_profile_endpoint(name: str):
     try:
         path = profiles_mod.delete_profile(name, yes=True)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=scrub_detail(str(e)) or "Profile not found")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=scrub_detail(str(e)) or "Invalid profile")
     except Exception as e:
-        _log.exception("DELETE /api/profiles/%s failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to delete profile", log=_log),
+        )
     return {"ok": True, "path": str(path)}
 
 
@@ -6421,7 +6511,10 @@ async def get_profile_soul(name: str):
         try:
             return {"content": soul_path.read_text(encoding="utf-8"), "exists": True}
         except OSError as e:
-            raise HTTPException(status_code=500, detail=f"Could not read SOUL.md: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=safe_detail(e, "Could not read SOUL.md", log=_log),
+            )
     return {"content": "", "exists": False}
 
 
@@ -6431,8 +6524,10 @@ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
     try:
         soul_path.write_text(body.content, encoding="utf-8")
     except OSError as e:
-        _log.exception("PUT /api/profiles/%s/soul failed", name)
-        raise HTTPException(status_code=500, detail=f"Could not write SOUL.md: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Could not write SOUL.md", log=_log),
+        )
     return {"ok": True}
 
 
@@ -6454,8 +6549,10 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
             description_auto=False,
         )
     except Exception as e:
-        _log.exception("PUT /api/profiles/%s/description failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to update profile description", log=_log),
+        )
     return {"ok": True, "description": text, "description_auto": False}
 
 
@@ -6474,8 +6571,10 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
     try:
         _write_profile_model(profile_dir, provider, model)
     except Exception as e:
-        _log.exception("PUT /api/profiles/%s/model failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to update profile model", log=_log),
+        )
     return {"ok": True, "provider": provider, "model": model}
 
 
@@ -6494,8 +6593,10 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
         from hermes_cli import profile_describer
         outcome = profile_describer.describe_profile(name, overwrite=bool(body.overwrite))
     except Exception as e:
-        _log.exception("POST /api/profiles/%s/describe-auto failed", name)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(e, "Failed to describe profile", log=_log),
+        )
     return {
         "ok": bool(outcome.ok),
         "reason": outcome.reason,
@@ -6697,7 +6798,10 @@ async def select_toolset_provider(name: str, body: ToolsetProviderSelect):
     try:
         apply_provider_selection(name, body.provider, config)
     except KeyError as exc:
-        raise HTTPException(status_code=400, detail=str(exc).strip('"'))
+        raise HTTPException(
+            status_code=400,
+            detail=scrub_detail(str(exc).strip('"')) or "Invalid provider",
+        )
     save_config(config)
     return {"ok": True, "name": name, "provider": body.provider}
 
@@ -6728,7 +6832,10 @@ async def update_config_raw(body: RawConfigUpdate):
         save_config(parsed)
         return {"ok": True}
     except yaml.YAMLError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=scrub_detail(f"Invalid YAML: {e}") or "Invalid YAML",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -7293,7 +7400,8 @@ async def pty_ws(ws: WebSocket) -> None:
         argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
     except SystemExit as exc:
         # _make_tui_argv calls sys.exit(1) when node/npm is missing.
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        detail = scrub_detail(f"Chat unavailable: {exc}") or "Chat unavailable"
+        await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
 
@@ -7301,11 +7409,13 @@ async def pty_ws(ws: WebSocket) -> None:
     try:
         bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
     except PtyUnavailableError as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        detail = scrub_detail(f"Chat unavailable: {exc}") or "Chat unavailable"
+        await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
     except (FileNotFoundError, OSError) as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
+        detail = scrub_detail(f"Chat failed to start: {exc}") or "Chat failed to start"
+        await ws.send_text(f"\r\n\x1b[31m{detail}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
 
@@ -7933,7 +8043,8 @@ def _safe_plugin_entry_state(entry_field: Any, *, dashboard_dir: Path) -> tuple[
         with target.open("rb"):
             pass
     except OSError as exc:
-        return entry, False, f"entry file is not readable: {exc}"
+        _log.exception("dashboard plugin entry file is not readable")
+        return entry, False, scrub_detail(f"entry file is not readable: {exc}") or "entry file is not readable"
     return entry, True, None
 
 
