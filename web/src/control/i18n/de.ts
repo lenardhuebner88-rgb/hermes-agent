@@ -277,5 +277,34 @@ export const de = {
     prioHigh: "high",
     prioMedium: "medium",
     prioLow: "low",
+    // Commission / Dispatch
+    nextTask: "Nächster Task",
+    nextBadge: "NÄCHSTER",
+    commission: "Nächsten beauftragen",
+    commissionCopied: "Prompt kopiert ✓",
+    commissionHint: "Kopiert den Dispatch-Prompt in die Zwischenablage — in eine Remote-Claude-Session einfügen.",
+    commissionDrawer: "Commission-Prompt kopieren",
+    noNextTask: "Alle Tasks blockiert oder kein To-do offen.",
+    // Search / Filter / Sort
+    searchPlaceholder: "Suchen …",
+    filterPriority: "Priorität",
+    filterProject: "Projekt",
+    filterPlanGate: "Plan-Gate",
+    filterReadiness: "Bereit",
+    filterAll: "Alle",
+    filterReady: "Startklar",
+    filterBlocked: "Blockiert",
+    sortLabel: "Sortierung",
+    sortPriority: "Priorität",
+    sortAge: "Alter",
+    sortReadiness: "Bereitschaft",
+    // Mobile stream
+    streamHeading: "Tasks",
+    // Done section
+    doneReceiptHint: "Mit Receipt & Commit-Vorschau",
+    // Project names
+    projDashboard: "Dashboard",
+    projFamilyOrganizer: "Family Organizer",
+    projOrchestration: "Orchestration",
   },
 } as const;

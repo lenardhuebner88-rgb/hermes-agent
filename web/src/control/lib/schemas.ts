@@ -326,6 +326,8 @@ export const OrchestrationItemSchema = z.object({
   dependsOn: z.array(z.string()).catch([]),
   planGate: z.boolean().catch(false),
   created: z.string().catch(""),
+  root: z.string().optional().catch(undefined),
+  excerpt: z.string().optional().catch(undefined),
 });
 
 export const OrchestrationDetailSchema = z.object({

@@ -1,10 +1,12 @@
-import { useEffect } from "react";
-import { X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, ClipboardCopy, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ToneName } from "../lib/types";
 import { toneClasses } from "../lib/tones";
 import { tokens } from "../lib/tokens";
 import { StatusPill, ToneCallout } from "./atoms";
+import { Markdown } from "./Markdown";
+import { de } from "../i18n/de";
 
 interface BacklogDetailDrawerProps {
   title: string;
@@ -14,6 +16,7 @@ interface BacklogDetailDrawerProps {
   body: string;
   loading?: boolean;
   error?: string;
+  commissionPrompt?: string;
   onClose: () => void;
 }
 
@@ -27,18 +30,31 @@ export function BacklogDetailDrawer({
   body,
   loading = false,
   error,
+  commissionPrompt,
   onClose,
 }: BacklogDetailDrawerProps) {
+  const [copied, setCopied] = useState(false);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
   const visibleFields = fields?.filter((field) => field.value.trim() !== "") ?? [];
+
+  const copyCommission = async () => {
+    if (!commissionPrompt) return;
+    try {
+      await navigator.clipboard.writeText(commissionPrompt);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      /* clipboard blocked — non-critical */
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50">
@@ -74,7 +90,7 @@ export function BacklogDetailDrawer({
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
           {chips?.length ? (
             <div className="flex flex-wrap gap-2">
               {chips.map((chip, index) => (
@@ -89,7 +105,7 @@ export function BacklogDetailDrawer({
           ) : null}
 
           {visibleFields.length ? (
-            <dl className="space-y-3">
+            <dl className="space-y-2">
               {visibleFields.map((field, index) => (
                 <div
                   key={`${index}-${field.label}`}
@@ -103,17 +119,33 @@ export function BacklogDetailDrawer({
             </dl>
           ) : null}
 
+          {commissionPrompt ? (
+            <button
+              type="button"
+              onClick={copyCommission}
+              className={cn(
+                "flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition",
+                copied
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                  : "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15",
+              )}
+            >
+              {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
+              {copied ? de.orchestrator.commissionCopied : de.orchestrator.commissionDrawer}
+            </button>
+          ) : null}
+
           {error ? (
             <ToneCallout tone="red">
               <p className="whitespace-pre-wrap break-words hc-mono">{error}</p>
             </ToneCallout>
           ) : loading ? (
             <div className={cn("rounded-lg border px-3 py-2 text-sm", toneClasses("zinc"))}>
-              <p className="whitespace-pre-wrap break-words hc-mono">Loading details...</p>
+              <p className="whitespace-pre-wrap break-words hc-mono">{de.orchestrator.loading}</p>
             </div>
           ) : (
-            <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-zinc-200">
-              <p className="whitespace-pre-wrap break-words hc-mono">{body}</p>
+            <div className="rounded-lg border border-white/10 bg-white/[.03] px-4 py-3">
+              <Markdown body={body} />
             </div>
           )}
         </div>

@@ -13,6 +13,7 @@ import json
 import pytest
 
 from hermes_cli.orchestration_backlog_view import (
+    _extract_excerpt,
     _parse_bool,
     _parse_depends_on,
     _parse_frontmatter,
@@ -89,11 +90,26 @@ def test_parse_bool():
     assert _parse_bool(None) is False
 
 
+def test_extract_excerpt_strips_markdown_markers():
+    text = "---\nid: x\n---\n\n## Ziel\n\nbody line here\n"
+    assert _extract_excerpt(text) == "Ziel"
+
+    text2 = "---\nid: x\n---\n\n- list item\n"
+    assert _extract_excerpt(text2) == "list item"
+
+    text3 = "---\nid: x\n---\n\n> blockquote\n"
+    assert _extract_excerpt(text3) == "blockquote"
+
+    text4 = "---\nid: x\n---\n"
+    assert _extract_excerpt(text4) == ""
+
+
 def test_read_items_counts_and_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
     monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
     _write(tmp_path, "f-a.md", id="f-a", title="A", status="doing",
-           priority="high", dependsOn="[]", planGate="true", created="2026-06-01")
+           priority="high", dependsOn="[]", planGate="true", created="2026-06-01",
+           root="/home/piet/.hermes/hermes-agent")
     _write(tmp_path, "f-b.md", id="f-b", title="B", status="todo",
            priority="medium", dependsOn="[f-a]", planGate="false", created="2026-05-30")
     _write(tmp_path, "f-c.md", id="f-c", title="C", status="done",
@@ -119,6 +135,10 @@ def test_read_items_counts_and_shape(tmp_path, monkeypatch):
     assert by_id["f-c"]["dependsOn"] == ["f-a", "f-b"]
     assert by_id["f-a"]["priority"] == "high"
     assert by_id["f-a"]["created"] == "2026-06-01"
+    # New fields: root + excerpt
+    assert by_id["f-a"]["root"] == "/home/piet/.hermes/hermes-agent"
+    assert by_id["f-b"]["root"] == ""  # not in frontmatter → empty
+    assert by_id["f-a"]["excerpt"] == "Ziel"  # body starts with "## Ziel"
 
 
 def test_read_items_missing_dir(tmp_path, monkeypatch):
@@ -143,7 +163,8 @@ def test_route_returns_json(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
     monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
     _write(tmp_path, "f-a.md", id="f-a", title="A", status="review",
-           priority="high", dependsOn="[]", planGate="true", created="2026-06-01")
+           priority="high", dependsOn="[]", planGate="true", created="2026-06-01",
+           root="/tmp/project")
 
     app = FastAPI()
     register_orchestration_backlog_routes(app)
@@ -157,6 +178,8 @@ def test_route_returns_json(tmp_path, monkeypatch):
     assert data["items"][0]["id"] == "f-a"
     assert data["items"][0]["title"] == "A"
     assert data["items"][0]["status"] == "review"
+    assert data["items"][0]["root"] == "/tmp/project"
+    assert data["items"][0]["excerpt"] == "Ziel"  # first readable body line after ## Ziel
 
 
 def test_detail_route_returns_item_body_gate_and_root(tmp_path, monkeypatch):

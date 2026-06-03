@@ -18,11 +18,20 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+# Coarse Markdown-stripping for excerpt extraction. Only the leading-line patterns matter:
+# headings, list bullets, blockquote markers, and inline decoration (backticks, asterisks).
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+")
+_MD_LIST_RE = re.compile(r"^\s*[-*+]\s+|^\s*\d+\.\s+")
+_MD_QUOTE_RE = re.compile(r"^\s*>\s*")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_INLINE_RE = re.compile(r"`[^`]*`|\*+|_+")
 
 from fastapi import FastAPI
 
@@ -100,6 +109,26 @@ def _parse_bool(value: Any) -> bool:
 
 def _detail_error(message: str) -> dict[str, str]:
     return {"error": message}
+
+
+def _extract_excerpt(text: str, max_len: int = 140) -> str:
+    """First readable body line, coarsely stripped of Markdown markers, ≤max_len chars."""
+    body = _body_after_frontmatter(text)
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.fullmatch(r"[-*_=]{3,}", stripped):
+            continue  # skip HR/rule lines
+        cleaned = _MD_HEADING_RE.sub("", stripped)
+        cleaned = _MD_LIST_RE.sub("", cleaned)
+        cleaned = _MD_QUOTE_RE.sub("", cleaned)
+        cleaned = _MD_LINK_RE.sub(r"\1", cleaned)
+        cleaned = _MD_INLINE_RE.sub("", cleaned)
+        cleaned = cleaned.strip()
+        if cleaned:
+            return cleaned[:max_len]
+    return ""
 
 
 def _body_after_frontmatter(text: str) -> str:
@@ -259,6 +288,8 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "planGate": _parse_bool(fm.get("planGate")),
                 "created": str(created) if created is not None else "",
                 "created_epoch": _created_epoch(created),
+                "root": str(fm.get("root") or ""),
+                "excerpt": _extract_excerpt(text),
             }
         )
         if status in counts:
