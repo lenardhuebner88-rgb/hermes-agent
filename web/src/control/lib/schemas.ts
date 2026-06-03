@@ -273,6 +273,7 @@ export const BacklogItemSchema = z.object({
   lane: z.string().nullable().catch(null),
   result: z.string().nullable().catch(null),
   stale: z.boolean().catch(false),
+  excerpt: z.string().optional().catch(undefined),
 });
 
 export const BacklogDetailSchema = z.object({

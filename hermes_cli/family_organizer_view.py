@@ -17,10 +17,18 @@ import asyncio
 import datetime as dt
 import logging
 import os
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# Coarse Markdown-stripping for excerpt extraction (mirrors orchestration_backlog_view).
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+")
+_MD_LIST_RE = re.compile(r"^\s*[-*+]\s+|^\s*\d+\.\s+")
+_MD_QUOTE_RE = re.compile(r"^\s*>\s*")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_INLINE_RE = re.compile(r"`[^`]*`|\*+|_+")
 from typing import Any
 
 from fastapi import FastAPI
@@ -188,6 +196,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "lane": str(fm.get("lane")) if fm.get("lane") is not None else None,
                 "result": str(fm.get("result")) if fm.get("result") is not None else None,
                 "stale": bool(stale),
+                "excerpt": _extract_excerpt(text),
             }
         )
         if status in counts:
@@ -236,6 +245,26 @@ def _body_after_frontmatter(text: str) -> str:
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
             return "".join(lines[i + 1:])
+    return ""
+
+
+def _extract_excerpt(text: str, max_len: int = 140) -> str:
+    """First readable body line, coarsely stripped of Markdown markers, ≤max_len chars."""
+    body = _body_after_frontmatter(text)
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.fullmatch(r"[-*_=]{3,}", stripped):
+            continue
+        cleaned = _MD_HEADING_RE.sub("", stripped)
+        cleaned = _MD_LIST_RE.sub("", cleaned)
+        cleaned = _MD_QUOTE_RE.sub("", cleaned)
+        cleaned = _MD_LINK_RE.sub(r"\1", cleaned)
+        cleaned = _MD_INLINE_RE.sub("", cleaned)
+        cleaned = cleaned.strip()
+        if cleaned:
+            return cleaned[:max_len]
     return ""
 
 

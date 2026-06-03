@@ -13,6 +13,7 @@ import json
 import pytest
 
 from hermes_cli.family_organizer_view import (
+    _extract_excerpt,
     _parse_frontmatter,
     _read_items_sync,
     _read_sources_from_git,
@@ -20,11 +21,14 @@ from hermes_cli.family_organizer_view import (
 )
 
 
-def _write(dir_, name, **fm):
+def _write(dir_, name, body=None, **fm):
     lines = ["---"]
     for key, value in fm.items():
         lines.append(f"{key}: {value}")
-    lines += ["---", "", "# Kontext", "", "body mit --- als Trennlinie"]
+    if body is not None:
+        lines += ["---", "", body]
+    else:
+        lines += ["---", "", "# Kontext", "", "body mit --- als Trennlinie"]
     (dir_ / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -236,6 +240,53 @@ def test_detail_route_rejects_traversal_ids(monkeypatch):
     assert status == 200
     assert raw["error"]
     assert "passwd" not in json.dumps(raw)
+
+
+def test_extract_excerpt_strips_markdown_markers():
+    text = "---\nid: 0001\n---\n\n## Heading\n\nErster Satz hier.\n"
+    assert _extract_excerpt(text) == "Heading"
+
+    text_plain = "---\nid: 0001\n---\n\nPlain line.\n"
+    assert _extract_excerpt(text_plain) == "Plain line."
+
+    text_long = "---\nid: 0001\n---\n\n" + "x" * 200 + "\n"
+    assert len(_extract_excerpt(text_long)) <= 140
+
+    text_empty = "---\nid: 0001\n---\n\n"
+    assert _extract_excerpt(text_empty) == ""
+
+
+def test_read_items_excerpt_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-a.md", body="## Ziel\n\nBeschreibung des Tasks.",
+           id="0001", title="A", status="now", owner="claude",
+           risk="low", area="kitchen", updated="2026-06-01")
+    now = int(dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc).timestamp())
+    out = _read_items_sync(now)
+    item = out["items"][0]
+    assert "excerpt" in item
+    assert item["excerpt"] == "Ziel"
+
+
+def test_route_excerpt_in_list_payload(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+    from hermes_cli.family_organizer_view import register_backlog_routes
+
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-a.md", body="Excerpt-Satz.", id="0001", title="A",
+           status="now", owner="claude", risk="low", area="kitchen",
+           updated="2026-06-01")
+    app = FastAPI()
+    register_backlog_routes(app)
+    r = TestClient(app).get("/api/family-organizer/backlog")
+    assert r.status_code == 200
+    item = r.json()["items"][0]
+    assert "excerpt" in item
+    assert item["excerpt"] == "Excerpt-Satz."
 
 
 def test_detail_route_empty_and_unknown_id_return_error(monkeypatch):
