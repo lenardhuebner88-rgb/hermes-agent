@@ -18,6 +18,13 @@ export function canBatchConfirmAutoresearchSelection(input: {
   return input.selectedCount > 0 && input.selectedManualReviewCount === 0 && !input.busy;
 }
 
+export function canApplyAllOpenSkillProposals(input: {
+  openSkillProposals: readonly Proposal[];
+  busy: boolean;
+}): boolean {
+  return input.openSkillProposals.length > 0 && !input.busy && input.openSkillProposals.every((proposal) => !proposalNeedsManualReview(proposal));
+}
+
 export function proposalNeedsManualReview(proposal: Proposal): boolean {
   if (proposal.mode !== "skill") return true;
   if (SEVERITY_ORDER[getProposalSeverity(proposal)] >= SEVERITY_ORDER.high) return true;

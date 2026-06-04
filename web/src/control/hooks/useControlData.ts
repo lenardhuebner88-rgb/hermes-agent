@@ -20,6 +20,7 @@ import {
 } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
+import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, WorkersResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -300,13 +301,19 @@ export function useProposals() {
     // applies + their reloads churning the list under us can't re-POST a
     // proposal that has already been submitted this run.
     const pending = openSkillProposals.filter(isActionable);
+    const safe = pending.filter((proposal) => !proposalNeedsManualReview(proposal));
+    const blocked = pending.length - safe.length;
+    if (blocked > 0) {
+      log(`${blocked} Skill-Vorschläge brauchen Einzelreview und wurden nicht gesammelt übernommen.`, "amber");
+    }
+    if (safe.length === 0) return;
     const seen = new Set<string>();
-    for (const proposal of pending) {
+    for (const proposal of safe) {
       if (seen.has(proposal.id)) continue;
       seen.add(proposal.id);
       await apply(proposal);
     }
-  }, [apply, openSkillProposals]);
+  }, [apply, log, openSkillProposals]);
 
   const confirmBatch = useCallback(async (ids: string[]) => {
     const selectedIds = Array.from(new Set(ids)).filter(Boolean);

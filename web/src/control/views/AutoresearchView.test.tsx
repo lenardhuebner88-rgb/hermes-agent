@@ -4,7 +4,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
@@ -295,6 +295,14 @@ describe("AutoresearchView decision guide", () => {
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 0, busy: false })).toBe(true);
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 1, busy: false })).toBe(false);
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 0, selectedManualReviewCount: 0, busy: false })).toBe(false);
+  });
+
+  it("blocks global apply-all when open skill proposals need manual review", () => {
+    expect(canApplyAllOpenSkillProposals({ openSkillProposals: [proposal({ id: "safe", severity: "low" })], busy: false })).toBe(true);
+    expect(canApplyAllOpenSkillProposals({ openSkillProposals: [proposal({ id: "risky", severity: "high" })], busy: false })).toBe(false);
+    expect(canApplyAllOpenSkillProposals({ openSkillProposals: [proposal({ id: "safety", severity: "low", title: "Token safety note" })], busy: false })).toBe(false);
+    expect(canApplyAllOpenSkillProposals({ openSkillProposals: [proposal({ id: "safe", severity: "low" })], busy: true })).toBe(false);
+    expect(canApplyAllOpenSkillProposals({ openSkillProposals: [], busy: false })).toBe(false);
   });
 });
 

@@ -12,7 +12,7 @@ import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWe
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
-import { canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -118,6 +118,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     [open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
   );
   const batchBusy = store.busy === "confirm-batch";
+  const openSkillManualReviewCount = useMemo(() => store.openSkillProposals.filter(proposalNeedsManualReview).length, [store.openSkillProposals]);
+  const canApplyAllOpenSkills = canApplyAllOpenSkillProposals({
+    openSkillProposals: store.openSkillProposals,
+    busy: !!store.busy,
+  });
   const canConfirmSelection = canBatchConfirmAutoresearchSelection({
     selectedCount: selectedIds.length,
     selectedManualReviewCount,
@@ -379,9 +384,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <OperatorActionCard
                 icon={<ShieldCheck className="h-5 w-5" />}
                 eyebrow="Review"
-                title="Offenes übernehmen"
-                body="Skill-Vorschläge gesammelt übernehmen; Code läuft einzeln durchs Gate."
-                button={<Button outlined className="hc-hit w-full justify-center" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} title={de.autoresearch.applyAllHint} prefix={<GitPullRequestArrow className="h-4 w-4" />}>{de.autoresearch.applyAll} ({store.openSkillProposals.length})</Button>}
+                title={openSkillManualReviewCount > 0 ? "Erst Review öffnen" : "Sichere Skills übernehmen"}
+                body={openSkillManualReviewCount > 0
+                  ? `${openSkillManualReviewCount} Skill-Vorschläge brauchen Einzelreview. Sammelübernahme bleibt gesperrt.`
+                  : "Nur batch-sichere Skill-Vorschläge gesammelt übernehmen; Code läuft einzeln durchs Gate."}
+                button={openSkillManualReviewCount > 0 ? (
+                  <Button outlined className="hc-hit w-full justify-center" onClick={() => scrollTo("autoresearch-queue")} disabled={store.openSkillProposals.length === 0} title="Öffnet die Queue, damit riskante Skill-Vorschläge einzeln geprüft werden." prefix={<ArrowDown className="h-4 w-4" />}>
+                    Review öffnen ({store.openSkillProposals.length})
+                  </Button>
+                ) : (
+                  <Button outlined className="hc-hit w-full justify-center" onClick={store.applyAll} disabled={!canApplyAllOpenSkills} title={canApplyAllOpenSkills ? de.autoresearch.applyAllHint : "Keine batch-sicheren Skill-Vorschläge offen."} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
+                    {de.autoresearch.applyAll} ({store.openSkillProposals.length})
+                  </Button>
+                )}
               />
               <OperatorActionCard
                 icon={<Archive className="h-5 w-5" />}
