@@ -12,6 +12,7 @@ import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWe
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
+import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun } from "../lib/types";
@@ -78,6 +79,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [pruneMessage, setPruneMessage] = useState<PruneMessage | null>(null);
   const [bulkRevertedBusy, setBulkRevertedBusy] = useState(false);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
+  const reviewFlow = useMemo(
+    () => getAutoresearchReviewFlow({
+      openCount: open.length,
+      decidedCount: applied.length + skipped.length + reverted.length,
+      selectedCount: selectedIds.length,
+      visibleCount: visibleProposalIds.length,
+      highPriorityCount,
+      backlogCount: relevanceQueue.summary.remaining,
+      revertedCount: reverted.length,
+      topTitle: topProposal?.title?.trim() || topProposal?.target,
+    }),
+    [applied.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+  );
   const batchBusy = store.busy === "confirm-batch";
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
@@ -214,6 +228,26 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     } finally {
       setBulkRevertedBusy(false);
     }
+  };
+
+  const runReviewFlowPrimary = () => {
+    if (reviewFlow.primaryAction === "confirm-selection") {
+      void confirmSelected();
+      return;
+    }
+    if (reviewFlow.primaryAction === "select-visible") {
+      selectQueue();
+      return;
+    }
+    if (reviewFlow.primaryAction === "archive-reverted") {
+      void skipAllReverted();
+      return;
+    }
+    if (reviewFlow.primaryAction === "generate") {
+      void store.generate();
+      return;
+    }
+    if (topProposal) toggleSelection(topProposal.id, true);
   };
 
   return (
@@ -474,25 +508,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
           </div>
         </div>
-        {topProposal ? (
-          <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] p-3">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="hc-eyebrow text-[var(--hc-accent-text)]">Erstes Review</p>
-                <p className="mt-1 truncate text-base font-semibold text-white">{topProposal.title?.trim() || topProposal.target}</p>
-                <p className="mt-1 text-sm hc-soft">Diese Karte ist nach Sicherheits-/Impact-Signal ganz oben. Entscheide sie zuerst, dann wird die Liste schnell leerer.</p>
-              </div>
-              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-                <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
-                  Sichtbare markieren
-                </Button>
-                <Button className="hc-hit" onClick={() => toggleSelection(topProposal.id, true)} disabled={batchBusy || selectedProposalIds.has(topProposal.id)} prefix={<ClipboardCheck className="h-4 w-4" />}>
-                  Top auswählen
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+        <ReviewFlowPanel
+          flow={reviewFlow}
+          busy={batchBusy || bulkRevertedBusy || !!store.busy}
+          onPrimary={runReviewFlowPrimary}
+        />
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
@@ -586,6 +606,64 @@ function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: Reac
       <div className="mt-3">{button}</div>
     </article>
   );
+}
+
+function ReviewFlowPanel({ flow, busy, onPrimary }: { flow: AutoresearchReviewFlow; busy: boolean; onPrimary: () => void }) {
+  const icon = flow.primaryAction === "confirm-selection"
+    ? <CheckCheck className="h-4 w-4" />
+    : flow.primaryAction === "select-visible"
+      ? <ListChecks className="h-4 w-4" />
+      : flow.primaryAction === "archive-reverted"
+        ? <Archive className="h-4 w-4" />
+        : flow.primaryAction === "generate"
+          ? <Sparkles className="h-4 w-4" />
+          : <ClipboardCheck className="h-4 w-4" />;
+
+  return (
+    <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] p-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow text-[var(--hc-accent-text)]">Review-Flow</p>
+            <StatusPill tone={flow.tone} label={flow.progressLabel} />
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{flow.title}</h3>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{flow.detail}</p>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/30">
+            <div className="h-full rounded-full bg-[var(--hc-accent)]" style={{ width: `${flow.progressPercent}%` }} />
+          </div>
+        </div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-3 lg:min-w-[360px]">
+          {flow.steps.map((step) => (
+            <div key={step.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(step.tone))}>
+              <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{step.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{step.value}</p>
+            </div>
+          ))}
+          <Button className="hc-hit sm:col-span-3" onClick={onPrimary} disabled={busy} prefix={busy ? <Spinner /> : icon}>
+            {flow.primaryLabel}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function reviewStepToneClass(tone: AutoresearchReviewFlow["steps"][number]["tone"]): string {
+  switch (tone) {
+    case "emerald":
+      return "border-emerald-500/20 bg-emerald-500/10";
+    case "cyan":
+      return "border-cyan-500/20 bg-cyan-500/10";
+    case "amber":
+      return "border-amber-500/20 bg-amber-500/10";
+    case "violet":
+      return "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]";
+    case "red":
+      return "border-red-500/20 bg-red-500/10";
+    default:
+      return "border-white/10 bg-black/20";
+  }
 }
 
 function LaneModelPanel() {

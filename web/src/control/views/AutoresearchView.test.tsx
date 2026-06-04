@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
+import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
@@ -113,5 +114,61 @@ describe("AutoresearchView cockpit recommendation", () => {
     expect(recommendation.kind).toBe("inspect");
     expect(recommendation.title).toContain("Status prüfen");
     expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
+});
+
+describe("AutoresearchView review flow", () => {
+  it("prioritizes high-risk decisions before batch flow", () => {
+    const flow = getAutoresearchReviewFlow({
+      openCount: 5,
+      decidedCount: 2,
+      selectedCount: 0,
+      visibleCount: 5,
+      highPriorityCount: 2,
+      backlogCount: 0,
+      revertedCount: 1,
+      topTitle: "Secret leak in CLI",
+    });
+
+    expect(flow.tone).toBe("amber");
+    expect(flow.primaryAction).toBe("select-top");
+    expect(flow.primaryLabel).toBe("Top auswählen");
+    expect(flow.title).toContain("Hoch+");
+    expect(flow.detail).toContain("Secret leak in CLI");
+  });
+
+  it("switches to batch confirmation when proposals are selected", () => {
+    const flow = getAutoresearchReviewFlow({
+      openCount: 5,
+      decidedCount: 2,
+      selectedCount: 3,
+      visibleCount: 5,
+      highPriorityCount: 2,
+      backlogCount: 1,
+      revertedCount: 0,
+      topTitle: "Any proposal",
+    });
+
+    expect(flow.tone).toBe("cyan");
+    expect(flow.primaryAction).toBe("confirm-selection");
+    expect(flow.primaryLabel).toBe("Auswahl übernehmen");
+    expect(flow.progressLabel).toBe("2 von 7 entschieden");
+  });
+
+  it("turns an empty queue into an actionable next step", () => {
+    const flow = getAutoresearchReviewFlow({
+      openCount: 0,
+      decidedCount: 4,
+      selectedCount: 0,
+      visibleCount: 0,
+      highPriorityCount: 0,
+      backlogCount: 0,
+      revertedCount: 0,
+    });
+
+    expect(flow.tone).toBe("emerald");
+    expect(flow.primaryAction).toBe("generate");
+    expect(flow.primaryLabel).toBe("Neue Kandidaten holen");
+    expect(flow.progressPercent).toBe(100);
   });
 });
