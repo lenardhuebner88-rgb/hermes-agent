@@ -9,7 +9,6 @@ import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
-import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
@@ -70,7 +69,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
   const [minUseCount, setMinUseCount] = useState("");
-  const [codeWeaknessScope, setCodeWeaknessScope] = useState<CodeWeaknessScope>("incremental");
   const [deepAuditSubsystem, setDeepAuditSubsystem] = useState("");
   const [deepAuditFocus, setDeepAuditFocus] = useState("");
   const [deepAuditMessage, setDeepAuditMessage] = useState<string | null>(null);
@@ -383,20 +381,20 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 body="Findet Code-Risiken und legt gegatete Vorschläge an."
                 button={
                   <div className="space-y-2">
-                    <div className="grid grid-cols-3 overflow-hidden rounded-lg border border-white/10 text-sm">
-                      <button type="button" onClick={() => setCodeWeaknessScope("incremental")} title={de.autoresearch.scanScopeHintChanged} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "incremental" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
-                        {de.autoresearch.scanScopeChanged}
-                      </button>
-                      <button type="button" onClick={() => setCodeWeaknessScope("full")} title={de.autoresearch.scanScopeHintFull} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "full" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
-                        {de.autoresearch.scanScopeFull}
-                      </button>
-                      <button type="button" onClick={() => setCodeWeaknessScope("deep")} title={de.autoresearch.deepScanHint} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "deep" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
-                        {de.autoresearch.scanScopeDeep}
-                      </button>
-                    </div>
-                    <Button outlined className="hc-hit w-full justify-center" onClick={() => store.generateCodeWeaknesses(codeWeaknessScope)} disabled={!!store.busy} title={de.autoresearch.scanButtonHint} prefix={store.busy === codeWeaknessBusyKey(codeWeaknessScope) ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-                      Scan starten
+                    <Button outlined className="hc-hit w-full justify-center" onClick={() => store.generateCodeWeaknesses("incremental")} disabled={!!store.busy} title={de.autoresearch.scanScopeHintChanged} prefix={store.busy === codeWeaknessBusyKey("incremental") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                      Geänderte Dateien scannen
                     </Button>
+                    <details className="rounded-lg border border-white/10 bg-black/20 p-2">
+                      <summary className="cursor-pointer text-xs font-semibold text-white">Mehr Umfang</summary>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                        <Button outlined className="hc-hit justify-center" onClick={() => store.generateCodeWeaknesses("full")} disabled={!!store.busy} title={de.autoresearch.scanScopeHintFull} prefix={store.busy === codeWeaknessBusyKey("full") ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                          {de.autoresearch.scanScopeFull}
+                        </Button>
+                        <Button outlined className="hc-hit justify-center" onClick={() => store.generateCodeWeaknesses("deep")} disabled={!!store.busy} title={de.autoresearch.deepScanHint} prefix={store.busy === codeWeaknessBusyKey("deep") ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
+                          {de.autoresearch.scanScopeDeep}
+                        </Button>
+                      </div>
+                    </details>
                   </div>
                 }
               />
