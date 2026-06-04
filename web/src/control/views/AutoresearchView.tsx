@@ -428,6 +428,97 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       {pruneMessage ? <ToneCallout tone={pruneMessage.tone}>{pruneMessage.text}</ToneCallout> : null}
 
+      {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
+      {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
+
+      <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="hc-eyebrow">Relevanz-Queue</p>
+            <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
+            <p className="mt-1 text-sm hc-soft">{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></p>
+            {open.length > 0 ? (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs hc-soft">{de.autoresearch.distributionHeading}:</span>
+                {distribution.bySeverity.critical > 0 ? <StatusPill tone="red" label={`${de.autoresearch.severityCritical} ${distribution.bySeverity.critical}`} /> : null}
+                {distribution.bySeverity.high > 0 ? <StatusPill tone="amber" label={`${de.autoresearch.severityHigh} ${distribution.bySeverity.high}`} /> : null}
+                {distribution.bySeverity.medium > 0 ? <StatusPill tone="sky" label={`${de.autoresearch.severityMedium} ${distribution.bySeverity.medium}`} /> : null}
+                {distribution.bySeverity.low > 0 ? <StatusPill tone="zinc" label={`${de.autoresearch.severityLow} ${distribution.bySeverity.low}`} /> : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="flex flex-col gap-2 sm:items-end">
+            <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
+              <button type="button" onClick={() => setSeverityFilter("all")} className={cn("px-3 py-1", severityFilter === "all" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                {de.autoresearch.severityFilterAll}
+              </button>
+              <button type="button" onClick={() => setSeverityFilter("high")} className={cn("px-3 py-1", severityFilter === "high" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
+                {de.autoresearch.severityFilterHighPlus}
+              </button>
+            </div>
+            {store.loading ? <Spinner /> : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
+              <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
+                {de.autoresearch.selectAllVisible}
+              </Button>
+              <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
+                {de.autoresearch.clearSelection}
+              </Button>
+              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={!canConfirmSelection} title={selectedManualReviewCount > 0 ? "Riskante Auswahl einzeln prüfen oder Auswahl leeren." : undefined} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+                {de.autoresearch.batchConfirm}
+              </Button>
+            </div>
+          </div>
+        </div>
+        <ReviewFlowPanel
+          flow={reviewFlow}
+          busy={batchBusy || bulkRevertedBusy || !!store.busy}
+          onPrimary={runReviewFlowPrimary}
+        />
+        <DecisionGuidePanel guide={decisionGuide} />
+        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
+        <div className="grid gap-4">
+          {relevanceQueue.shortlist.map((item) => (
+            <ProposalCard
+              key={item.proposal.id}
+              proposal={item.proposal}
+              priorityGroup={item.group}
+              density={density}
+              busy={store.busy === item.proposal.id}
+              selectable
+              selected={selectedProposalIds.has(item.proposal.id)}
+              batchStatus={store.batchConfirmById[item.proposal.id]}
+              onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
+              onApply={store.apply}
+              onSkip={store.skip}
+            />
+          ))}
+        </div>
+        {relevanceQueue.backlog.length > 0 ? (
+          <details className="hc-card p-4">
+            <summary className="cursor-pointer text-sm font-medium text-white">Weitere Vorschläge ({relevanceQueue.summary.remaining}) anzeigen</summary>
+            <div className="mt-4 grid gap-4">
+              {relevanceQueue.backlog.map((item) => (
+                <ProposalCard
+                  key={item.proposal.id}
+                  proposal={item.proposal}
+                  priorityGroup={item.group}
+                  density={density}
+                  busy={store.busy === item.proposal.id}
+                  selectable
+                  selected={selectedProposalIds.has(item.proposal.id)}
+                  batchStatus={store.batchConfirmById[item.proposal.id]}
+                  onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
+                  onApply={store.apply}
+                  onSkip={store.skip}
+                />
+              ))}
+            </div>
+          </details>
+        ) : null}
+      </section>
+
       <LaneModelPanel />
 
       <section id="autoresearch-loop" className="hc-card scroll-mt-6 p-4 sm:p-5">
@@ -555,97 +646,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </Button>
           </div>
         </div>
-      </section>
-
-      {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
-      {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
-
-      <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="hc-eyebrow">Relevanz-Queue</p>
-            <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
-            <p className="mt-1 text-sm hc-soft">{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></p>
-            {open.length > 0 ? (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="text-xs hc-soft">{de.autoresearch.distributionHeading}:</span>
-                {distribution.bySeverity.critical > 0 ? <StatusPill tone="red" label={`${de.autoresearch.severityCritical} ${distribution.bySeverity.critical}`} /> : null}
-                {distribution.bySeverity.high > 0 ? <StatusPill tone="amber" label={`${de.autoresearch.severityHigh} ${distribution.bySeverity.high}`} /> : null}
-                {distribution.bySeverity.medium > 0 ? <StatusPill tone="sky" label={`${de.autoresearch.severityMedium} ${distribution.bySeverity.medium}`} /> : null}
-                {distribution.bySeverity.low > 0 ? <StatusPill tone="zinc" label={`${de.autoresearch.severityLow} ${distribution.bySeverity.low}`} /> : null}
-              </div>
-            ) : null}
-          </div>
-          <div className="flex flex-col gap-2 sm:items-end">
-            <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
-              <button type="button" onClick={() => setSeverityFilter("all")} className={cn("px-3 py-1", severityFilter === "all" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                {de.autoresearch.severityFilterAll}
-              </button>
-              <button type="button" onClick={() => setSeverityFilter("high")} className={cn("px-3 py-1", severityFilter === "high" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                {de.autoresearch.severityFilterHighPlus}
-              </button>
-            </div>
-            {store.loading ? <Spinner /> : null}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
-              <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
-                {de.autoresearch.selectAllVisible}
-              </Button>
-              <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
-                {de.autoresearch.clearSelection}
-              </Button>
-              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={!canConfirmSelection} title={selectedManualReviewCount > 0 ? "Riskante Auswahl einzeln prüfen oder Auswahl leeren." : undefined} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
-                {de.autoresearch.batchConfirm}
-              </Button>
-            </div>
-          </div>
-        </div>
-        <ReviewFlowPanel
-          flow={reviewFlow}
-          busy={batchBusy || bulkRevertedBusy || !!store.busy}
-          onPrimary={runReviewFlowPrimary}
-        />
-        <DecisionGuidePanel guide={decisionGuide} />
-        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
-        <div className="grid gap-4">
-          {relevanceQueue.shortlist.map((item) => (
-            <ProposalCard
-              key={item.proposal.id}
-              proposal={item.proposal}
-              priorityGroup={item.group}
-              density={density}
-              busy={store.busy === item.proposal.id}
-              selectable
-              selected={selectedProposalIds.has(item.proposal.id)}
-              batchStatus={store.batchConfirmById[item.proposal.id]}
-              onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
-              onApply={store.apply}
-              onSkip={store.skip}
-            />
-          ))}
-        </div>
-        {relevanceQueue.backlog.length > 0 ? (
-          <details className="hc-card p-4">
-            <summary className="cursor-pointer text-sm font-medium text-white">Weitere Vorschläge ({relevanceQueue.summary.remaining}) anzeigen</summary>
-            <div className="mt-4 grid gap-4">
-              {relevanceQueue.backlog.map((item) => (
-                <ProposalCard
-                  key={item.proposal.id}
-                  proposal={item.proposal}
-                  priorityGroup={item.group}
-                  density={density}
-                  busy={store.busy === item.proposal.id}
-                  selectable
-                  selected={selectedProposalIds.has(item.proposal.id)}
-                  batchStatus={store.batchConfirmById[item.proposal.id]}
-                  onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
-                  onApply={store.apply}
-                  onSkip={store.skip}
-                />
-              ))}
-            </div>
-          </details>
-        ) : null}
       </section>
 
       {reverted.length > 0 ? (
