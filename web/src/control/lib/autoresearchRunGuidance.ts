@@ -14,6 +14,81 @@ export interface ResearchLoopStartControl {
   title: string;
 }
 
+export type ResearchLoopPresetId = "recommended" | "popular" | "dashboard";
+
+export interface ResearchLoopPreset {
+  id: ResearchLoopPresetId;
+  label: string;
+  badge: string;
+  area: string;
+  focus: string;
+  maxIterations: string;
+  minUseCount: string;
+  summary: string;
+  cost: string;
+  title: string;
+}
+
+export const RESEARCH_LOOP_PRESETS = [
+  {
+    id: "recommended",
+    label: "Empfohlen",
+    badge: "klein",
+    area: "all",
+    focus: "recommended_sections",
+    maxIterations: "2",
+    minUseCount: "",
+    summary: "Breit genug für frische Vorschläge, klein genug für einen kontrollierten Probelauf.",
+    cost: "2 Iterationen",
+    title: "Setzt den günstigen Standardlauf für neue Skill-Kandidaten.",
+  },
+  {
+    id: "popular",
+    label: "Häufig genutzt",
+    badge: "enger",
+    area: "all",
+    focus: "recommended_sections",
+    maxIterations: "3",
+    minUseCount: "10",
+    summary: "Reduziert Rauschen, indem selten genutzte Skills ausgelassen werden.",
+    cost: "3 Iterationen · Nutzung >= 10",
+    title: "Sucht bevorzugt dort, wo Verbesserungen wahrscheinlich tatsächlich helfen.",
+  },
+  {
+    id: "dashboard",
+    label: "Dashboard",
+    badge: "Code",
+    area: "dashboard",
+    focus: "code_review",
+    maxIterations: "2",
+    minUseCount: "",
+    summary: "Prüft Dashboard-Skripte und Tests statt die Skill-Sammlung zu durchsuchen.",
+    cost: "2 Iterationen",
+    title: "Startet einen kleinen Dashboard-Code-Probelauf.",
+  },
+] as const satisfies readonly ResearchLoopPreset[];
+
+export function getResearchLoopPreset(id: ResearchLoopPresetId): ResearchLoopPreset {
+  return RESEARCH_LOOP_PRESETS.find((preset) => preset.id === id) ?? RESEARCH_LOOP_PRESETS[0];
+}
+
+export function getSelectedResearchLoopPresetId(input: {
+  area: string;
+  focus: string;
+  maxIterations: string;
+  minUseCount: string;
+}): ResearchLoopPresetId | null {
+  const focus = input.focus.trim() || "recommended_sections";
+  const maxIterations = String(input.maxIterations).trim();
+  const minUseCount = String(input.minUseCount).trim();
+  return RESEARCH_LOOP_PRESETS.find((preset) => (
+    preset.area === input.area
+    && preset.focus === focus
+    && preset.maxIterations === maxIterations
+    && preset.minUseCount === minUseCount
+  ))?.id ?? null;
+}
+
 export function getDeepAuditGuidance(input: { subsystem?: string | null; running: boolean }): AutoresearchRunGuidance {
   if (input.running) {
     return {

@@ -5,7 +5,7 @@ import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopStartControl, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
@@ -307,6 +307,49 @@ describe("AutoresearchView decision guide", () => {
 });
 
 describe("AutoresearchView run guidance", () => {
+  it("keeps plain-language research-loop presets mapped to backend payload values", () => {
+    expect(RESEARCH_LOOP_PRESETS).toHaveLength(3);
+    expect(getResearchLoopPreset("recommended")).toMatchObject({
+      label: "Empfohlen",
+      area: "all",
+      focus: "recommended_sections",
+      maxIterations: "2",
+      minUseCount: "",
+    });
+    expect(getResearchLoopPreset("popular")).toMatchObject({
+      area: "all",
+      focus: "recommended_sections",
+      maxIterations: "3",
+      minUseCount: "10",
+    });
+    expect(getResearchLoopPreset("dashboard")).toMatchObject({
+      area: "dashboard",
+      focus: "code_review",
+      maxIterations: "2",
+    });
+  });
+
+  it("detects whether current research-loop values still match a preset", () => {
+    expect(getSelectedResearchLoopPresetId({
+      area: "all",
+      focus: "recommended_sections",
+      maxIterations: "2",
+      minUseCount: "",
+    })).toBe("recommended");
+    expect(getSelectedResearchLoopPresetId({
+      area: "all",
+      focus: "",
+      maxIterations: "2",
+      minUseCount: "",
+    })).toBe("recommended");
+    expect(getSelectedResearchLoopPresetId({
+      area: "all",
+      focus: "recommended_sections",
+      maxIterations: "7",
+      minUseCount: "",
+    })).toBeNull();
+  });
+
   it("warns before starting the research loop when the model route is not ready", () => {
     const guidance = getResearchLoopGuidance({
       running: false,
