@@ -89,6 +89,13 @@ Rules:
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
+  - For worker-lane children assigned to admin, coder, research, reviewer,
+    or critic, include a structured YAML scope block in the body with
+    `scope_contract.version: 2`, concrete `allowed_tools`, and
+    `completion_policy.require_scope_attestation: true`. The Python
+    decomposer will deterministically inject and validate this block, so this
+    prompt rule is a secondary defense. Do NOT use broad allowed_tools values
+    like `all`, `any`, `*`, `tools`, `mcp`, or `kanban`.
 
 CRITICAL: Constraint preservation (non-negotiable).
   - Any line in the original task body starting with
@@ -415,6 +422,279 @@ def validate_constraint_preservation(
     )
 
 
+# ---------------------------------------------------------------------------
+# Worker scope-contract injection + validation
+# ---------------------------------------------------------------------------
+
+_WORKER_SCOPE_LANES: frozenset[str] = frozenset({
+    "admin",
+    "coder",
+    "research",
+    "reviewer",
+    "critic",
+})
+
+_BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (
+    "kanban_show",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_comment",
+)
+
+_BROAD_ALLOWED_TOOL_MARKERS: frozenset[str] = frozenset({
+    "all",
+    "*",
+    "any",
+    "tools",
+    "mcp",
+    "kanban",
+    "all_tools",
+})
+
+_FORBIDDEN_SCOPE_MARKERS: frozenset[str] = frozenset({
+    "openclaw",
+    "atlas",
+    "mission-control",
+    "mission_control",
+    "telegram",
+    "auth",
+    "secrets",
+    "config_write",
+    "cron_write",
+})
+
+_DEFAULT_FORBIDDEN_SYSTEMS: tuple[str, ...] = (
+    "OpenClaw",
+    "Atlas",
+    "Mission-Control",
+    "Telegram",
+    "secrets",
+    "auth",
+    "config_write",
+    "cron_write",
+)
+
+_DEFAULT_FORBIDDEN_PATHS: tuple[str, ...] = (
+    "/home/piet/.hermes/config.yaml",
+    "/home/piet/.hermes/profiles/",
+    "/home/piet/.hermes/kanban.db",
+    "/home/piet/.openclaw/",
+    "/home/piet/vault/_agents/OpenClaw/",
+)
+
+
+@dataclass
+class WorkerScopeContractIssue:
+    """A fail-closed worker scope-contract validation issue."""
+
+    index: int
+    assignee: str
+    reason: str
+
+
+@dataclass
+class WorkerScopeContractReport:
+    """Validation result for worker-lane child scope contracts."""
+
+    issues: list[WorkerScopeContractIssue]
+
+    @property
+    def ok(self) -> bool:
+        return not self.issues
+
+
+def _is_worker_lane(assignee: str) -> bool:
+    return assignee.strip() in _WORKER_SCOPE_LANES
+
+
+def _body_has_scope_contract(body: str) -> bool:
+    return "scope_contract:" in body and "allowed_tools:" in body
+
+
+def _default_worker_scope_contract(
+    child: dict,
+    *,
+    parent_task: object | None = None,
+) -> dict:
+    """Build a deterministic minimal contract for a worker child body."""
+    title = (child.get("title") or "worker task").strip()
+    parent_id = getattr(parent_task, "id", "") if parent_task is not None else ""
+    objective = title if not parent_id else f"[{parent_id}] {title}"
+    return {
+        "scope_contract": {
+            "version": 2,
+            "objective": objective[:280],
+            "allowed_systems": ["hermes-agent", "hermes-kanban"],
+            "allowed_paths": _collect_absolute_paths(
+                getattr(parent_task, "body", "") or ""
+            ) if parent_task is not None else [],
+            "allowed_tools": list(_BASE_WORKER_ALLOWED_TOOLS),
+            "forbidden_systems": list(_DEFAULT_FORBIDDEN_SYSTEMS),
+            "forbidden_paths": list(_DEFAULT_FORBIDDEN_PATHS),
+            "forbidden_tools": [
+                "browser_navigate",
+                "browser_click",
+                "mcp_linear_save_issue",
+                "mcp_linear_save_comment",
+                "mcp_linear_save_document",
+                "clarify",
+            ],
+            "ambiguity_policy": "fail_closed_and_ask",
+        },
+        "completion_policy": {
+            "require_scope_attestation": True,
+        },
+    }
+
+
+def _yaml_scalar(value: object) -> str:
+    text = str(value).replace("\n", " ").strip()
+    if not text:
+        return "''"
+    return text
+
+
+def _render_yaml_list(name: str, values: list[str], *, indent: str = "  ") -> list[str]:
+    if not values:
+        return [f"{indent}{name}: []"]
+    lines = [f"{indent}{name}:"]
+    lines.extend(f"{indent}  - {_yaml_scalar(v)}" for v in values)
+    return lines
+
+
+def _render_scope_contract_yaml(contract: dict) -> str:
+    scope = contract.get("scope_contract") or {}
+    completion = contract.get("completion_policy") or {}
+    lines = [
+        "scope_contract:",
+        f"  version: {int(scope.get('version', 2))}",
+        f"  objective: {_yaml_scalar(scope.get('objective', 'worker task'))}",
+    ]
+    for key in (
+        "allowed_systems",
+        "allowed_paths",
+        "allowed_tools",
+        "forbidden_systems",
+        "forbidden_paths",
+        "forbidden_tools",
+    ):
+        vals = scope.get(key) or []
+        lines.extend(_render_yaml_list(key, [str(v) for v in vals]))
+    lines.append(
+        f"  ambiguity_policy: {_yaml_scalar(scope.get('ambiguity_policy', 'fail_closed_and_ask'))}"
+    )
+    require_attestation = bool(completion.get("require_scope_attestation", True))
+    lines.extend([
+        "completion_policy:",
+        f"  require_scope_attestation: {str(require_attestation).lower()}",
+    ])
+    return "\n".join(lines)
+
+
+def _ensure_worker_scope_contract(
+    child: dict,
+    *,
+    parent_task: object | None = None,
+) -> dict:
+    """Return ``child`` with a deterministic worker scope block if needed."""
+    assignee = child.get("assignee")
+    if not isinstance(assignee, str) or not _is_worker_lane(assignee):
+        return child
+
+    raw_body = child.get("body")
+    body = raw_body if isinstance(raw_body, str) else ""
+    if _body_has_scope_contract(body):
+        return child
+
+    contract = _default_worker_scope_contract(child, parent_task=parent_task)
+    scope_block = _render_scope_contract_yaml(contract)
+    enriched = dict(child)
+    enriched["body"] = f"{scope_block}\n\n{body.strip()}".strip()
+    return enriched
+
+
+def _extract_scope_version(body: str) -> int | None:
+    if "scope_contract:" not in body:
+        return None
+    match = re.search(r"(?m)^\s*version:\s*(\d+)\s*$", body)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_allowed_tools(body: str) -> list[str]:
+    lines = body.splitlines()
+    tools: list[str] = []
+    in_allowed_tools = False
+    base_indent = 0
+    for line in lines:
+        stripped = line.strip()
+        if not in_allowed_tools:
+            if stripped == "allowed_tools:":
+                in_allowed_tools = True
+                base_indent = len(line) - len(line.lstrip())
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("- ") and indent > base_indent:
+            tools.append(stripped[2:].strip().strip('"\''))
+            continue
+        if stripped and indent <= base_indent:
+            break
+    return tools
+
+
+def validate_worker_scope_contracts(children: list[dict]) -> WorkerScopeContractReport:
+    """Fail-closed validation for worker-lane child body contracts."""
+    issues: list[WorkerScopeContractIssue] = []
+    known_tools = set(_BASE_WORKER_ALLOWED_TOOLS)
+    for idx, child in enumerate(children):
+        assignee = child.get("assignee")
+        assignee_text = assignee if isinstance(assignee, str) else ""
+        if not _is_worker_lane(assignee_text):
+            continue
+        raw_body = child.get("body")
+        body = raw_body if isinstance(raw_body, str) else ""
+        version = _extract_scope_version(body)
+        if version != 2:
+            issues.append(WorkerScopeContractIssue(
+                idx, assignee_text, "worker scope contract missing version: 2",
+            ))
+            continue
+        allowed_tools = _extract_allowed_tools(body)
+        if not allowed_tools:
+            issues.append(WorkerScopeContractIssue(
+                idx, assignee_text, "worker scope contract missing allowed_tools",
+            ))
+            continue
+        for tool in allowed_tools:
+            normalized = tool.strip().lower()
+            if normalized in _BROAD_ALLOWED_TOOL_MARKERS:
+                issues.append(WorkerScopeContractIssue(
+                    idx, assignee_text, f"broad allowed_tools marker {tool!r}",
+                ))
+                break
+            if normalized in _FORBIDDEN_SCOPE_MARKERS:
+                issues.append(WorkerScopeContractIssue(
+                    idx, assignee_text, f"forbidden allowed_tools marker {tool!r}",
+                ))
+                break
+            if tool not in known_tools:
+                issues.append(WorkerScopeContractIssue(
+                    idx, assignee_text, f"unknown allowed_tool {tool!r}",
+                ))
+                break
+        if "completion_policy:" not in body or "require_scope_attestation: true" not in body:
+            issues.append(WorkerScopeContractIssue(
+                idx,
+                assignee_text,
+                "worker scope contract missing completion_policy.require_scope_attestation",
+            ))
+    return WorkerScopeContractReport(issues)
+
+
 def _normalize_assignee_choice(
     assignee: object,
     *,
@@ -597,12 +877,23 @@ def decompose_task(
             parents = []
         # Clean parent indices: drop non-int and out-of-range.
         clean_parents = [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx]
-        children.append({
+        child = {
             "title": title.strip()[:200],
             "body": body.strip(),
             "assignee": chosen,
             "parents": clean_parents,
-        })
+        }
+        children.append(_ensure_worker_scope_contract(child, parent_task=task))
+
+    scope_report = validate_worker_scope_contracts(children)
+    if not scope_report.ok:
+        first = scope_report.issues[0]
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "worker scope contract invalid before DB insert: "
+            f"child {first.index} ({first.assignee}) {first.reason}",
+        )
 
     # Post-validate that the LLM preserved CRITICAL: / MANDATORY: lines and
     # absolute paths / task ids from the parent body. Warn (not block) so

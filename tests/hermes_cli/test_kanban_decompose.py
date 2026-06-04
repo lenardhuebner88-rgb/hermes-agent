@@ -347,6 +347,117 @@ def test_decompose_no_aux_client_configured(kanban_home):
     assert "no auxiliary client" in outcome.reason
 
 
+def _assert_worker_scope_contract(body: str):
+    assert "scope_contract:" in body
+    assert "version: 2" in body
+    assert "allowed_tools:" in body
+    assert "kanban_show" in body
+    assert "kanban_complete" in body
+    assert "kanban_block" in body
+    assert "kanban_comment" in body
+    assert "completion_policy:" in body
+    assert "require_scope_attestation: true" in body
+
+
+def test_decompose_injects_scope_contract_for_worker_children(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="harden worker routing", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "worker graph",
+        "tasks": [
+            {"title": "admin check", "body": "Inspect operator state.", "assignee": "admin", "parents": []},
+            {"title": "code change", "body": "Modify the decomposer.", "assignee": "coder", "parents": [0]},
+            {"title": "review result", "body": "Review the diff.", "assignee": "reviewer", "parents": [1]},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "admin", "coder", "reviewer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.child_ids and len(outcome.child_ids) == 3
+    with kb.connect() as conn:
+        children = [kb.get_task(conn, cid) for cid in outcome.child_ids]
+
+    for child in children:
+        assert child is not None
+        _assert_worker_scope_contract(child.body or "")
+
+
+def test_decompose_prompt_mentions_scope_contract_allowed_tools():
+    assert "scope_contract" in decomp._SYSTEM_PROMPT
+    assert "allowed_tools" in decomp._SYSTEM_PROMPT
+    assert "completion_policy" in decomp._SYSTEM_PROMPT
+    assert "require_scope_attestation" in decomp._SYSTEM_PROMPT
+
+
+def test_worker_scope_contract_validator_rejects_broad_allowed_tools():
+    children = [{
+        "title": "unsafe worker",
+        "body": (
+            "scope_contract:\n"
+            "  version: 2\n"
+            "  allowed_tools:\n"
+            "    - all\n"
+            "completion_policy:\n"
+            "  require_scope_attestation: true\n"
+        ),
+        "assignee": "coder",
+    }]
+
+    report = decomp.validate_worker_scope_contracts(children)
+
+    assert report.ok is False
+    assert report.issues
+    assert "broad" in report.issues[0].reason
+
+
+def test_decompose_blocks_before_db_insert_when_worker_contract_invalid(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="block invalid worker", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "worker graph",
+        "tasks": [
+            {"title": "code change", "body": "Modify the decomposer.", "assignee": "coder", "parents": []},
+        ],
+    })
+
+    monkeypatch.setattr(
+        decomp,
+        "_ensure_worker_scope_contract",
+        lambda child, **kwargs: {**child, "body": "scope_contract:\n  version: 2\n  allowed_tools:\n    - all\n"},
+    )
+    patches = _patch_list_profiles(["orchestrator", "coder"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert "worker scope contract" in outcome.reason
+    with kb.connect() as conn:
+        root = kb.get_task(conn, tid)
+        tasks = kb.list_tasks(conn, limit=10)
+    assert root is not None
+    assert root.status == "triage"
+    assert [task.id for task in tasks] == [tid]
+
+
 # ---------------------------------------------------------------------------
 # CRITICAL: / MANDATORY: / absolute-path / task-id preservation
 # (Hardening sprint 2026-05-27 TASK 4)
