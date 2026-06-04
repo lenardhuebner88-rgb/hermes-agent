@@ -430,6 +430,53 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       <LaneModelPanel />
 
+      <section id="autoresearch-loop" className="hc-card scroll-mt-6 p-4 sm:p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div><p className="hc-eyebrow">Iterativer Research-Loop</p><h2 className="mt-1 text-lg font-semibold text-white">{loop.running ? `Iteration ${loop.iterationLabel}` : "kein Lauf aktiv"}</h2></div>
+              <span className="hc-mono text-xs hc-soft">Heartbeat {loop.heartbeatLabel}</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-[var(--hc-accent)]" style={{ width: `${loop.progressPercent}%` }} /></div>
+            <div className="grid gap-3 text-sm sm:grid-cols-3">
+              <Metric label="Letzter Schritt" value={loop.stepLabel} />
+              <Metric label="Letzte Bewertung" value={loop.evalLabel} />
+              <Metric label="Request" value={status.data?.request_id || "-"} />
+            </div>
+            {loop.routeHint ? <ToneCallout tone="amber">{loop.routeHint}: {status.data?.route_status ?? "unbekannt"}</ToneCallout> : null}
+            <LastRun status={status.data} latestRun={runs.data?.runs?.[0] ?? null} />
+            {loopMessage ? <ToneCallout tone={loopMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{loopMessage}</ToneCallout> : null}
+          </div>
+          <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <RunGuidanceCard guidance={researchLoopGuidance} />
+            <LoopPresetPicker
+              selectedId={selectedLoopPresetId}
+              disabled={loop.running || !!loopBusy}
+              onSelect={applyLoopPreset}
+            />
+            <details className="rounded-lg border border-white/10 bg-black/20 p-2" open={!selectedLoopPresetId}>
+              <summary className="cursor-pointer text-xs font-semibold text-white">Feinsteuerung {selectedLoopPresetId ? "" : "· eigene Werte"}</summary>
+              <div className="mt-3 flex flex-col gap-2">
+                <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
+                <select id="loop-area" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+                  {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[#16181d] text-white">{a.value} — {a.scope}</option>)}
+                </select>
+                <label className="text-xs hc-soft" htmlFor="loop-focus">{de.autoresearch.triggerFocus}</label>
+                <input id="loop-focus" type="text" inputMode="text" pattern="[a-z0-9][a-z0-9_-]*" placeholder={de.autoresearch.triggerFocusPlaceholder} value={focus} onChange={(event) => setFocus(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+                <p className="-mt-1 text-[11px] hc-dim">{de.autoresearch.triggerFocusHint}</p>
+                <label className="text-xs hc-soft" htmlFor="loop-min-use">{de.autoresearch.triggerMinUse}</label>
+                <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+                <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
+                <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+              </div>
+            </details>
+            <TargetingPreview area={area} focus={focus} maxIterations={maxIterations} minUseCount={minUseCount} />
+            <Button className="hc-hit" onClick={startLoop} disabled={researchLoopStart.disabled} title={researchLoopStart.title} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>{researchLoopStart.label}</Button>
+            <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
+          </div>
+        </div>
+      </section>
+
       <section id="autoresearch-deep-audit" className="hc-card scroll-mt-6 p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1 space-y-3">
@@ -506,53 +553,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
               Test-Foundry starten
             </Button>
-          </div>
-        </div>
-      </section>
-
-      <section id="autoresearch-loop" className="hc-card scroll-mt-6 p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 flex-1 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div><p className="hc-eyebrow">Iterativer Research-Loop</p><h2 className="mt-1 text-lg font-semibold text-white">{loop.running ? `Iteration ${loop.iterationLabel}` : "kein Lauf aktiv"}</h2></div>
-              <span className="hc-mono text-xs hc-soft">Heartbeat {loop.heartbeatLabel}</span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-[var(--hc-accent)]" style={{ width: `${loop.progressPercent}%` }} /></div>
-            <div className="grid gap-3 text-sm sm:grid-cols-3">
-              <Metric label="Letzter Schritt" value={loop.stepLabel} />
-              <Metric label="Letzte Bewertung" value={loop.evalLabel} />
-              <Metric label="Request" value={status.data?.request_id || "-"} />
-            </div>
-            {loop.routeHint ? <ToneCallout tone="amber">{loop.routeHint}: {status.data?.route_status ?? "unbekannt"}</ToneCallout> : null}
-            <LastRun status={status.data} latestRun={runs.data?.runs?.[0] ?? null} />
-            {loopMessage ? <ToneCallout tone={loopMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{loopMessage}</ToneCallout> : null}
-          </div>
-          <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
-            <RunGuidanceCard guidance={researchLoopGuidance} />
-            <LoopPresetPicker
-              selectedId={selectedLoopPresetId}
-              disabled={loop.running || !!loopBusy}
-              onSelect={applyLoopPreset}
-            />
-            <details className="rounded-lg border border-white/10 bg-black/20 p-2" open={!selectedLoopPresetId}>
-              <summary className="cursor-pointer text-xs font-semibold text-white">Feinsteuerung {selectedLoopPresetId ? "" : "· eigene Werte"}</summary>
-              <div className="mt-3 flex flex-col gap-2">
-                <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
-                <select id="loop-area" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-                  {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[#16181d] text-white">{a.value} — {a.scope}</option>)}
-                </select>
-                <label className="text-xs hc-soft" htmlFor="loop-focus">{de.autoresearch.triggerFocus}</label>
-                <input id="loop-focus" type="text" inputMode="text" pattern="[a-z0-9][a-z0-9_-]*" placeholder={de.autoresearch.triggerFocusPlaceholder} value={focus} onChange={(event) => setFocus(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
-                <p className="-mt-1 text-[11px] hc-dim">{de.autoresearch.triggerFocusHint}</p>
-                <label className="text-xs hc-soft" htmlFor="loop-min-use">{de.autoresearch.triggerMinUse}</label>
-                <input id="loop-min-use" type="number" min={1} step={1} placeholder={de.autoresearch.triggerMinUsePlaceholder} value={minUseCount} onChange={(event) => setMinUseCount(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
-                <label className="text-xs hc-soft" htmlFor="loop-iterations">Max. Iterationen</label>
-                <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
-              </div>
-            </details>
-            <TargetingPreview area={area} focus={focus} maxIterations={maxIterations} minUseCount={minUseCount} />
-            <Button className="hc-hit" onClick={startLoop} disabled={researchLoopStart.disabled} title={researchLoopStart.title} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>{researchLoopStart.label}</Button>
-            <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
         </div>
       </section>
