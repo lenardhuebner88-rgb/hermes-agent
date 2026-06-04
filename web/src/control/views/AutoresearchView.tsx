@@ -130,6 +130,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   });
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
+  const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const effectiveAdvancedOpen = advancedNeedsAttention || advancedOpen;
   const routeOk = loop.routeTone === "emerald";
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
   const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
@@ -566,87 +569,101 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       </section>
 
-      <LaneModelPanel />
+      <details className="space-y-4 border-t border-white/10 pt-4" open={effectiveAdvancedOpen} onToggle={(event) => {
+        if (!advancedNeedsAttention) setAdvancedOpen(event.currentTarget.open);
+      }}>
+        <summary className="hc-hit flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-left marker:hidden">
+          <span className="min-w-0">
+            <span className="hc-eyebrow">Erweitert</span>
+            <span className="mt-1 block text-sm font-semibold text-white">Modelle, Deep-Audit und Test-Foundry</span>
+            <span className="mt-0.5 block text-xs leading-5 hc-soft">Für gezielte Spezialläufe und Modellzuweisung. Der normale Ablauf bleibt oben: Queue prüfen, dann Probelauf starten.</span>
+          </span>
+          <StatusPill tone={advancedNeedsAttention ? "amber" : "zinc"} label={advancedNeedsAttention ? "Aufmerksamkeit" : "Optional"} />
+        </summary>
+        <div className="space-y-4">
+          <LaneModelPanel />
 
-      <section id="autoresearch-deep-audit" className="hc-card scroll-mt-6 p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 flex-1 space-y-3">
-            <div>
-              <p className="hc-eyebrow">Deep-Audit</p>
-              <h2 className="mt-1 text-lg font-semibold text-white">Subsystem-Audit</h2>
-              <p className="mt-1 max-w-2xl text-sm hc-soft">Teuer: ca. 1-2 Mio Token pro Lauf. Startet nur per Klick und schreibt keine Code-Änderungen.</p>
+          <section id="autoresearch-deep-audit" className="hc-card scroll-mt-6 p-4 sm:p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0 flex-1 space-y-3">
+                <div>
+                  <p className="hc-eyebrow">Deep-Audit</p>
+                  <h2 className="mt-1 text-lg font-semibold text-white">Subsystem-Audit</h2>
+                  <p className="mt-1 max-w-2xl text-sm hc-soft">Teuer: ca. 1-2 Mio Token pro Lauf. Startet nur per Klick und schreibt keine Code-Änderungen.</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Metric label="Status" value={deepAudit.status?.state ?? (deepAudit.loading ? "lädt" : "idle")} />
+                  <Metric label="Subsystem" value={deepAudit.status?.subsystem ?? (effectiveDeepAuditSubsystem || "-")} />
+                  <Metric label="Findings" value={String(deepAudit.findings?.findings.length ?? 0)} />
+                </div>
+                {deepAudit.error ? <ToneCallout tone="red">{deepAudit.error}</ToneCallout> : null}
+                {deepAuditMessage ? <ToneCallout tone={deepAuditMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{deepAuditMessage}</ToneCallout> : null}
+              </div>
+              <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+                <RunGuidanceCard guidance={deepAuditGuidance} />
+                <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
+                <select id="deep-audit-subsystem" value={effectiveDeepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+                  {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+                </select>
+                <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
+                <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
+                <CodeAuditSlotPicker />
+                <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !effectiveDeepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
+                  Deep-Audit starten
+                </Button>
+              </div>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Metric label="Status" value={deepAudit.status?.state ?? (deepAudit.loading ? "lädt" : "idle")} />
-              <Metric label="Subsystem" value={deepAudit.status?.subsystem ?? (effectiveDeepAuditSubsystem || "-")} />
-              <Metric label="Findings" value={String(deepAudit.findings?.findings.length ?? 0)} />
-            </div>
-            {deepAudit.error ? <ToneCallout tone="red">{deepAudit.error}</ToneCallout> : null}
-            {deepAuditMessage ? <ToneCallout tone={deepAuditMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{deepAuditMessage}</ToneCallout> : null}
-          </div>
-          <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
-            <RunGuidanceCard guidance={deepAuditGuidance} />
-            <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
-            <select id="deep-audit-subsystem" value={effectiveDeepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-              {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
-            </select>
-            <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
-            <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
-            <CodeAuditSlotPicker />
-            <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !effectiveDeepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
-              Deep-Audit starten
-            </Button>
-          </div>
-        </div>
-        <DeepAuditFindings findings={deepAudit.findings?.findings ?? []} proposals={deepAudit.findings?.proposals ?? []} />
-      </section>
+            <DeepAuditFindings findings={deepAudit.findings?.findings ?? []} proposals={deepAudit.findings?.proposals ?? []} />
+          </section>
 
-      <section id="autoresearch-test-foundry" className="hc-card scroll-mt-6 p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 flex-1 space-y-3">
-            <div>
-              <p className="hc-eyebrow">Test-Foundry</p>
-              <h2 className="mt-1 text-lg font-semibold text-white">Mutation-Test-Härtung</h2>
-              <p className="mt-1 max-w-2xl text-sm hc-soft">Härtet die Test-Suite via Mutation-Testing; Läufe können einige Minuten dauern.</p>
+          <section id="autoresearch-test-foundry" className="hc-card scroll-mt-6 p-4 sm:p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0 flex-1 space-y-3">
+                <div>
+                  <p className="hc-eyebrow">Test-Foundry</p>
+                  <h2 className="mt-1 text-lg font-semibold text-white">Mutation-Test-Härtung</h2>
+                  <p className="mt-1 max-w-2xl text-sm hc-soft">Härtet die Test-Suite via Mutation-Testing; Läufe können einige Minuten dauern.</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Metric label="Status" value={testFoundry.status?.state ?? (testFoundry.loading ? "lädt" : "idle")} />
+                  <Metric label="Target" value={testFoundry.status?.target ?? (effectiveTestFoundryTarget || "-")} />
+                  <Metric label="PID" value={testFoundry.status?.pid ? String(testFoundry.status.pid) : "-"} />
+                </div>
+                <ToneCallout tone={testFoundryApply ? "amber" : "cyan"}>
+                  {testFoundryApply
+                    ? "Auto-Apply ist an: validierte Tests werden auf dem separaten Branch f-test-foundry committet, nie auf main."
+                    : "Auto-Apply ist aus: Test-Foundry erzeugt nur Vorschläge in der Queue."}
+                </ToneCallout>
+                {testFoundry.error ? <ToneCallout tone="red">{testFoundry.error}</ToneCallout> : null}
+                {testFoundryMessage ? <ToneCallout tone={testFoundryMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{testFoundryMessage}</ToneCallout> : null}
+              </div>
+              <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+                <RunGuidanceCard guidance={testFoundryGuidance} />
+                <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
+                <select id="test-foundry-target" value={effectiveTestFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+                  {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+                </select>
+                <TestHardeningSlotPicker />
+                <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 bg-black/20 p-2 text-sm text-white">
+                  <input
+                    type="checkbox"
+                    checked={testFoundryApply}
+                    onChange={(event) => setTestFoundryApply(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-[var(--hc-accent)]"
+                  />
+                  <span>
+                    <span className="block font-medium">Auto-Apply</span>
+                    <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
+                  </span>
+                </label>
+                <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                  Test-Foundry starten
+                </Button>
+              </div>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Metric label="Status" value={testFoundry.status?.state ?? (testFoundry.loading ? "lädt" : "idle")} />
-              <Metric label="Target" value={testFoundry.status?.target ?? (effectiveTestFoundryTarget || "-")} />
-              <Metric label="PID" value={testFoundry.status?.pid ? String(testFoundry.status.pid) : "-"} />
-            </div>
-            <ToneCallout tone={testFoundryApply ? "amber" : "cyan"}>
-              {testFoundryApply
-                ? "Auto-Apply ist an: validierte Tests werden auf dem separaten Branch f-test-foundry committet, nie auf main."
-                : "Auto-Apply ist aus: Test-Foundry erzeugt nur Vorschläge in der Queue."}
-            </ToneCallout>
-            {testFoundry.error ? <ToneCallout tone="red">{testFoundry.error}</ToneCallout> : null}
-            {testFoundryMessage ? <ToneCallout tone={testFoundryMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{testFoundryMessage}</ToneCallout> : null}
-          </div>
-          <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
-            <RunGuidanceCard guidance={testFoundryGuidance} />
-            <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
-            <select id="test-foundry-target" value={effectiveTestFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-              {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
-            </select>
-            <TestHardeningSlotPicker />
-            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 bg-black/20 p-2 text-sm text-white">
-              <input
-                type="checkbox"
-                checked={testFoundryApply}
-                onChange={(event) => setTestFoundryApply(event.target.checked)}
-                className="mt-0.5 h-4 w-4 accent-[var(--hc-accent)]"
-              />
-              <span>
-                <span className="block font-medium">Auto-Apply</span>
-                <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
-              </span>
-            </label>
-            <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-              Test-Foundry starten
-            </Button>
-          </div>
+          </section>
         </div>
-      </section>
+      </details>
 
       {reverted.length > 0 ? (
         <details className="space-y-3 border-t border-white/10 pt-4">
