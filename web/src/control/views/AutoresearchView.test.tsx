@@ -5,7 +5,7 @@ import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopStartControl, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
@@ -318,6 +318,17 @@ describe("AutoresearchView run guidance", () => {
     expect(guidance.tone).toBe("amber");
     expect(guidance.label).toBe("Route prüfen");
     expect(guidance.safety).toContain("Erst Route prüfen");
+  });
+
+  it("disables research-loop start until the model route is ready", () => {
+    expect(getResearchLoopStartControl({ running: false, busy: false, routeOk: false })).toEqual({
+      disabled: true,
+      label: "Route prüfen",
+      title: "Der Research-Loop startet erst, wenn die Modellroute bestätigt ist.",
+    });
+    expect(getResearchLoopStartControl({ running: true, busy: false, routeOk: true }).label).toBe("Loop läuft");
+    expect(getResearchLoopStartControl({ running: false, busy: true, routeOk: true }).label).toBe("Startet...");
+    expect(getResearchLoopStartControl({ running: false, busy: false, routeOk: true }).disabled).toBe(false);
   });
 
   it("explains deep-audit cost and queue-only safety", () => {

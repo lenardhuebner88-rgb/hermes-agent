@@ -14,7 +14,7 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopStartControl, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -130,6 +130,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   });
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
+  const routeOk = loop.routeTone === "emerald";
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
   const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
   const deepAuditGuidance = useMemo(
@@ -141,8 +142,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     [effectiveTestFoundryTarget, testFoundryApply, testFoundryRunning],
   );
   const researchLoopGuidance = useMemo(
-    () => getResearchLoopGuidance({ running: loop.running, routeOk: loop.routeTone === "emerald", maxIterations: clampLoopIterations(Number(maxIterations)), area: describeArea(area) }),
-    [area, loop.routeTone, loop.running, maxIterations],
+    () => getResearchLoopGuidance({ running: loop.running, routeOk, maxIterations: clampLoopIterations(Number(maxIterations)), area: describeArea(area) }),
+    [area, loop.running, maxIterations, routeOk],
+  );
+  const researchLoopStart = useMemo(
+    () => getResearchLoopStartControl({ running: loop.running, busy: !!loopBusy, routeOk }),
+    [loop.running, loopBusy, routeOk],
   );
 
   const startLoop = async () => {
@@ -526,7 +531,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <TargetingPreview area={area} focus={focus} maxIterations={maxIterations} minUseCount={minUseCount} />
             <Button outlined className="hc-hit" onClick={() => { setArea("all"); setFocus("recommended_sections"); setMinUseCount(""); setMaxIterations("2"); }} disabled={loop.running || !!loopBusy} title={de.autoresearch.presetRecommendedHint} prefix={<RotateCw className="h-4 w-4" />}>{de.autoresearch.presetRecommended}</Button>
-            <Button className="hc-hit" onClick={startLoop} disabled={loop.running || !!loopBusy} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>Research-Loop starten</Button>
+            <Button className="hc-hit" onClick={startLoop} disabled={researchLoopStart.disabled} title={researchLoopStart.title} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>{researchLoopStart.label}</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
         </div>

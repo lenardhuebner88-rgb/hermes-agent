@@ -8,6 +8,12 @@ export interface AutoresearchRunGuidance {
   safety: string;
 }
 
+export interface ResearchLoopStartControl {
+  disabled: boolean;
+  label: string;
+  title: string;
+}
+
 export function getDeepAuditGuidance(input: { subsystem?: string | null; running: boolean }): AutoresearchRunGuidance {
   if (input.running) {
     return {
@@ -71,5 +77,34 @@ export function getResearchLoopGuidance(input: { running: boolean; routeOk: bool
     outcome: `Sucht Kandidaten in ${input.area}.`,
     cost: `${input.maxIterations} Iterationen, klein genug für einen kontrollierten Lauf.`,
     safety: "Schreibt keine Änderungen; neue Kandidaten landen zuerst in der Queue.",
+  };
+}
+
+export function getResearchLoopStartControl(input: { running: boolean; busy: boolean; routeOk: boolean }): ResearchLoopStartControl {
+  if (!input.routeOk) {
+    return {
+      disabled: true,
+      label: "Route prüfen",
+      title: "Der Research-Loop startet erst, wenn die Modellroute bestätigt ist.",
+    };
+  }
+  if (input.running) {
+    return {
+      disabled: true,
+      label: "Loop läuft",
+      title: "Es läuft bereits ein Research-Loop.",
+    };
+  }
+  if (input.busy) {
+    return {
+      disabled: true,
+      label: "Startet...",
+      title: "Startsignal wird gerade gesendet.",
+    };
+  }
+  return {
+    disabled: false,
+    label: "Research-Loop starten",
+    title: "Startet einen Dry-Run. Änderungen landen erst als Vorschläge in der Queue.",
   };
 }
