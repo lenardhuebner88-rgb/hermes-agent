@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
@@ -170,5 +171,36 @@ describe("AutoresearchView review flow", () => {
     expect(flow.primaryAction).toBe("generate");
     expect(flow.primaryLabel).toBe("Neue Kandidaten holen");
     expect(flow.progressPercent).toBe(100);
+  });
+});
+
+describe("AutoresearchView run guidance", () => {
+  it("warns before starting the research loop when the model route is not ready", () => {
+    const guidance = getResearchLoopGuidance({
+      running: false,
+      routeOk: false,
+      maxIterations: 2,
+      area: "alle Skills",
+    });
+
+    expect(guidance.tone).toBe("amber");
+    expect(guidance.label).toBe("Route prüfen");
+    expect(guidance.safety).toContain("Erst Route prüfen");
+  });
+
+  it("explains deep-audit cost and queue-only safety", () => {
+    const guidance = getDeepAuditGuidance({ subsystem: "autoresearch", running: false });
+
+    expect(guidance.label).toBe("Teurer Audit");
+    expect(guidance.cost).toContain("gezielter Audit");
+    expect(guidance.safety).toContain("Queue");
+  });
+
+  it("makes test-foundry auto-apply branch safety explicit", () => {
+    const guidance = getTestFoundryGuidance({ target: "hermes_state.py", running: false, autoApply: true });
+
+    expect(guidance.tone).toBe("amber");
+    expect(guidance.label).toBe("Auto-Apply aktiv");
+    expect(guidance.safety).toContain("f-test-foundry");
   });
 });

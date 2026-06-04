@@ -13,6 +13,7 @@ import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun } from "../lib/types";
@@ -97,6 +98,18 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const testFoundryRunning = testFoundry.status?.state === "running";
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
   const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
+  const deepAuditGuidance = useMemo(
+    () => getDeepAuditGuidance({ subsystem: effectiveDeepAuditSubsystem, running: deepAuditRunning }),
+    [deepAuditRunning, effectiveDeepAuditSubsystem],
+  );
+  const testFoundryGuidance = useMemo(
+    () => getTestFoundryGuidance({ target: effectiveTestFoundryTarget, running: testFoundryRunning, autoApply: testFoundryApply }),
+    [effectiveTestFoundryTarget, testFoundryApply, testFoundryRunning],
+  );
+  const researchLoopGuidance = useMemo(
+    () => getResearchLoopGuidance({ running: loop.running, routeOk: loop.routeTone === "emerald", maxIterations: clampLoopIterations(Number(maxIterations)), area: describeArea(area) }),
+    [area, loop.routeTone, loop.running, maxIterations],
+  );
 
   const startLoop = async () => {
     setLoopBusy("start");
@@ -367,6 +380,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {deepAuditMessage ? <ToneCallout tone={deepAuditMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{deepAuditMessage}</ToneCallout> : null}
           </div>
           <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <RunGuidanceCard guidance={deepAuditGuidance} />
             <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
             <select id="deep-audit-subsystem" value={effectiveDeepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
               {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
@@ -404,6 +418,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {testFoundryMessage ? <ToneCallout tone={testFoundryMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{testFoundryMessage}</ToneCallout> : null}
           </div>
           <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <RunGuidanceCard guidance={testFoundryGuidance} />
             <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
             <select id="test-foundry-target" value={effectiveTestFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
               {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
@@ -446,6 +461,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {loopMessage ? <ToneCallout tone={loopMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{loopMessage}</ToneCallout> : null}
           </div>
           <div className="flex min-w-56 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
+            <RunGuidanceCard guidance={researchLoopGuidance} />
             <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
             <select id="loop-area" value={area} onChange={(event) => setArea(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
               {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[#16181d] text-white">{a.value} — {a.scope}</option>)}
@@ -644,6 +660,22 @@ function ReviewFlowPanel({ flow, busy, onPrimary }: { flow: AutoresearchReviewFl
             {flow.primaryLabel}
           </Button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function RunGuidanceCard({ guidance }: { guidance: AutoresearchRunGuidance }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="hc-eyebrow">Vor dem Start</p>
+        <StatusPill tone={guidance.tone} label={guidance.label} />
+      </div>
+      <div className="grid gap-2 text-xs leading-5 hc-soft">
+        <p><span className="font-semibold text-white">Wofür:</span> {guidance.outcome}</p>
+        <p><span className="font-semibold text-white">Kosten:</span> {guidance.cost}</p>
+        <p><span className="font-semibold text-white">Sicherheit:</span> {guidance.safety}</p>
       </div>
     </div>
   );
