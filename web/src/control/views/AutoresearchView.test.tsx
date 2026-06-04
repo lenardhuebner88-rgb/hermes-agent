@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
+import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -252,5 +253,18 @@ describe("AutoresearchView run summary", () => {
     expect(summary.tone).toBe("amber");
     expect(summary.label).toBe("Teuer ohne Treffer");
     expect(summary.next).toContain("Scope enger");
+  });
+});
+
+describe("AutoresearchView keyboard safety", () => {
+  it("does not map single-letter apply or skip keys to destructive actions", () => {
+    expect(getAutoresearchKeyboardAction({ key: "a", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBeNull();
+    expect(getAutoresearchKeyboardAction({ key: "s", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBeNull();
+  });
+
+  it("keeps keyboard shortcuts to selection-only actions", () => {
+    expect(getAutoresearchKeyboardAction({ key: "t", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-top");
+    expect(getAutoresearchKeyboardAction({ key: "v", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-visible");
+    expect(getAutoresearchKeyboardAction({ key: "Escape", hasTopProposal: true, hasVisibleProposals: true, hasSelection: true })).toBe("clear-selection");
   });
 });

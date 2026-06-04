@@ -11,9 +11,10 @@ export const KEYMAP = {
     prev: ['k'],
     open: ['Enter'],
   },
-  autoresearch: { // auf dem obersten offenen Vorschlag
-    apply: ['a'],
-    skip: ['s'],
+  autoresearch: { // sichere Review-Beschleuniger; keine direkten Apply/Skip-Aktionen
+    selectTop: ['t'],
+    selectVisible: ['v'],
+    clearSelection: ['Escape'],
   },
   palette: {
     next: ['ArrowDown'],

@@ -10,7 +10,7 @@ import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundr
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
-import { KEYMAP } from "../lib/keymap";
+import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
@@ -185,26 +185,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     void store.generate();
   };
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("input,textarea,[contenteditable='true'],[role='dialog']")) return;
-      const top = relevanceQueue.shortlist.find((item) => item.proposal.status === "proposed")?.proposal ?? open[0];
-      if (!top) return;
-      const key = event.key.toLowerCase();
-      if (KEYMAP.autoresearch.apply.includes(key as "a")) {
-        event.preventDefault();
-        void store.apply(top);
-      }
-      if (KEYMAP.autoresearch.skip.includes(key as "s")) {
-        event.preventDefault();
-        void store.skip(top);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, relevanceQueue.shortlist, store]);
-
   const toggleSelection = (proposalId: string, selected: boolean) => {
     setSelectedProposalIds((current) => toggleProposalSelection(current, proposalId, selected));
   };
@@ -214,6 +194,29 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const confirmSelected = async () => {
     await store.confirmBatch(selectedIds);
   };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,[contenteditable='true'],[role='dialog']")) return;
+      const top = relevanceQueue.shortlist.find((item) => item.proposal.status === "proposed")?.proposal ?? open[0];
+      const action = getAutoresearchKeyboardAction({
+        key: event.key,
+        hasTopProposal: !!top,
+        hasVisibleProposals: visibleProposalIds.length > 0,
+        hasSelection: selectedIds.length > 0,
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "select-top" && top) {
+        setSelectedProposalIds((current) => toggleProposalSelection(current, top.id, true));
+      }
+      if (action === "select-visible") setSelectedProposalIds(selectVisibleProposals(visibleProposalIds));
+      if (action === "clear-selection") setSelectedProposalIds(clearProposalSelection());
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, relevanceQueue.shortlist, selectedIds.length, visibleProposalIds]);
 
   const pruneAutoresearch = async () => {
     setPruneBusy(true);
