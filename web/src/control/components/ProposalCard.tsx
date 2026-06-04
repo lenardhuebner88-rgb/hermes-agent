@@ -34,6 +34,19 @@ function proposalTitle(proposal: Proposal): string {
   return proposal.title?.trim() || `${proposal.target}${proposal.section ? ` · ${proposal.section}` : ""}`;
 }
 
+function decisionCopy(proposal: Proposal): string {
+  if (proposal.last_outcome === "reverted_no_improvement") {
+    return "Dieser Kandidat wurde automatisch zurückgerollt. Archivieren räumt ihn weg; erneut prüfen startet ihn bewusst neu.";
+  }
+  if (proposal.mode === "code") {
+    return "Übernehmen schreibt die Code-Änderung und startet direkt die Test-Suite. Bei rotem Lauf wird automatisch zurückgerollt.";
+  }
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") {
+    return "Übernehmen legt den Härtungs-Test als geprüften Vorschlag an. Die Änderung ist auf Test-Sicherheit optimiert.";
+  }
+  return "Übernehmen schreibt den Skill-Vorschlag direkt. Überspringen verwirft ihn ohne weitere Wirkung.";
+}
+
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
@@ -111,13 +124,18 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
       ) : isTesting ? (
         <ToneCallout tone="violet"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ToneCallout>
       ) : isActionable ? (
-        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-          <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
-            {isReverted ? "Archivieren" : de.autoresearch.skip}
-          </Button>
-          <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
-            {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
-          </Button>
+        <div className="space-y-3">
+          <ToneCallout tone={isReverted ? "zinc" : isCode ? "amber" : "cyan"}>
+            <span className="font-semibold">Entscheidung:</span> {decisionCopy(proposal)}
+          </ToneCallout>
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
+              {isReverted ? "Archivieren" : de.autoresearch.skip}
+            </Button>
+            <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
+              {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
+            </Button>
+          </div>
         </div>
       ) : null}
     </article>

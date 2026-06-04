@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, CheckCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, RotateCw, SearchCode, Settings2, Square, Target, X } from "lucide-react";
+import { Archive, ArrowDown, CheckCheck, ClipboardCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, Radar, RotateCw, SearchCode, Settings2, ShieldCheck, Sparkles, Square, Target, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
@@ -8,9 +8,10 @@ import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, pruneProposalSelection, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { KEYMAP } from "../lib/keymap";
+import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun } from "../lib/types";
@@ -48,6 +49,18 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
+  const recommendation = useMemo(
+    () => getAutoresearchRecommendation({
+      state: status.data?.state,
+      openCount: open.length,
+      revertedCount: reverted.length,
+      loopRunning: loop.running,
+      routeStatus: status.data?.route_status,
+    }),
+    [loop.running, open.length, reverted.length, status.data?.route_status, status.data?.state],
+  );
+  const highPriorityCount = distribution.bySeverity.critical + distribution.bySeverity.high;
+  const topProposal = relevanceQueue.shortlist[0]?.proposal ?? null;
   const [maxIterations, setMaxIterations] = useState("2");
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
@@ -68,18 +81,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const batchBusy = store.busy === "confirm-batch";
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
-
-  useEffect(() => {
-    if (!deepAuditSubsystem && deepAudit.subsystems.length > 0) {
-      setDeepAuditSubsystem(deepAudit.subsystems[0]);
-    }
-  }, [deepAudit.subsystems, deepAuditSubsystem]);
-
-  useEffect(() => {
-    if (!testFoundryTarget && testFoundry.targets.length > 0) {
-      setTestFoundryTarget(testFoundry.targets[0]);
-    }
-  }, [testFoundry.targets, testFoundryTarget]);
+  const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
+  const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
 
   const startLoop = async () => {
     setLoopBusy("start");
@@ -117,10 +120,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   };
 
   const startDeepAudit = async () => {
-    if (!deepAuditSubsystem) return;
+    if (!effectiveDeepAuditSubsystem) return;
     setDeepAuditMessage(null);
     try {
-      const result = await deepAudit.trigger(deepAuditSubsystem, deepAuditFocus.trim(), 12);
+      const result = await deepAudit.trigger(effectiveDeepAuditSubsystem, deepAuditFocus.trim(), 12);
       setDeepAuditMessage(`Deep-Audit gestartet${result.request_id ? ` · ${result.request_id}` : ""}`);
     } catch (e) {
       setDeepAuditMessage(`Deep-Audit fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
@@ -128,14 +131,30 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   };
 
   const startTestFoundry = async () => {
-    if (!testFoundryTarget) return;
+    if (!effectiveTestFoundryTarget) return;
     setTestFoundryMessage(null);
     try {
-      const result = await testFoundry.trigger(testFoundryTarget, testFoundryApply);
+      const result = await testFoundry.trigger(effectiveTestFoundryTarget, testFoundryApply);
       setTestFoundryMessage(`Test-Foundry gestartet${result.pid ? ` · PID ${result.pid}` : ""}`);
     } catch (e) {
       setTestFoundryMessage(`Test-Foundry fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
     }
+  };
+
+  const scrollTo = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const runPrimaryRecommendation = () => {
+    if (recommendation.kind === "review") {
+      scrollTo("autoresearch-queue");
+      return;
+    }
+    if (recommendation.kind === "monitor" || recommendation.kind === "recover") {
+      scrollTo("autoresearch-loop");
+      return;
+    }
+    void store.generate();
   };
 
   useEffect(() => {
@@ -157,13 +176,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, relevanceQueue.shortlist, store]);
-
-  useEffect(() => {
-    setSelectedProposalIds((current) => {
-      const next = new Set(pruneProposalSelection(current, queueProposalIds));
-      return next.size === current.size ? current : next;
-    });
-  }, [queueProposalIds]);
 
   const toggleSelection = (proposalId: string, selected: boolean) => {
     setSelectedProposalIds((current) => toggleProposalSelection(current, proposalId, selected));
@@ -206,46 +218,96 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
   return (
     <div className="space-y-5">
-      <section className="hc-card p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-3">
+      <section className="hc-card overflow-hidden border-[var(--hc-border-strong)]">
+        <div className="grid gap-0 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,.95fr)]">
+          <div className="space-y-5 p-4 sm:p-6">
             <div className="flex flex-wrap items-center gap-2">
               {status.loading ? <Spinner /> : <StatusPill tone={statusTone} label={status.data?.state ?? "unbekannt"} dot={loop.running ? "live" : status.data?.state === "crashed" ? "error" : "idle"} />}
               <StatusPill tone={loop.routeTone} label={`Route ${status.data?.route_status ?? "unbekannt"}`} dot={loop.routeTone === "emerald" ? "ready" : "warn"} />
+              <StatusPill tone={recommendation.tone} label={recommendation.eyebrow} />
               <span className="rounded-full border border-white/10 px-2.5 py-1 text-xs hc-soft">{loop.iterationLabel}</span>
             </div>
             <div>
-              <p className="hc-eyebrow">{de.autoresearch.nextStep}</p>
-              <p className="mt-1 max-w-2xl text-base leading-7 text-white">{open.length > 0 ? de.autoresearch.nextStepOpen(open.length) : reverted.length > 0 ? <span>{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></span> : de.autoresearch.nextStepEmpty}</p>
+              <p className="hc-eyebrow">Autoresearch Cockpit</p>
+              <h1 className="mt-2 max-w-3xl text-2xl font-semibold leading-tight text-white sm:text-3xl">
+                {recommendation.title}
+              </h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6 hc-soft sm:text-base sm:leading-7">
+                {recommendation.detail}
+              </p>
+              {topProposal ? (
+                <p className="mt-3 max-w-2xl rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white">
+                  Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span>
+                </p>
+              ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:flex-col xl:flex-row xl:items-center">
-            <Button className="hc-hit" onClick={store.generate} disabled={!!store.busy} title={de.autoresearch.generateHint} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>
-              Vorschläge erzeugen (sofort)
-            </Button>
-            <div className="flex items-center gap-2">
-              <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
-                <button type="button" onClick={() => setCodeWeaknessScope("incremental")} title={de.autoresearch.scanScopeHintChanged} className={cn("px-3 py-1", codeWeaknessScope === "incremental" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                  {de.autoresearch.scanScopeChanged}
-                </button>
-                <button type="button" onClick={() => setCodeWeaknessScope("full")} title={de.autoresearch.scanScopeHintFull} className={cn("px-3 py-1", codeWeaknessScope === "full" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                  {de.autoresearch.scanScopeFull}
-                </button>
-                <button type="button" onClick={() => setCodeWeaknessScope("deep")} title={de.autoresearch.deepScanHint} className={cn("px-3 py-1", codeWeaknessScope === "deep" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                  {de.autoresearch.scanScopeDeep}
-                </button>
-              </div>
-              <Button outlined className="hc-hit" onClick={() => store.generateCodeWeaknesses(codeWeaknessScope)} disabled={!!store.busy} title={de.autoresearch.scanButtonHint} prefix={store.busy === codeWeaknessBusyKey(codeWeaknessScope) ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
-                {de.autoresearch.scanButton}
+            <div className="grid gap-3 sm:grid-cols-4">
+              <Metric label="Offen" value={String(open.length)} />
+              <Metric label="Hoch+" value={String(highPriorityCount)} />
+              <Metric label="Zurückgerollt" value={String(reverted.length)} />
+              <Metric label="Letzter Lauf" value={runs.data?.runs?.[0] ? formatRunTime(runs.data.runs[0].at) : "-"} />
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
+                {recommendation.primaryLabel}
+              </Button>
+              <Button outlined className="hc-hit" onClick={() => scrollTo("autoresearch-queue")} disabled={open.length === 0} prefix={<ClipboardCheck className="h-4 w-4" />}>
+                Entscheidungen ({open.length})
+              </Button>
+              <Button outlined className="hc-hit" onClick={() => scrollTo("autoresearch-loop")} prefix={<Radar className="h-4 w-4" />}>
+                Loop-Steuerung
               </Button>
             </div>
-            <Button outlined className="hc-hit" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} title={de.autoresearch.applyAllHint} prefix={<GitPullRequestArrow className="h-4 w-4" />}>
-              {de.autoresearch.applyAll} ({store.openSkillProposals.length})
-            </Button>
-            <Button outlined className="hc-hit" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
-              {de.autoresearch.prune}
-            </Button>
+          </div>
+          <div className="border-t border-[var(--hc-border)] bg-black/20 p-4 sm:p-5 xl:border-l xl:border-t-0">
+            <div className="grid gap-3 md:grid-cols-2">
+              <OperatorActionCard
+                icon={<Sparkles className="h-5 w-5" />}
+                eyebrow="Schnell"
+                title="Skill-Vorschläge holen"
+                body="Sofort neue Kandidaten aus genutzten Skills erzeugen."
+                button={<Button className="hc-hit w-full justify-center" onClick={store.generate} disabled={!!store.busy} title={de.autoresearch.generateHint} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>Vorschläge erzeugen</Button>}
+              />
+              <OperatorActionCard
+                icon={<FlaskConical className="h-5 w-5" />}
+                eyebrow="Code"
+                title="Schwächen finden"
+                body="Findet Code-Risiken und legt gegatete Vorschläge an."
+                button={
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-3 overflow-hidden rounded-lg border border-white/10 text-sm">
+                      <button type="button" onClick={() => setCodeWeaknessScope("incremental")} title={de.autoresearch.scanScopeHintChanged} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "incremental" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
+                        {de.autoresearch.scanScopeChanged}
+                      </button>
+                      <button type="button" onClick={() => setCodeWeaknessScope("full")} title={de.autoresearch.scanScopeHintFull} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "full" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
+                        {de.autoresearch.scanScopeFull}
+                      </button>
+                      <button type="button" onClick={() => setCodeWeaknessScope("deep")} title={de.autoresearch.deepScanHint} className={cn("hc-hit min-h-10 px-2", codeWeaknessScope === "deep" ? "bg-[var(--hc-accent)] text-white" : "hc-soft hover:bg-white/5")}>
+                        {de.autoresearch.scanScopeDeep}
+                      </button>
+                    </div>
+                    <Button outlined className="hc-hit w-full justify-center" onClick={() => store.generateCodeWeaknesses(codeWeaknessScope)} disabled={!!store.busy} title={de.autoresearch.scanButtonHint} prefix={store.busy === codeWeaknessBusyKey(codeWeaknessScope) ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+                      Scan starten
+                    </Button>
+                  </div>
+                }
+              />
+              <OperatorActionCard
+                icon={<ShieldCheck className="h-5 w-5" />}
+                eyebrow="Review"
+                title="Offenes übernehmen"
+                body="Skill-Vorschläge gesammelt übernehmen; Code läuft einzeln durchs Gate."
+                button={<Button outlined className="hc-hit w-full justify-center" onClick={store.applyAll} disabled={!!store.busy || store.openSkillProposals.length === 0} title={de.autoresearch.applyAllHint} prefix={<GitPullRequestArrow className="h-4 w-4" />}>{de.autoresearch.applyAll} ({store.openSkillProposals.length})</Button>}
+              />
+              <OperatorActionCard
+                icon={<Archive className="h-5 w-5" />}
+                eyebrow="Pflege"
+                title="Queue aufräumen"
+                body="Archiviert Erledigtes und entfernt alte Kandidaten nach Backend-Regeln."
+                button={<Button outlined className="hc-hit w-full justify-center" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
+              />
+            </div>
           </div>
         </div>
       </section>
@@ -254,7 +316,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       <LaneModelPanel />
 
-      <section className="hc-card p-4 sm:p-5">
+      <section id="autoresearch-loop" className="hc-card scroll-mt-6 p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1 space-y-3">
             <div>
@@ -264,7 +326,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
               <Metric label="Status" value={deepAudit.status?.state ?? (deepAudit.loading ? "lädt" : "idle")} />
-              <Metric label="Subsystem" value={deepAudit.status?.subsystem ?? (deepAuditSubsystem || "-")} />
+              <Metric label="Subsystem" value={deepAudit.status?.subsystem ?? (effectiveDeepAuditSubsystem || "-")} />
               <Metric label="Findings" value={String(deepAudit.findings?.findings.length ?? 0)} />
             </div>
             {deepAudit.error ? <ToneCallout tone="red">{deepAudit.error}</ToneCallout> : null}
@@ -272,13 +334,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
           <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
             <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
-            <select id="deep-audit-subsystem" value={deepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+            <select id="deep-audit-subsystem" value={effectiveDeepAuditSubsystem} onChange={(event) => setDeepAuditSubsystem(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
               {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
             </select>
             <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
             <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
             <CodeAuditSlotPicker />
-            <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !deepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
+            <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !effectiveDeepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
               Deep-Audit starten
             </Button>
           </div>
@@ -296,7 +358,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
               <Metric label="Status" value={testFoundry.status?.state ?? (testFoundry.loading ? "lädt" : "idle")} />
-              <Metric label="Target" value={testFoundry.status?.target ?? (testFoundryTarget || "-")} />
+              <Metric label="Target" value={testFoundry.status?.target ?? (effectiveTestFoundryTarget || "-")} />
               <Metric label="PID" value={testFoundry.status?.pid ? String(testFoundry.status.pid) : "-"} />
             </div>
             <ToneCallout tone={testFoundryApply ? "amber" : "cyan"}>
@@ -309,7 +371,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
           <div className="flex min-w-64 flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] p-3">
             <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
-            <select id="test-foundry-target" value={testFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
+            <select id="test-foundry-target" value={effectiveTestFoundryTarget} onChange={(event) => setTestFoundryTarget(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
               {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
             </select>
             <TestHardeningSlotPicker />
@@ -325,7 +387,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
               </span>
             </label>
-            <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !testFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
+            <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
               Test-Foundry starten
             </Button>
           </div>
@@ -372,7 +434,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
       {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
 
-      <section className="space-y-3">
+      <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="hc-eyebrow">Relevanz-Queue</p>
@@ -412,6 +474,25 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
           </div>
         </div>
+        {topProposal ? (
+          <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="hc-eyebrow text-[var(--hc-accent-text)]">Erstes Review</p>
+                <p className="mt-1 truncate text-base font-semibold text-white">{topProposal.title?.trim() || topProposal.target}</p>
+                <p className="mt-1 text-sm hc-soft">Diese Karte ist nach Sicherheits-/Impact-Signal ganz oben. Entscheide sie zuerst, dann wird die Liste schnell leerer.</p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+                <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
+                  Sichtbare markieren
+                </Button>
+                <Button className="hc-hit" onClick={() => toggleSelection(topProposal.id, true)} disabled={batchBusy || selectedProposalIds.has(topProposal.id)} prefix={<ClipboardCheck className="h-4 w-4" />}>
+                  Top auswählen
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
@@ -489,6 +570,24 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2"><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold text-white">{value}</p></div>;
 }
 
+function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: React.ReactNode; eyebrow: string; title: string; body: string; button: React.ReactNode }) {
+  return (
+    <article className="flex min-h-[188px] flex-col justify-between rounded-lg border border-white/10 bg-white/[.035] p-3">
+      <div>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <span className="grid h-10 w-10 place-items-center rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]">
+            {icon}
+          </span>
+          <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] font-medium hc-soft">{eyebrow}</span>
+        </div>
+        <h3 className="text-sm font-semibold text-white">{title}</h3>
+        <p className="mt-1 text-xs leading-5 hc-soft">{body}</p>
+      </div>
+      <div className="mt-3">{button}</div>
+    </article>
+  );
+}
+
 function LaneModelPanel() {
   const [aux, setAux] = useState<AuxiliaryModelsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -510,7 +609,7 @@ function LaneModelPanel() {
   };
 
   useEffect(() => {
-    void loadAux();
+    queueMicrotask(() => void loadAux());
   }, []);
 
   const assignmentFor = (task: LaneModelSlot) => aux?.tasks.find((item) => item.task === task) ?? null;
@@ -705,7 +804,7 @@ function CodeAuditSlotPicker() {
   };
 
   useEffect(() => {
-    void loadAux();
+    queueMicrotask(() => void loadAux());
   }, []);
 
   const assignment = aux?.tasks.find((item) => item.task === "code_audit") ?? null;
@@ -776,7 +875,7 @@ function TestHardeningSlotPicker() {
   };
 
   useEffect(() => {
-    void loadAux();
+    queueMicrotask(() => void loadAux());
   }, []);
 
   const assignment = aux?.tasks.find((item) => item.task === "test_hardening") ?? null;

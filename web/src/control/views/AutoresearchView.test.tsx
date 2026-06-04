@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
+import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
@@ -30,5 +31,73 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(html).toContain("_VALID_LANES");
     expect(html).toContain("1 in Queue");
     expect(html).toContain("Run lane omitted");
+  });
+});
+
+describe("AutoresearchView cockpit recommendation", () => {
+  it("sends the operator to review when actionable proposals exist", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: "idle",
+      openCount: 4,
+      revertedCount: 1,
+      loopRunning: false,
+      routeStatus: "configured",
+    });
+
+    expect(recommendation.kind).toBe("review");
+    expect(recommendation.primaryLabel).toBe("Queue öffnen");
+    expect(recommendation.title).toContain("4 geprüfte Verbesserungen");
+  });
+
+  it("keeps the operator in monitor mode while the loop is running", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: "running",
+      openCount: 0,
+      revertedCount: 0,
+      loopRunning: true,
+      routeStatus: "configured",
+    });
+
+    expect(recommendation.kind).toBe("monitor");
+    expect(recommendation.primaryLabel).toBe("Lauf ansehen");
+  });
+
+  it("prioritizes recovery before new runs when the loop crashed", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: "crashed",
+      openCount: 0,
+      revertedCount: 0,
+      loopRunning: false,
+      routeStatus: "configured",
+    });
+
+    expect(recommendation.kind).toBe("recover");
+    expect(recommendation.tone).toBe("red");
+  });
+
+  it("prioritizes recovery when the model route is not configured", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: "idle",
+      openCount: 0,
+      revertedCount: 0,
+      loopRunning: false,
+      routeStatus: "unavailable",
+    });
+
+    expect(recommendation.kind).toBe("recover");
+    expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
+
+  it("offers generation when the queue is empty and the loop is idle", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: "idle",
+      openCount: 0,
+      revertedCount: 0,
+      loopRunning: false,
+      routeStatus: "configured",
+    });
+
+    expect(recommendation.kind).toBe("generate");
+    expect(recommendation.primaryLabel).toBe("Vorschläge holen");
   });
 });

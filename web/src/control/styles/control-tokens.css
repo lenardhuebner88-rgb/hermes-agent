@@ -61,7 +61,7 @@
 /* Labelled action buttons: the upstream Button sets line-height:0 for single-line
    icon alignment, so a wrapped label collapses its lines on top of each other
    (jumbled text in narrow/compact layouts). Keep these labels on one line. */
-.hc-hit { min-height: 44px; white-space: nowrap; }
+.hc-hit { min-height: 44px; white-space: nowrap; letter-spacing: 0; }
 .hc-tab { min-height: 60px; }
 
 .hc-led { box-shadow: 0 0 6px currentColor; }

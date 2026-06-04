@@ -133,4 +133,18 @@ describe("ProposalCard", () => {
     );
     expect(html).toContain("Test-Härtung");
   });
+
+  it("explains the apply/skip consequence in plain language", () => {
+    const skillHtml = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "plain-1", target: "skill/foo" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(skillHtml).toContain("Entscheidung:");
+    expect(skillHtml).toContain("schreibt den Skill-Vorschlag direkt");
+
+    const codeHtml = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "plain-2", target: "hermes_cli/foo.py", mode: "code" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(codeHtml).toContain("startet direkt die Test-Suite");
+    expect(codeHtml).toContain("automatisch zurückgerollt");
+  });
 });
