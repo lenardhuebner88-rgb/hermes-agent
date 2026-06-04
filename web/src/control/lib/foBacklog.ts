@@ -1,6 +1,38 @@
-import type { BacklogItem, BacklogDetail } from "./schemas";
+import type { BacklogContractHealth, BacklogItem, BacklogDetail } from "./schemas";
 
 export type FoSortKey = "risk" | "age" | "status";
+export type FoQueueState = "now" | "next" | "in_progress" | "blocked" | "later" | "done";
+export type FoQueueStateResult =
+  | { state: FoQueueState; reason?: undefined }
+  | { state: "drift"; reason: "unknown_status" };
+
+export type FoQualityFlagKind =
+  | "weak_title"
+  | "missing_acceptance"
+  | "unclear_owner"
+  | "stale_update"
+  | "large_scope"
+  | "missing_next_action";
+
+export type FoQualityFlag = { kind: FoQualityFlagKind; label: string; severity: "warn" | "risk" };
+
+export type FoStaleSignal =
+  | { state: "fresh"; label: string }
+  | { state: "missing_update"; label: string }
+  | { state: "stale"; label: string };
+
+export type FoOwnerLoad = { owner: string; total: number; highRisk: number; stale: number; unready: number };
+
+export type FoHealthStripCounts = {
+  now: number;
+  nextReady: number;
+  blocked: number;
+  unowned: number;
+  stale: number;
+  highRisk: number;
+  contractDrift: number;
+  missingAcceptance: number;
+};
 
 export type FoFilterOptions = {
   owner?: string;
@@ -19,13 +51,158 @@ const STATUS_ORDER: Record<string, number> = {
   later: 4,
   done: 5,
 };
+const KNOWN_STATUSES = new Set(Object.keys(STATUS_ORDER));
+const KNOWN_OWNERS = new Set(["hermes", "claude", "codex", "piet", "unassigned"]);
+const BUSINESS_IMPACT: Record<string, number> = {
+  db: 4,
+  "hermes-api": 4,
+  admin: 3,
+  calendar: 3,
+  shopping: 3,
+  lists: 2,
+  kitchen: 1,
+  process: 1,
+};
+const STATE_PULL_WEIGHT: Record<string, number> = {
+  now: 50,
+  next: 40,
+  in_progress: 20,
+  blocked: 4,
+  later: 0,
+  done: -100,
+};
+
+export function queueStateForFoItem(item: Pick<BacklogItem, "status">): FoQueueStateResult {
+  if (KNOWN_STATUSES.has(item.status)) return { state: item.status as FoQueueState };
+  return { state: "drift", reason: "unknown_status" };
+}
+
+export function staleSignalForFoItem(item: Pick<BacklogItem, "status" | "updated" | "stale">, nowSec: number): FoStaleSignal {
+  if (!item.updated) return { state: "missing_update", label: "kein Update" };
+  if (item.status === "done") return { state: "fresh", label: "abgeschlossen" };
+  const updated = Date.parse(`${item.updated.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(updated)) return { state: "missing_update", label: "Update unklar" };
+  const ageDays = Math.floor((nowSec * 1000 - updated) / 86_400_000);
+  const stale = item.stale || (["in_progress", "blocked"].includes(item.status) && ageDays > 7);
+  if (stale) return { state: "stale", label: ageDays > 0 ? `${ageDays} Tage ohne Beleg` : "überfällig" };
+  return { state: "fresh", label: ageDays <= 0 ? "heute" : `${ageDays} Tage` };
+}
+
+function hasAcceptance(detail?: Pick<BacklogDetail, "acceptance_criteria" | "body">): boolean {
+  if (!detail) return false;
+  if (detail.acceptance_criteria?.length) return true;
+  return /akzeptanz|acceptance|criteria/i.test(detail.body);
+}
+
+function hasNextAction(detail?: Pick<BacklogDetail, "next_action" | "body">): boolean {
+  if (!detail) return false;
+  if (detail.next_action?.trim()) return true;
+  return /next action|next step|nächster|naechster|vorgehen/i.test(detail.body);
+}
+
+function bodyScopeScore(detail?: Pick<BacklogDetail, "body">): number {
+  if (!detail?.body) return 0;
+  const bullets = detail.body.match(/(^|\n)\s*(?:[-*]|\d+\.)\s+/g)?.length ?? 0;
+  return bullets + Math.floor(detail.body.length / 1500);
+}
+
+export function qualityFlagsForFoItem(item: BacklogItem, detail?: BacklogDetail): FoQualityFlag[] {
+  const flags: FoQualityFlag[] = [];
+  const title = item.title.trim();
+  if (title.length < 12 || ["fix", "bug", "todo", "misc", "cleanup"].includes(title.toLowerCase())) {
+    flags.push({ kind: "weak_title", label: "Titel schwach", severity: "warn" });
+  }
+  if (item.missing_acceptance === true || (detail && !hasAcceptance(detail))) {
+    flags.push({ kind: "missing_acceptance", label: "Akzeptanz fehlt", severity: "risk" });
+  }
+  if (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner)) {
+    flags.push({ kind: "unclear_owner", label: "Owner unklar", severity: "risk" });
+  }
+  if (item.stale) {
+    flags.push({ kind: "stale_update", label: "Stale Update", severity: "risk" });
+  }
+  if (bodyScopeScore(detail) >= 10) {
+    flags.push({ kind: "large_scope", label: "Scope gross", severity: "warn" });
+  }
+  if (item.missing_next_action === true || (item.status !== "done" && detail && !hasNextAction(detail))) {
+    flags.push({ kind: "missing_next_action", label: "Next Action fehlt", severity: "risk" });
+  }
+  return flags;
+}
+
+export function nextActionForFoItem(item: BacklogItem, detail?: BacklogDetail): string {
+  const flags = qualityFlagsForFoItem(item, detail);
+  const missingAcceptance = flags.some((flag) => flag.kind === "missing_acceptance");
+  const missingNext = flags.some((flag) => flag.kind === "missing_next_action");
+  if (missingAcceptance && missingNext) return "Akzeptanzkriterien und konkreten nächsten Schritt klären.";
+  if (detail?.next_action?.trim()) return detail.next_action.trim();
+  if (item.status === "blocked") return "Blocker prüfen und Entblockungspfad festlegen.";
+  if (item.stale) return "Letzten Stand verifizieren und Claim erneuern oder schließen.";
+  if (item.owner === "unassigned") return "Owner setzen oder vor Ziehen präzisieren.";
+  if (item.status === "now" || item.status === "next") return "Spec vollständig lesen und Umsetzung vorbereiten.";
+  if (item.status === "in_progress") return "Aktuellen Beleg prüfen und nächsten Proof erzeugen.";
+  if (item.status === "done") return item.result ?? "Ergebnis prüfen.";
+  return "Vertragsdrift prüfen, bevor der Task gezogen wird.";
+}
+
+export function ownerLoadSummary(items: BacklogItem[]): FoOwnerLoad[] {
+  const byOwner = new Map<string, FoOwnerLoad>();
+  for (const item of items) {
+    if (item.status === "done") continue;
+    const owner = item.owner || "(missing)";
+    const current = byOwner.get(owner) ?? { owner, total: 0, highRisk: 0, stale: 0, unready: 0 };
+    current.total += 1;
+    if (item.risk === "high") current.highRisk += 1;
+    if (item.stale) current.stale += 1;
+    if (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner)) current.unready += 1;
+    byOwner.set(owner, current);
+  }
+  return [...byOwner.values()].sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
+}
+
+function ageDays(updated: string): number {
+  if (!updated) return 0;
+  const parsed = Date.parse(`${updated.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(parsed)) return 0;
+  return Math.max(0, Math.floor((Date.now() - parsed) / 86_400_000));
+}
+
+function rankScore(item: BacklogItem): number {
+  const risk = RISK_ORDER[item.risk] === 0 ? 16 : RISK_ORDER[item.risk] === 1 ? 8 : 2;
+  const impact = BUSINESS_IMPACT[item.area] ?? 1;
+  const state = STATE_PULL_WEIGHT[item.status] ?? -20;
+  const age = Math.min(ageDays(item.updated), 30) / 2;
+  const penalties = (item.owner === "unassigned" ? 8 : 0) + (item.stale ? 6 : 0);
+  return state + risk + impact * 4 + age - penalties;
+}
+
+export function rankFoItems<T extends BacklogItem>(items: T[]): T[] {
+  return [...items].sort((a, b) => rankScore(b) - rankScore(a) || a.id.localeCompare(b.id));
+}
+
+export function foHealthStripCounts(items: BacklogItem[], contractHealth?: BacklogContractHealth): FoHealthStripCounts {
+  const contractDrift =
+    (contractHealth?.unknown_statuses ?? []).reduce((sum, entry) => sum + entry.count, 0) +
+    (contractHealth?.invalid_risk_count ?? 0) +
+    (contractHealth?.invalid_owner_count ?? 0);
+  return {
+    now: items.filter((item) => queueStateForFoItem(item).state === "now").length,
+    nextReady: items.filter((item) => queueStateForFoItem(item).state === "next" && !item.stale).length,
+    blocked: items.filter((item) => queueStateForFoItem(item).state === "blocked").length,
+    unowned: contractHealth?.unowned_count ?? items.filter((item) => item.owner === "unassigned").length,
+    stale: contractHealth?.stale_count ?? items.filter((item) => item.stale).length,
+    highRisk: items.filter((item) => item.risk === "high" && item.status !== "done").length,
+    contractDrift,
+    missingAcceptance: contractHealth?.missing_acceptance_count ?? items.filter((item) => item.missing_acceptance).length,
+  };
+}
 
 export function computeNextFoTaskId(items: BacklogItem[]): string | null {
   const pick = (status: string) => {
-    const candidates = items.filter((it) => it.status === status && !it.stale);
+    const candidates = items.filter((it) => queueStateForFoItem(it).state === status && !it.stale);
     if (candidates.length === 0) {
       // fall back to stale items of this status if none non-stale
-      const stale = items.filter((it) => it.status === status);
+      const stale = items.filter((it) => queueStateForFoItem(it).state === status);
       if (stale.length === 0) return null;
       stale.sort((a, b) => a.updated.localeCompare(b.updated) || a.id.localeCompare(b.id));
       return stale[0].id;

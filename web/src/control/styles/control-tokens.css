@@ -29,7 +29,7 @@
   --agent-spark: #ec4899;
   --agent-james: #10b981;
   --hc-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --hc-radius: .75rem;
+  --hc-radius: .5rem;
   min-height: calc(100dvh - 5rem);
   color: var(--hc-text);
   font-family: var(--hc-font-sans);
@@ -45,10 +45,7 @@
 .hc-page {
   min-height: calc(100dvh - 7rem);
   margin: -0.5rem -0.75rem 0;
-  background:
-    radial-gradient(circle at top left, rgba(124,58,237,.08), transparent 28%),
-    radial-gradient(circle at top right, rgba(34,211,238,.035), transparent 24%),
-    linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
+  background: linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
 }
 
 .hc-card {

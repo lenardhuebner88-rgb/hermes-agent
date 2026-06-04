@@ -3,7 +3,14 @@ import {
   computeNextFoTaskId,
   buildFoCommissionPrompt,
   filterFoItems,
+  foHealthStripCounts,
+  nextActionForFoItem,
+  ownerLoadSummary,
+  qualityFlagsForFoItem,
+  queueStateForFoItem,
+  rankFoItems,
   sortFoItems,
+  staleSignalForFoItem,
 } from "./foBacklog";
 import type { BacklogItem, BacklogDetail } from "./schemas";
 
@@ -35,6 +42,14 @@ function detail(overrides: Partial<BacklogDetail> & { id: string }): BacklogDeta
     result: null,
     stale: false,
     body: "",
+    decision: [],
+    acceptance_criteria: [],
+    proofs: [],
+    blockers: [],
+    next_action: "",
+    source_path: "",
+    source_ref: "",
+    links: [],
     ...overrides,
   };
 }
@@ -91,6 +106,113 @@ describe("computeNextFoTaskId", () => {
       item({ id: "0002", status: "now", stale: false, updated: "2026-06-01" }),
     ];
     expect(computeNextFoTaskId(items)).toBe("0002");
+  });
+
+  it("uses queueState semantics and ignores unknown-status drift", () => {
+    const items = [
+      item({ id: "0001", status: "readyish" as BacklogItem["status"], updated: "2026-01-01" }),
+      item({ id: "0002", status: "next", updated: "2026-06-01" }),
+    ];
+    expect(queueStateForFoItem(items[0]).state).toBe("drift");
+    expect(computeNextFoTaskId(items)).toBe("0002");
+  });
+});
+
+describe("FO queue intelligence", () => {
+  it("classifies all canonical queue states without remapping unknown statuses", () => {
+    expect(queueStateForFoItem(item({ id: "n", status: "now" })).state).toBe("now");
+    expect(queueStateForFoItem(item({ id: "x", status: "readyish" as BacklogItem["status"] }))).toEqual({
+      state: "drift",
+      reason: "unknown_status",
+    });
+  });
+
+  it("marks stale proof/update separately from fresh and missing update states", () => {
+    expect(staleSignalForFoItem(item({ id: "old", status: "in_progress", updated: "2026-05-20" }), 1780524000).state).toBe("stale");
+    expect(staleSignalForFoItem(item({ id: "none", status: "next", updated: "" }), 1780524000).state).toBe("missing_update");
+    expect(staleSignalForFoItem(item({ id: "done", status: "done", updated: "2026-05-20" }), 1780524000).state).toBe("fresh");
+  });
+
+  it("summarizes active owner load with high-risk and stale pressure", () => {
+    const summary = ownerLoadSummary([
+      item({ id: "a", owner: "unassigned", risk: "high", status: "next" }),
+      item({ id: "b", owner: "claude", risk: "medium", status: "in_progress", stale: true }),
+      item({ id: "c", owner: "claude", risk: "low", status: "done" }),
+    ]);
+    expect(summary).toEqual([
+      { owner: "claude", total: 1, highRisk: 0, stale: 1, unready: 0 },
+      { owner: "unassigned", total: 1, highRisk: 1, stale: 0, unready: 1 },
+    ]);
+  });
+
+  it("ranks risk, age, and business impact ahead of low-impact later work", () => {
+    const ranked = rankFoItems([
+      item({ id: "low", status: "later", risk: "low", area: "process", updated: "2026-06-01" }),
+      item({ id: "high", status: "next", risk: "high", area: "db", updated: "2026-06-03" }),
+      item({ id: "old", status: "next", risk: "medium", area: "lists", updated: "2026-05-01" }),
+    ]);
+    expect(ranked.map((it) => it.id)).toEqual(["high", "old", "low"]);
+  });
+
+  it("derives next action and task-quality flags without mutating backlog data", () => {
+    const weak = item({
+      id: "0009",
+      title: "Fix",
+      owner: "unassigned",
+      status: "next",
+      updated: "2026-05-01",
+      stale: true,
+    });
+    const d = detail({
+      id: "0009",
+      title: "Fix",
+      owner: "unassigned",
+      status: "next",
+      body: "## Kontext\n\n" + "- Punkt\n".repeat(12),
+    });
+
+    expect(nextActionForFoItem(weak, d)).toBe("Akzeptanzkriterien und konkreten nächsten Schritt klären.");
+    expect(qualityFlagsForFoItem(weak, d).map((flag) => flag.kind)).toEqual([
+      "weak_title",
+      "missing_acceptance",
+      "unclear_owner",
+      "stale_update",
+      "large_scope",
+      "missing_next_action",
+    ]);
+  });
+
+  it("computes health strip counts from items plus endpoint contract health", () => {
+    const counts = foHealthStripCounts(
+      [
+        item({ id: "n", status: "now", risk: "low" }),
+        item({ id: "x", status: "next", risk: "high", owner: "unassigned" }),
+        item({ id: "b", status: "blocked", risk: "medium", stale: true }),
+      ],
+      {
+        source_count: 3,
+        counted_sum: 2,
+        unknown_statuses: [{ status: "readyish", count: 1, ids: ["d"] }],
+        invalid_risk_count: 1,
+        invalid_owner_count: 0,
+        unowned_count: 1,
+        stale_count: 1,
+        missing_acceptance_count: 2,
+        missing_next_action_count: 1,
+        invalid_area_count: 0,
+      },
+    );
+
+    expect(counts).toEqual({
+      now: 1,
+      nextReady: 1,
+      blocked: 1,
+      unowned: 1,
+      stale: 1,
+      highRisk: 1,
+      contractDrift: 2,
+      missingAcceptance: 2,
+    });
   });
 });
 

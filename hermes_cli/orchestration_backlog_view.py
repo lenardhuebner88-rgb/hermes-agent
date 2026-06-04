@@ -2,10 +2,11 @@
 
 Serves the orchestration workspace's planning backlog (``~/orchestration/backlog/*.md``)
 as JSON for the Hermes Control dashboard's read-only "Orchestrator" tab. Parses the
-Backlog.md-style frontmatter (``status: backlog|todo|doing|review|done``, ``priority``,
-``dependsOn``, ``planGate``) — a *different* schema than the family-organizer board, so
-this is a deliberately separate view/endpoint (no premature generalisation; see the
-slice's anti-scope note).
+Backlog.md-style frontmatter (``status``, ``priority``, ``dependsOn``, ``planGate``)
+— a *different* schema than the family-organizer board, so this is a deliberately
+separate view/endpoint (no premature generalisation; see the slice's anti-scope note).
+Known status counts are contract-checked, but unknown status values are preserved on
+the item and reported as drift instead of being silently remapped.
 
 Unlike the family-organizer board (which reads the committed ``origin/main`` of a pushed
 product repo), this backlog is **living planning scratch** — often uncommitted
@@ -31,7 +32,7 @@ from typing import Any
 _MD_HEADING_RE = re.compile(r"^#{1,6}\s+")
 _MD_LIST_RE = re.compile(r"^\s*[-*+]\s+|^\s*\d+\.\s+")
 _MD_QUOTE_RE = re.compile(r"^\s*>\s*")
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]*)\)")
 _MD_INLINE_RE = re.compile(r"`[^`]*`|\*+|_+")
 
 from fastapi import FastAPI
@@ -41,6 +42,7 @@ from hermes_cli.error_sanitize import scrub_detail
 _SCHEMA = "orchestration-backlog-v1"
 _DEFAULT_DIR = "/home/piet/orchestration/backlog"
 _STATUSES = ("backlog", "todo", "doing", "review", "done")
+_PRIORITIES = ("low", "medium", "high")
 _log = logging.getLogger(__name__)
 
 
@@ -135,6 +137,63 @@ def _extract_excerpt(text: str, max_len: int = 140) -> str:
     return ""
 
 
+def _extract_links(text: str, max_links: int = 8) -> list[dict[str, str]]:
+    """Extract a small list of Markdown links for the detail drawer."""
+    links: list[dict[str, str]] = []
+    for label, href in _MD_LINK_RE.findall(_body_after_frontmatter(text)):
+        clean_label = label.strip()
+        clean_href = href.strip()
+        if not clean_label or not clean_href:
+            continue
+        links.append({"label": clean_label[:120], "href": clean_href[:500]})
+        if len(links) >= max_links:
+            break
+    return links
+
+
+def _extract_proof_lines(text: str, fm: dict[str, Any], max_lines: int = 8) -> list[str]:
+    """Evidence-oriented lines from frontmatter/body, bounded for UI display."""
+    proofs: list[str] = []
+    for key in ("closed", "receipt", "proof", "lastProof", "last_proof"):
+        value = str(fm.get(key) or "").strip()
+        if value:
+            proofs.append(f"{key}: {value}")
+
+    body = _body_after_frontmatter(text)
+    for line in body.split("\n"):
+        cleaned = line.strip().strip("*")
+        if not cleaned:
+            continue
+        low = cleaned.lower()
+        if any(token in low for token in ("receipt", "verifiziert", "verified", "deployed", "live", "commit", "gate")):
+            cleaned = _MD_LINK_RE.sub(r"\1", cleaned)
+            cleaned = _MD_INLINE_RE.sub("", cleaned).strip()
+            if cleaned:
+                proofs.append(cleaned[:220])
+        if len(proofs) >= max_lines:
+            break
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for proof in proofs:
+        if proof in seen:
+            continue
+        seen.add(proof)
+        deduped.append(proof)
+        if len(deduped) >= max_lines:
+            break
+    return deduped
+
+
+def _last_proof(text: str, fm: dict[str, Any]) -> str:
+    for key in ("lastProof", "last_proof", "receipt", "proof", "closed"):
+        value = str(fm.get(key) or "").strip()
+        if value:
+            return value
+    proofs = _extract_proof_lines(text, fm, max_lines=1)
+    return proofs[0] if proofs else ""
+
+
 def _body_after_frontmatter(text: str) -> str:
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
@@ -183,6 +242,12 @@ def _read_detail_sync(item_id: str) -> dict[str, Any]:
             "planGate": _parse_bool(fm.get("planGate")),
             "gate": str(fm.get("gate") or ""),
             "root": str(fm.get("root") or ""),
+            "owner": str(fm.get("owner") or fm.get("assignee") or ""),
+            "source": str(fm.get("source") or ""),
+            "closed": str(fm.get("closed") or ""),
+            "lastProof": _last_proof(text, fm),
+            "proofs": _extract_proof_lines(text, fm),
+            "links": _extract_links(text),
             "created": str(fm.get("created") or ""),
             "body": _body_after_frontmatter(text),
         }
@@ -249,6 +314,13 @@ def _read_sources_from_fs(base: Path) -> list[tuple[str, str]]:
 def _read_items_sync(now: int) -> dict[str, Any]:
     base = _backlog_dir().resolve()
     counts = {s: 0 for s in _STATUSES}
+    empty_health = {
+        "source_count": 0,
+        "counted_sum": 0,
+        "unknown_statuses": [],
+        "invalid_priority_count": 0,
+        "missing_dep_count": 0,
+    }
 
     ref = _ref()
     sources: list[tuple[str, str]] | None = None
@@ -264,6 +336,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "checked_at": now,
                 "items": [],
                 "counts": counts,
+                "contract_health": empty_health,
                 "source": {"dir": str(base), "ref": "missing", "count": 0},
                 "error": scrub_detail(f"backlog dir not found: {base}"),
             }
@@ -271,6 +344,8 @@ def _read_items_sync(now: int) -> dict[str, Any]:
         source_ref = "fs:working-tree"
 
     items: list[dict[str, Any]] = []
+    unknown_status_ids: dict[str, list[str]] = {}
+    invalid_priority_count = 0
     for name, text in sources:
         # id from the filename stem (README.md and any other file without valid
         # frontmatter is dropped below) — the YAML `id` is not relied upon.
@@ -281,6 +356,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
 
         status = str(fm.get("status") or "").strip()
         priority = str(fm.get("priority") or "").strip()
+        depends_on = _parse_depends_on(fm.get("dependsOn"))
         created = fm.get("created")
         items.append(
             {
@@ -288,23 +364,48 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "title": str(fm.get("title") or stem),
                 "status": status,
                 "priority": priority,
-                "dependsOn": _parse_depends_on(fm.get("dependsOn")),
+                "dependsOn": depends_on,
                 "planGate": _parse_bool(fm.get("planGate")),
                 "created": str(created) if created is not None else "",
                 "created_epoch": _created_epoch(created),
                 "root": str(fm.get("root") or ""),
+                "owner": str(fm.get("owner") or fm.get("assignee") or ""),
+                "source": str(fm.get("source") or ""),
+                "lastProof": _last_proof(text, fm),
                 "excerpt": _extract_excerpt(text),
             }
         )
         if status in counts:
             counts[status] += 1
+        else:
+            unknown_status_ids.setdefault(status or "(missing)", []).append(stem)
+        if priority not in _PRIORITIES:
+            invalid_priority_count += 1
 
+    item_ids = {item["id"] for item in items}
+    missing_dep_count = sum(
+        1
+        for item in items
+        for dep_id in item.get("dependsOn", [])
+        if dep_id not in item_ids
+    )
+    contract_health = {
+        "source_count": len(items),
+        "counted_sum": sum(counts.values()),
+        "unknown_statuses": [
+            {"status": status, "count": len(ids), "ids": sorted(ids)[:20]}
+            for status, ids in sorted(unknown_status_ids.items())
+        ],
+        "invalid_priority_count": invalid_priority_count,
+        "missing_dep_count": missing_dep_count,
+    }
     items.sort(key=lambda it: it["id"])
     return {
         "schema": _SCHEMA,
         "checked_at": now,
         "items": items,
         "counts": counts,
+        "contract_health": contract_health,
         "source": {"dir": str(base), "ref": source_ref, "count": len(items)},
         "error": None,
     }

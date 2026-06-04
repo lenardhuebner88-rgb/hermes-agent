@@ -1,24 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ClipboardCopy } from "lucide-react";
+import { Check, ClipboardCopy, ExternalLink, LayoutGrid, List, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import { useBacklog, useBacklogDetail } from "../hooks/useControlData";
-import { BacklogDetailDrawer } from "../components/BacklogDetailDrawer";
 import { FoBacklogCard } from "../components/FoBacklogCard";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import {
   buildFoCommissionPrompt,
   computeNextFoTaskId,
   filterFoItems,
+  foHealthStripCounts,
+  nextActionForFoItem,
+  ownerLoadSummary,
+  qualityFlagsForFoItem,
+  queueStateForFoItem,
+  rankFoItems,
   sortFoItems,
+  staleSignalForFoItem,
 } from "../lib/foBacklog";
 import type { FoSortKey } from "../lib/foBacklog";
 import type { Density } from "../hooks/useDensity";
-import type { BacklogItem } from "../lib/schemas";
+import type { BacklogContractHealth, BacklogDetail, BacklogItem } from "../lib/schemas";
 import type { ToneName } from "../lib/types";
 
-type Status = BacklogItem["status"];
+type Status = "now" | "next" | "in_progress" | "blocked" | "later" | "done";
+type ViewMode = "queue" | "board";
 
 const ACTIVE_COLUMNS: Array<{ key: Exclude<Status, "done">; label: string; tone: ToneName }> = [
   { key: "now", label: de.backlog.colNow, tone: "sky" },
@@ -28,64 +35,199 @@ const ACTIVE_COLUMNS: Array<{ key: Exclude<Status, "done">; label: string; tone:
   { key: "later", label: de.backlog.colLater, tone: "zinc" },
 ];
 
-const STREAM_STATUSES: Array<{ key: Exclude<Status, "done">; label: string; tone: ToneName }> = [
-  { key: "now", label: de.backlog.colNow, tone: "sky" },
-  { key: "next", label: de.backlog.colNext, tone: "indigo" },
-  { key: "in_progress", label: de.backlog.colInProgress, tone: "violet" },
-  { key: "blocked", label: de.backlog.colBlocked, tone: "red" },
-  { key: "later", label: de.backlog.colLater, tone: "zinc" },
-];
+const STATUS_TONE: Record<string, ToneName> = {
+  now: "sky",
+  next: "indigo",
+  in_progress: "violet",
+  blocked: "red",
+  later: "zinc",
+  done: "emerald",
+};
+const RISK_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
+const OWNER_TONE: Record<string, ToneName> = { claude: "violet", hermes: "cyan", piet: "emerald", codex: "sky", unassigned: "zinc" };
+const EMPTY_ITEMS: BacklogItem[] = [];
 
 function clockLabel(nowSec: number): string {
   return new Date(nowSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
-function CommissionBanner({
-  nextId,
-  nextTitle,
-  prompt,
-}: {
-  nextId: string;
-  nextTitle: string;
-  prompt: string | undefined;
-}) {
-  const [copied, setCopied] = useState(false);
+function relLabel(updated: string, nowSec: number): string {
+  if (!updated) return "-";
+  const t = Date.parse(`${updated.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(t)) return updated;
+  const days = Math.floor((nowSec * 1000 - t) / 86_400_000);
+  if (days <= 0) return "heute";
+  if (days === 1) return "gestern";
+  if (days < 7) return `vor ${days} T`;
+  if (days < 30) return `vor ${Math.floor(days / 7)} Wo`;
+  return `vor ${Math.floor(days / 30)} Mon`;
+}
 
+function sourceRef(item: BacklogItem): string {
+  return item.source_path || `backlog/items/${item.id}.md`;
+}
+
+function operatorBrief(item: BacklogItem, detail?: BacklogDetail): string {
+  return [
+    `FO Backlog ${item.id}: ${item.title}`,
+    `Status/Risk/Owner: ${item.status} / ${item.risk || "-"} / ${item.owner || "-"}`,
+    `Area: ${item.area || "-"}`,
+    `Next Action: ${nextActionForFoItem(item, detail)}`,
+    `Source: ${detail?.source_path || sourceRef(item)}`,
+    detail?.source_ref ? `Ref: ${detail.source_ref}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+function CopyButton({ text, label, copiedLabel }: { text: string | undefined; label: string; copiedLabel: string }) {
+  const [copied, setCopied] = useState(false);
   const copy = async () => {
-    if (!prompt) return;
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(prompt);
+      await navigator.clipboard.writeText(text);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      window.setTimeout(() => setCopied(false), 1600);
     } catch {
       /* clipboard blocked */
     }
   };
-
   return (
-    <div className="hc-card flex flex-col gap-3 border-cyan-400/25 bg-cyan-500/5 p-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-cyan-400">{de.backlog.nextTask}</p>
-        <p className="mt-0.5 truncate text-sm font-medium text-white">{nextTitle}</p>
-        <p className="mt-0.5 text-[11px] hc-mono hc-dim">{nextId}</p>
-      </div>
-      <button
-        type="button"
-        onClick={copy}
-        disabled={!prompt}
-        className={cn(
-          "flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition",
-          copied
-            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-            : !prompt
-              ? "cursor-wait border-white/10 text-zinc-500"
-              : "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20",
-        )}
-        title={de.backlog.commissionHint}
-      >
-        {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
-        {copied ? de.backlog.commissionCopied : de.backlog.commission}
-      </button>
+    <button
+      type="button"
+      onClick={copy}
+      disabled={!text}
+      className={cn(
+        "inline-flex min-h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-medium transition",
+        copied
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+          : "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-500",
+      )}
+    >
+      {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
+      {copied ? copiedLabel : label}
+    </button>
+  );
+}
+
+function SectionLines({ title, lines, fallback }: { title: string; lines: string[] | undefined; fallback: string }) {
+  const visible = lines?.filter((line) => line.trim() !== "") ?? [];
+  return (
+    <section className="border-t border-[var(--hc-border)] pt-3">
+      <h3 className="text-[11px] font-semibold uppercase text-zinc-400">{title}</h3>
+      {visible.length ? (
+        <ul className="mt-2 space-y-1.5">
+          {visible.map((line, index) => (
+            <li key={`${title}-${index}-${line}`} className="break-words text-sm text-zinc-100">{line}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-sm hc-soft">{fallback}</p>
+      )}
+    </section>
+  );
+}
+
+export function FoHealthStrip({ items, contractHealth }: { items: BacklogItem[]; contractHealth?: BacklogContractHealth }) {
+  const counts = foHealthStripCounts(items, contractHealth);
+  const cells: Array<{ label: string; value: number; tone: ToneName }> = [
+    { label: "Now", value: counts.now, tone: "sky" },
+    { label: "Next Ready", value: counts.nextReady, tone: "indigo" },
+    { label: "Blocked", value: counts.blocked, tone: "red" },
+    { label: "Unowned", value: counts.unowned, tone: "amber" },
+    { label: "Stale", value: counts.stale, tone: "red" },
+    { label: "High Risk", value: counts.highRisk, tone: "red" },
+    { label: "Contract Drift", value: counts.contractDrift, tone: counts.contractDrift ? "amber" : "zinc" },
+    { label: "Missing Acceptance", value: counts.missingAcceptance, tone: counts.missingAcceptance ? "amber" : "zinc" },
+  ];
+  return (
+    <section className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8" aria-label="FO Contract Health">
+      {cells.map((cell) => (
+        <div key={cell.label} className="min-w-0 rounded-md border border-[var(--hc-border)] bg-white/[.025] px-3 py-2">
+          <div className="truncate text-[11px] font-semibold uppercase text-zinc-400">{cell.label}</div>
+          <div className={cn("mt-1 hc-mono text-lg font-semibold", cell.tone === "red" ? "text-red-200" : cell.tone === "amber" ? "text-amber-200" : cell.tone === "sky" ? "text-sky-200" : cell.tone === "indigo" ? "text-indigo-200" : "text-zinc-200")}>{cell.value}</div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+export function FoBacklogQueueTable({
+  items,
+  nowSec,
+  nextTaskId,
+  detailById = {},
+  onOpen,
+}: {
+  items: BacklogItem[];
+  nowSec: number;
+  nextTaskId: string | null;
+  detailById?: Record<string, BacklogDetail | undefined>;
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-md border border-[var(--hc-border)]">
+      <table className="w-full table-fixed border-collapse text-left text-sm">
+        <thead className="bg-white/[.035] text-[11px] uppercase text-zinc-400">
+          <tr>
+            <th className="w-[30%] px-3 py-2">Title</th>
+            <th className="w-[9%] px-3 py-2">Status</th>
+            <th className="hidden w-[8%] px-3 py-2 md:table-cell">Risk</th>
+            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">Owner</th>
+            <th className="hidden w-[10%] px-3 py-2 xl:table-cell">Area</th>
+            <th className="hidden w-[10%] px-3 py-2 md:table-cell">Age/Updated</th>
+            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">Stale/Proof</th>
+            <th className="hidden w-[13%] px-3 py-2 xl:table-cell">Source/Id</th>
+            <th className="w-[28%] px-3 py-2">Next Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const detail = detailById[item.id];
+            const queueState = queueStateForFoItem(item);
+            const flags = qualityFlagsForFoItem(item, detail);
+            const stale = staleSignalForFoItem(item, nowSec);
+            return (
+              <tr
+                key={item.id}
+                tabIndex={0}
+                onClick={() => onOpen(item.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpen(item.id);
+                  }
+                }}
+                className={cn(
+                  "cursor-pointer border-t border-[var(--hc-border)] align-top outline-none hover:bg-white/[.035] focus-visible:bg-white/[.045]",
+                  item.id === nextTaskId && "bg-cyan-500/[.06]",
+                )}
+              >
+                <td className="px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-medium text-white">{item.title}</span>
+                      {item.id === nextTaskId ? <span className="shrink-0 rounded-sm bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">NEXT</span> : null}
+                    </div>
+                    {item.excerpt ? <p className="mt-1 line-clamp-2 text-xs hc-dim">{item.excerpt}</p> : null}
+                    {flags.length ? (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {flags.slice(0, 3).map((flag) => <span key={`${item.id}-${flag.kind}`} className={cn("rounded-sm px-1.5 py-0.5 text-[10px]", flag.severity === "risk" ? "bg-amber-500/10 text-amber-200" : "bg-zinc-500/10 text-zinc-300")}>{flag.label}</span>)}
+                      </div>
+                    ) : null}
+                  </div>
+                </td>
+                <td className="px-3 py-2"><StatusPill tone={queueState.state === "drift" ? "amber" : STATUS_TONE[queueState.state]} label={item.status || "missing"} /></td>
+                <td className="hidden px-3 py-2 md:table-cell"><StatusPill tone={RISK_TONE[item.risk] ?? "amber"} label={item.risk || "missing"} /></td>
+                <td className="hidden px-3 py-2 lg:table-cell"><StatusPill tone={OWNER_TONE[item.owner] ?? "amber"} label={item.owner || "missing"} /></td>
+                <td className="hidden px-3 py-2 text-zinc-200 xl:table-cell">{item.area || "-"}</td>
+                <td className="hidden px-3 py-2 md:table-cell"><span className="hc-mono text-xs hc-soft">{relLabel(item.updated, nowSec)}</span></td>
+                <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("text-xs", stale.state === "stale" ? "text-red-200" : stale.state === "missing_update" ? "text-amber-200" : "hc-soft")}>{stale.label}</span></td>
+                <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate hc-mono text-[11px] text-zinc-400">{sourceRef(item)}</span><span className="hc-mono text-[11px] text-zinc-500">{item.id}</span></td>
+                <td className="px-3 py-2"><p className="line-clamp-3 text-sm text-zinc-100">{nextActionForFoItem(item, detail)}</p></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -116,78 +258,130 @@ function ControlsBar({
   owners: string[];
 }) {
   return (
-    <div className="hc-card flex flex-col gap-3 p-3">
+    <section className="rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3">
       <input
         type="search"
         value={q}
         onChange={(e) => onQ(e.target.value)}
         placeholder={de.backlog.searchPlaceholder}
-        className="w-full rounded-lg border border-white/10 bg-white/[.04] px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-cyan-400/50 focus:outline-none"
+        className="w-full rounded-md border border-white/10 bg-white/[.04] px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-cyan-400/50 focus:outline-none"
       />
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Risk filter */}
-        {(["", "high", "medium", "low"] as const).map((r) => (
-          <button
-            key={r || "all-risk"}
-            type="button"
-            onClick={() => onFilterRisk(r)}
-            className={cn(
-              "rounded-full border px-2.5 py-1 text-xs font-medium transition",
-              filterRisk === r
-                ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200"
-                : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
-            )}
-          >
-            {r || de.backlog.filterAll}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {(["", "high", "medium", "low"] as const).map((risk) => (
+          <button key={risk || "all-risk"} type="button" onClick={() => onFilterRisk(risk)} className={cn("rounded-md border px-2.5 py-1 text-xs font-medium transition", filterRisk === risk ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200")}>
+            {risk || de.backlog.filterAll}
           </button>
         ))}
-
-        {/* Stale filter */}
-        <button
-          type="button"
-          onClick={() => onFilterStale(!filterStale)}
-          className={cn(
-            "rounded-full border px-2.5 py-1 text-xs font-medium transition",
-            filterStale
-              ? "border-red-400/50 bg-red-500/15 text-red-200"
-              : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
-          )}
-        >
+        <button type="button" onClick={() => onFilterStale(!filterStale)} className={cn("rounded-md border px-2.5 py-1 text-xs font-medium transition", filterStale ? "border-red-400/50 bg-red-500/15 text-red-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200")}>
           {de.backlog.filterStale}
         </button>
-
-        {/* Owner filter */}
-        {owners.length > 1 && (
-          <select
-            value={filterOwner}
-            onChange={(e) => onFilterOwner(e.target.value)}
-            className="rounded-full border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200 focus:outline-none"
-          >
+        {owners.length > 1 ? (
+          <select value={filterOwner} onChange={(e) => onFilterOwner(e.target.value)} className="rounded-md border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200 focus:outline-none">
             <option value="">{de.backlog.filterAll} Owner</option>
-            {owners.map((o) => <option key={o} value={o}>{o}</option>)}
+            {owners.map((owner) => <option key={owner} value={owner}>{owner}</option>)}
           </select>
-        )}
-
-        {/* Sort */}
+        ) : null}
         <div className="ml-auto flex items-center gap-1.5">
           <span className="text-xs hc-dim">{de.backlog.sortLabel}:</span>
-          {(["risk", "age", "status"] as FoSortKey[]).map((sk) => (
-            <button
-              key={sk}
-              type="button"
-              onClick={() => onSort(sk)}
-              className={cn(
-                "rounded-full border px-2 py-0.5 text-xs transition",
-                sortKey === sk
-                  ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-200"
-                  : "border-white/10 text-zinc-400 hover:text-zinc-200",
-              )}
-            >
-              {sk === "risk" ? de.backlog.sortRisk : sk === "age" ? de.backlog.sortAge : de.backlog.sortStatus}
+          {(["risk", "age", "status"] as FoSortKey[]).map((key) => (
+            <button key={key} type="button" onClick={() => onSort(key)} className={cn("rounded-md border px-2 py-1 text-xs transition", sortKey === key ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")}>
+              {key === "risk" ? de.backlog.sortRisk : key === "age" ? de.backlog.sortAge : de.backlog.sortStatus}
             </button>
           ))}
         </div>
       </div>
+    </section>
+  );
+}
+
+function FoDetailDrawer({
+  item,
+  detail,
+  loading,
+  error,
+  commissionPrompt,
+  onClose,
+}: {
+  item: BacklogItem;
+  detail?: BacklogDetail;
+  loading: boolean;
+  error?: string;
+  commissionPrompt?: string;
+  onClose: () => void;
+}) {
+  const brief = operatorBrief(item, detail);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <button type="button" className="absolute inset-0 bg-black/60" aria-label="Schließen" onClick={onClose} />
+      <aside role="dialog" aria-modal="true" aria-labelledby="fo-detail-title" className="hc-card absolute right-0 top-0 flex h-full w-full max-w-xl flex-col rounded-none border-y-0 border-l border-[var(--hc-border)] shadow-2xl">
+        <header className="flex items-start justify-between gap-3 border-b border-[var(--hc-border)] p-5">
+          <div className="min-w-0">
+            <h2 id="fo-detail-title" className="text-lg font-semibold text-white">{item.title}</h2>
+            <p className="mt-1 truncate text-xs hc-mono hc-dim">{detail?.source_path || sourceRef(item)}</p>
+          </div>
+          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[.03] text-zinc-200 hover:bg-white/[.07]" aria-label="Schließen" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+          {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
+          {loading && !detail ? <ToneCallout tone="zinc">{de.backlog.loading}</ToneCallout> : null}
+
+          <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[["Status", item.status], ["Risk", item.risk], ["Owner", item.owner], ["Area", item.area]].map(([label, value]) => (
+              <div key={label} className="rounded-md border border-[var(--hc-border)] bg-white/[.025] px-3 py-2">
+                <div className="text-[10px] font-semibold uppercase text-zinc-500">{label}</div>
+                <div className="mt-1 truncate text-sm text-zinc-100">{value || "-"}</div>
+              </div>
+            ))}
+          </section>
+
+          <section className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
+            <h3 className="text-[11px] font-semibold uppercase text-emerald-200">Next Action</h3>
+            <p className="mt-1 text-sm text-white">{nextActionForFoItem(item, detail)}</p>
+          </section>
+
+          <SectionLines title="Decision / Why now" lines={detail?.decision} fallback={item.excerpt || "Keine explizite Entscheidung im Body gefunden."} />
+          <SectionLines title="Acceptance Criteria" lines={detail?.acceptance_criteria} fallback="Keine Akzeptanzkriterien gefunden." />
+          <SectionLines title="Current Evidence / Last Proof" lines={detail?.proofs} fallback={item.result || "Kein letzter Beleg gefunden."} />
+          <SectionLines title="Blockers" lines={detail?.blockers} fallback="Keine Blocker im Body gefunden." />
+
+          <section className="border-t border-[var(--hc-border)] pt-3">
+            <h3 className="text-[11px] font-semibold uppercase text-zinc-400">Source path/ref</h3>
+            <dl className="mt-2 space-y-2 text-sm">
+              <div><dt className="text-[10px] uppercase text-zinc-500">Path</dt><dd className="break-words hc-mono text-zinc-100">{detail?.source_path || sourceRef(item)}</dd></div>
+              <div><dt className="text-[10px] uppercase text-zinc-500">Ref</dt><dd className="break-words hc-mono text-zinc-100">{detail?.source_ref || "git:origin/main"}</dd></div>
+            </dl>
+          </section>
+
+          <div className="grid gap-2 sm:grid-cols-2">
+            <CopyButton text={brief} label="Copy operator brief" copiedLabel="Brief kopiert" />
+            <CopyButton text={commissionPrompt} label="Copy implementation prompt" copiedLabel={de.backlog.commissionCopied} />
+          </div>
+
+          {detail?.links?.length ? (
+            <section className="border-t border-[var(--hc-border)] pt-3">
+              <h3 className="text-[11px] font-semibold uppercase text-zinc-400">Links</h3>
+              <div className="mt-2 space-y-1">
+                {detail.links.map((link) => (
+                  <a key={`${link.label}-${link.href}`} href={link.href} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-2 text-sm text-cyan-200 hover:text-cyan-100">
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{link.label}</span>
+                  </a>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      </aside>
     </div>
   );
 }
@@ -197,57 +391,51 @@ export function BacklogView({ density }: { density: Density }) {
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
   const [showAllDone, setShowAllDone] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
-
-  // Filter/sort state
+  const [viewMode, setViewMode] = useState<ViewMode>("queue");
   const [q, setQ] = useState("");
   const [filterOwner, setFilterOwner] = useState("");
   const [filterRisk, setFilterRisk] = useState("");
   const [filterStale, setFilterStale] = useState(false);
   const [sortKey, setSortKey] = useState<FoSortKey>("status");
+  const [fallbackNowSec] = useState(() => Math.floor(Date.now() / 1000));
 
   const data = backlog.data;
-  const nowSec = data?.checked_at ?? Math.floor(Date.now() / 1000);
+  const allItems = data?.items ?? EMPTY_ITEMS;
+  const nowSec = data?.checked_at ?? fallbackNowSec;
   const gap = density === "compact" ? "gap-3" : "gap-4";
-  const allItems = data?.items ?? [];
 
   useEffect(() => {
     if (openId) void fetchDetail(openId);
   }, [fetchDetail, openId]);
 
-  // Compute next task + auto-fetch detail for commission prompt
   const nextTaskId = useMemo(() => computeNextFoTaskId(allItems), [allItems]);
-  const nextTask = nextTaskId ? allItems.find((it) => it.id === nextTaskId) : null;
+  const nextTask = nextTaskId ? allItems.find((item) => item.id === nextTaskId) : null;
 
   useEffect(() => {
     if (nextTaskId && !detailById[nextTaskId]) void fetchDetail(nextTaskId);
   }, [nextTaskId, detailById, fetchDetail]);
 
-  const nextDetail = nextTaskId ? detailById[nextTaskId] : undefined;
-  const commissionPromptForNext = nextDetail ? buildFoCommissionPrompt(nextDetail) : undefined;
-
-  // Distinct owners for filter dropdown
   const owners = useMemo(() => {
     const set = new Set<string>();
-    for (const it of allItems) if (it.owner && it.owner !== "unassigned") set.add(it.owner);
+    for (const item of allItems) if (item.owner && item.owner !== "unassigned") set.add(item.owner);
     return [...set].sort();
   }, [allItems]);
 
-  // Grouped by status (full, unfiltered)
   const byStatus = useMemo(() => {
     const map: Record<string, BacklogItem[]> = {};
     for (const item of allItems) (map[item.status] ??= []).push(item);
     return map;
   }, [allItems]);
 
-  // Filtered + sorted active items
   const filteredActive = useMemo(() => {
-    const active = allItems.filter((it) => it.status !== "done");
+    const active = allItems.filter((item) => item.status !== "done");
     const filtered = filterFoItems(active, q, {
       owner: filterOwner || undefined,
       risk: filterRisk || undefined,
       stale: filterStale || undefined,
     });
-    return sortFoItems(filtered, sortKey);
+    const sorted = sortFoItems(filtered, sortKey);
+    return sortKey === "risk" ? rankFoItems(sorted) : sorted;
   }, [allItems, q, filterOwner, filterRisk, filterStale, sortKey]);
 
   const filteredByStatus = useMemo(() => {
@@ -262,173 +450,135 @@ export function BacklogView({ density }: { density: Density }) {
     return arr;
   }, [byStatus]);
 
+  const ownerLoad = useMemo(() => ownerLoadSummary(allItems).slice(0, 4), [allItems]);
   const counts = data?.counts;
-  const activeTotal = counts ? counts.now + counts.next + counts.in_progress + counts.blocked + counts.later : 0;
-
+  const activeTotal = counts ? counts.now + counts.next + counts.in_progress + counts.blocked + counts.later : allItems.filter((item) => item.status !== "done").length;
   const selectedItem = openId ? allItems.find((item) => item.id === openId) : undefined;
   const detail = openId ? detailById[openId] : undefined;
-
-  const detailFields: Array<{ label: string; value: string }> = detail
-    ? (
-        [
-          detail.owner ? { label: de.backlog.owner, value: detail.owner } : null,
-          detail.risk ? { label: de.backlog.risk, value: detail.risk } : null,
-          detail.area ? { label: de.backlog.area, value: detail.area } : null,
-          detail.lane ? { label: de.backlog.lane, value: detail.lane } : null,
-          detail.result ? { label: de.backlog.result, value: detail.result } : null,
-          detail.updated ? { label: de.backlog.updatedLabel, value: detail.updated } : null,
-        ] as Array<{ label: string; value: string } | null>
-      ).filter((f): f is { label: string; value: string } => f !== null)
-    : [];
-
-  const commissionPromptForDrawer = detail ? buildFoCommissionPrompt(detail) : undefined;
+  const commissionPrompt = detail ? buildFoCommissionPrompt(detail) : undefined;
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <section className="hc-card flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="hc-eyebrow">{de.backlog.eyebrow}</p>
-          <h2 className="mt-1 text-xl font-semibold text-white">
-            {de.backlog.title} · {activeTotal} aktiv
-          </h2>
-          <p className="mt-1 text-xs hc-soft">{de.backlog.subtitle}</p>
-        </div>
-        <div className="text-right text-xs hc-soft">
-          <div>{backlog.loading && !data ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
-          {counts ? (
-            <div className="mt-1 hc-dim">
-              {counts.done} erledigt · {data?.source.count ?? 0} gesamt
-            </div>
-          ) : null}
+      <section className="rounded-md border border-[var(--hc-border)] bg-white/[.02] p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <p className="hc-eyebrow">{de.backlog.eyebrow}</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">{de.backlog.title} · {activeTotal} aktiv</h2>
+            <p className="mt-1 text-xs hc-soft">{de.backlog.subtitle}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="mr-2 text-xs hc-soft">{backlog.loading && !data ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
+            <button type="button" onClick={() => setViewMode("queue")} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "queue" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Queue">
+              <List className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={() => setViewMode("board")} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "board" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Board">
+              <LayoutGrid className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </section>
 
       {backlog.error ? <ToneCallout tone="red">{de.backlog.error}</ToneCallout> : null}
       {data?.error ? <ToneCallout tone="amber">{de.backlog.sourceMissing}</ToneCallout> : null}
 
-      {/* Commission banner */}
+      <FoHealthStrip items={allItems} contractHealth={data?.contract_health} />
+
       {nextTask ? (
-        <CommissionBanner
-          nextId={nextTask.id}
-          nextTitle={nextTask.title}
-          prompt={commissionPromptForNext}
-        />
+        <section className="rounded-md border border-cyan-400/25 bg-cyan-500/5 p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase text-cyan-300">{de.backlog.nextTask}</p>
+              <p className="mt-0.5 truncate text-sm font-medium text-white">{nextTask.title}</p>
+              <p className="mt-0.5 hc-mono text-[11px] hc-dim">{sourceRef(nextTask)}</p>
+            </div>
+            <CopyButton text={detailById[nextTask.id] ? buildFoCommissionPrompt(detailById[nextTask.id]) : undefined} label={de.backlog.commission} copiedLabel={de.backlog.commissionCopied} />
+          </div>
+        </section>
       ) : allItems.length > 0 ? (
         <ToneCallout tone="zinc">{de.backlog.noNextTask}</ToneCallout>
       ) : null}
 
-      {/* Controls */}
-      {allItems.length > 0 && (
+      {ownerLoad.length ? (
+        <section className="grid gap-2 md:grid-cols-2 xl:grid-cols-4" aria-label="Owner load summary">
+          {ownerLoad.map((owner) => (
+            <div key={owner.owner} className="rounded-md border border-[var(--hc-border)] bg-white/[.02] px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-sm font-medium text-white">{owner.owner}</span>
+                <span className="hc-mono text-xs hc-soft">{owner.total}</span>
+              </div>
+              <p className="mt-1 text-xs hc-dim">High {owner.highRisk} · Stale {owner.stale} · Unready {owner.unready}</p>
+            </div>
+          ))}
+        </section>
+      ) : null}
+
+      {allItems.length > 0 ? (
         <ControlsBar
-          q={q} onQ={setQ}
-          filterOwner={filterOwner} onFilterOwner={setFilterOwner}
-          filterRisk={filterRisk} onFilterRisk={setFilterRisk}
-          filterStale={filterStale} onFilterStale={setFilterStale}
-          sortKey={sortKey} onSort={setSortKey}
+          q={q}
+          onQ={setQ}
+          filterOwner={filterOwner}
+          onFilterOwner={setFilterOwner}
+          filterRisk={filterRisk}
+          onFilterRisk={setFilterRisk}
+          filterStale={filterStale}
+          onFilterStale={setFilterStale}
+          sortKey={sortKey}
+          onSort={setSortKey}
           owners={owners}
         />
+      ) : null}
+
+      {viewMode === "queue" ? (
+        filteredActive.length ? (
+          <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} detailById={detailById} onOpen={setOpenId} />
+        ) : (
+          <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
+        )
+      ) : (
+        <div className={cn("grid", gap)} style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+          {ACTIVE_COLUMNS.map((col) => {
+            const items = filteredByStatus[col.key] ?? [];
+            return (
+              <section key={col.key} className="min-w-0 rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <StatusPill tone={col.tone} label={col.label} />
+                  <span className="hc-mono text-xs hc-dim">{items.length}</span>
+                </div>
+                <div className="space-y-2">
+                  {items.length ? items.map((item) => <FoBacklogCard key={item.id} item={item} nowSec={nowSec} isNext={item.id === nextTaskId} onOpen={setOpenId} />) : <p className="py-3 text-center text-xs hc-dim">{de.backlog.emptyColumn}</p>}
+                </div>
+              </section>
+            );
+          })}
+        </div>
       )}
 
-      {/* Desktop board (≥lg), hidden on mobile */}
-      <div className={cn("hidden lg:grid", gap)} style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
-        {ACTIVE_COLUMNS.map((col) => {
-          const items = filteredByStatus[col.key] ?? [];
-          return (
-            <section key={col.key} className="hc-card flex min-w-0 flex-col gap-2 p-3">
-              <div className="flex items-center justify-between">
-                <StatusPill tone={col.tone} label={col.label} />
-                <span className="hc-mono text-xs hc-dim">{items.length}</span>
-              </div>
-              {items.length === 0 ? (
-                <p className="py-3 text-center text-xs hc-dim">{de.backlog.emptyColumn}</p>
-              ) : (
-                items.map((item) => (
-                  <FoBacklogCard
-                    key={item.id}
-                    item={item}
-                    nowSec={nowSec}
-                    isNext={item.id === nextTaskId}
-                    onOpen={setOpenId}
-                  />
-                ))
-              )}
-            </section>
-          );
-        })}
-      </div>
-
-      {/* Mobile stream (<lg), skip empty groups */}
-      <div className={cn("flex flex-col lg:hidden", gap)}>
-        {STREAM_STATUSES.map((col) => {
-          const items = filteredByStatus[col.key] ?? [];
-          if (items.length === 0) return null;
-          return (
-            <section key={col.key} className="hc-card flex flex-col gap-2 p-3">
-              <div className="flex items-center gap-2">
-                <StatusPill tone={col.tone} label={col.label} />
-                <span className="hc-mono text-xs hc-dim">{items.length}</span>
-              </div>
-              {items.map((item) => (
-                <FoBacklogCard
-                  key={item.id}
-                  item={item}
-                  nowSec={nowSec}
-                  isNext={item.id === nextTaskId}
-                  onOpen={setOpenId}
-                />
-              ))}
-            </section>
-          );
-        })}
-        {filteredActive.length === 0 && (
-          <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
-        )}
-      </div>
-
-      {/* Done section */}
-      <section className="hc-card p-3">
+      <section className="rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <StatusPill tone="emerald" label={de.backlog.colDone} />
             <span className="hc-mono text-xs hc-dim">{doneItems.length}</span>
-            <span className="hidden text-xs hc-dim sm:inline">· {de.backlog.doneRecentHint}</span>
-            <span className="hidden text-xs hc-dim sm:inline">· {de.backlog.doneResultHint}</span>
           </div>
           {doneItems.length > 5 ? (
-            <button
-              type="button"
-              onClick={() => setShowAllDone((v) => !v)}
-              className="rounded-md border border-white/10 px-2 py-1 text-xs hc-soft hover:bg-white/5"
-            >
+            <button type="button" onClick={() => setShowAllDone((value) => !value)} className="rounded-md border border-white/10 px-2 py-1 text-xs hc-soft hover:bg-white/5">
               {showAllDone ? de.backlog.showRecent : de.backlog.showAll}
             </button>
           ) : null}
         </div>
-        {doneItems.length === 0 ? (
-          <p className="py-2 text-xs hc-dim">{de.backlog.empty}</p>
+        {doneItems.length ? (
+          <FoBacklogQueueTable items={showAllDone ? doneItems : doneItems.slice(0, 5)} nowSec={nowSec} nextTaskId={null} detailById={detailById} onOpen={setOpenId} />
         ) : (
-          <div className={cn("grid", gap)} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
-            {(showAllDone ? doneItems : doneItems.slice(0, 5)).map((item) => (
-              <FoBacklogCard key={item.id} item={item} nowSec={nowSec} isNext={false} onOpen={setOpenId} />
-            ))}
-          </div>
+          <p className="py-2 text-xs hc-dim">{de.backlog.empty}</p>
         )}
       </section>
 
-      {/* Detail drawer */}
-      {openId ? (
-        <BacklogDetailDrawer
-          title={selectedItem?.title ?? detail?.title ?? openId}
-          id={openId}
-          body={detail?.body ?? ""}
-          chips={[
-            ...(selectedItem?.stale ? [{ label: de.backlog.staleBadge, tone: "red" as const }] : []),
-          ]}
-          fields={detailFields}
-          loading={loadingId === openId}
-          error={errorById[openId] || detail?.error}
-          commissionPrompt={commissionPromptForDrawer}
+      {selectedItem ? (
+        <FoDetailDrawer
+          item={selectedItem}
+          detail={detail}
+          loading={loadingId === selectedItem.id}
+          error={errorById[selectedItem.id] || detail?.error}
+          commissionPrompt={commissionPrompt}
           onClose={() => setOpenId(null)}
         />
       ) : null}

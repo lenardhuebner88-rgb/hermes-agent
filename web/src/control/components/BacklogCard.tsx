@@ -1,24 +1,11 @@
 import { cn } from "@/lib/utils";
 import { StatusPill } from "./atoms";
-import { depState, projectFromRoot, readiness } from "../lib/orchestration";
+import { ageLabel, depState, projectFromRoot, readiness } from "../lib/orchestration";
 import { de } from "../i18n/de";
 import type { ToneName } from "../lib/types";
 import type { OrchestrationItem } from "../lib/schemas";
 
 const PRIORITY_TONE: Record<string, ToneName> = { high: "red", medium: "amber", low: "zinc" };
-const DEP_TONE: Record<string, ToneName> = { done: "emerald", pending: "red", missing: "zinc" };
-
-function relLabel(created: string, nowSec: number): string {
-  if (!created) return "—";
-  const t = Date.parse(`${created}T00:00:00Z`);
-  if (Number.isNaN(t)) return created;
-  const days = Math.floor((nowSec * 1000 - t) / 86_400_000);
-  if (days <= 0) return "heute";
-  if (days === 1) return "gestern";
-  if (days < 7) return `vor ${days} T`;
-  if (days < 30) return `vor ${Math.floor(days / 7)} Wo`;
-  return `vor ${Math.floor(days / 30)} Mon`;
-}
 
 type ExtItem = OrchestrationItem & { root?: string; excerpt?: string };
 
@@ -40,22 +27,15 @@ export function BacklogCard({
   const showProject = project !== "Orchestration";
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
+    <button
+      type="button"
       className={cn(
-        "cursor-pointer rounded-lg border p-3 transition hover:bg-white/[.03] focus:outline-none focus:ring-2 focus:ring-cyan-400/60",
+        "w-full cursor-pointer rounded-lg border p-3 text-left transition hover:bg-white/[.03] focus:outline-none focus:ring-2 focus:ring-cyan-400/60",
         isNext
           ? "border-cyan-400/40 ring-1 ring-cyan-400/20 hover:border-cyan-400/60"
           : "border-white/10 hover:border-white/20",
       )}
       onClick={() => onOpen(item.id)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen(item.id);
-        }
-      }}
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
@@ -79,11 +59,14 @@ export function BacklogCard({
         ) : null}
         <StatusPill tone={PRIORITY_TONE[item.priority] ?? "zinc"} label={item.priority} />
         {item.planGate ? <StatusPill tone="indigo" label={de.orchestrator.planGate} /> : null}
-        {(item.dependsOn ?? []).map((depId) => (
-          <StatusPill key={depId} tone={DEP_TONE[depState(depId, allItems)] ?? "zinc"} label={depId} />
-        ))}
-        <span className="ml-auto text-[11px] hc-soft">{relLabel(item.created, nowSec)}</span>
+        {item.dependsOn?.length ? (
+          <StatusPill
+            tone={(item.dependsOn ?? []).some((depId) => depState(depId, allItems) !== "done") ? "red" : "emerald"}
+            label={de.orchestrator.dependsOn(item.dependsOn.length)}
+          />
+        ) : null}
+        <span className="ml-auto text-[11px] hc-soft">{ageLabel(item.created, nowSec)}</span>
       </div>
-    </div>
+    </button>
   );
 }

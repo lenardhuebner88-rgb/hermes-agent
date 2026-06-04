@@ -265,15 +265,18 @@ export const ProposalsResponseSchema = z.object({
 export const BacklogItemSchema = z.object({
   id: z.string().catch(""),
   title: z.string().catch("Ohne Titel"),
-  status: z.enum(["now", "next", "later", "in_progress", "blocked", "done"]).catch("now"),
+  status: z.string().catch(""),
   owner: z.string().catch("unassigned"),
-  risk: z.enum(["low", "medium", "high"]).catch("low"),
+  risk: z.string().catch(""),
   area: z.string().catch(""),
   updated: z.string().catch(""),
   lane: z.string().nullable().catch(null),
   result: z.string().nullable().catch(null),
   stale: z.boolean().catch(false),
   excerpt: z.string().optional().catch(undefined),
+  source_path: z.string().optional().catch(undefined),
+  missing_acceptance: z.boolean().optional().catch(undefined),
+  missing_next_action: z.boolean().optional().catch(undefined),
 });
 
 export const BacklogDetailSchema = z.object({
@@ -288,7 +291,37 @@ export const BacklogDetailSchema = z.object({
   result: z.string().nullable().catch(null),
   stale: z.boolean().catch(false),
   body: z.string().catch(""),
+  decision: z.array(z.string()).catch([]),
+  acceptance_criteria: z.array(z.string()).catch([]),
+  proofs: z.array(z.string()).catch([]),
+  blockers: z.array(z.string()).catch([]),
+  next_action: z.string().catch(""),
+  source_path: z.string().catch(""),
+  source_ref: z.string().catch(""),
+  links: z.array(z.object({
+    label: z.string().catch(""),
+    href: z.string().catch(""),
+  })).catch([]),
   error: z.string().optional(),
+});
+
+const BacklogUnknownStatusSchema = z.object({
+  status: z.string().catch("(missing)"),
+  count: z.coerce.number().catch(0),
+  ids: z.array(z.string()).catch([]),
+});
+
+export const BacklogContractHealthSchema = z.object({
+  source_count: z.coerce.number().catch(0),
+  counted_sum: z.coerce.number().catch(0),
+  unknown_statuses: z.array(BacklogUnknownStatusSchema).catch([]),
+  invalid_risk_count: z.coerce.number().catch(0),
+  invalid_owner_count: z.coerce.number().catch(0),
+  unowned_count: z.coerce.number().catch(0),
+  stale_count: z.coerce.number().catch(0),
+  missing_acceptance_count: z.coerce.number().catch(0),
+  missing_next_action_count: z.coerce.number().catch(0),
+  invalid_area_count: z.coerce.number().catch(0),
 });
 
 export const BacklogResponseSchema = z.object({
@@ -303,32 +336,56 @@ export const BacklogResponseSchema = z.object({
     later: z.coerce.number().catch(0),
     done: z.coerce.number().catch(0),
   }).catch({ now: 0, next: 0, in_progress: 0, blocked: 0, later: 0, done: 0 }),
+  contract_health: BacklogContractHealthSchema.optional().catch(undefined),
   source: z.object({
     dir: z.string().catch(""),
+    ref: z.string().catch(""),
     count: z.coerce.number().catch(0),
-  }).catch({ dir: "", count: 0 }),
+  }).catch({ dir: "", ref: "", count: 0 }),
   error: z.string().nullable().catch(null),
 });
 
 export type BacklogItem = z.infer<typeof BacklogItemSchema>;
 export type BacklogDetail = z.infer<typeof BacklogDetailSchema>;
+export type BacklogContractHealth = z.infer<typeof BacklogContractHealthSchema>;
 export type BacklogResponse = z.infer<typeof BacklogResponseSchema>;
 
 // Read-only Orchestrator backlog board. Mirrors the Backlog.md-style frontmatter
 // (status/priority/dependsOn/planGate/created) served by GET /api/orchestration/backlog.
 // Deliberately a separate schema/view from the family-organizer board (different
-// contract — no premature generalisation). Tolerant (.catch defaults) so a
-// partial/stale payload still renders the board.
+// contract — no premature generalisation). Unknown status/priority values stay
+// visible as raw strings; contract_health carries the drift counters.
 export const OrchestrationItemSchema = z.object({
   id: z.string().catch(""),
   title: z.string().catch("Ohne Titel"),
-  status: z.enum(["backlog", "todo", "doing", "review", "done"]).catch("backlog"),
-  priority: z.enum(["low", "medium", "high"]).catch("medium"),
+  status: z.string().catch(""),
+  priority: z.string().catch(""),
   dependsOn: z.array(z.string()).catch([]),
   planGate: z.boolean().catch(false),
   created: z.string().catch(""),
   root: z.string().optional().catch(undefined),
+  owner: z.string().optional().catch(undefined),
+  source: z.string().optional().catch(undefined),
+  lastProof: z.string().optional().catch(undefined),
   excerpt: z.string().optional().catch(undefined),
+});
+
+export const OrchestrationContractHealthSchema = z.object({
+  source_count: z.coerce.number().catch(0),
+  counted_sum: z.coerce.number().catch(0),
+  unknown_statuses: z.array(z.object({
+    status: z.string().catch(""),
+    count: z.coerce.number().catch(0),
+    ids: z.array(z.string()).catch([]),
+  })).catch([]),
+  invalid_priority_count: z.coerce.number().catch(0),
+  missing_dep_count: z.coerce.number().catch(0),
+}).catch({
+  source_count: 0,
+  counted_sum: 0,
+  unknown_statuses: [],
+  invalid_priority_count: 0,
+  missing_dep_count: 0,
 });
 
 export const OrchestrationDetailSchema = z.object({
@@ -340,6 +397,15 @@ export const OrchestrationDetailSchema = z.object({
   planGate: z.boolean().catch(false),
   gate: z.string().catch(""),
   root: z.string().catch(""),
+  owner: z.string().catch(""),
+  source: z.string().catch(""),
+  closed: z.string().catch(""),
+  lastProof: z.string().catch(""),
+  proofs: z.array(z.string()).catch([]),
+  links: z.array(z.object({
+    label: z.string().catch(""),
+    href: z.string().catch(""),
+  })).catch([]),
   created: z.string().catch(""),
   body: z.string().catch(""),
   error: z.string().optional(),
@@ -356,6 +422,7 @@ export const OrchestrationBacklogResponseSchema = z.object({
     review: z.coerce.number().catch(0),
     done: z.coerce.number().catch(0),
   }).catch({ backlog: 0, todo: 0, doing: 0, review: 0, done: 0 }),
+  contract_health: OrchestrationContractHealthSchema,
   source: z.object({
     dir: z.string().catch(""),
     ref: z.string().catch(""),

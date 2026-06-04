@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildCommissionPrompt,
   computeNextTaskId,
+  contractDriftCount,
+  deriveQueueSignals,
   depState,
   filterItems,
+  nextActionForItem,
   projectFromRoot,
   readiness,
   sortItems,
@@ -90,9 +93,10 @@ describe("computeNextTaskId", () => {
     expect(computeNextTaskId(items)).toBeNull();
   });
 
-  it("picks todo with missing dep (missing ≠ blocking)", () => {
+  it("returns null when todo has a missing dep, matching readiness", () => {
     const items = [mkItem("x", "todo", "medium", "2026-01-01", ["ghost"])];
-    expect(computeNextTaskId(items)).toBe("x");
+    expect(readiness(items[0], items)).toEqual({ state: "blocked", blockedBy: ["ghost"] });
+    expect(computeNextTaskId(items)).toBeNull();
   });
 
   it("prefers high priority over medium", () => {
@@ -118,6 +122,59 @@ describe("computeNextTaskId", () => {
       mkItem("free", "todo", "medium", "2026-01-02"),
     ];
     expect(computeNextTaskId(items)).toBe("free");
+  });
+});
+
+describe("queue signals", () => {
+  it("derives top-strip counts from readiness, ownership, proof age and contract health", () => {
+    const queue = [
+      mkItem("done-dep", "done", "low", "2026-05-20"),
+      { ...mkItem("ready", "todo", "high", "2026-06-03", ["done-dep"]), owner: "Piet", lastProof: "smoke ok" },
+      mkItem("blocked", "todo", "medium", "2026-06-01", ["missing"]),
+      mkItem("old", "backlog", "low", "2026-05-30"),
+      mkItem("drift", "planning", "urgent", "2026-06-02"),
+    ];
+
+    const signals = deriveQueueSignals(queue, {
+      source_count: 5,
+      counted_sum: 3,
+      unknown_statuses: [{ count: 1 }],
+      invalid_priority_count: 1,
+      missing_dep_count: 1,
+    }, Date.parse("2026-06-04T12:00:00Z") / 1000);
+
+    expect(signals).toEqual({
+      ready: 1,
+      blocked: 1,
+      unowned: 3,
+      staleProof: 2,
+      highRisk: 1,
+      contractDrift: 4,
+    });
+  });
+
+  it("computes contract drift from unknown statuses, invalid priority, missing deps and count gaps", () => {
+    expect(contractDriftCount({
+      source_count: 4,
+      counted_sum: 2,
+      unknown_statuses: [{ count: 2 }],
+      invalid_priority_count: 1,
+      missing_dep_count: 3,
+    })).toBe(6);
+  });
+
+  it("uses one dependency rule for next actions", () => {
+    const queue = [
+      mkItem("dep", "doing", "low", "2026-06-01"),
+      mkItem("blocked", "todo", "high", "2026-06-02", ["dep"]),
+      mkItem("ready", "todo", "high", "2026-06-03"),
+      mkItem("drift", "planning", "medium", "2026-06-03"),
+    ];
+
+    expect(nextActionForItem(queue[0], queue)).toBe("Fortschritt prüfen");
+    expect(nextActionForItem(queue[1], queue)).toBe("Dependency klären: dep");
+    expect(nextActionForItem(queue[2], queue)).toBe("Beauftragen");
+    expect(nextActionForItem(queue[3], queue)).toBe("Status klären");
   });
 });
 

@@ -27,7 +27,7 @@ from pathlib import Path
 _MD_HEADING_RE = re.compile(r"^#{1,6}\s+")
 _MD_LIST_RE = re.compile(r"^\s*[-*+]\s+|^\s*\d+\.\s+")
 _MD_QUOTE_RE = re.compile(r"^\s*>\s*")
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]*)\)")
 _MD_INLINE_RE = re.compile(r"`[^`]*`|\*+|_+")
 from typing import Any
 
@@ -41,6 +41,9 @@ _DEFAULT_DIR = "/home/piet/projects/family-organizer/backlog/items"
 # (mirrors the Stale-Claim-Sweep in family-organizer backlog/README.md).
 _STALE_AFTER_S = 7 * 24 * 3600
 _STATUSES = ("now", "next", "in_progress", "blocked", "later", "done")
+_RISKS = ("low", "medium", "high")
+_OWNERS = ("hermes", "claude", "codex", "piet", "unassigned")
+_AREAS = ("kitchen", "lists", "shopping", "admin", "calendar", "hermes-api", "db", "process")
 _log = logging.getLogger(__name__)
 
 
@@ -104,7 +107,7 @@ def _git(root: str, args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _read_sources_from_git(base: Path) -> list[tuple[str, str]] | None:
-    """(name, text) pairs from the committed ref (default ``origin/main``).
+    """(repo path, text) pairs from the committed ref (default ``origin/main``).
 
     Reads *committed* content, so a dirty or behind working tree in the canonical
     clone (concurrent agents leave it modified/stale) can't make the board show
@@ -127,7 +130,7 @@ def _read_sources_from_git(base: Path) -> list[tuple[str, str]] | None:
                 continue
             blob = _git(root, ["show", f"{ref}:{path}"])
             if blob.returncode == 0:
-                sources.append((path.rsplit("/", 1)[-1], blob.stdout))
+                sources.append((path, blob.stdout))
         return sources
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -147,9 +150,103 @@ def _read_sources_from_fs(base: Path) -> list[tuple[str, str]]:
     return sources
 
 
+def _source_name(source: str) -> str:
+    return source.rsplit("/", 1)[-1]
+
+
+def _source_path(source: str, base: Path, source_ref: str) -> str:
+    if "/" in source:
+        return source
+    if source_ref == "fs:working-tree":
+        return str((base / source).resolve())
+    return f"backlog/items/{source}"
+
+
+def _clean_markdown_line(line: str) -> str:
+    cleaned = _MD_HEADING_RE.sub("", line.strip())
+    cleaned = _MD_LIST_RE.sub("", cleaned)
+    cleaned = _MD_QUOTE_RE.sub("", cleaned)
+    cleaned = _MD_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MD_INLINE_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _extract_section_lines(text: str, heading_tokens: tuple[str, ...], max_lines: int = 8) -> list[str]:
+    body = _body_after_frontmatter(text)
+    lines: list[str] = []
+    in_section = False
+    for raw in body.split("\n"):
+        stripped = raw.strip()
+        heading = _MD_HEADING_RE.match(stripped)
+        if heading:
+            title = _MD_HEADING_RE.sub("", stripped).lower()
+            if any(token in title for token in heading_tokens):
+                in_section = True
+                continue
+            if in_section:
+                break
+        if not in_section:
+            continue
+        cleaned = _clean_markdown_line(raw)
+        if cleaned:
+            lines.append(cleaned[:220])
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+
+def _extract_links(text: str, max_links: int = 8) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for label, href in _MD_LINK_RE.findall(_body_after_frontmatter(text)):
+        clean_label = _clean_markdown_line(label)
+        clean_href = href.strip()
+        if not clean_label or not clean_href:
+            continue
+        links.append({"label": clean_label[:120], "href": clean_href[:500]})
+        if len(links) >= max_links:
+            break
+    return links
+
+
+def _has_acceptance(text: str) -> bool:
+    return bool(_extract_section_lines(text, ("akzeptanz", "acceptance", "criteria"), max_lines=1))
+
+
+def _has_next_action(text: str) -> bool:
+    return bool(_extract_section_lines(text, ("next action", "next step", "nächster", "naechster", "vorgehen"), max_lines=1))
+
+
+def _detail_sections(text: str) -> dict[str, Any]:
+    decision = _extract_section_lines(text, ("decision", "why now", "warum jetzt"))
+    acceptance = _extract_section_lines(text, ("akzeptanz", "acceptance", "criteria"), max_lines=12)
+    proofs = _extract_section_lines(text, ("current evidence", "last proof", "proof", "beleg", "evidence", "ergebnis"))
+    blockers = _extract_section_lines(text, ("blocker", "blockers", "blocked", "blockiert"))
+    next_actions = _extract_section_lines(text, ("next action", "next step", "nächster", "naechster", "vorgehen"), max_lines=3)
+    return {
+        "decision": decision,
+        "acceptance_criteria": acceptance,
+        "proofs": proofs,
+        "blockers": blockers,
+        "next_action": next_actions[0] if next_actions else "",
+        "links": _extract_links(text),
+    }
+
+
 def _read_items_sync(now: int) -> dict[str, Any]:
     base = _backlog_dir().resolve()
     counts = {s: 0 for s in _STATUSES}
+    empty_health = {
+        "source_count": 0,
+        "counted_sum": 0,
+        "unknown_statuses": [],
+        "invalid_risk_count": 0,
+        "invalid_owner_count": 0,
+        "unowned_count": 0,
+        "stale_count": 0,
+        "missing_acceptance_count": 0,
+        "missing_next_action_count": 0,
+        "invalid_area_count": 0,
+    }
 
     sources = _read_sources_from_git(base)
     source_ref = f"git:{_ref()}"
@@ -160,6 +257,7 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "checked_at": now,
                 "items": [],
                 "counts": counts,
+                "contract_health": empty_health,
                 "source": {"dir": str(base), "ref": "missing", "count": 0},
                 "error": scrub_detail(f"backlog dir not found: {base}"),
             }
@@ -167,7 +265,16 @@ def _read_items_sync(now: int) -> dict[str, Any]:
         source_ref = "fs:working-tree"
 
     items: list[dict[str, Any]] = []
-    for name, text in sources:
+    unknown_status_ids: dict[str, list[str]] = {}
+    invalid_risk_count = 0
+    invalid_owner_count = 0
+    unowned_count = 0
+    stale_count = 0
+    missing_acceptance_count = 0
+    missing_next_action_count = 0
+    invalid_area_count = 0
+    for source, text in sources:
+        name = _source_name(source)
         stem = name[:-3] if name.endswith(".md") else name
         fm = _parse_frontmatter(text)
         if not fm:
@@ -181,6 +288,11 @@ def _read_items_sync(now: int) -> dict[str, Any]:
             and epoch is not None
             and (now - epoch) > _STALE_AFTER_S
         )
+        owner = str(fm.get("owner") or "unassigned")
+        risk = str(fm.get("risk") or "")
+        area = str(fm.get("area") or "")
+        missing_acceptance = not _has_acceptance(text)
+        missing_next_action = status != "done" and not _has_next_action(text)
         items.append(
             {
                 # Canonical 4-digit id from the filename (the family-organizer
@@ -189,25 +301,60 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "id": stem[:4],
                 "title": str(fm.get("title") or stem),
                 "status": status,
-                "owner": str(fm.get("owner") or "unassigned"),
-                "risk": str(fm.get("risk") or ""),
-                "area": str(fm.get("area") or ""),
+                "owner": owner,
+                "risk": risk,
+                "area": area,
                 "updated": str(updated) if updated is not None else "",
                 "lane": str(fm.get("lane")) if fm.get("lane") is not None else None,
                 "result": str(fm.get("result")) if fm.get("result") is not None else None,
                 "stale": bool(stale),
                 "excerpt": _extract_excerpt(text),
+                "source_path": _source_path(source, base, source_ref),
+                "missing_acceptance": missing_acceptance,
+                "missing_next_action": missing_next_action,
             }
         )
         if status in counts:
             counts[status] += 1
+        else:
+            unknown_status_ids.setdefault(status or "(missing)", []).append(stem[:4])
+        if risk not in _RISKS:
+            invalid_risk_count += 1
+        if owner not in _OWNERS:
+            invalid_owner_count += 1
+        if owner == "unassigned":
+            unowned_count += 1
+        if area not in _AREAS:
+            invalid_area_count += 1
+        if stale:
+            stale_count += 1
+        if missing_acceptance:
+            missing_acceptance_count += 1
+        if missing_next_action:
+            missing_next_action_count += 1
 
     items.sort(key=lambda it: it["id"])
+    contract_health = {
+        "source_count": len(items),
+        "counted_sum": sum(counts.values()),
+        "unknown_statuses": [
+            {"status": status, "count": len(ids), "ids": sorted(ids)[:20]}
+            for status, ids in sorted(unknown_status_ids.items())
+        ],
+        "invalid_risk_count": invalid_risk_count,
+        "invalid_owner_count": invalid_owner_count,
+        "unowned_count": unowned_count,
+        "stale_count": stale_count,
+        "missing_acceptance_count": missing_acceptance_count,
+        "missing_next_action_count": missing_next_action_count,
+        "invalid_area_count": invalid_area_count,
+    }
     return {
         "schema": _SCHEMA,
         "checked_at": now,
         "items": items,
         "counts": counts,
+        "contract_health": contract_health,
         "source": {"dir": str(base), "ref": source_ref, "count": len(items)},
         "error": None,
     }
@@ -279,7 +426,9 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
         if sources is None:
             return _detail_error("backlog source unavailable")
 
-        for name, text in sources:
+        source_ref = f"git:{_ref()}"
+        for source, text in sources:
+            name = _source_name(source)
             if not (name.endswith(".md") and name.startswith(f"{valid_id}-")):
                 continue
 
@@ -296,7 +445,7 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
                 and epoch is not None
                 and (now - epoch) > _STALE_AFTER_S
             )
-            return {
+            detail = {
                 "id": stem[:4],
                 "title": str(fm.get("title") or stem),
                 "status": status,
@@ -308,7 +457,11 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
                 "result": str(fm.get("result")) if fm.get("result") is not None else None,
                 "stale": bool(stale),
                 "body": _body_after_frontmatter(text),
+                "source_path": _source_path(source, base, source_ref),
+                "source_ref": source_ref,
             }
+            detail.update(_detail_sections(text))
+            return detail
         return _detail_error("item not found")
     except Exception as exc:
         _log.exception("family organizer backlog detail unavailable")

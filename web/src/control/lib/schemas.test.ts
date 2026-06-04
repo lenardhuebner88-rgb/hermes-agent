@@ -1,5 +1,73 @@
 import { describe, expect, it } from "vitest";
-import { CronObservabilityResponseSchema, MetricsLiteResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+
+describe("BacklogResponseSchema (Family Organizer contract health)", () => {
+  it("preserves unknown status/risk values and parses contract-health drift", () => {
+    const parsed = parseOrThrow(BacklogResponseSchema, {
+      schema: "fo-backlog-v1",
+      checked_at: 1770000000,
+      items: [{
+        id: "0042",
+        title: "Contract drift",
+        status: "readyish",
+        owner: "nobody",
+        risk: "urgent",
+        area: "lists",
+        updated: "2026-06-01",
+        stale: false,
+        source_path: "backlog/items/0042-contract-drift.md",
+      }],
+      counts: { now: 0, next: 0, in_progress: 0, blocked: 0, later: 0, done: 0 },
+      contract_health: {
+        source_count: 1,
+        counted_sum: 0,
+        unknown_statuses: [{ status: "readyish", count: 1, ids: ["0042"] }],
+        invalid_risk_count: 1,
+        invalid_owner_count: 1,
+        unowned_count: 0,
+        stale_count: 0,
+        missing_acceptance_count: 1,
+        missing_next_action_count: 1,
+      },
+      source: { dir: "/home/piet/projects/family-organizer/backlog/items", ref: "git:origin/main", count: 1 },
+      error: null,
+    }, "family-organizer/backlog");
+
+    expect(parsed.items[0].status).toBe("readyish");
+    expect(parsed.items[0].risk).toBe("urgent");
+    expect(parsed.items[0].source_path).toBe("backlog/items/0042-contract-drift.md");
+    expect(parsed.contract_health?.unknown_statuses[0].ids).toEqual(["0042"]);
+    expect(parsed.contract_health?.invalid_risk_count).toBe(1);
+  });
+
+  it("parses detail sections for the product-manager drawer", () => {
+    const parsed = parseOrThrow(BacklogDetailSchema, {
+      id: "0042",
+      title: "Detail",
+      status: "next",
+      owner: "claude",
+      risk: "medium",
+      area: "lists",
+      updated: "2026-06-01",
+      stale: false,
+      body: "body",
+      decision: ["Warum jetzt"],
+      acceptance_criteria: ["Kriterium"],
+      proofs: ["Commit abc"],
+      blockers: ["Keine"],
+      next_action: "Starten",
+      source_path: "backlog/items/0042-detail.md",
+      source_ref: "git:origin/main",
+      links: [{ label: "Runbook", href: "https://example.invalid/runbook" }],
+    }, "family-organizer/backlog/detail");
+
+    expect(parsed.decision).toEqual(["Warum jetzt"]);
+    expect(parsed.acceptance_criteria).toEqual(["Kriterium"]);
+    expect(parsed.next_action).toBe("Starten");
+    expect(parsed.links[0].label).toBe("Runbook");
+  });
+});
+
 
 describe("WorkersResponseSchema", () => {
   it("coerces a numeric run_id so a real worker is not dropped", () => {
@@ -20,6 +88,42 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers).toHaveLength(1);
     expect(parsed.workers[0].run_id).toBe("380");
     expect(parsed.workers[0].run_status).toBe("blocked");
+  });
+});
+
+describe("OrchestrationBacklogResponseSchema", () => {
+  it("preserves unknown live statuses and exposes contract health", () => {
+    const parsed = parseOrThrow(OrchestrationBacklogResponseSchema, {
+      schema: "orchestration-backlog-v1",
+      checked_at: 100,
+      counts: { backlog: 0, todo: 0, doing: 0, review: 0, done: 0 },
+      contract_health: {
+        source_count: 3,
+        counted_sum: 0,
+        unknown_statuses: [
+          { status: "decided", count: 1, ids: ["a"] },
+          { status: "planning", count: 1, ids: ["b"] },
+          { status: "obsolete", count: 1, ids: ["c"] },
+        ],
+        invalid_priority_count: 1,
+        missing_dep_count: 2,
+      },
+      source: { dir: "/home/piet/orchestration/backlog", ref: "fs:working-tree", count: 3 },
+      items: [
+        { id: "a", title: "A", status: "decided", priority: "urgent", dependsOn: [], planGate: false, created: "2026-06-01" },
+        { id: "b", title: "B", status: "planning", priority: "medium", dependsOn: ["ghost"], planGate: false, created: "2026-06-02" },
+        { id: "c", title: "C", status: "obsolete", priority: "low", dependsOn: [], planGate: false, created: "2026-06-03" },
+      ],
+      error: null,
+    }, "orchestration/backlog");
+
+    expect(parsed.items.map((item) => item.status)).toEqual(["decided", "planning", "obsolete"]);
+    expect(parsed.items[0].priority).toBe("urgent");
+    expect(parsed.contract_health.source_count).toBe(3);
+    expect(parsed.contract_health.counted_sum).toBe(0);
+    expect(parsed.contract_health.unknown_statuses.map((status) => status.status)).toEqual(["decided", "planning", "obsolete"]);
+    expect(parsed.contract_health.invalid_priority_count).toBe(1);
+    expect(parsed.contract_health.missing_dep_count).toBe(2);
   });
 });
 

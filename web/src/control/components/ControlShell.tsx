@@ -138,7 +138,7 @@ function RailMoreNav() {
 }
 
 function StatusDots() {
-  return <div className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft md:flex"><span className="hc-led hc-led-live h-2 w-2 rounded-full" />Live<span className="hc-mono">9119</span><span className="hc-led hc-led-ready h-2 w-2 rounded-full" />MC</div>;
+  return <div className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft md:flex"><span className="hc-led hc-led-live h-2 w-2 rounded-full" />Hermes<span className="hc-mono">:9119</span><span className="hc-led hc-led-ready h-2 w-2 rounded-full" />Dashboard</div>;
 }
 
 function TabButton({ tab, active, openProposals, onClick }: { tab: (typeof tabs)[number]; active: boolean; openProposals: number; onClick: () => void }) {

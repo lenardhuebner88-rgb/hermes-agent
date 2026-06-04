@@ -148,6 +148,38 @@ def test_read_items_counts_stale_and_id_from_filename(tmp_path, monkeypatch):
     assert by_id["0001"]["result"] == "auf main"
 
 
+def test_read_items_contract_health_preserves_drift_and_quality_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-drift.md", id="0001", title="A drift item", status="readyish",
+           owner="nobody", risk="urgent", area="lists", updated="2026-05-20",
+           body="## Kontext\n\nOhne klare Kriterien.")
+    _write(tmp_path, "0002-ready.md", id="0002", title="A ready item", status="next",
+           owner="unassigned", risk="high", area="db", updated="2026-06-01",
+           body="## Akzeptanzkriterien\n\n- Gate ist gruen.\n\n## Next Action\n\nImplementieren.")
+    _write(tmp_path, "0003-stale.md", id="0003", title="A stale item", status="in_progress",
+           owner="codex", risk="medium", area="process", updated="2026-05-20",
+           body="## Kontext\n\nBegonnen, aber ohne neuen Beleg.")
+
+    now = int(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc).timestamp())
+    out = _read_items_sync(now)
+
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id["0001"]["status"] == "readyish"
+    assert by_id["0001"]["risk"] == "urgent"
+    assert by_id["0001"]["owner"] == "nobody"
+
+    health = out["contract_health"]
+    assert health["source_count"] == 3
+    assert health["counted_sum"] == 2
+    assert health["unknown_statuses"] == [{"status": "readyish", "count": 1, "ids": ["0001"]}]
+    assert health["invalid_risk_count"] == 1
+    assert health["invalid_owner_count"] == 1
+    assert health["unowned_count"] == 1
+    assert health["stale_count"] == 1
+    assert health["missing_acceptance_count"] == 2
+    assert health["missing_next_action_count"] == 2
+
+
 def test_read_items_missing_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path / "nope"))
     out = _read_items_sync(0)
@@ -220,6 +252,56 @@ def test_detail_route_resolves_four_digit_prefix_filename(monkeypatch):
     assert data["id"] == "0007"
     assert data["title"] == "Resolved by prefix"
     assert "error" not in data
+
+
+def test_detail_route_returns_product_manager_sections(monkeypatch):
+    text = """---
+id: 0042
+title: Structured drawer item
+status: next
+owner: claude
+risk: medium
+area: lists
+updated: 2026-06-01
+---
+
+## Decision / Why now
+
+Diese Arbeit reduziert Queue-Reibung.
+
+## Akzeptanzkriterien
+
+- Tabelle zeigt den naechsten Schritt.
+- Drawer zeigt Belege.
+
+## Current Evidence / Last Proof
+
+Commit abc123, gate gruen.
+
+## Blockers
+
+- Keine.
+
+## Next Action
+
+Implementierung in Hermes vorbereiten.
+
+Siehe [Runbook](https://example.invalid/runbook).
+"""
+    client = _detail_client(monkeypatch, [("backlog/items/0042-structured.md", text)])
+
+    r = client.get("/api/family-organizer/backlog/0042")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["source_path"] == "backlog/items/0042-structured.md"
+    assert data["source_ref"] == "git:origin/main"
+    assert data["decision"] == ["Diese Arbeit reduziert Queue-Reibung."]
+    assert data["acceptance_criteria"] == ["Tabelle zeigt den naechsten Schritt.", "Drawer zeigt Belege."]
+    assert data["proofs"] == ["Commit abc123, gate gruen."]
+    assert data["blockers"] == ["Keine."]
+    assert data["next_action"] == "Implementierung in Hermes vorbereiten."
+    assert data["links"] == [{"label": "Runbook", "href": "https://example.invalid/runbook"}]
 
 
 def test_detail_route_rejects_traversal_ids(monkeypatch):

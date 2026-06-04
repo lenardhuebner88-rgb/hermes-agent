@@ -6,6 +6,11 @@ export type DepState = "done" | "pending" | "missing";
 
 type ItemRef = { id: string; status: string };
 
+export const KNOWN_STATUSES = ["backlog", "todo", "doing", "review", "done"] as const;
+export type KnownStatus = (typeof KNOWN_STATUSES)[number];
+
+const KNOWN_STATUS_SET = new Set<string>(KNOWN_STATUSES);
+
 /** State of a single dependency relative to the loaded board. */
 export function depState(depId: string, items: ReadonlyArray<ItemRef>): DepState {
   const found = items.find((it) => it.id === depId);
@@ -35,26 +40,108 @@ export function readiness(
   return { state: "ready", blockedBy: [] };
 }
 
+export function isKnownStatus(status: string): status is KnownStatus {
+  return KNOWN_STATUS_SET.has(status);
+}
+
+export function ageDays(created: string, nowSec: number): number | null {
+  if (!created) return null;
+  const t = Date.parse(`${created}T00:00:00Z`);
+  if (Number.isNaN(t)) return null;
+  return Math.floor((nowSec * 1000 - t) / 86_400_000);
+}
+
+export function ageLabel(created: string, nowSec: number): string {
+  const days = ageDays(created, nowSec);
+  if (days === null) return created || "-";
+  if (days <= 0) return "heute";
+  if (days === 1) return "gestern";
+  if (days < 7) return `vor ${days} T`;
+  if (days < 30) return `vor ${Math.floor(days / 7)} Wo`;
+  return `vor ${Math.floor(days / 30)} Mon`;
+}
+
+type QueueSignalItem = {
+  id: string;
+  status: string;
+  priority: string;
+  created: string;
+  owner?: string;
+  lastProof?: string;
+  dependsOn?: string[];
+  planGate?: boolean;
+};
+
+type ContractHealthRef = {
+  source_count?: number;
+  counted_sum?: number;
+  unknown_statuses?: ReadonlyArray<{ count?: number }>;
+  invalid_priority_count?: number;
+  missing_dep_count?: number;
+};
+
+export function isQueueVisible(status: string): boolean {
+  return status !== "done";
+}
+
+export function isStaleProof(item: QueueSignalItem, nowSec: number, staleDays = 3): boolean {
+  if (!isQueueVisible(item.status)) return false;
+  if ((item.lastProof ?? "").trim()) return false;
+  const days = ageDays(item.created, nowSec);
+  return days !== null && days >= staleDays;
+}
+
+export function contractDriftCount(health?: ContractHealthRef | null): number {
+  if (!health) return 0;
+  const unknownCount = (health.unknown_statuses ?? []).reduce((sum, entry) => sum + (entry.count ?? 0), 0);
+  const countGap = Math.max(0, (health.source_count ?? 0) - (health.counted_sum ?? 0));
+  return Math.max(unknownCount, countGap) + (health.invalid_priority_count ?? 0) + (health.missing_dep_count ?? 0);
+}
+
+export function deriveQueueSignals(
+  items: ReadonlyArray<QueueSignalItem>,
+  health: ContractHealthRef | null | undefined,
+  nowSec: number,
+) {
+  const visible = items.filter((item) => isQueueVisible(item.status));
+  return {
+    ready: visible.filter((item) => readiness(item, items).state === "ready").length,
+    blocked: visible.filter((item) => readiness(item, items).state === "blocked").length,
+    unowned: visible.filter((item) => !(item.owner ?? "").trim()).length,
+    staleProof: visible.filter((item) => isStaleProof(item, nowSec)).length,
+    highRisk: visible.filter((item) => item.priority === "high").length,
+    contractDrift: contractDriftCount(health),
+  };
+}
+
+export function nextActionForItem(item: QueueSignalItem, items: ReadonlyArray<ItemRef>): string {
+  if (!isKnownStatus(item.status)) return "Status klären";
+  const r = readiness(item, items);
+  if (r.state === "blocked") return `Dependency klären: ${r.blockedBy.slice(0, 2).join(", ")}`;
+  if (item.status === "todo" && item.planGate) return "Plan-Gate entscheiden";
+  if (r.state === "ready") return "Beauftragen";
+  if (item.status === "doing") return "Fortschritt prüfen";
+  if (item.status === "review") return "Proof prüfen";
+  if (item.status === "backlog") return "Priorisieren";
+  if (item.status === "done") return "Receipt prüfen";
+  return "Einordnen";
+}
+
 // ── Commission / dispatch helpers ────────────────────────────────────────────
 
 const PRIORITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
 /**
- * Pick the single best next task: status=todo, all dependsOn either done or
- * missing (missing ≠ blocking per spec), ranked high>medium>low then oldest
- * `created`. Returns null when no candidate exists.
+ * Pick the single best next task: status=todo and readiness=ready, ranked
+ * high>medium>low then oldest `created`. Missing dependencies are blocking,
+ * matching readiness().
  */
 export function computeNextTaskId(
   items: ReadonlyArray<{ id: string; status: string; priority: string; created: string; dependsOn?: string[] }>,
 ): string | null {
   const candidates = items
     .filter((it) => it.status === "todo")
-    .filter((it) =>
-      (it.dependsOn ?? []).every((depId) => {
-        const s = depState(depId, items);
-        return s === "done" || s === "missing";
-      }),
-    );
+    .filter((it) => readiness(it, items).state === "ready");
   if (candidates.length === 0) return null;
   const sorted = [...candidates].sort((a, b) => {
     const pa = PRIORITY_ORDER[a.priority] ?? 1;

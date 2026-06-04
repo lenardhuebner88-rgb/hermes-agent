@@ -126,6 +126,13 @@ def test_read_items_counts_and_shape(tmp_path, monkeypatch):
     assert out["counts"]["todo"] == 1
     assert out["counts"]["done"] == 1
     assert out["counts"]["backlog"] == 0
+    assert out["contract_health"] == {
+        "source_count": 3,
+        "counted_sum": 3,
+        "unknown_statuses": [],
+        "invalid_priority_count": 0,
+        "missing_dep_count": 0,
+    }
 
     by_id = {it["id"]: it for it in out["items"]}
     assert set(by_id) == {"f-a", "f-b", "f-c"}
@@ -141,12 +148,44 @@ def test_read_items_counts_and_shape(tmp_path, monkeypatch):
     assert by_id["f-a"]["excerpt"] == "Ziel"  # body starts with "## Ziel"
 
 
+def test_read_items_reports_contract_drift_without_remapping_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+    _write(tmp_path, "f-a.md", id="f-a", title="A", status="decided",
+           priority="urgent", dependsOn="[missing-one]", planGate="true",
+           created="2026-06-01")
+    _write(tmp_path, "f-b.md", id="f-b", title="B", status="planning",
+           priority="medium", dependsOn="[f-a, missing-two]", planGate="false",
+           created="2026-06-02")
+    _write(tmp_path, "f-c.md", id="f-c", title="C", status="obsolete",
+           priority="low", dependsOn="[]", planGate="false",
+           created="2026-06-03")
+
+    out = _read_items_sync(0)
+
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id["f-a"]["status"] == "decided"
+    assert by_id["f-b"]["status"] == "planning"
+    assert by_id["f-c"]["status"] == "obsolete"
+    assert out["counts"] == {"backlog": 0, "todo": 0, "doing": 0, "review": 0, "done": 0}
+    assert out["contract_health"]["source_count"] == 3
+    assert out["contract_health"]["counted_sum"] == 0
+    assert out["contract_health"]["invalid_priority_count"] == 1
+    assert out["contract_health"]["missing_dep_count"] == 2
+    assert out["contract_health"]["unknown_statuses"] == [
+        {"status": "decided", "count": 1, "ids": ["f-a"]},
+        {"status": "obsolete", "count": 1, "ids": ["f-c"]},
+        {"status": "planning", "count": 1, "ids": ["f-b"]},
+    ]
+
+
 def test_read_items_missing_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path / "nope"))
     monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
     out = _read_items_sync(0)
     assert out["items"] == []
     assert out["counts"]["doing"] == 0
+    assert out["contract_health"]["source_count"] == 0
     assert out["source"]["ref"] == "missing"
     assert out["error"]
 
@@ -212,6 +251,50 @@ def test_detail_route_returns_item_body_gate_and_root(tmp_path, monkeypatch):
     assert data["gate"] == "venv/bin/python -m pytest -q"
     assert data["root"] == "/tmp/project"
     assert data["body"].strip()
+
+
+def test_detail_route_returns_evidence_links_owner_and_source(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+    (tmp_path / "f-a.md").write_text(
+        "\n".join([
+            "---",
+            "id: f-a",
+            "title: A",
+            "status: done",
+            "priority: high",
+            "owner: Piet",
+            "source: MiniMax-Audit",
+            "closed: 2026-06-04",
+            "---",
+            "",
+            "**Receipt:** Commit abc123 live verified",
+            "",
+            "Siehe [Build Log](https://example.test/build).",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    app = FastAPI()
+    register_orchestration_backlog_routes(app)
+    client = TestClient(app)
+
+    data = client.get("/api/orchestration/backlog/f-a").json()
+    assert data["owner"] == "Piet"
+    assert data["source"] == "MiniMax-Audit"
+    assert data["closed"] == "2026-06-04"
+    assert data["lastProof"] == "2026-06-04"
+    assert data["proofs"][0] == "closed: 2026-06-04"
+    assert "Receipt: Commit abc123 live verified" in data["proofs"]
+    assert data["links"] == [{"label": "Build Log", "href": "https://example.test/build"}]
 
 
 def test_detail_route_rejects_traversal_ids(tmp_path, monkeypatch):
