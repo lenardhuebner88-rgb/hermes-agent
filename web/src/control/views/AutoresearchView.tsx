@@ -11,7 +11,7 @@ import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -50,6 +50,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   // operator actually sees, never the backlog hidden in the collapsed <details>.
   const visibleProposalIds = useMemo(() => relevanceQueue.shortlist.map((item) => item.proposal.id), [relevanceQueue.shortlist]);
   const visibleProposals = useMemo(() => relevanceQueue.shortlist.map((item) => item.proposal), [relevanceQueue.shortlist]);
+  const batchSafeVisibleProposalIds = useMemo(() => getBatchSafeVisibleProposalIds(visibleProposals), [visibleProposals]);
+  const manualReviewVisibleCount = visibleProposalIds.length - batchSafeVisibleProposalIds.length;
   const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
@@ -95,13 +97,14 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       decidedCount: applied.length + skipped.length + reverted.length,
       selectedCount: selectedIds.length,
       visibleCount: visibleProposalIds.length,
+      batchSafeVisibleCount: batchSafeVisibleProposalIds.length,
       highPriorityCount,
       selectedManualReviewCount,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
       topTitle: topProposal?.title?.trim() || topProposal?.target,
     }),
-    [applied.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+    [applied.length, batchSafeVisibleProposalIds.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
   );
   const decisionGuide = useMemo(
     () => getAutoresearchDecisionGuide({
@@ -239,7 +242,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     setSelectedProposalIds((current) => toggleProposalSelection(current, proposalId, selected));
   };
 
-  const selectQueue = () => setSelectedProposalIds(selectVisibleProposals(visibleProposalIds));
+  const selectQueue = () => setSelectedProposalIds(selectVisibleProposals(batchSafeVisibleProposalIds));
   const clearSelection = () => setSelectedProposalIds(clearProposalSelection());
   const confirmSelected = async () => {
     await store.confirmBatch(selectedIds);
@@ -261,12 +264,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       if (action === "select-top" && top) {
         setSelectedProposalIds((current) => toggleProposalSelection(current, top.id, true));
       }
-      if (action === "select-visible") setSelectedProposalIds(selectVisibleProposals(visibleProposalIds));
+      if (action === "select-visible") setSelectedProposalIds(selectVisibleProposals(batchSafeVisibleProposalIds));
       if (action === "clear-selection") setSelectedProposalIds(clearProposalSelection());
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, relevanceQueue.shortlist, selectedIds.length, visibleProposalIds]);
+  }, [batchSafeVisibleProposalIds, open, relevanceQueue.shortlist, selectedIds.length, visibleProposalIds]);
 
   const pruneAutoresearch = async () => {
     setPruneBusy(true);
@@ -460,8 +463,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {store.loading ? <Spinner /> : null}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
-              <Button outlined className="hc-hit" onClick={selectQueue} disabled={visibleProposalIds.length === 0 || batchBusy} prefix={<ListChecks className="h-4 w-4" />}>
-                {de.autoresearch.selectAllVisible}
+              <Button outlined className="hc-hit" onClick={selectQueue} disabled={batchSafeVisibleProposalIds.length === 0 || batchBusy} title={manualReviewVisibleCount > 0 ? "Markiert nur sichtbare Vorschläge ohne Code, Hoch+-Risiko oder Safety-Bezug." : undefined} prefix={<ListChecks className="h-4 w-4" />}>
+                {manualReviewVisibleCount > 0 ? `Sichere markieren (${batchSafeVisibleProposalIds.length})` : de.autoresearch.selectAllVisible}
               </Button>
               <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
                 {de.autoresearch.clearSelection}
@@ -470,6 +473,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {de.autoresearch.batchConfirm}
               </Button>
             </div>
+            {manualReviewVisibleCount > 0 ? <p className="max-w-sm text-xs leading-5 hc-dim">{manualReviewVisibleCount} sichtbare {manualReviewVisibleCount === 1 ? "Karte bleibt" : "Karten bleiben"} Einzelreview und werden nicht gesammelt markiert.</p> : null}
           </div>
         </div>
         <ReviewFlowPanel

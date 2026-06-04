@@ -4,7 +4,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
@@ -203,6 +203,28 @@ describe("AutoresearchView review flow", () => {
     expect(flow.detail).toContain("entscheide sie direkt auf der Karte");
   });
 
+  it("turns mixed visible cards into a safe batch-selection step", () => {
+    const flow = getAutoresearchReviewFlow({
+      openCount: 5,
+      decidedCount: 2,
+      selectedCount: 0,
+      visibleCount: 4,
+      batchSafeVisibleCount: 2,
+      highPriorityCount: 0,
+      backlogCount: 1,
+      revertedCount: 0,
+      topTitle: "Any proposal",
+    });
+
+    expect(flow.tone).toBe("emerald");
+    expect(flow.primaryAction).toBe("select-visible");
+    expect(flow.primaryLabel).toBe("Sichere markieren");
+    expect(flow.detail).toContain("2 sichtbare Karten");
+    expect(flow.detail).toContain("2 bleiben bewusst Einzelreview");
+    expect(flow.steps.find((step) => step.label === "Sicher")?.value).toBe("2");
+    expect(flow.steps.find((step) => step.label === "Einzeln")?.tone).toBe("amber");
+  });
+
   it("turns an empty queue into an actionable next step", () => {
     const flow = getAutoresearchReviewFlow({
       openCount: 0,
@@ -295,6 +317,18 @@ describe("AutoresearchView decision guide", () => {
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 0, busy: false })).toBe(true);
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 1, busy: false })).toBe(false);
     expect(canBatchConfirmAutoresearchSelection({ selectedCount: 0, selectedManualReviewCount: 0, busy: false })).toBe(false);
+  });
+
+  it("selects only visible proposals that can be batch-confirmed safely", () => {
+    const ids = getBatchSafeVisibleProposalIds([
+      proposal({ id: "safe-low", severity: "low" }),
+      proposal({ id: "safe-medium", severity: "medium" }),
+      proposal({ id: "code", mode: "code", severity: "medium" }),
+      proposal({ id: "high-risk", severity: "high" }),
+      proposal({ id: "safety", severity: "low", title: "Token safety note" }),
+    ]);
+
+    expect(ids).toEqual(["safe-low", "safe-medium"]);
   });
 
   it("blocks global apply-all when open skill proposals need manual review", () => {

@@ -25,6 +25,10 @@ export function canApplyAllOpenSkillProposals(input: {
   return input.openSkillProposals.length > 0 && !input.busy && input.openSkillProposals.every((proposal) => !proposalNeedsManualReview(proposal));
 }
 
+export function getBatchSafeVisibleProposalIds(visibleProposals: readonly Proposal[]): string[] {
+  return visibleProposals.filter((proposal) => !proposalNeedsManualReview(proposal)).map((proposal) => proposal.id);
+}
+
 export function proposalNeedsManualReview(proposal: Proposal): boolean {
   if (proposal.mode !== "skill") return true;
   if (SEVERITY_ORDER[getProposalSeverity(proposal)] >= SEVERITY_ORDER.high) return true;

@@ -22,6 +22,7 @@ export function getAutoresearchReviewFlow(input: {
   decidedCount: number;
   selectedCount: number;
   visibleCount: number;
+  batchSafeVisibleCount?: number;
   highPriorityCount: number;
   selectedManualReviewCount?: number;
   backlogCount: number;
@@ -32,6 +33,8 @@ export function getAutoresearchReviewFlow(input: {
   const progressPercent = total > 0 ? Math.round((input.decidedCount / total) * 100) : 100;
   const progressLabel = total > 0 ? `${input.decidedCount} von ${total} entschieden` : "Keine offenen Entscheidungen";
   const top = input.topTitle?.trim() || "Top-Karte";
+  const batchSafeVisibleCount = Math.max(0, Math.round(input.batchSafeVisibleCount ?? input.visibleCount));
+  const manualReviewVisibleCount = Math.max(0, input.visibleCount - batchSafeVisibleCount);
 
   if (input.openCount === 0) {
     return {
@@ -105,15 +108,18 @@ export function getAutoresearchReviewFlow(input: {
 
   return {
     tone: "emerald",
-    title: `${input.openCount} normale Entscheidungen offen.`,
-    detail: `${top} ist ein guter Start. Ohne Hoch+-Risiko kannst du sichtbare Skill-Karten gesammelt markieren.`,
+    title: manualReviewVisibleCount > 0 ? "Sichere Sammelauswahl möglich." : `${input.openCount} normale Entscheidungen offen.`,
+    detail: manualReviewVisibleCount > 0
+      ? `${batchSafeVisibleCount} sichtbare Karten sind für Sammelreview geeignet; ${manualReviewVisibleCount} bleiben bewusst Einzelreview.`
+      : `${top} ist ein guter Start. Ohne Hoch+-Risiko kannst du sichtbare Skill-Karten gesammelt markieren.`,
     progressLabel,
     progressPercent,
-    primaryAction: input.visibleCount > 1 ? "select-visible" : "select-top",
-    primaryLabel: input.visibleCount > 1 ? "Sichtbare markieren" : "Top auswählen",
+    primaryAction: batchSafeVisibleCount > 1 ? "select-visible" : "select-top",
+    primaryLabel: batchSafeVisibleCount > 1 ? "Sichere markieren" : "Top auswählen",
     steps: [
       { label: "Offen", value: String(input.openCount), tone: "emerald" },
-      { label: "Sichtbar", value: String(input.visibleCount), tone: "cyan" },
+      { label: "Sicher", value: String(batchSafeVisibleCount), tone: batchSafeVisibleCount > 0 ? "cyan" : "zinc" },
+      { label: "Einzeln", value: String(manualReviewVisibleCount), tone: manualReviewVisibleCount > 0 ? "amber" : "emerald" },
       { label: "Backlog", value: String(input.backlogCount), tone: input.backlogCount > 0 ? "zinc" : "emerald" },
     ],
   };
