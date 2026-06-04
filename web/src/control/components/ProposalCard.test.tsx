@@ -147,4 +147,36 @@ describe("ProposalCard", () => {
     expect(codeHtml).toContain("startet direkt die Test-Suite");
     expect(codeHtml).toContain("automatisch zurückgerollt");
   });
+
+  it("renders a structured decision guide for non-technical review", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({ id: "guide-1", target: "hermes_cli/foo.py", mode: "code", severity: "high" })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(html).toContain("Entscheidungshilfe");
+    expect(html).toContain("Nutzen");
+    expect(html).toContain("Risiko");
+    expect(html).toContain("Empfohlen");
+    expect(html).toContain("Einzeln prüfen");
+    expect(html).toContain("Test-Suite");
+  });
+
+  it("shows reverted proposals as archive-first decisions", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({ id: "guide-2", target: "skill/foo", last_outcome: "reverted_no_improvement" })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(html).toContain("Archivieren empfohlen");
+    expect(html).toContain("automatisch ohne Verbesserung zurückgerollt");
+  });
 });

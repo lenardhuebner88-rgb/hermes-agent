@@ -1,6 +1,6 @@
 import type { AutoresearchState, ToneName } from "./types";
 
-export type AutoresearchRecommendationKind = "review" | "monitor" | "recover" | "generate";
+export type AutoresearchRecommendationKind = "review" | "monitor" | "recover" | "inspect" | "generate";
 
 export interface AutoresearchRecommendation {
   kind: AutoresearchRecommendationKind;
@@ -19,6 +19,7 @@ export function getAutoresearchRecommendation(input: {
   routeStatus?: string | null;
 }): AutoresearchRecommendation {
   const routeNeedsRecovery = !!input.routeStatus && input.routeStatus !== "configured";
+  const statusUnknown = !input.state && !input.routeStatus;
 
   if (input.state === "crashed" || routeNeedsRecovery) {
     return {
@@ -50,6 +51,16 @@ export function getAutoresearchRecommendation(input: {
         ? `${input.revertedCount} zurückgerollte Kandidaten sind bereits sicher aussortiert. Entscheide zuerst die offene Queue.`
         : "Lies zuerst die Begründung und den Diff der Top-Karte. Übernehmen ist gegatet, Überspringen räumt auf.",
       primaryLabel: "Queue öffnen",
+    };
+  }
+  if (statusUnknown) {
+    return {
+      kind: "inspect",
+      tone: "amber",
+      eyebrow: "Status offen",
+      title: "Erst Status prüfen.",
+      detail: "Der Autoresearch-Status ist noch nicht geladen. Warte kurz oder prüfe die Loop-Steuerung, bevor du neue Kandidaten startest.",
+      primaryLabel: "Status ansehen",
     };
   }
   return {

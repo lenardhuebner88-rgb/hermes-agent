@@ -150,7 +150,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       scrollTo("autoresearch-queue");
       return;
     }
-    if (recommendation.kind === "monitor" || recommendation.kind === "recover") {
+    if (recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect") {
       scrollTo("autoresearch-loop");
       return;
     }
@@ -249,7 +249,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <Metric label="Letzter Lauf" value={runs.data?.runs?.[0] ? formatRunTime(runs.data.runs[0].at) : "-"} />
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-              <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
+              <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
                 {recommendation.primaryLabel}
               </Button>
               <Button outlined className="hc-hit" onClick={() => scrollTo("autoresearch-queue")} disabled={open.length === 0} prefix={<ClipboardCheck className="h-4 w-4" />}>

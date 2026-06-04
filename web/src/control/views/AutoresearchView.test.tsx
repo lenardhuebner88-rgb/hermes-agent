@@ -100,4 +100,18 @@ describe("AutoresearchView cockpit recommendation", () => {
     expect(recommendation.kind).toBe("generate");
     expect(recommendation.primaryLabel).toBe("Vorschläge holen");
   });
+
+  it("does not claim everything is clean while status is still unknown", () => {
+    const recommendation = getAutoresearchRecommendation({
+      state: undefined,
+      openCount: 0,
+      revertedCount: 0,
+      loopRunning: false,
+      routeStatus: undefined,
+    });
+
+    expect(recommendation.kind).toBe("inspect");
+    expect(recommendation.title).toContain("Status prüfen");
+    expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
 });

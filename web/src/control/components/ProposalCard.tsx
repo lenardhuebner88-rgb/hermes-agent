@@ -7,7 +7,7 @@ import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
 import { getProposalSeverity, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
 import type { Density } from "../hooks/useDensity";
-import type { Proposal, ProposalSeverity } from "../lib/types";
+import type { Proposal, ProposalSeverity, ToneName } from "../lib/types";
 import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
 
 const SEVERITY_LABEL: Record<ProposalSeverity, string> = {
@@ -34,17 +34,54 @@ function proposalTitle(proposal: Proposal): string {
   return proposal.title?.trim() || `${proposal.target}${proposal.section ? ` · ${proposal.section}` : ""}`;
 }
 
-function decisionCopy(proposal: Proposal): string {
+interface DecisionGuide {
+  label: string;
+  tone: ToneName;
+  benefit: string;
+  risk: string;
+  next: string;
+  consequence: string;
+}
+
+function decisionGuide(proposal: Proposal, severity: ProposalSeverity): DecisionGuide {
   if (proposal.last_outcome === "reverted_no_improvement") {
-    return "Dieser Kandidat wurde automatisch zurückgerollt. Archivieren räumt ihn weg; erneut prüfen startet ihn bewusst neu.";
+    return {
+      label: "Archivieren empfohlen",
+      tone: "zinc",
+      benefit: "Der Kandidat ist bereits automatisch ohne Verbesserung zurückgerollt.",
+      risk: "Ein erneuter Lauf kostet Zeit und sollte nur bewusst passieren.",
+      next: "Archivieren, außer du willst genau diesen Kandidaten nochmal prüfen.",
+      consequence: "Archivieren räumt ihn weg; erneut prüfen startet ihn bewusst neu.",
+    };
   }
   if (proposal.mode === "code") {
-    return "Übernehmen schreibt die Code-Änderung und startet direkt die Test-Suite. Bei rotem Lauf wird automatisch zurückgerollt.";
+    return {
+      label: severity === "critical" || severity === "high" ? "Einzeln prüfen" : "Code-Gate prüfen",
+      tone: "amber",
+      benefit: "Behebt ein konkretes Code-Signal mit Test-Gate statt Blind-Änderung.",
+      risk: "Schreibt Code, läuft aber durch die Test-Suite und rollbackt bei rotem Lauf.",
+      next: "Diff kurz lesen, dann Code übernehmen, wenn die Änderung fachlich passt.",
+      consequence: "Übernehmen schreibt die Code-Änderung und startet direkt die Test-Suite. Bei rotem Lauf wird automatisch zurückgerollt.",
+    };
   }
   if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") {
-    return "Übernehmen legt den Härtungs-Test als geprüften Vorschlag an. Die Änderung ist auf Test-Sicherheit optimiert.";
+    return {
+      label: "Test-Härtung",
+      tone: "cyan",
+      benefit: "Macht vorhandene Tests stärker und reduziert stille Regressionen.",
+      risk: "Kann zusätzliche Laufzeit erzeugen, verändert aber keinen Produktivcode.",
+      next: "Übernehmen, wenn Ziel und Diff zum beschriebenen Risiko passen.",
+      consequence: "Übernehmen legt den Härtungs-Test als geprüften Vorschlag an. Die Änderung ist auf Test-Sicherheit optimiert.",
+    };
   }
-  return "Übernehmen schreibt den Skill-Vorschlag direkt. Überspringen verwirft ihn ohne weitere Wirkung.";
+  return {
+    label: severity === "critical" || severity === "high" ? "Sinnvoll übernehmen" : "Niedriges Risiko",
+    tone: severity === "critical" || severity === "high" ? "emerald" : "cyan",
+    benefit: "Verbessert Skill-Verhalten ohne Code-Gate oder Branch-Wechsel.",
+    risk: "Wirkt direkt auf den Skill-Text; Überspringen hat keine Nebenwirkung.",
+    next: "Begründung prüfen und übernehmen, wenn sie zur Arbeitsweise passt.",
+    consequence: "Übernehmen schreibt den Skill-Vorschlag direkt. Überspringen verwirft ihn ohne weitere Wirkung.",
+  };
 }
 
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
@@ -57,6 +94,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const isActionable = proposal.status === "proposed";
   const category = proposal.category?.trim();
   const severity = getProposalSeverity(proposal);
+  const guide = decisionGuide(proposal, severity);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   return (
@@ -96,6 +134,8 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         ) : null}
       </div>
 
+      {!isDone ? <DecisionGuidePanel guide={guide} /> : null}
+
       {evidence ? (
         <div className="space-y-1">
           <p className="hc-eyebrow">{de.autoresearch.evidence}</p>
@@ -125,8 +165,8 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         <ToneCallout tone="violet"><Spinner />{proposal.result || de.autoresearch.codeGateTesting}</ToneCallout>
       ) : isActionable ? (
         <div className="space-y-3">
-          <ToneCallout tone={isReverted ? "zinc" : isCode ? "amber" : "cyan"}>
-            <span className="font-semibold">Entscheidung:</span> {decisionCopy(proposal)}
+          <ToneCallout tone={guide.tone}>
+            <span className="font-semibold">Entscheidung:</span> {guide.consequence}
           </ToneCallout>
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
@@ -139,5 +179,30 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         </div>
       ) : null}
     </article>
+  );
+}
+
+function DecisionGuidePanel({ guide }: { guide: DecisionGuide }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[.025] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="hc-eyebrow">Entscheidungshilfe</p>
+        <StatusPill tone={guide.tone} label={guide.label} />
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        <DecisionFact label="Nutzen" value={guide.benefit} />
+        <DecisionFact label="Risiko" value={guide.risk} />
+        <DecisionFact label="Empfohlen" value={guide.next} />
+      </div>
+    </div>
+  );
+}
+
+function DecisionFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md border border-white/10 bg-black/20 px-3 py-2">
+      <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{label}</p>
+      <p className="mt-1 text-sm leading-5 hc-soft">{value}</p>
+    </div>
   );
 }
