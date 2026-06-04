@@ -519,8 +519,6 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         ) : null}
       </section>
 
-      <LaneModelPanel />
-
       <section id="autoresearch-loop" className="hc-card scroll-mt-6 p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1 space-y-3">
@@ -567,6 +565,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           </div>
         </div>
       </section>
+
+      <LaneModelPanel />
 
       <section id="autoresearch-deep-audit" className="hc-card scroll-mt-6 p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
