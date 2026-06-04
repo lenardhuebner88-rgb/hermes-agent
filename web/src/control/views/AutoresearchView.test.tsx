@@ -4,7 +4,9 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
+import type { AutoresearchRun } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
 describe("AutoresearchView Deep-Audit", () => {
@@ -202,5 +204,53 @@ describe("AutoresearchView run guidance", () => {
     expect(guidance.tone).toBe("amber");
     expect(guidance.label).toBe("Auto-Apply aktiv");
     expect(guidance.safety).toContain("f-test-foundry");
+  });
+});
+
+describe("AutoresearchView run summary", () => {
+  const baseRun: AutoresearchRun = {
+    at: "2026-06-04T20:00:00Z",
+    lane: "skill",
+    request_id: "r1",
+    tokens: 1200,
+    proposed: 0,
+    scanned: 4,
+    errors: 0,
+  };
+
+  it("tells the operator to review when the latest run produced proposals", () => {
+    const summary = getAutoresearchRunSummary({
+      runs: [{ ...baseRun, proposed: 3 }],
+      acceptanceRate: 0.6,
+      tokensPerApplied: 20_000,
+    });
+
+    expect(summary.tone).toBe("emerald");
+    expect(summary.label).toBe("Hat geliefert");
+    expect(summary.next).toContain("Queue zuerst leeren");
+  });
+
+  it("prioritizes error investigation before more runs", () => {
+    const summary = getAutoresearchRunSummary({
+      runs: [{ ...baseRun, errors: 2 }],
+      acceptanceRate: null,
+      tokensPerApplied: null,
+    });
+
+    expect(summary.tone).toBe("red");
+    expect(summary.title).toContain("Fehler prüfen");
+    expect(summary.next).toContain("Receipt prüfen");
+  });
+
+  it("warns when a run spent many tokens without producing proposals", () => {
+    const summary = getAutoresearchRunSummary({
+      runs: [{ ...baseRun, tokens: 220_000, proposed: 0 }],
+      acceptanceRate: null,
+      tokensPerApplied: null,
+    });
+
+    expect(summary.tone).toBe("amber");
+    expect(summary.label).toBe("Teuer ohne Treffer");
+    expect(summary.next).toContain("Scope enger");
   });
 });

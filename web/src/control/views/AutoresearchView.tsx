@@ -14,6 +14,7 @@ import { KEYMAP } from "../lib/keymap";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
+import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun } from "../lib/types";
@@ -1043,6 +1044,11 @@ function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: P
   const totalTokens = sumRunTokens(runs);
   const recent = summarizeRecentRuns(runs, 7);
   const proposalRoi = summarizeProposalRoi(proposals, recent.tokens);
+  const runSummary = getAutoresearchRunSummary({
+    runs,
+    acceptanceRate: proposalRoi.acceptanceRate,
+    tokensPerApplied: proposalRoi.tokensPerApplied,
+  });
   return (
     <section className="hc-card p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -1058,6 +1064,7 @@ function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: P
         </div>
         {totalTokens > 0 ? <span className="hc-mono text-xs hc-soft">{de.autoresearch.runsTokensTotal}: {totalTokens.toLocaleString("de-DE")}</span> : null}
       </div>
+      <RunSummaryPanel summary={runSummary} />
       {runs.length === 0 ? (
         <p className="text-sm hc-soft">{de.autoresearch.recentRunsEmpty}</p>
       ) : (
@@ -1099,5 +1106,31 @@ function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: P
         </div>
       )}
     </section>
+  );
+}
+
+function RunSummaryPanel({ summary }: { summary: AutoresearchRunSummary }) {
+  return (
+    <div className="mb-4 rounded-lg border border-white/10 bg-white/[.025] p-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Lauf-Auswertung</p>
+            <StatusPill tone={summary.tone} label={summary.label} />
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{summary.title}</h3>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{summary.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Nächster Schritt:</span> {summary.next}</p>
+        </div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-5 lg:min-w-[520px]">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}>
+              <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
+              <p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
