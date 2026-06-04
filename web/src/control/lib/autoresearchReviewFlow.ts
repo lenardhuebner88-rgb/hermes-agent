@@ -12,7 +12,7 @@ export interface AutoresearchReviewFlow {
   detail: string;
   progressLabel: string;
   progressPercent: number;
-  primaryAction: "select-top" | "select-visible" | "confirm-selection" | "archive-reverted" | "generate";
+  primaryAction: "select-top" | "select-visible" | "confirm-selection" | "clear-selection" | "archive-reverted" | "generate";
   primaryLabel: string;
   steps: AutoresearchReviewStep[];
 }
@@ -23,6 +23,7 @@ export function getAutoresearchReviewFlow(input: {
   selectedCount: number;
   visibleCount: number;
   highPriorityCount: number;
+  selectedManualReviewCount?: number;
   backlogCount: number;
   revertedCount: number;
   topTitle?: string | null;
@@ -52,6 +53,23 @@ export function getAutoresearchReviewFlow(input: {
   }
 
   if (input.selectedCount > 0) {
+    const selectedManualReviewCount = Math.max(0, Math.round(input.selectedManualReviewCount ?? 0));
+    if (selectedManualReviewCount > 0) {
+      return {
+        tone: "amber",
+        title: `${selectedManualReviewCount} markierte Karte muss einzeln geprüft werden.`,
+        detail: "Die Auswahl enthält Code, Hoch+-Risiko oder Safety-Bezug. Entferne sie aus der Sammelauswahl oder entscheide sie direkt auf der Karte.",
+        progressLabel,
+        progressPercent,
+        primaryAction: "clear-selection",
+        primaryLabel: "Auswahl zurücksetzen",
+        steps: [
+          { label: "Auswahl", value: String(input.selectedCount), tone: "cyan" },
+          { label: "Einzeln", value: String(selectedManualReviewCount), tone: "amber" },
+          { label: "Sichtbar", value: String(input.visibleCount), tone: "zinc" },
+        ],
+      };
+    }
     return {
       tone: "cyan",
       title: `${input.selectedCount} zur Entscheidung markiert.`,

@@ -4,11 +4,36 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
+import { canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
-import type { AutoresearchRun } from "../lib/types";
+import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
+
+function proposal(overrides: Partial<Proposal> = {}): Proposal {
+  return {
+    id: overrides.id ?? "p1",
+    target: overrides.target ?? "skill.md",
+    section: overrides.section ?? "examples",
+    title: overrides.title ?? "Better example",
+    category: overrides.category ?? "missing_section",
+    severity: overrides.severity ?? "low",
+    evidence: overrides.evidence ?? null,
+    new_text: overrides.new_text ?? "New text",
+    proposal_type: overrides.proposal_type ?? "skill_section",
+    rationale_plain: overrides.rationale_plain ?? "Clearer operator guidance.",
+    diff_before_after: overrides.diff_before_after ?? "",
+    rank_score: overrides.rank_score ?? null,
+    mode: overrides.mode ?? "skill",
+    status: overrides.status ?? "proposed",
+    last_outcome: overrides.last_outcome ?? null,
+    result: overrides.result ?? null,
+    created_at: overrides.created_at ?? "2026-06-04T20:00:00Z",
+    applied_at: overrides.applied_at ?? null,
+    gate: overrides.gate ?? null,
+  };
+}
 
 describe("AutoresearchView Deep-Audit", () => {
   it("keeps the deep-audit run label and tone", () => {
@@ -159,6 +184,25 @@ describe("AutoresearchView review flow", () => {
     expect(flow.progressLabel).toBe("2 von 7 entschieden");
   });
 
+  it("does not offer batch confirmation for selected manual-review proposals", () => {
+    const flow = getAutoresearchReviewFlow({
+      openCount: 5,
+      decidedCount: 2,
+      selectedCount: 2,
+      visibleCount: 5,
+      highPriorityCount: 1,
+      selectedManualReviewCount: 1,
+      backlogCount: 1,
+      revertedCount: 0,
+      topTitle: "Risky proposal",
+    });
+
+    expect(flow.tone).toBe("amber");
+    expect(flow.primaryAction).toBe("clear-selection");
+    expect(flow.primaryLabel).toBe("Auswahl zurücksetzen");
+    expect(flow.detail).toContain("entscheide sie direkt auf der Karte");
+  });
+
   it("turns an empty queue into an actionable next step", () => {
     const flow = getAutoresearchReviewFlow({
       openCount: 0,
@@ -174,6 +218,83 @@ describe("AutoresearchView review flow", () => {
     expect(flow.primaryAction).toBe("generate");
     expect(flow.primaryLabel).toBe("Neue Kandidaten holen");
     expect(flow.progressPercent).toBe(100);
+  });
+});
+
+describe("AutoresearchView decision guide", () => {
+  it("allows batch review only for low-risk visible skill proposals", () => {
+    const guide = getAutoresearchDecisionGuide({
+      visibleProposals: [proposal({ id: "p1", severity: "low" }), proposal({ id: "p2", severity: "medium" })],
+      selectedProposals: [],
+      openCount: 2,
+      selectedCount: 0,
+      backlogCount: 0,
+      revertedCount: 0,
+      topTitle: "Better example",
+    });
+
+    expect(guide.tone).toBe("emerald");
+    expect(guide.primaryLabel).toBe("Sammelreview");
+    expect(guide.summary).toContain("gesammelt markieren");
+    expect(guide.facts.find((fact) => fact.label === "Sammeln ok")?.value).toBe("2");
+  });
+
+  it("pushes code, high-risk, or safety proposals into manual review", () => {
+    const guide = getAutoresearchDecisionGuide({
+      visibleProposals: [
+        proposal({ id: "code", mode: "code", severity: "medium", title: "Patch retry loop" }),
+        proposal({ id: "high", severity: "high", title: "Credential warning" }),
+        proposal({ id: "safety", severity: "low", title: "Token safety note", rationale_plain: "Mentions token risk." }),
+      ],
+      selectedProposals: [],
+      openCount: 3,
+      selectedCount: 0,
+      backlogCount: 1,
+      revertedCount: 0,
+      topTitle: "Patch retry loop",
+    });
+
+    expect(guide.tone).toBe("amber");
+    expect(guide.primaryLabel).toBe("Einzelreview");
+    expect(guide.next).toContain("Patch retry loop");
+    expect(guide.facts.find((fact) => fact.label === "Einzeln lesen")?.value).toBe("3");
+  });
+
+  it("explains that selected batch actions only touch the current selection", () => {
+    const guide = getAutoresearchDecisionGuide({
+      visibleProposals: [proposal({ id: "p1" }), proposal({ id: "p2" })],
+      selectedProposals: [proposal({ id: "p1" }), proposal({ id: "p2" })],
+      openCount: 4,
+      selectedCount: 2,
+      backlogCount: 2,
+      revertedCount: 0,
+    });
+
+    expect(guide.tone).toBe("cyan");
+    expect(guide.headline).toContain("2 markiert");
+    expect(guide.summary).toContain("nur markierte Karten");
+  });
+
+  it("keeps selected risky proposals in manual review guidance", () => {
+    const guide = getAutoresearchDecisionGuide({
+      visibleProposals: [proposal({ id: "p1", severity: "low" })],
+      selectedProposals: [proposal({ id: "backlog-code", mode: "code", severity: "medium", title: "Hidden code patch" })],
+      openCount: 3,
+      selectedCount: 1,
+      backlogCount: 2,
+      revertedCount: 0,
+    });
+
+    expect(guide.tone).toBe("amber");
+    expect(guide.headline).toContain("Einzelreview-Pflicht");
+    expect(guide.summary).toContain("Sammel-Übernehmen wäre zu pauschal");
+    expect(guide.facts.find((fact) => fact.label === "Einzeln lesen")?.value).toBe("1");
+  });
+
+  it("blocks the toolbar batch confirm action for risky selections", () => {
+    expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 0, busy: false })).toBe(true);
+    expect(canBatchConfirmAutoresearchSelection({ selectedCount: 2, selectedManualReviewCount: 1, busy: false })).toBe(false);
+    expect(canBatchConfirmAutoresearchSelection({ selectedCount: 0, selectedManualReviewCount: 0, busy: false })).toBe(false);
   });
 });
 

@@ -12,6 +12,7 @@ import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWe
 import type { CodeWeaknessScope } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
+import { canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getTestFoundryGuidance, type AutoresearchRunGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -49,6 +50,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
   // operator actually sees, never the backlog hidden in the collapsed <details>.
   const visibleProposalIds = useMemo(() => relevanceQueue.shortlist.map((item) => item.proposal.id), [relevanceQueue.shortlist]);
+  const visibleProposals = useMemo(() => relevanceQueue.shortlist.map((item) => item.proposal), [relevanceQueue.shortlist]);
   const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
   const statusTone = status.data?.state === "crashed" ? "red" : status.data?.heartbeat_fresh ? "cyan" : "amber";
   const loop = describeLoopStatus(status.data);
@@ -81,6 +83,14 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const [pruneMessage, setPruneMessage] = useState<PruneMessage | null>(null);
   const [bulkRevertedBusy, setBulkRevertedBusy] = useState(false);
   const selectedIds = useMemo(() => queueProposalIds.filter((id) => selectedProposalIds.has(id)), [queueProposalIds, selectedProposalIds]);
+  const selectedProposals = useMemo(() => {
+    const byId = new Map([...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => [item.proposal.id, item.proposal]));
+    return selectedIds.flatMap((id) => {
+      const proposal = byId.get(id);
+      return proposal ? [proposal] : [];
+    });
+  }, [relevanceQueue.backlog, relevanceQueue.shortlist, selectedIds]);
+  const selectedManualReviewCount = useMemo(() => selectedProposals.filter(proposalNeedsManualReview).length, [selectedProposals]);
   const reviewFlow = useMemo(
     () => getAutoresearchReviewFlow({
       openCount: open.length,
@@ -88,13 +98,31 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       selectedCount: selectedIds.length,
       visibleCount: visibleProposalIds.length,
       highPriorityCount,
+      selectedManualReviewCount,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
       topTitle: topProposal?.title?.trim() || topProposal?.target,
     }),
-    [applied.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+    [applied.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+  );
+  const decisionGuide = useMemo(
+    () => getAutoresearchDecisionGuide({
+      visibleProposals,
+      selectedProposals,
+      openCount: open.length,
+      selectedCount: selectedIds.length,
+      backlogCount: relevanceQueue.summary.remaining,
+      revertedCount: reverted.length,
+      topTitle: topProposal?.title?.trim() || topProposal?.target,
+    }),
+    [open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
   );
   const batchBusy = store.busy === "confirm-batch";
+  const canConfirmSelection = canBatchConfirmAutoresearchSelection({
+    selectedCount: selectedIds.length,
+    selectedManualReviewCount,
+    busy: batchBusy,
+  });
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
@@ -254,6 +282,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     }
     if (reviewFlow.primaryAction === "select-visible") {
       selectQueue();
+      return;
+    }
+    if (reviewFlow.primaryAction === "clear-selection") {
+      clearSelection();
       return;
     }
     if (reviewFlow.primaryAction === "archive-reverted") {
@@ -522,7 +554,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
                 {de.autoresearch.clearSelection}
               </Button>
-              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={selectedIds.length === 0 || batchBusy} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={!canConfirmSelection} title={selectedManualReviewCount > 0 ? "Riskante Auswahl einzeln prüfen oder Auswahl leeren." : undefined} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
                 {de.autoresearch.batchConfirm}
               </Button>
             </div>
@@ -533,6 +565,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           busy={batchBusy || bulkRevertedBusy || !!store.busy}
           onPrimary={runReviewFlowPrimary}
         />
+        <DecisionGuidePanel guide={decisionGuide} />
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
@@ -633,11 +666,13 @@ function ReviewFlowPanel({ flow, busy, onPrimary }: { flow: AutoresearchReviewFl
     ? <CheckCheck className="h-4 w-4" />
     : flow.primaryAction === "select-visible"
       ? <ListChecks className="h-4 w-4" />
-      : flow.primaryAction === "archive-reverted"
-        ? <Archive className="h-4 w-4" />
-        : flow.primaryAction === "generate"
-          ? <Sparkles className="h-4 w-4" />
-          : <ClipboardCheck className="h-4 w-4" />;
+      : flow.primaryAction === "clear-selection"
+        ? <X className="h-4 w-4" />
+        : flow.primaryAction === "archive-reverted"
+          ? <Archive className="h-4 w-4" />
+          : flow.primaryAction === "generate"
+            ? <Sparkles className="h-4 w-4" />
+            : <ClipboardCheck className="h-4 w-4" />;
 
   return (
     <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] p-3">
@@ -663,6 +698,43 @@ function ReviewFlowPanel({ flow, busy, onPrimary }: { flow: AutoresearchReviewFl
           <Button className="hc-hit sm:col-span-3" onClick={onPrimary} disabled={busy} prefix={busy ? <Spinner /> : icon}>
             {flow.primaryLabel}
           </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DecisionGuidePanel({ guide }: { guide: AutoresearchDecisionGuide }) {
+  const icon = guide.tone === "emerald"
+    ? <ShieldCheck className="h-4 w-4" />
+    : guide.tone === "cyan"
+      ? <ClipboardCheck className="h-4 w-4" />
+      : guide.tone === "amber"
+        ? <Target className="h-4 w-4" />
+        : <X className="h-4 w-4" />;
+
+  return (
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(guide.tone))}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="grid h-8 w-8 place-items-center rounded-md border border-white/10 bg-black/20 text-white">
+              {icon}
+            </span>
+            <p className="hc-eyebrow">Heute tun</p>
+            <StatusPill tone={guide.tone} label={guide.primaryLabel} />
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{guide.headline}</h3>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{guide.summary}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Nächster sicherer Schritt:</span> {guide.next}</p>
+        </div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-3 lg:min-w-[360px]">
+          {guide.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}>
+              <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
         </div>
       </div>
     </div>
