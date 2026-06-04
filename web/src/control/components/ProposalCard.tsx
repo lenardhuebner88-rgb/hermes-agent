@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
 import { getProposalSeverity, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
+import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Density } from "../hooks/useDensity";
 import type { Proposal, ProposalSeverity, ToneName } from "../lib/types";
 import { DiffView, ModeBadge, StatusPill, ToneCallout } from "./atoms";
@@ -92,7 +93,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const isDone = proposal.status === "applied" || proposal.status === "skipped";
   const isReverted = proposal.status === "proposed" && proposal.last_outcome === "reverted_no_improvement";
   const isActionable = proposal.status === "proposed";
-  const category = proposal.category?.trim();
+  const category = formatProposalCategory(proposal.category);
   const severity = getProposalSeverity(proposal);
   const guide = decisionGuide(proposal, severity);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
@@ -104,7 +105,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
           <div className="flex flex-wrap items-center gap-2">
             {isTestHardening ? <Badge tone="success">Test-Härtung</Badge> : <ModeBadge mode={proposal.mode === "code" ? "code" : "skill"} />}
             <StatusPill tone={severityTone(severity)} label={`${de.autoresearch.severity}: ${SEVERITY_LABEL[severity]}`} />
-            {category ? <StatusPill tone="cyan" label={`${de.autoresearch.category}: ${category}`} /> : null}
+            {category ? <StatusPill tone="cyan" label={`${de.autoresearch.category}: ${category.label}`} /> : null}
             {priorityGroup ? <StatusPill tone={priorityGroup.tone} label={priorityGroup.label} /> : null}
             {batchStatus?.status === "pending" ? <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]"><Spinner />{de.autoresearch.batchPending}</span> : null}
             {batchStatus?.status === "ok" ? <StatusPill tone="emerald" label={de.autoresearch.batchOk} /> : null}
@@ -115,6 +116,11 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
             {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
           <h3 className="text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
+          {category?.help ? (
+            <p className="max-w-3xl text-xs leading-5 hc-dim">
+              <span className="font-semibold text-zinc-300">{category.label}:</span> {category.help}
+            </p>
+          ) : null}
           <div className="space-y-1">
             <p className="hc-eyebrow">{de.autoresearch.why}</p>
             <p className="text-sm leading-6 hc-soft">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>

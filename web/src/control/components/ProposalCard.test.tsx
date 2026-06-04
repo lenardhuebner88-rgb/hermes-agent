@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ProposalCard } from "./ProposalCard";
 import { de } from "../i18n/de";
+import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Proposal } from "../lib/types";
 
 function proposal(overrides: Partial<Proposal> & Pick<Proposal, "id" | "target">): Proposal {
@@ -24,6 +25,29 @@ describe("ProposalCard", () => {
       <ProposalCard proposal={proposal({ id: "p1", target: "skill/foo", category: "Sicherheit" })} density="airy" onApply={noop} onSkip={noop} />,
     );
     expect(html).toContain(`${de.autoresearch.category}: Sicherheit`);
+  });
+
+  it("turns backend category keys into plain operator labels", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "p1b", target: "skill/foo", category: "info_leak" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(html).toContain(`${de.autoresearch.category}: Geheimnis sichtbar`);
+    expect(html).toContain("Token, Zugangsdaten oder interne Details");
+    expect(html).not.toContain(`${de.autoresearch.category}: info_leak`);
+  });
+
+  it("formats unknown category keys while preserving the backend key for correlation", () => {
+    expect(formatProposalCategory("custom_backend_signal")?.label).toBe("Custom Backend Signal");
+    const html = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "p1c", target: "skill/foo", category: "custom_backend_signal" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(html).toContain(`${de.autoresearch.category}: Custom Backend Signal`);
+    expect(html).toContain("Backend-Kategorie: custom_backend_signal");
+  });
+
+  it("keeps missing and unclear trigger explanations distinct", () => {
+    expect(formatProposalCategory("missing_trigger")?.help).toContain("überhaupt starten");
+    expect(formatProposalCategory("unclear_trigger")?.help).toContain("nicht eindeutig genug");
   });
 
   it("omits the category badge when the category is empty or whitespace", () => {
