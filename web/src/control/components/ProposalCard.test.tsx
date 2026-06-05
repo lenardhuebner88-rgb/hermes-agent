@@ -121,7 +121,7 @@ describe("ProposalCard", () => {
     const manual = renderToStaticMarkup(
       <ProposalCard proposal={proposal({ id: "p6-manual", target: "hermes_cli/foo.py", mode: "code" })} density="airy" selectable batchSelectable={false} onApply={noop} onSkip={noop} />,
     );
-    expect(manual).not.toContain('type="checkbox"');
+    expect(manual).not.toContain(`aria-label="${de.autoresearch.selectProposal}"`);
     expect(manual).toContain("Einzelreview");
   });
 
@@ -142,6 +142,24 @@ describe("ProposalCard", () => {
     expect(manual).toContain("guarded()");
   });
 
+  it("requires explicit confirmation before applying actionable manual-review cards", () => {
+    const manual = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({ id: "manual-confirm", target: "hermes_cli/foo.py", mode: "code", diff_before_after: "- risky()\n+ guarded()" })}
+        density="airy"
+        selectable
+        batchSelectable={false}
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(manual).toContain("Diff geprüft");
+    expect(manual).toContain("Erst Diff geprüft bestätigen.");
+    expect(manual).toContain("disabled");
+    expect(manual).toContain(de.autoresearch.skip);
+  });
+
   it("keeps batch-selectable card diffs collapsed by default", () => {
     const safe = renderToStaticMarkup(
       <ProposalCard
@@ -155,6 +173,7 @@ describe("ProposalCard", () => {
     );
 
     expect(safe).not.toContain("Diese Änderung ist geöffnet");
+    expect(safe).not.toContain("Diff geprüft");
     expect(safe).toContain("hidden md:block");
   });
 

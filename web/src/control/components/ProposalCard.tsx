@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Check, ShieldAlert, X } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -87,6 +88,7 @@ function decisionGuide(proposal: Proposal, severity: ProposalSeverity): Decision
 }
 
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
+  const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
   const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
@@ -100,6 +102,8 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   const opensDiffByDefault = isActionable && selectable && !batchSelectable;
+  const requiresReviewConfirmation = opensDiffByDefault && !isReverted;
+  const applyDisabled = !!busy || (requiresReviewConfirmation && !reviewConfirmed);
   return (
     <article id={`autoresearch-proposal-${proposal.id}`} className={cn("hc-card scroll-mt-6 space-y-4 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -183,11 +187,25 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
           <ToneCallout tone={guide.tone}>
             <span className="font-semibold">Entscheidung:</span> {guide.consequence}
           </ToneCallout>
+          {requiresReviewConfirmation ? (
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+              <input
+                type="checkbox"
+                checked={reviewConfirmed}
+                onChange={(event) => setReviewConfirmed(event.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--hc-accent)]"
+              />
+              <span>
+                <span className="block font-medium">Diff geprüft</span>
+                <span className="block text-xs leading-5 text-amber-100/80">Ich habe Änderung und Risiko gelesen; Übernehmen startet danach die beschriebene Aktion.</span>
+              </span>
+            </label>
+          ) : null}
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button outlined className="hc-hit" onClick={() => onSkip(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>
               {isReverted ? "Archivieren" : de.autoresearch.skip}
             </Button>
-            <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
+            <Button className="hc-hit" onClick={() => onApply(proposal)} disabled={applyDisabled} title={requiresReviewConfirmation && !reviewConfirmed ? "Erst Diff geprüft bestätigen." : undefined} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>
               {isReverted ? "Erneut prüfen" : isCode ? de.autoresearch.applyCode : de.autoresearch.apply}
             </Button>
           </div>
