@@ -499,17 +499,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
+            {/* Primary CTA direkt unter den Befund ziehen: in jedem Zustand der EINE
+                offensichtliche nächste Klick, bevor Readiness/Metriken den Blick teilen. */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
+                {recommendation.primaryLabel}
+              </Button>
+            </div>
             <ReadinessPanel summary={readiness} />
             <div className="grid gap-3 sm:grid-cols-4">
               <Metric label="Offen" value={String(open.length)} />
               <Metric label="Hoch+" value={String(highPriorityCount)} />
               <Metric label="Zurückgerollt" value={String(reverted.length)} />
               <Metric label="Letzter Lauf" value={runs.data?.runs?.[0] ? formatRunTime(runs.data.runs[0].at) : "-"} />
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-              <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
-                {recommendation.primaryLabel}
-              </Button>
             </div>
             <CockpitSectionNav items={AUTORESEARCH_SECTION_NAV} onJump={scrollTo} />
           </div>
