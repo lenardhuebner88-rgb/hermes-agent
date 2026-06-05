@@ -4,7 +4,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
@@ -340,6 +340,82 @@ describe("AutoresearchView decision guide", () => {
       label: "Einzelreview",
       tone: "amber",
     });
+  });
+
+  it("explains mixed queue actions as safe batch plus manual review", () => {
+    const summary = getAutoresearchQueueActionSummary({
+      visibleCount: 5,
+      batchSafeVisibleCount: 3,
+      manualReviewVisibleCount: 2,
+      selectedCount: 0,
+      selectedManualReviewCount: 0,
+    });
+
+    expect(summary.title).toBe("Zwei Wege: sichere sammeln, riskante einzeln.");
+    expect(summary.batchLine).toContain("3 sichtbare Karten");
+    expect(summary.manualLine).toContain("2 sichtbare Karten bleiben");
+    expect(summary.confirmLine).toContain("Erst sichere Karten markieren");
+    expect(summary.facts.find((fact) => fact.label === "Einzelreview")?.tone).toBe("amber");
+  });
+
+  it("explains that a safe selected batch affects only marked cards", () => {
+    const summary = getAutoresearchQueueActionSummary({
+      visibleCount: 4,
+      batchSafeVisibleCount: 4,
+      manualReviewVisibleCount: 0,
+      selectedCount: 2,
+      selectedManualReviewCount: 0,
+    });
+
+    expect(summary.tone).toBe("cyan");
+    expect(summary.title).toContain("Sammel-Übernehmen bereit");
+    expect(summary.batchLine).toContain("2 sichere Karten");
+    expect(summary.confirmLine).toContain("nur auf die markierten Karten");
+  });
+
+  it("keeps an all-manual queue out of the batch path", () => {
+    const summary = getAutoresearchQueueActionSummary({
+      visibleCount: 2,
+      batchSafeVisibleCount: 0,
+      manualReviewVisibleCount: 2,
+      selectedCount: 0,
+      selectedManualReviewCount: 0,
+    });
+
+    expect(summary.tone).toBe("amber");
+    expect(summary.title).toBe("Heute ist Einzelreview dran.");
+    expect(summary.batchLine).toContain("Keine sichtbare Karte");
+    expect(summary.confirmLine).toContain("Top-Karte");
+  });
+
+  it("explains an empty visible queue without enabling batch action", () => {
+    const summary = getAutoresearchQueueActionSummary({
+      visibleCount: 0,
+      batchSafeVisibleCount: 0,
+      manualReviewVisibleCount: 0,
+      selectedCount: 0,
+      selectedManualReviewCount: 0,
+    });
+
+    expect(summary.tone).toBe("zinc");
+    expect(summary.title).toContain("Keine sichtbare Karte");
+    expect(summary.batchLine).toContain("nichts zu markieren");
+    expect(summary.confirmLine).toContain("bleibt aus");
+  });
+
+  it("explains selected manual-review cards as blocked for batch confirmation", () => {
+    const summary = getAutoresearchQueueActionSummary({
+      visibleCount: 3,
+      batchSafeVisibleCount: 2,
+      manualReviewVisibleCount: 1,
+      selectedCount: 2,
+      selectedManualReviewCount: 1,
+    });
+
+    expect(summary.tone).toBe("amber");
+    expect(summary.title).toContain("nicht sammelsicher");
+    expect(summary.batchLine).toContain("1 davon brauchen Einzelreview");
+    expect(summary.confirmLine).toContain("bleibt gesperrt");
   });
 
   it("blocks global apply-all when open skill proposals need manual review", () => {

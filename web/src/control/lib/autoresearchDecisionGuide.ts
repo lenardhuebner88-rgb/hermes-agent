@@ -16,6 +16,15 @@ export interface AutoresearchTopCardMode {
   detail: string;
 }
 
+export interface AutoresearchQueueActionSummary {
+  tone: ToneName;
+  title: string;
+  batchLine: string;
+  manualLine: string;
+  confirmLine: string;
+  facts: { label: string; value: string; tone: ToneName }[];
+}
+
 export function canBatchConfirmAutoresearchSelection(input: {
   selectedCount: number;
   selectedManualReviewCount: number;
@@ -53,6 +62,76 @@ export function describeTopCardMode(proposal: Proposal): AutoresearchTopCardMode
     tone: "emerald",
     label: "Sammel-sicher",
     detail: "Diese Karte darf in die sichere Sammelauswahl.",
+  };
+}
+
+export function getAutoresearchQueueActionSummary(input: {
+  visibleCount: number;
+  batchSafeVisibleCount: number;
+  manualReviewVisibleCount: number;
+  selectedCount: number;
+  selectedManualReviewCount: number;
+}): AutoresearchQueueActionSummary {
+  const facts = [
+    { label: "Sicher sammelbar", value: String(input.batchSafeVisibleCount), tone: input.batchSafeVisibleCount > 0 ? "emerald" : "zinc" },
+    { label: "Einzelreview", value: String(input.manualReviewVisibleCount), tone: input.manualReviewVisibleCount > 0 ? "amber" : "emerald" },
+    { label: "Markiert", value: String(input.selectedCount), tone: input.selectedCount > 0 ? "cyan" : "zinc" },
+  ] satisfies AutoresearchQueueActionSummary["facts"];
+
+  if (input.visibleCount === 0) {
+    return {
+      tone: "zinc",
+      title: "Keine sichtbare Karte in dieser Ansicht.",
+      batchLine: "Es gibt gerade nichts zu markieren.",
+      manualLine: "Einzelreview erscheint, sobald riskantere Karten sichtbar sind.",
+      confirmLine: "Sammel-Übernehmen bleibt aus, bis eine sichere Auswahl markiert ist.",
+      facts,
+    };
+  }
+
+  if (input.selectedCount > 0) {
+    if (input.selectedManualReviewCount > 0) {
+      return {
+        tone: "amber",
+        title: "Die Auswahl ist nicht sammelsicher.",
+        batchLine: `${input.selectedCount} markiert, aber ${input.selectedManualReviewCount} davon brauchen Einzelreview.`,
+        manualLine: "Riskante Karten bitte öffnen, Diff lesen und direkt auf der Karte entscheiden.",
+        confirmLine: "Sammel-Übernehmen bleibt gesperrt, bis nur sichere Karten markiert sind.",
+        facts,
+      };
+    }
+    return {
+      tone: "cyan",
+      title: "Diese Auswahl ist für Sammel-Übernehmen bereit.",
+      batchLine: `${input.selectedCount} sichere ${input.selectedCount === 1 ? "Karte ist" : "Karten sind"} markiert.`,
+      manualLine: input.manualReviewVisibleCount > 0
+        ? `${input.manualReviewVisibleCount} sichtbare ${input.manualReviewVisibleCount === 1 ? "Karte bleibt" : "Karten bleiben"} bewusst Einzelreview.`
+        : "Keine sichtbare Karte braucht Einzelreview.",
+      confirmLine: "Sammel-Übernehmen wirkt nur auf die markierten Karten; alles andere bleibt liegen.",
+      facts,
+    };
+  }
+
+  if (input.batchSafeVisibleCount === 0) {
+    return {
+      tone: "amber",
+      title: "Heute ist Einzelreview dran.",
+      batchLine: "Keine sichtbare Karte ist für Sammel-Übernehmen freigegeben.",
+      manualLine: `${input.manualReviewVisibleCount} sichtbare ${input.manualReviewVisibleCount === 1 ? "Karte braucht" : "Karten brauchen"} bewusstes Lesen.`,
+      confirmLine: "Öffne die Top-Karte und entscheide direkt mit Übernehmen oder Überspringen.",
+      facts,
+    };
+  }
+
+  return {
+    tone: input.manualReviewVisibleCount > 0 ? "emerald" : "cyan",
+    title: input.manualReviewVisibleCount > 0 ? "Zwei Wege: sichere sammeln, riskante einzeln." : "Sammelweg ist frei.",
+    batchLine: `${input.batchSafeVisibleCount} sichtbare ${input.batchSafeVisibleCount === 1 ? "Karte darf" : "Karten dürfen"} gesammelt markiert werden.`,
+    manualLine: input.manualReviewVisibleCount > 0
+      ? `${input.manualReviewVisibleCount} sichtbare ${input.manualReviewVisibleCount === 1 ? "Karte bleibt" : "Karten bleiben"} ohne Checkbox im Einzelreview.`
+      : "Keine sichtbare Karte ist als Einzelreview markiert.",
+    confirmLine: "Erst sichere Karten markieren, dann die Auswahl gesammelt übernehmen.",
+    facts,
   };
 }
 

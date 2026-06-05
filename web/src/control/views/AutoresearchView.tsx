@@ -11,7 +11,7 @@ import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -118,6 +118,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       topTitle: topProposal?.title?.trim() || topProposal?.target,
     }),
     [open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
+  );
+  const queueActionSummary = useMemo(
+    () => getAutoresearchQueueActionSummary({
+      visibleCount: visibleProposalIds.length,
+      batchSafeVisibleCount: batchSafeVisibleProposalIds.length,
+      manualReviewVisibleCount,
+      selectedCount: selectedIds.length,
+      selectedManualReviewCount,
+    }),
+    [batchSafeVisibleProposalIds.length, manualReviewVisibleCount, selectedIds.length, selectedManualReviewCount, visibleProposalIds.length],
   );
   const batchBusy = store.busy === "confirm-batch";
   const openSkillManualReviewCount = useMemo(() => store.openSkillProposals.filter(proposalNeedsManualReview).length, [store.openSkillProposals]);
@@ -517,7 +527,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {de.autoresearch.batchConfirm}
               </Button>
             </div>
-            {manualReviewVisibleCount > 0 ? <p className="max-w-sm text-xs leading-5 hc-dim">{manualReviewVisibleCount} sichtbare {manualReviewVisibleCount === 1 ? "Karte bleibt" : "Karten bleiben"} Einzelreview und werden nicht gesammelt markiert.</p> : null}
+            <QueueActionSummaryPanel summary={queueActionSummary} />
           </div>
         </div>
         <ReviewFlowPanel
@@ -803,6 +813,32 @@ function ReviewFlowPanel({ flow, busy, onPrimary }: { flow: AutoresearchReviewFl
           <Button className="hc-hit sm:col-span-3" onClick={onPrimary} disabled={busy} prefix={busy ? <Spinner /> : icon}>
             {flow.primaryLabel}
           </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QueueActionSummaryPanel({ summary }: { summary: AutoresearchQueueActionSummary }) {
+  return (
+    <div className={cn("max-w-xl rounded-lg border p-3 text-left", reviewStepToneClass(summary.tone))}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">Auswahlwirkung</p>
+          <h3 className="mt-1 text-sm font-semibold text-white">{summary.title}</h3>
+          <div className="mt-2 space-y-1 text-xs leading-5 hc-soft">
+            <p>{summary.batchLine}</p>
+            <p>{summary.manualLine}</p>
+            <p className="text-white/90">{summary.confirmLine}</p>
+          </div>
+        </div>
+        <div className="grid shrink-0 grid-cols-3 gap-1.5 sm:min-w-64">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}>
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
         </div>
       </div>
     </div>
