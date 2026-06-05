@@ -145,7 +145,7 @@ function StatusDots() {
 function TabButton({ tab, active, openProposals, onClick }: { tab: (typeof tabs)[number]; active: boolean; openProposals: number; onClick: () => void }) {
   const Icon = tab.icon;
   return (
-    <button type="button" onClick={onClick} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
+    <button type="button" onClick={onClick} aria-label={tab.label} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
       <Icon className="h-5 w-5" />
       <span className="max-w-full truncate px-0.5">{tab.mobileLabel}</span>
       {tab.id === "autoresearch" && openProposals > 0 ? <span className="absolute right-5 top-2 rounded-full bg-[var(--hc-accent)] px-1.5 text-[10px] text-white">{openProposals}</span> : null}
