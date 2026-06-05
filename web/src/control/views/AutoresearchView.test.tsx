@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AUTORESEARCH_ADVANCED_GUIDE } from "../lib/autoresearchAdvanced";
+import { getAutoresearchActivityCard } from "../lib/autoresearchActivity";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -155,6 +156,28 @@ describe("AutoresearchView cockpit recommendation", () => {
     expect(recommendation.kind).toBe("inspect");
     expect(recommendation.title).toContain("Status prüfen");
     expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
+});
+
+describe("AutoresearchView activity timeline", () => {
+  it("turns raw activity entries into operator-readable cards", () => {
+    expect(getAutoresearchActivityCard({ at: 1, text: "Batch übernommen", tone: "emerald" })).toMatchObject({
+      label: "Erledigt",
+      title: "Die Aktion ist abgeschlossen.",
+      detail: "Batch übernommen",
+    });
+    expect(getAutoresearchActivityCard({ at: 2, text: "Loop fehlgeschlagen", tone: "red" })).toMatchObject({
+      label: "Fehler",
+      next: expect.stringContaining("erneut"),
+    });
+    expect(getAutoresearchActivityCard({ at: 3, text: "Auswahl enthält Risiko", tone: "amber" })).toMatchObject({
+      label: "Achtung",
+      next: expect.stringContaining("prüfen"),
+    });
+    expect(getAutoresearchActivityCard({ at: 4, text: "Quelle geprüft", tone: "violet" })).toMatchObject({
+      label: "Info",
+      tone: "cyan",
+    });
   });
 });
 

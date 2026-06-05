@@ -8,6 +8,7 @@ import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { AUTORESEARCH_ADVANCED_GUIDE, type AutoresearchAdvancedGuideItem } from "../lib/autoresearchAdvanced";
+import { getAutoresearchActivityCard, type AutoresearchActivityCard } from "../lib/autoresearchActivity";
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -746,7 +747,17 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       <section className="hc-card p-4">
         <h2 className="mb-3 text-base font-semibold text-white">{de.autoresearch.activity}</h2>
-        {store.activity.length === 0 ? <p className="text-sm hc-soft">Noch keine Aktion in dieser Ansicht.</p> : <div className="space-y-2">{store.activity.map((entry) => <div key={`${entry.at}-${entry.text}`} className={cn("flex gap-3 rounded-lg border px-3 py-2 text-sm", entry.tone === "red" ? "border-red-500/20 bg-red-500/10 text-red-100" : entry.tone === "amber" ? "border-amber-500/20 bg-amber-500/10 text-amber-100" : entry.tone === "emerald" ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100" : "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}><span className="hc-mono hc-dim">{fmtClock(entry.at)}</span><span>{entry.text}</span></div>)}</div>}
+        {store.activity.length === 0 ? <p className="text-sm hc-soft">Noch keine Aktion in dieser Ansicht.</p> : (
+          <div className="space-y-2">
+            {store.activity.map((entry) => (
+              <ActivityTimelineItem
+                key={`${entry.at}-${entry.text}`}
+                at={entry.at}
+                card={getAutoresearchActivityCard(entry)}
+              />
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
@@ -848,6 +859,24 @@ function AdvancedGuidePanel({ items }: { items: readonly AutoresearchAdvancedGui
         ))}
       </div>
     </section>
+  );
+}
+
+function ActivityTimelineItem({ at, card }: { at: number; card: AutoresearchActivityCard }) {
+  return (
+    <article className={cn("rounded-lg border px-3 py-2", reviewStepToneClass(card.tone))}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="hc-mono text-xs hc-dim">{fmtClock(at)}</span>
+            <StatusPill tone={card.tone} label={card.label} />
+          </div>
+          <h3 className="mt-1 text-sm font-semibold text-white">{card.title}</h3>
+          <p className="mt-1 text-sm leading-6 hc-soft">{card.detail}</p>
+        </div>
+        <p className="max-w-sm text-xs leading-5 hc-dim"><span className="font-semibold text-white/80">Danach:</span> {card.next}</p>
+      </div>
+    </article>
   );
 }
 
