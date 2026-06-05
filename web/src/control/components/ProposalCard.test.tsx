@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ProposalCard } from "./ProposalCard";
 import { de } from "../i18n/de";
+import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Proposal } from "../lib/types";
 
@@ -261,6 +262,82 @@ describe("ProposalCard", () => {
     expect(html).toContain("Empfohlen");
     expect(html).toContain("Einzeln prüfen");
     expect(html).toContain("Test-Suite");
+  });
+
+  it("renders a compact operator brief before the detailed decision sections", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "brief-1",
+          target: "hermes_cli/web_server.py",
+          mode: "code",
+          title: "Deep-Audit in hermes_cli/web_server.py:6420: subprocess.Popen with shell-built command",
+          category: "bug_risk",
+          severity: "high",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(html).toContain("Kurzbriefing");
+    expect(html).toContain("Code mit Gate");
+    expect(html).toContain("Betroffen");
+    expect(html).toContain("Code: hermes_cli/web_server.py");
+    expect(html).toContain("Übernehmen startet Code-Änderung plus Test-Gate.");
+  });
+
+  it("keeps skill proposal briefs plain and non-code-specific", () => {
+    const brief = getProposalOperatorBrief(proposal({
+      id: "brief-2",
+      target: "skills/family/SKILL.md",
+      section: "examples",
+      category: "missing_section",
+      severity: "low",
+    }));
+
+    expect(brief.label).toBe("Skill-Polish");
+    expect(brief.title).toContain("ohne Code-Lauf");
+    expect(brief.facts.find((fact) => fact.label === "Betroffen")?.value).toBe("Skill: skills/family/SKILL.md · examples");
+    expect(brief.facts.find((fact) => fact.label === "Klick")?.value).toContain("Skill-Text");
+  });
+
+  it("keeps completed proposal briefs status-focused instead of action-focused", () => {
+    const brief = getProposalOperatorBrief(proposal({
+      id: "brief-done",
+      target: "hermes_cli/foo.py",
+      mode: "code",
+      status: "applied",
+      result: "Gate passed and patch applied.",
+    }));
+
+    expect(brief.label).toBe("Erledigt");
+    expect(brief.summary).toContain("Gate passed");
+    expect(brief.facts.find((fact) => fact.label === "Stand")?.value).toBe("Keine Aktion offen.");
+    expect(brief.facts.some((fact) => fact.label === "Klick")).toBe(false);
+  });
+
+  it("keeps testing cards focused on the running gate instead of unavailable actions", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "brief-testing",
+          target: "hermes_cli/foo.py",
+          mode: "code",
+          status: "testing",
+          result: "Gate is still running.",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(html).toContain("Gate läuft");
+    expect(html).toContain("Auf Gate-Ergebnis warten.");
+    expect(html).not.toContain("Entscheidungshilfe");
+    expect(html).not.toContain("Übernehmen schreibt");
   });
 
   it("shows reverted proposals as archive-first decisions", () => {

@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { toDiffLines } from "../lib/diff";
 import { de } from "../i18n/de";
 import { getProposalSeverity, proposalAgeDays, severityTone, type ProposalPriorityGroup } from "../lib/autoresearch";
+import { getProposalOperatorBrief, type ProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { formatProposalCategory } from "../lib/autoresearchProposalLabels";
 import type { Density } from "../hooks/useDensity";
 import type { Proposal, ProposalSeverity, ToneName } from "../lib/types";
@@ -99,6 +100,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const category = formatProposalCategory(proposal.category);
   const severity = getProposalSeverity(proposal);
   const guide = decisionGuide(proposal, severity);
+  const brief = getProposalOperatorBrief(proposal);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   const opensDiffByDefault = isActionable && selectable && !batchSelectable;
@@ -121,12 +123,13 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
             {ageDays !== null ? <span className={cn("rounded-full border px-2 py-0.5 text-xs", ageDays > 7 ? "border-amber-500/20 bg-amber-500/10 text-amber-200" : "border-zinc-500/20 bg-zinc-500/10 text-zinc-200")}>{de.autoresearch.ageDays(ageDays)}</span> : null}
             {isDone ? <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200">{proposal.status === "applied" ? "Erledigt" : "Übersprungen"}</span> : null}
           </div>
-          <h3 className="text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
+          <h3 className="break-words text-lg font-semibold leading-snug text-white">{proposalTitle(proposal)}</h3>
           {category?.help ? (
             <p className="max-w-3xl text-xs leading-5 hc-dim">
               <span className="font-semibold text-zinc-300">{category.label}:</span> {category.help}
             </p>
           ) : null}
+          <ProposalBriefPanel brief={brief} />
           <div className="space-y-1">
             <p className="hc-eyebrow">{de.autoresearch.why}</p>
             <p className="text-sm leading-6 hc-soft">{proposal.rationale_plain || "Keine Begründung geliefert."}</p>
@@ -152,7 +155,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         ) : null}
       </div>
 
-      {!isDone ? <DecisionGuidePanel guide={guide} /> : null}
+      {isActionable ? <DecisionGuidePanel guide={guide} /> : null}
 
       {evidence ? (
         <div className="space-y-1">
@@ -213,6 +216,48 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
       ) : null}
     </article>
   );
+}
+
+function ProposalBriefPanel({ brief }: { brief: ProposalOperatorBrief }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[.025] p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Kurzbriefing</p>
+            <StatusPill tone={brief.tone} label={brief.label} />
+          </div>
+          <h4 className="mt-2 text-sm font-semibold text-white">{brief.title}</h4>
+          <p className="mt-1 text-sm leading-6 hc-soft">{brief.summary}</p>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 lg:grid-cols-3">
+        {brief.facts.map((fact) => (
+          <div key={fact.label} className={cn("min-w-0 rounded-md border px-3 py-2", briefFactToneClass(fact.tone))}>
+            <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
+            <p className="mt-1 text-sm leading-5 hc-soft">{fact.value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function briefFactToneClass(tone: ToneName): string {
+  switch (tone) {
+    case "emerald":
+      return "border-emerald-500/20 bg-emerald-500/10";
+    case "cyan":
+      return "border-cyan-500/20 bg-cyan-500/10";
+    case "amber":
+      return "border-amber-500/20 bg-amber-500/10";
+    case "violet":
+      return "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]";
+    case "red":
+      return "border-red-500/20 bg-red-500/10";
+    default:
+      return "border-white/10 bg-black/20";
+  }
 }
 
 function DecisionGuidePanel({ guide }: { guide: DecisionGuide }) {
