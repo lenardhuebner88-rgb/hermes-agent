@@ -10,6 +10,7 @@ import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundr
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
+import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
@@ -408,13 +409,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <Button className="hc-hit" onClick={runPrimaryRecommendation} disabled={recommendation.kind === "generate" && !!store.busy} prefix={recommendation.kind === "review" ? <ArrowDown className="h-4 w-4" /> : recommendation.kind === "monitor" || recommendation.kind === "recover" || recommendation.kind === "inspect" ? <Radar className="h-4 w-4" /> : store.busy === "generate" ? <Spinner /> : <Sparkles className="h-4 w-4" />}>
                 {recommendation.primaryLabel}
               </Button>
-              <Button outlined className="hc-hit" onClick={() => scrollTo("autoresearch-queue")} disabled={open.length === 0} prefix={<ClipboardCheck className="h-4 w-4" />}>
-                Entscheidungen ({open.length})
-              </Button>
-              <Button outlined className="hc-hit" onClick={() => scrollTo("autoresearch-loop")} prefix={<Radar className="h-4 w-4" />}>
-                Loop-Steuerung
-              </Button>
             </div>
+            <CockpitSectionNav items={AUTORESEARCH_SECTION_NAV} onJump={scrollTo} />
           </div>
           <div className="border-t border-[var(--hc-border)] bg-black/20 p-4 sm:p-5 xl:border-l xl:border-t-0">
             <div className="grid gap-3 md:grid-cols-2">
@@ -627,7 +623,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       </section>
 
-      <details className="space-y-4 border-t border-white/10 pt-4" open={effectiveAdvancedOpen} onToggle={(event) => {
+      <details id="autoresearch-advanced" className="scroll-mt-6 space-y-4 border-t border-white/10 pt-4" open={effectiveAdvancedOpen} onToggle={(event) => {
         if (!advancedNeedsAttention) setAdvancedOpen(event.currentTarget.open);
       }}>
         <summary className="hc-hit flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-left marker:hidden">
@@ -773,6 +769,40 @@ function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: Reac
       </div>
       <div className="mt-3">{button}</div>
     </article>
+  );
+}
+
+function CockpitSectionNav({ items, onJump }: { items: readonly AutoresearchSectionNavItem[]; onJump: (id: string) => void }) {
+  const iconFor = (kind: AutoresearchSectionNavItem["kind"]) => {
+    switch (kind) {
+      case "review":
+        return <ClipboardCheck className="h-4 w-4" />;
+      case "run":
+        return <Radar className="h-4 w-4" />;
+      case "history":
+        return <ListChecks className="h-4 w-4" />;
+      case "advanced":
+        return <Settings2 className="h-4 w-4" />;
+    }
+  };
+
+  return (
+    <nav aria-label="Autoresearch Bereiche" className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          onClick={() => onJump(item.id)}
+          className="hc-hit rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-left transition hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold text-white">
+            {iconFor(item.kind)}
+            {item.label}
+          </span>
+          <span className="mt-0.5 block text-xs leading-5 hc-soft">{item.detail}</span>
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -1313,7 +1343,7 @@ function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: P
   });
   const runCards = runs.slice(0, 5).map((run) => ({ run, card: getAutoresearchRunCard(run) }));
   return (
-    <section className="hc-card p-4">
+    <section id="autoresearch-history" className="hc-card scroll-mt-6 p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-white">{de.autoresearch.recentRuns}</h2>

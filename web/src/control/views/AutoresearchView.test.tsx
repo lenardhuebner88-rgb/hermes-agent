@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
+import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
@@ -65,6 +66,16 @@ describe("AutoresearchView Deep-Audit", () => {
 });
 
 describe("AutoresearchView cockpit recommendation", () => {
+  it("keeps cockpit section navigation anchored to the main operator areas", () => {
+    expect(AUTORESEARCH_SECTION_NAV.map((item) => item.id)).toEqual([
+      "autoresearch-queue",
+      "autoresearch-loop",
+      "autoresearch-history",
+      "autoresearch-advanced",
+    ]);
+    expect(AUTORESEARCH_SECTION_NAV.map((item) => item.label)).toEqual(["Queue", "Probelauf", "Verlauf", "Erweitert"]);
+  });
+
   it("sends the operator to review when actionable proposals exist", () => {
     const recommendation = getAutoresearchRecommendation({
       state: "idle",
