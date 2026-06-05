@@ -1,19 +1,20 @@
-import { Bot, Clock, Command, FlaskConical, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Bot, Clock, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
-const tabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: "overview", label: de.tabs.overview, path: "/control", icon: LayoutDashboard },
-  { id: "hermes", label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
-  { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
-  { id: "backlog", label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
-  { id: "orchestrator", label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
-  { id: "crons", label: de.tabs.crons, path: "/control/crons", icon: Clock },
+const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: "overview", label: de.tabs.overview, mobileLabel: "Übers.", path: "/control", icon: LayoutDashboard },
+  { id: "workstreams", label: de.tabs.workstreams, mobileLabel: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
+  { id: "hermes", label: de.tabs.hermes, mobileLabel: "Hermes", path: "/control/hermes", icon: Bot },
+  { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
+  { id: "backlog", label: de.tabs.backlog, mobileLabel: "Family", path: "/control/backlog", icon: KanbanSquare },
+  { id: "orchestrator", label: de.tabs.orchestrator, mobileLabel: "Orch.", path: "/control/orchestrator", icon: Workflow },
+  { id: "crons", label: de.tabs.crons, mobileLabel: "Crons", path: "/control/crons", icon: Clock },
 ];
 
 const secondaryNav = [
@@ -63,7 +64,7 @@ function ShellAiry({ active, children, density, pinned, openProposals, onNavigat
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
-        <div className="grid grid-cols-6">
+        <div className="grid grid-cols-7">
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} openProposals={openProposals} onClick={() => onNavigate(tab.id)} />)}
         </div>
       </nav>
@@ -146,7 +147,7 @@ function TabButton({ tab, active, openProposals, onClick }: { tab: (typeof tabs)
   return (
     <button type="button" onClick={onClick} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
       <Icon className="h-5 w-5" />
-      <span>{tab.label}</span>
+      <span className="max-w-full truncate px-0.5">{tab.mobileLabel}</span>
       {tab.id === "autoresearch" && openProposals > 0 ? <span className="absolute right-5 top-2 rounded-full bg-[var(--hc-accent)] px-1.5 text-[10px] text-white">{openProposals}</span> : null}
     </button>
   );

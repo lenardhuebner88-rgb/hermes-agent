@@ -6,6 +6,7 @@ import { useHermesWorkers, useProposals } from "./hooks/useControlData";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { OverviewView } from "./views/OverviewView";
+import { AgentOpsView } from "./views/AgentOpsView";
 import { HermesFleet } from "./views/HermesFleet";
 import { AutoresearchView } from "./views/AutoresearchView";
 import { BacklogView } from "./views/BacklogView";
@@ -13,6 +14,7 @@ import { OrchestratorBacklogView } from "./views/OrchestratorBacklogView";
 import { CronView } from "./views/CronView";
 
 function activeFromPath(pathname: string): ControlTab {
+  if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/hermes")) return "hermes";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
@@ -23,6 +25,7 @@ function activeFromPath(pathname: string): ControlTab {
 
 const tabPath: Record<ControlTab, string> = {
   overview: "/control",
+  workstreams: "/control/workstreams",
   hermes: "/control/hermes",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
@@ -58,11 +61,11 @@ export default function ControlPage() {
         setPaletteOpen(true);
         return;
       }
-      // Zwei-Tasten-Navigation "g <x>" (g h / g a / g u).
+      // Zwei-Tasten-Navigation "g <x>" (g s / g h / g a / g u).
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { h: "hermes", a: "autoresearch", u: "overview" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", h: "hermes", a: "autoresearch", u: "overview" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -89,6 +92,7 @@ export default function ControlPage() {
         <Routes>
           <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
+          <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
           <Route path="backlog" element={<BacklogView density={density.density} />} />
