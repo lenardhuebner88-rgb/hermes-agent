@@ -14,13 +14,14 @@ import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWe
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
+import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
-import type { AutoresearchRun } from "../lib/types";
+import type { AutoresearchRun, ToneName } from "../lib/types";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { ProposalCard } from "../components/ProposalCard";
 
@@ -160,6 +161,18 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const testFoundryGuidance = useMemo(
     () => getTestFoundryGuidance({ target: effectiveTestFoundryTarget, running: testFoundryRunning, autoApply: testFoundryApply }),
     [effectiveTestFoundryTarget, testFoundryApply, testFoundryRunning],
+  );
+  const readiness = useMemo(
+    () => getAutoresearchReadiness({
+      state: status.data?.state,
+      routeStatus: status.data?.route_status,
+      heartbeatFresh: status.data?.heartbeat_fresh,
+      loopRunning: loop.running,
+      openCount: open.length,
+      highPriorityCount,
+      busy: !!store.busy || !!loopBusy || pruneBusy || bulkRevertedBusy || deepAudit.busy || testFoundry.busy || deepAuditRunning || testFoundryRunning,
+    }),
+    [bulkRevertedBusy, deepAudit.busy, deepAuditRunning, highPriorityCount, loop.running, loopBusy, open.length, pruneBusy, status.data?.heartbeat_fresh, status.data?.route_status, status.data?.state, store.busy, testFoundry.busy, testFoundryRunning],
   );
   const researchLoopGuidance = useMemo(
     () => getResearchLoopGuidance({ running: loop.running, routeOk, maxIterations: clampLoopIterations(Number(maxIterations)), area: describeArea(area) }),
@@ -401,6 +414,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
+            <ReadinessPanel summary={readiness} />
             <div className="grid gap-3 sm:grid-cols-4">
               <Metric label="Offen" value={String(open.length)} />
               <Metric label="Hoch+" value={String(highPriorityCount)} />
@@ -785,6 +799,32 @@ function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: Reac
   );
 }
 
+function ReadinessPanel({ summary }: { summary: AutoresearchReadinessSummary }) {
+  return (
+    <section className={cn("rounded-lg border p-3", reviewStepToneClass(summary.tone))} aria-label="Autoresearch Betriebsstatus">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Betriebsstatus</p>
+            <StatusPill tone={summary.tone} label={summary.label} />
+          </div>
+          <h2 className="mt-2 text-base font-semibold text-white">{summary.title}</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{summary.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> {summary.next}</p>
+        </div>
+        <div className="grid shrink-0 grid-cols-2 gap-1.5 sm:grid-cols-5 lg:min-w-[420px]">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}>
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+              <p className="mt-1 truncate text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function CockpitSectionNav({ items, onJump }: { items: readonly AutoresearchSectionNavItem[]; onJump: (id: string) => void }) {
   const iconFor = (kind: AutoresearchSectionNavItem["kind"]) => {
     switch (kind) {
@@ -1047,7 +1087,7 @@ function LoopPresetPicker({ selectedId, disabled, onSelect }: { selectedId: Rese
   );
 }
 
-function reviewStepToneClass(tone: AutoresearchReviewFlow["steps"][number]["tone"]): string {
+function reviewStepToneClass(tone: ToneName): string {
   switch (tone) {
     case "emerald":
       return "border-emerald-500/20 bg-emerald-500/10";

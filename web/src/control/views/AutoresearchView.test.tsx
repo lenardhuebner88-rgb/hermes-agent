@@ -7,6 +7,7 @@ import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
+import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -156,6 +157,115 @@ describe("AutoresearchView cockpit recommendation", () => {
     expect(recommendation.kind).toBe("inspect");
     expect(recommendation.title).toContain("Status prüfen");
     expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
+});
+
+describe("AutoresearchView cockpit readiness", () => {
+  it("keeps the cockpit in route-check mode until the model route is confirmed", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "idle",
+      routeStatus: "unavailable",
+      heartbeatFresh: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      busy: false,
+    });
+
+    expect(readiness.tone).toBe("amber");
+    expect(readiness.label).toBe("Route prüfen");
+    expect(readiness.next).toContain("Modellroute prüfen");
+    expect(readiness.facts.find((fact) => fact.label === "Route")).toMatchObject({
+      value: "unavailable",
+      tone: "amber",
+    });
+  });
+
+  it("prioritizes crashed loop recovery over queue or start guidance", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "crashed",
+      routeStatus: "configured",
+      heartbeatFresh: false,
+      loopRunning: false,
+      openCount: 2,
+      highPriorityCount: 1,
+      busy: false,
+    });
+
+    expect(readiness.tone).toBe("red");
+    expect(readiness.label).toBe("Fehler prüfen");
+    expect(readiness.next).toContain("Status");
+  });
+
+  it("shows monitor mode while the loop is running", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "running",
+      routeStatus: "configured",
+      heartbeatFresh: true,
+      loopRunning: true,
+      openCount: 0,
+      highPriorityCount: 0,
+      busy: false,
+    });
+
+    expect(readiness.tone).toBe("cyan");
+    expect(readiness.label).toBe("Lauf aktiv");
+    expect(readiness.next).toContain("Loop beobachten");
+  });
+
+  it("turns an open high-priority queue into explicit review readiness", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "idle",
+      routeStatus: "configured",
+      heartbeatFresh: true,
+      loopRunning: false,
+      openCount: 5,
+      highPriorityCount: 2,
+      busy: false,
+    });
+
+    expect(readiness.tone).toBe("amber");
+    expect(readiness.label).toBe("Review bereit");
+    expect(readiness.title).toContain("wichtigen Karten");
+    expect(readiness.facts.find((fact) => fact.label === "Hoch+")).toMatchObject({
+      value: "2",
+      tone: "amber",
+    });
+  });
+
+  it("offers a small dry-run only when route, loop, queue, and busy state are calm", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "idle",
+      routeStatus: "configured",
+      heartbeatFresh: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      busy: false,
+    });
+
+    expect(readiness.tone).toBe("emerald");
+    expect(readiness.label).toBe("Betriebsbereit");
+    expect(readiness.next).toContain("Dry-Run starten");
+  });
+
+  it("keeps running cockpit actions visible before suggesting the next operation", () => {
+    const readiness = getAutoresearchReadiness({
+      state: "idle",
+      routeStatus: "configured",
+      heartbeatFresh: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      busy: true,
+    });
+
+    expect(readiness.tone).toBe("violet");
+    expect(readiness.label).toBe("Aktion läuft");
+    expect(readiness.facts.find((fact) => fact.label === "Loop")).toMatchObject({
+      value: "aktualisiert",
+      tone: "violet",
+    });
   });
 });
 
