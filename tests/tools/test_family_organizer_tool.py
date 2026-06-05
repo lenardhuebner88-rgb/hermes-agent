@@ -316,6 +316,90 @@ def test_delete_task_with_confirm_deletes_with_empty_body():
     assert "X-Request-Id" in captured["headers"]
 
 
+# ─── fo_create_event Konflikt-Gate (0094) ───────────────────────────────────
+
+def test_create_event_creates_when_no_clash():
+    def fake_request(method, url, **kw):
+        if method == "GET" and "/api/hermes/events/conflicts" in url:
+            return _resp(200, {"exactTimeClash": False, "conflicts": [], "count": 0})
+        if method == "POST" and url.endswith("/api/hermes/events"):
+            assert kw["json"]["title"] == "Zahnarzt"
+            assert "X-Request-Id" in kw["headers"]
+            return _resp(201, {"event": {"id": "ev-1", "title": "Zahnarzt"}})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_create_event(title="Zahnarzt", date="2026-06-14", time="15:30"))
+    assert out["created"] is True
+    assert out["event"]["id"] == "ev-1"
+
+
+def test_create_event_gates_on_exact_time_clash():
+    calls = []
+
+    def fake_request(method, url, **kw):
+        calls.append(method)
+        if method == "GET" and "/conflicts" in url:
+            return _resp(
+                200,
+                {
+                    "exactTimeClash": True,
+                    "conflicts": [{"title": "Oma Besuch", "startsAt": "2026-06-14T15:30:00+02:00"}],
+                    "count": 1,
+                },
+            )
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_create_event(title="Zahnarzt", date="2026-06-14", time="15:30"))
+    assert out["conflict_required"] is True
+    assert out["conflicts"][0]["title"] == "Oma Besuch"
+    assert "POST" not in calls  # bei exakter Kollision wird NICHT angelegt
+
+
+def test_create_event_with_confirm_conflict_creates_despite_clash():
+    def fake_request(method, url, **kw):
+        if method == "GET" and "/conflicts" in url:
+            return _resp(200, {"exactTimeClash": True, "conflicts": [], "count": 1})
+        if method == "POST" and url.endswith("/api/hermes/events"):
+            return _resp(201, {"event": {"id": "ev-2"}})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(
+                fo.fo_create_event(
+                    title="Zahnarzt", date="2026-06-14", time="15:30", confirm_conflict=True
+                )
+            )
+    assert out["created"] is True
+    assert out["event"]["id"] == "ev-2"
+
+
+def test_create_event_reports_other_same_day_events_without_blocking():
+    def fake_request(method, url, **kw):
+        if method == "GET" and "/conflicts" in url:
+            return _resp(
+                200,
+                {
+                    "exactTimeClash": False,
+                    "conflicts": [{"title": "Sport", "startsAt": "2026-06-14T18:00:00+02:00"}],
+                    "count": 1,
+                },
+            )
+        if method == "POST" and url.endswith("/api/hermes/events"):
+            return _resp(201, {"event": {"id": "ev-3"}})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_create_event(title="Zahnarzt", date="2026-06-14", time="15:30"))
+    assert out["created"] is True
+    assert out["also_that_day"][0]["title"] == "Sport"
+
+
 # ─── registry wiring ─────────────────────────────────────────────────────────
 
 def test_tools_registered_under_family_organizer_toolset():

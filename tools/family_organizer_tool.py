@@ -244,14 +244,22 @@ def fo_create_event(
     time: Optional[str] = None,
     notes: Optional[str] = None,
     member_role: Optional[str] = None,
+    confirm_conflict: bool = False,
 ) -> str:
     """Lege einen Familientermin an (z. B. 'Zahnarzt Oskar' am 14.06 um 15:30).
 
-    title:       Titel des Termins (Pflicht)
-    date:        YYYY-MM-DD (Pflicht) — relative Angaben vorher ausrechnen
-    time:        HH:MM (optional); ohne Uhrzeit wird der Termin ganztägig
-    notes:       optionale Notiz
-    member_role: papa | mama | kind_1 | kind_2 (optional)
+    title:            Titel des Termins (Pflicht)
+    date:             YYYY-MM-DD (Pflicht) — relative Angaben vorher ausrechnen
+    time:             HH:MM (optional); ohne Uhrzeit wird der Termin ganztägig
+    notes:            optionale Notiz
+    member_role:      papa | mama | kind_1 | kind_2 (optional)
+    confirm_conflict: erst nach Nutzer-Bestätigung auf true setzen (0094)
+
+    Konfliktprüfung (0094): liegt am selben Tag bereits ein Termin auf exakt
+    derselben Uhrzeit, wird NICHT still angelegt — der Tool gibt conflict_required
+    + die Kollision zurück; frage die Person, ob trotzdem angelegt werden soll, und
+    rufe erst dann erneut mit confirm_conflict=true auf. Andere Termine am selben
+    Tag werden nur informativ ausgewiesen (kein Block).
     """
     title = (title or "").strip()
     date = (date or "").strip()
@@ -266,6 +274,28 @@ def fo_create_event(
             f"member_role muss eines von {list(MEMBER_ROLES)} sein", got=member_role
         )
     try:
+        # 0094: Konfliktprüfung VOR dem Anlegen. Exakte Zeit-Kollision -> Rückfrage
+        # (statt still doppelt zu buchen, ADR-0004); gleicher Tag nur informativ.
+        conflict_path = f"/api/hermes/events/conflicts?date={date}"
+        if time:
+            conflict_path += f"&time={time}"
+        conflict = _request("GET", conflict_path, write=False) or {}
+        same_day = conflict.get("conflicts", [])
+        if conflict.get("exactTimeClash") and not confirm_conflict:
+            return tool_result(
+                {
+                    "conflict_required": True,
+                    "message": (
+                        f"Achtung: am {date} um {time} ist bereits ein Termin "
+                        f"eingetragen. Trotzdem anlegen? Bestätige mit "
+                        f"confirm_conflict=true."
+                    ),
+                    "conflicts": [
+                        {"title": e.get("title"), "startsAt": e.get("startsAt")}
+                        for e in same_day
+                    ],
+                }
+            )
         body: Dict[str, Any] = {"title": title, "date": date}
         if time:
             body["time"] = time
@@ -274,9 +304,18 @@ def fo_create_event(
         if member_role:
             body["memberRole"] = member_role
         data = _request("POST", "/api/hermes/events", write=True, json_body=body)
+        result: Dict[str, Any] = {
+            "created": True,
+            "event": (data or {}).get("event", {}),
+        }
+        if same_day:
+            result["also_that_day"] = [
+                {"title": e.get("title"), "startsAt": e.get("startsAt")}
+                for e in same_day
+            ]
     except Exception as exc:
         return tool_error(str(exc))
-    return tool_result({"created": True, "event": (data or {}).get("event", {})})
+    return tool_result(result)
 
 
 def fo_add_birthday(
@@ -547,7 +586,9 @@ FO_CREATE_EVENT_SCHEMA = {
         "danach unter /admin/termine und im Küchen-Dashboard sichtbar. " + _ROLE_HINT
         + " Das Datum muss als YYYY-MM-DD übergeben werden — rechne relative "
         "Angaben wie 'morgen' oder 'nächsten Montag' anhand des heutigen Datums "
-        "aus dem Kontext aus. Ohne Uhrzeit wird der Termin ganztägig angelegt."
+        "aus dem Kontext aus. Ohne Uhrzeit wird der Termin ganztägig angelegt. "
+        "Bei exakter Zeit-Kollision am selben Tag fragt der Tool zuerst zurück "
+        "(conflict_required) — bestätige dann mit confirm_conflict=true (0094)."
     ),
     "parameters": {
         "type": "object",
@@ -566,6 +607,13 @@ FO_CREATE_EVENT_SCHEMA = {
                 "type": "string",
                 "enum": list(MEMBER_ROLES),
                 "description": "Optionale Zuordnung zu einem Mitglied. " + _ROLE_HINT,
+            },
+            "confirm_conflict": {
+                "type": "boolean",
+                "description": (
+                    "Erst nach Nutzer-Bestätigung auf true setzen, um trotz "
+                    "exakter Zeit-Kollision anzulegen (0094)."
+                ),
             },
         },
         "required": ["title", "date"],
@@ -747,6 +795,7 @@ registry.register(
         time=args.get("time"),
         notes=args.get("notes"),
         member_role=args.get("member_role"),
+        confirm_conflict=bool(args.get("confirm_conflict", False)),
     ),
     check_fn=check_family_organizer_requirements,
     emoji="📅",
