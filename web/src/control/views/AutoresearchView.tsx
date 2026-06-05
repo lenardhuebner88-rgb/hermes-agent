@@ -22,6 +22,7 @@ import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, de
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchAdvancedRunChecklist, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getTestFoundryResultSummary, type TestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -174,7 +175,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const busyNotice = describeAutoresearchBusy(store.busy);
   const latestActivity = store.activity[0] ?? null;
   const deepAuditHasFindings = (deepAudit.findings?.findings.length ?? 0) > 0 || (deepAudit.findings?.proposals.length ?? 0) > 0;
-  const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || deepAuditHasFindings || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
+  const testFoundryResultSummary = useMemo(() => getTestFoundryResultSummary(testFoundry.status?.last_run), [testFoundry.status?.last_run]);
+  const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || deepAuditHasFindings || !!testFoundryResultSummary || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const effectiveAdvancedOpen = advancedNeedsAttention || advancedOpen;
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
@@ -787,6 +789,12 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                     ? "Auto-Apply ist an: validierte Tests werden auf dem separaten Branch f-test-foundry committet, nie auf main."
                     : "Auto-Apply ist aus: Test-Foundry erzeugt nur Vorschläge in der Queue."}
                 </ToneCallout>
+                {testFoundryResultSummary ? (
+                  <TestFoundryResultPanel
+                    summary={testFoundryResultSummary}
+                    raw={testFoundry.status?.last_run}
+                  />
+                ) : null}
                 {testFoundry.error ? <ToneCallout tone="red">{testFoundry.error}</ToneCallout> : null}
                 {testFoundryMessage ? <ToneCallout tone={testFoundryMessage.includes("fehlgeschlagen") ? "red" : "emerald"}>{testFoundryMessage}</ToneCallout> : null}
               </div>
@@ -1453,6 +1461,39 @@ function AdvancedRunChecklistPanel({ checklist }: { checklist: AutoresearchAdvan
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function TestFoundryResultPanel({ summary, raw }: { summary: TestFoundryResultSummary; raw: unknown }) {
+  const rawPayload = formatLastRunRawPayload(raw);
+  return (
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(summary.tone))}>
+      <div className="flex flex-col gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Letzter Test-Foundry-Lauf</p>
+            <StatusPill tone={summary.tone} label={summary.label} />
+          </div>
+          <h3 className="mt-2 text-sm font-semibold text-white">{summary.title}</h3>
+          <p className="mt-1 text-sm leading-6 hc-soft">{summary.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> {summary.next}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}>
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+              <p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+      {rawPayload ? (
+        <details className="mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft">
+          <summary className="cursor-pointer font-semibold text-white">{summary.rawLabel}</summary>
+          <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 hc-mono text-[11px] leading-5 text-white/80">{rawPayload}</pre>
+        </details>
+      ) : null}
     </div>
   );
 }

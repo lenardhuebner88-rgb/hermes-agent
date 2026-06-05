@@ -14,6 +14,7 @@ import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
@@ -1042,6 +1043,104 @@ describe("AutoresearchView run guidance", () => {
       label: "Branch-Gate",
       detail: expect.stringContaining("separaten Branch"),
     });
+  });
+
+  it("summarizes successful test-foundry queue proposals without claiming a branch write", () => {
+    const summary = getTestFoundryResultSummary({
+      ok: true,
+      target: "hermes_state.py",
+      tests_kept: 2,
+      proposals: ["p1", "p2"],
+      mutants_run: 8,
+      survivors: [{ lineno: 10 }],
+      tokens: 3200,
+      model: "test-model",
+    });
+
+    expect(summary).toMatchObject({
+      tone: "emerald",
+      label: "Queue gefüllt",
+      title: "2 Tests wurden validiert.",
+    });
+    expect(summary?.detail).toContain("2 Queue-Karten");
+    expect(summary?.next).toContain("Queue-Karten prüfen");
+    expect(summary?.facts.find((fact) => fact.label === "Target")?.value).toBe("hermes_state.py");
+  });
+
+  it("summarizes branch-gated test-foundry apply results explicitly", () => {
+    const summary = getTestFoundryResultSummary({
+      ok: true,
+      target: "hermes_state.py",
+      tests_kept: 1,
+      proposals: ["p1"],
+      mutants_run: 5,
+      tokens: 1800,
+      apply_branch: "f-test-foundry",
+      apply_commit: "abcdef123456",
+    });
+
+    expect(summary).toMatchObject({
+      tone: "emerald",
+      label: "Branch bereit",
+      title: "1 Test wurde validiert.",
+    });
+    expect(summary?.detail).toContain("f-test-foundry");
+    expect(summary?.next).toContain("Branch prüfen");
+  });
+
+  it("surfaces failed branch-gate apply results before queue success", () => {
+    const summary = getTestFoundryResultSummary({
+      ok: true,
+      target: "hermes_state.py",
+      tests_kept: 2,
+      proposals: ["p1", "p2"],
+      apply_result: {
+        ok: false,
+        detail: "regression gate failed",
+      },
+    });
+
+    expect(summary).toMatchObject({
+      tone: "amber",
+      label: "Branch-Gate fehlgeschlagen",
+      title: "2 Tests wurden validiert.",
+      detail: "regression gate failed",
+    });
+    expect(summary?.next).toContain("Gate-Ausgabe prüfen");
+  });
+
+  it("does not invent a kept-test count when test-foundry omits it", () => {
+    const summary = getTestFoundryResultSummary({
+      ok: true,
+      target: "hermes_state.py",
+      proposals: ["p1"],
+    });
+
+    expect(summary).toMatchObject({
+      tone: "emerald",
+      label: "Queue gefüllt",
+      title: "Test-Foundry-Lauf erfolgreich.",
+    });
+    expect(summary?.facts.find((fact) => fact.label === "Tests")?.value).toBe("n/v");
+  });
+
+  it("keeps no-kept-test-foundry runs actionable instead of looking successful", () => {
+    const summary = getTestFoundryResultSummary({
+      ok: false,
+      target: "hermes_state.py",
+      tests_kept: 0,
+      proposals: [],
+      mutants_run: 4,
+      reason: "affected baseline tests failed",
+    });
+
+    expect(summary).toMatchObject({
+      tone: "amber",
+      label: "Nichts behalten",
+      title: "Lauf hat keinen sicheren Test behalten.",
+    });
+    expect(summary?.detail).toBe("affected baseline tests failed");
+    expect(summary?.next).toContain("Baseline prüfen");
   });
 
   it("blocks advanced run checklist readiness until a target is selected", () => {
