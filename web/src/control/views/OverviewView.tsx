@@ -1,10 +1,12 @@
-import { useState } from "react";
-import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Inbox } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useAutoresearchStatus, useHermesWorkers, useMetricsLite, useSystemHealth } from "../hooks/useControlData";
+import { useAutoresearchStatus, useBacklog, useHermesRecentResults, useHermesWorkers, useMetricsLite, useOrchestrationBacklog, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
+import { buildAgentOpsSnapshot } from "../lib/agentOps";
+import { buildDecisionInbox, inboxSummary } from "../lib/decisionInbox";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { Proposal } from "../lib/types";
@@ -33,12 +35,45 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   const health = useSystemHealth();
   const metrics = useMetricsLite();
   const autoresearch = useAutoresearchStatus();
+  const results = useHermesRecentResults();
+  const backlog = useBacklog();
+  const orchestration = useOrchestrationBacklog();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
   const [copied, setCopied] = useState(false);
 
-  const title = overview.allHealthy ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length);
+  // Cross-surface Entscheidungs-Postfach (gleiche getestete Logik wie der Postfach-Tab),
+  // damit die Übersicht ehrlich ist: "Ruhig" nur, wenn AUCH nichts auf eine Entscheidung
+  // wartet — nicht nur, wenn die Worker gesund sind.
+  const snapshot = useMemo(
+    () =>
+      buildAgentOpsSnapshot({
+        workers: workers.data?.workers ?? [],
+        results: results.data?.results ?? [],
+        proposals,
+        orchestrationItems: orchestration.data?.items ?? [],
+        contractHealth: orchestration.data?.contract_health,
+        systemHealth: health.data,
+        metrics: metrics.data,
+        nowSec: orchestration.data?.checked_at ?? now,
+      }),
+    [workers.data, results.data, proposals, orchestration.data, health.data, metrics.data, now],
+  );
+  const inbox = useMemo(
+    () =>
+      buildDecisionInbox({
+        proposals,
+        foItems: backlog.data?.items ?? [],
+        foNowSec: backlog.data?.checked_at ?? now,
+        interventions: snapshot.interventions,
+      }),
+    [proposals, backlog.data, snapshot.interventions, now],
+  );
+  const inboxCounts = useMemo(() => inboxSummary(inbox), [inbox]);
+
+  const allCalm = overview.allHealthy && inboxCounts.total === 0;
+  const title = allCalm ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length + inboxCounts.total);
   const proposalValue = proposalsError ? "Fehler" : proposalsLoading && proposals.length === 0 ? "unbekannt" : String(overview.openProposals);
 
   const arState = autoresearch.data?.state ?? "idle";
@@ -84,10 +119,23 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
           <div><p className="hc-eyebrow">System nominal</p><h2 className="mt-2 text-3xl font-semibold tracking-normal text-white">{title}</h2><p className="mt-2 max-w-2xl hc-soft">Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen.</p></div>
           <div className="flex items-center gap-2">
             <Button outlined size="sm" onClick={copyDiagnostics} className="gap-2">{copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}{copied ? de.overview.copied : de.overview.copyDiagnostics}</Button>
-            <StatusPill tone={overview.allHealthy ? "emerald" : "amber"} label={overview.allHealthy ? "Ruhig" : "Aufmerksamkeit"} dot={overview.allHealthy ? "live" : "warn"} size="md" />
+            <StatusPill tone={allCalm ? "emerald" : "amber"} label={allCalm ? "Ruhig" : "Aufmerksamkeit"} dot={allCalm ? "live" : "warn"} size="md" />
           </div>
         </div>
       </section>
+
+      {inboxCounts.total > 0 ? (
+        <button type="button" onClick={() => navigate("/control/inbox")} className="flex w-full items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[.07] px-4 py-3 text-left transition hover:bg-amber-500/[.12]">
+          <span className="flex min-w-0 items-center gap-3">
+            <Inbox className="h-5 w-5 shrink-0 text-amber-200" />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-white">{de.overview.inboxWaiting(inboxCounts.total)}</span>
+              <span className="block truncate text-xs hc-soft">{de.overview.inboxBreakdown(inboxCounts.autoresearch, inboxCounts.family, inboxCounts.orchestrator)}</span>
+            </span>
+          </span>
+          <span className="shrink-0 text-xs font-medium text-amber-200">{de.overview.inboxOpen} →</span>
+        </button>
+      ) : null}
 
       {/* E1: Datenfrische je Quelle */}
       <section className="hc-card p-4">

@@ -33,6 +33,9 @@ export const de = {
     noProblemWorkers: "Keine problematischen Worker.",
     noProblemAgents: "Keine problematischen Agenten.",
     noOpenProposals: "Keine offenen Vorschläge.",
+    inboxWaiting: (n: number) => `${n} ${n === 1 ? "Entscheidung wartet" : "Entscheidungen warten"} auf dich`,
+    inboxBreakdown: (ar: number, fam: number, orch: number) => `Autoresearch ${ar} · Family ${fam} · Orchestrator ${orch}`,
+    inboxOpen: "Postfach öffnen",
   },
   systemHealth: {
     title: "System-Health",
