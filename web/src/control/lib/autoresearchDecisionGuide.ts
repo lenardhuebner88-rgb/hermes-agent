@@ -166,7 +166,7 @@ export function getAutoresearchDecisionGuide(input: {
       headline: input.revertedCount > 0 ? "Keine Entscheidung offen, nur Aufräumen." : "Nichts offen. Du musst gerade nichts entscheiden.",
       summary: input.revertedCount > 0
         ? "Zurückgerollte Vorschläge sind keine aktive Verbesserung mehr. Archivieren macht die Ansicht ruhiger."
-        : "Die Queue ist leer. Starte erst wieder einen Lauf, wenn du neue Kandidaten brauchst.",
+        : "Es gibt keine offene Entscheidung. Starte erst wieder einen Lauf, wenn du neue Kandidaten brauchst.",
       next: input.revertedCount > 0 ? "Zurückgerollte archivieren oder einen neuen gezielten Lauf starten." : "Bei Bedarf neue Kandidaten holen.",
       primaryLabel: input.revertedCount > 0 ? "Aufräumen" : "Bereit",
       facts: visibleFacts,

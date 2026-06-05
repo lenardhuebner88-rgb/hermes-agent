@@ -44,7 +44,7 @@ export function getAutoresearchQueueModeSummary(proposals: Proposal[], activeMod
       label: "Alle",
       count: proposals.length,
       tone: proposals.length > 0 ? "cyan" : "zinc",
-      detail: "Zeigt die komplette offene Queue in Relevanz-Reihenfolge.",
+      detail: "Zeigt alle offenen Karten in sinnvoller Reihenfolge.",
     },
     {
       id: "high",
@@ -117,7 +117,7 @@ export function getAutoresearchEmptyQueueModeGuidance(summary: AutoresearchQueue
       title: "Keine Karten für Einzelreview in diesem Filter.",
       detail: safe.count > 0
         ? "Es liegen nur noch sammelsichere Karten an. Du kannst sie gezielt markieren."
-        : "Der Filter ist leer. Zeige alle Karten, um den nächsten sinnvollen Schritt zu wählen.",
+        : "Der Filter ist leer. Zeige alle Karten, um die nächste Entscheidung zu wählen.",
       primaryMode,
       primaryLabel: `${primary.label} zeigen`,
       facts,
@@ -129,8 +129,8 @@ export function getAutoresearchEmptyQueueModeGuidance(summary: AutoresearchQueue
     label: manual.count > 0 ? "Erst lesen" : "Filter leer",
     title: "Keine sammelsicheren Karten in diesem Filter.",
     detail: manual.count > 0
-      ? "Die übrige Queue braucht bewusstes Einzelreview. Sammelübernahme bleibt deshalb aus."
-      : "Der Filter ist leer. Zeige alle Karten, um den nächsten sinnvollen Schritt zu wählen.",
+      ? "Die übrigen Karten brauchen bewusstes Einzelreview. Sammelübernahme bleibt deshalb aus."
+      : "Der Filter ist leer. Zeige alle Karten, um die nächste Entscheidung zu wählen.",
     primaryMode,
     primaryLabel: `${primary.label} zeigen`,
     facts,

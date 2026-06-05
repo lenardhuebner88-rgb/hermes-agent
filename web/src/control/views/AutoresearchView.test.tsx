@@ -444,6 +444,7 @@ describe("AutoresearchView queue modes", () => {
       ["manual", 3],
       ["safe", 1],
     ]);
+    expect(summary.options.find((option) => option.id === "all")?.detail).toBe("Zeigt alle offenen Karten in sinnvoller Reihenfolge.");
   });
 
   it("filters the queue by risk and review style without dropping the source queue", () => {
@@ -473,6 +474,7 @@ describe("AutoresearchView queue modes", () => {
       primaryMode: "manual",
       detail: expect.stringContaining("Einzelreview"),
     });
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary([high, code], "safe"))?.detail).not.toContain("Queue");
   });
 
   it("does not show empty-filter guidance for non-empty or fully empty queues", () => {
@@ -630,6 +632,21 @@ describe("AutoresearchView decision guide", () => {
     expect(guide.primaryLabel).toBe("Sammelreview");
     expect(guide.summary).toContain("gesammelt markieren");
     expect(guide.facts.find((fact) => fact.label === "Sammeln ok")?.value).toBe("2");
+  });
+
+  it("frames an empty decision area without queue jargon", () => {
+    const guide = getAutoresearchDecisionGuide({
+      visibleProposals: [],
+      selectedProposals: [],
+      openCount: 0,
+      selectedCount: 0,
+      backlogCount: 0,
+      revertedCount: 0,
+    });
+
+    expect(guide.headline).toContain("Nichts offen");
+    expect(guide.summary).toContain("keine offene Entscheidung");
+    expect(guide.summary).not.toContain("Queue ist leer");
   });
 
   it("pushes code, high-risk, or safety proposals into manual review", () => {

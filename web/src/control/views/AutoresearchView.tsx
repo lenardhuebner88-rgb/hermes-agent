@@ -105,6 +105,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       return proposal ? [proposal] : [];
     });
   }, [relevanceQueue.backlog, relevanceQueue.shortlist, selectedIds]);
+  const decisionHeading = open.length === 0
+    ? "Keine offenen Entscheidungen"
+    : `${relevanceQueue.summary.shown} ${relevanceQueue.summary.shown === 1 ? "wichtige Karte" : "wichtige Karten"} in dieser Ansicht`;
   const selectedManualReviewCount = useMemo(() => selectedProposals.filter(proposalNeedsManualReview).length, [selectedProposals]);
   const reviewFlow = useMemo(
     () => getAutoresearchReviewFlow({
@@ -585,9 +588,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="hc-eyebrow">Relevanz-Queue</p>
-            <h2 className="text-lg font-semibold text-white">Top {relevanceQueue.summary.shown} von {relevanceQueue.summary.total} Vorschlägen</h2>
-            <p className="mt-1 text-sm hc-soft">{open.length} offen · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></p>
+            <p className="hc-eyebrow">Entscheidungen</p>
+            <h2 className="text-lg font-semibold text-white">{decisionHeading}</h2>
+            <p className="mt-1 text-sm hc-soft">{open.length} offen · zuerst nach Nutzen und Risiko sortiert · <span className="underline decoration-dotted underline-offset-2" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedCount(reverted.length)}</span></p>
             {open.length > 0 ? (
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="text-xs hc-soft">{de.autoresearch.distributionHeading}:</span>
@@ -624,7 +627,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           />
         )}
         {open.length > 0 && filteredOpen.length === 0 ? null : <DecisionGuidePanel guide={decisionGuide} />}
-        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
+        {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Entscheidungen." /> : null}
         {open.length > 0 && filteredOpen.length === 0 && !store.loading && emptyQueueModeGuidance ? (
           <EmptyQueueModePanel guidance={emptyQueueModeGuidance} onChangeMode={setQueueMode} />
         ) : null}
@@ -648,7 +651,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
         {relevanceQueue.backlog.length > 0 ? (
           <details className="hc-card p-4">
-            <summary className="cursor-pointer text-sm font-medium text-white">Weitere Vorschläge ({relevanceQueue.summary.remaining}) anzeigen</summary>
+            <summary className="cursor-pointer text-sm font-medium text-white">Weitere Entscheidungen ({relevanceQueue.summary.remaining}) anzeigen</summary>
             <div className="mt-4 grid gap-4">
               {relevanceQueue.backlog.map((item) => (
                 <ProposalCard
