@@ -7,6 +7,7 @@ import { fetchJSON } from "@/lib/api";
 import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
+import { AUTORESEARCH_ADVANCED_GUIDE, type AutoresearchAdvancedGuideItem } from "../lib/autoresearchAdvanced";
 import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -635,6 +636,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           <StatusPill tone={advancedNeedsAttention ? "amber" : "zinc"} label={advancedNeedsAttention ? "Aufmerksamkeit" : "Optional"} />
         </summary>
         <div className="space-y-4">
+          <AdvancedGuidePanel items={AUTORESEARCH_ADVANCED_GUIDE} />
           <LaneModelPanel />
 
           <section id="autoresearch-deep-audit" className="hc-card scroll-mt-6 p-4 sm:p-5">
@@ -803,6 +805,49 @@ function CockpitSectionNav({ items, onJump }: { items: readonly AutoresearchSect
         </button>
       ))}
     </nav>
+  );
+}
+
+function AdvancedGuidePanel({ items }: { items: readonly AutoresearchAdvancedGuideItem[] }) {
+  const iconFor = (kind: AutoresearchAdvancedGuideItem["kind"]) => {
+    switch (kind) {
+      case "models":
+        return <Settings2 className="h-4 w-4" />;
+      case "deep-audit":
+        return <SearchCode className="h-4 w-4" />;
+      case "test-foundry":
+        return <FlaskConical className="h-4 w-4" />;
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-white/10 bg-white/[.025] p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="hc-eyebrow">Vor Erweitert</p>
+          <h2 className="text-base font-semibold text-white">Nur öffnen, wenn der normale Probelauf nicht reicht.</h2>
+        </div>
+        <StatusPill tone="zinc" label="Optional" />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-3">
+        {items.map((item) => (
+          <article key={item.kind} className={cn("rounded-lg border p-3", reviewStepToneClass(item.tone))}>
+            <div className="flex items-start justify-between gap-3">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-white/10 bg-black/20 text-white">
+                {iconFor(item.kind)}
+              </span>
+              <StatusPill tone={item.tone} label={item.label} />
+            </div>
+            <h3 className="mt-3 text-sm font-semibold text-white">{item.title}</h3>
+            <div className="mt-2 space-y-1 text-xs leading-5 hc-soft">
+              <p><span className="font-semibold text-white">Wann:</span> {item.when}</p>
+              <p><span className="font-semibold text-white">Aufwand:</span> {item.cost}</p>
+              <p><span className="font-semibold text-white">Sicherheit:</span> {item.safety}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

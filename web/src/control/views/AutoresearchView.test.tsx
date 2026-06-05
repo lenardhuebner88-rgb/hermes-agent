@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { AUTORESEARCH_ADVANCED_GUIDE } from "../lib/autoresearchAdvanced";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
@@ -439,6 +440,13 @@ describe("AutoresearchView decision guide", () => {
 });
 
 describe("AutoresearchView run guidance", () => {
+  it("keeps advanced controls framed as optional specialist actions", () => {
+    expect(AUTORESEARCH_ADVANCED_GUIDE.map((item) => item.kind)).toEqual(["models", "deep-audit", "test-foundry"]);
+    expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "deep-audit")?.cost).toContain("1-2 Mio Token");
+    expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "test-foundry")?.safety).toContain("separatem Branch");
+    expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "models")?.safety).toContain("Queue");
+  });
+
   it("keeps plain-language research-loop presets mapped to backend payload values", () => {
     expect(RESEARCH_LOOP_PRESETS).toHaveLength(3);
     expect(getResearchLoopPreset("recommended")).toMatchObject({
