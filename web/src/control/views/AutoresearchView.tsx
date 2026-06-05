@@ -19,7 +19,7 @@ import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../
 import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary, type AutoresearchEmptyQueueModeGuidance, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
+import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchAdvancedRunChecklist, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { de } from "../i18n/de";
@@ -181,9 +181,28 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     () => getDeepAuditGuidance({ subsystem: effectiveDeepAuditSubsystem, running: deepAuditRunning }),
     [deepAuditRunning, effectiveDeepAuditSubsystem],
   );
+  const deepAuditChecklist = useMemo(
+    () => getAdvancedRunChecklist({
+      kind: "deep-audit",
+      target: effectiveDeepAuditSubsystem,
+      running: deepAuditRunning,
+      busy: deepAudit.busy,
+    }),
+    [deepAudit.busy, deepAuditRunning, effectiveDeepAuditSubsystem],
+  );
   const testFoundryGuidance = useMemo(
     () => getTestFoundryGuidance({ target: effectiveTestFoundryTarget, running: testFoundryRunning, autoApply: testFoundryApply }),
     [effectiveTestFoundryTarget, testFoundryApply, testFoundryRunning],
+  );
+  const testFoundryChecklist = useMemo(
+    () => getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: effectiveTestFoundryTarget,
+      running: testFoundryRunning,
+      busy: testFoundry.busy,
+      autoApply: testFoundryApply,
+    }),
+    [effectiveTestFoundryTarget, testFoundry.busy, testFoundryApply, testFoundryRunning],
   );
   const readiness = useMemo(
     () => getAutoresearchReadiness({
@@ -735,6 +754,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
                 <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
                 <CodeAuditSlotPicker />
+                <AdvancedRunChecklistPanel checklist={deepAuditChecklist} />
                 <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !effectiveDeepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
                   Deep-Audit starten
                 </Button>
@@ -783,6 +803,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                     <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
                   </span>
                 </label>
+                <AdvancedRunChecklistPanel checklist={testFoundryChecklist} />
                 <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
                   Test-Foundry starten
                 </Button>
@@ -1357,6 +1378,32 @@ function StartChecklistPanel({ checklist }: { checklist: ResearchLoopStartCheckl
           <div key={item.label} className="rounded-md border border-white/10 bg-black/20 px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{item.label}</p>
+              <StatusPill tone={item.tone} label={item.value} />
+            </div>
+            <p className="mt-1 text-xs leading-5 hc-soft">{item.detail}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdvancedRunChecklistPanel({ checklist }: { checklist: AutoresearchAdvancedRunChecklist }) {
+  return (
+    <div className={cn("rounded-lg border p-2.5", reviewStepToneClass(checklist.tone))}>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">Start-Check</p>
+          <h3 className="mt-1 text-sm font-semibold text-white">{checklist.title}</h3>
+          <p className="mt-1 text-xs leading-5 hc-soft">{checklist.detail}</p>
+        </div>
+        <StatusPill tone={checklist.tone} label={checklist.label} />
+      </div>
+      <div className="grid gap-1.5">
+        {checklist.items.map((item) => (
+          <div key={item.label} className="rounded-md border border-white/10 bg-black/20 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{item.label}</p>
               <StatusPill tone={item.tone} label={item.value} />
             </div>
             <p className="mt-1 text-xs leading-5 hc-soft">{item.detail}</p>

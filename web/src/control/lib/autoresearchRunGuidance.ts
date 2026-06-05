@@ -125,6 +125,16 @@ export interface ResearchLoopStartChecklist {
   items: ResearchLoopStartChecklistItem[];
 }
 
+export type AutoresearchAdvancedRunKind = "deep-audit" | "test-foundry";
+
+export interface AutoresearchAdvancedRunChecklist {
+  tone: ToneName;
+  label: string;
+  title: string;
+  detail: string;
+  items: ResearchLoopStartChecklistItem[];
+}
+
 export function getResearchLoopStartSummary(input: {
   selectedPresetId: ResearchLoopPresetId | null;
   areaLabel: string;
@@ -196,6 +206,66 @@ export function getResearchLoopStartChecklist(input: {
   };
 }
 
+export function getAdvancedRunChecklist(input: {
+  kind: AutoresearchAdvancedRunKind;
+  target?: string | null;
+  running: boolean;
+  busy: boolean;
+  autoApply?: boolean;
+}): AutoresearchAdvancedRunChecklist {
+  const target = input.target?.trim() || null;
+  const isDeepAudit = input.kind === "deep-audit";
+  const startItem = advancedStartItem({ target, running: input.running, busy: input.busy, label: isDeepAudit ? "Subsystem" : "Target" });
+  const effectItem = isDeepAudit
+    ? {
+      label: "Wirkung",
+      value: "nur Queue",
+      detail: "Der Lauf schreibt keinen Code; Befunde werden später als Review-Karten entschieden.",
+      tone: "emerald",
+    } satisfies ResearchLoopStartChecklistItem
+    : {
+      label: "Wirkung",
+      value: input.autoApply ? "Branch" : "nur Queue",
+      detail: input.autoApply
+        ? "Validierte Tests landen auf f-test-foundry; main bleibt unberührt."
+        : "Der Lauf erzeugt Vorschläge; du entscheidest später in der Queue.",
+      tone: input.autoApply ? "amber" : "emerald",
+    } satisfies ResearchLoopStartChecklistItem;
+  const costItem = {
+    label: "Aufwand",
+    value: isDeepAudit ? "sehr hoch" : "mittel",
+    detail: isDeepAudit ? "Nur starten, wenn du eine gezielte Subsystem-Frage hast." : "Kostet vor allem Laufzeit und kann einige Minuten dauern.",
+    tone: isDeepAudit ? "amber" : "cyan",
+  } satisfies ResearchLoopStartChecklistItem;
+  const tone = !target
+    ? "amber"
+    : input.running
+      ? "cyan"
+      : input.busy
+        ? "violet"
+        : isDeepAudit || input.autoApply
+          ? "amber"
+          : "emerald";
+
+  return {
+    tone,
+    label: !target ? "Ziel fehlt" : input.running ? "Läuft" : input.busy ? "Startet" : isDeepAudit ? "Teuer" : input.autoApply ? "Branch-Gate" : "Queue-sicher",
+    title: isDeepAudit ? "Check vor Deep-Audit" : "Check vor Test-Foundry",
+    detail: !target
+      ? "Wähle zuerst ein klares Ziel, sonst ist der Speziallauf nicht sinnvoll."
+      : input.running
+        ? "Der Speziallauf ist aktiv. Beobachte Status und Ergebnis, statt parallel neu zu starten."
+        : input.busy
+          ? "Das Startsignal ist unterwegs. Warte auf Rückmeldung, bevor du erneut klickst."
+          : isDeepAudit
+            ? "Deep-Audit ist bewusst teuer und sollte nur für konkrete Risiko-Fragen laufen."
+            : input.autoApply
+              ? "Auto-Apply ist begrenzt, aber bewusst: Änderungen gehen auf den separaten Branch."
+              : "Test-Foundry bleibt im sicheren Vorschlagsmodus und verändert main nicht.",
+    items: [startItem, effectItem, costItem],
+  };
+}
+
 export function getDeepAuditGuidance(input: { subsystem?: string | null; running: boolean }): AutoresearchRunGuidance {
   if (input.running) {
     return {
@@ -212,6 +282,39 @@ export function getDeepAuditGuidance(input: { subsystem?: string | null; running
     outcome: input.subsystem ? `Prüft ${input.subsystem} auf konkrete Risiken.` : "Wähle zuerst ein Subsystem.",
     cost: "Nur starten, wenn ein gezielter Audit sinnvoll ist.",
     safety: "Keine direkte Code-Änderung; du entscheidest später in der Queue.",
+  };
+}
+
+function advancedStartItem(input: { target: string | null; running: boolean; busy: boolean; label: string }): ResearchLoopStartChecklistItem {
+  if (!input.target) {
+    return {
+      label: "Startsignal",
+      value: `${input.label} fehlt`,
+      detail: "Ohne klares Ziel bleibt der Start gesperrt.",
+      tone: "amber",
+    };
+  }
+  if (input.running) {
+    return {
+      label: "Startsignal",
+      value: "läuft bereits",
+      detail: "Keinen zweiten Speziallauf parallel starten.",
+      tone: "cyan",
+    };
+  }
+  if (input.busy) {
+    return {
+      label: "Startsignal",
+      value: "unterwegs",
+      detail: "Das Startsignal wartet auf Rückmeldung.",
+      tone: "violet",
+    };
+  }
+  return {
+    label: "Startsignal",
+    value: "bereit",
+    detail: `Ziel: ${input.target}.`,
+    tone: "emerald",
   };
 }
 

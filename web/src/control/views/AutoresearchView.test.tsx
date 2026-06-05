@@ -11,7 +11,7 @@ import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, g
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings } from "./AutoresearchView";
@@ -946,12 +946,105 @@ describe("AutoresearchView run guidance", () => {
     expect(guidance.safety).toContain("Queue");
   });
 
+  it("adds explicit start checks for expensive deep-audit runs", () => {
+    const checklist = getAdvancedRunChecklist({
+      kind: "deep-audit",
+      target: "autoresearch",
+      running: false,
+      busy: false,
+    });
+
+    expect(checklist).toMatchObject({
+      tone: "amber",
+      label: "Teuer",
+      title: "Check vor Deep-Audit",
+    });
+    expect(checklist.items.find((item) => item.label === "Wirkung")).toMatchObject({
+      value: "nur Queue",
+      tone: "emerald",
+    });
+    expect(checklist.items.find((item) => item.label === "Aufwand")).toMatchObject({
+      value: "sehr hoch",
+      tone: "amber",
+    });
+  });
+
   it("makes test-foundry auto-apply branch safety explicit", () => {
     const guidance = getTestFoundryGuidance({ target: "hermes_state.py", running: false, autoApply: true });
 
     expect(guidance.tone).toBe("amber");
     expect(guidance.label).toBe("Auto-Apply aktiv");
     expect(guidance.safety).toContain("f-test-foundry");
+  });
+
+  it("keeps test-foundry start checks distinct for queue-only and branch-gated modes", () => {
+    expect(getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: "hermes_state.py",
+      running: false,
+      busy: false,
+      autoApply: false,
+    })).toMatchObject({
+      tone: "emerald",
+      label: "Queue-sicher",
+      detail: expect.stringContaining("Vorschlagsmodus"),
+    });
+
+    expect(getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: "hermes_state.py",
+      running: false,
+      busy: false,
+      autoApply: true,
+    })).toMatchObject({
+      tone: "amber",
+      label: "Branch-Gate",
+      detail: expect.stringContaining("separaten Branch"),
+    });
+  });
+
+  it("blocks advanced run checklist readiness until a target is selected", () => {
+    const checklist = getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: "",
+      running: false,
+      busy: false,
+      autoApply: false,
+    });
+
+    expect(checklist).toMatchObject({
+      tone: "amber",
+      label: "Ziel fehlt",
+    });
+    expect(checklist.items.find((item) => item.label === "Startsignal")).toMatchObject({
+      value: "Target fehlt",
+      tone: "amber",
+    });
+  });
+
+  it("keeps advanced run checklist headline aligned with running and busy states", () => {
+    expect(getAdvancedRunChecklist({
+      kind: "deep-audit",
+      target: "autoresearch",
+      running: true,
+      busy: false,
+    })).toMatchObject({
+      tone: "cyan",
+      label: "Läuft",
+      detail: expect.stringContaining("aktiv"),
+    });
+
+    expect(getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: "hermes_state.py",
+      running: false,
+      busy: true,
+      autoApply: false,
+    })).toMatchObject({
+      tone: "violet",
+      label: "Startet",
+      detail: expect.stringContaining("Startsignal ist unterwegs"),
+    });
   });
 });
 
