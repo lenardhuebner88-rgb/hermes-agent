@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { getAutoresearchActionPlan } from "../lib/autoresearchActionPlan";
 import { AUTORESEARCH_ADVANCED_GUIDE } from "../lib/autoresearchAdvanced";
 import { getAutoresearchActivityCard } from "../lib/autoresearchActivity";
 import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
@@ -266,6 +267,97 @@ describe("AutoresearchView cockpit readiness", () => {
       value: "aktualisiert",
       tone: "violet",
     });
+  });
+});
+
+describe("AutoresearchView action plan", () => {
+  it("discourages new starts while high-priority queue work is open", () => {
+    const plan = getAutoresearchActionPlan({
+      routeOk: true,
+      loopRunning: false,
+      openCount: 5,
+      highPriorityCount: 2,
+      openSkillCount: 1,
+      openSkillManualReviewCount: 1,
+      revertedCount: 0,
+      storeBusy: false,
+      pruneBusy: false,
+    });
+
+    expect(plan.generate).toMatchObject({ label: "Erst Hoch+", tone: "amber" });
+    expect(plan.scan.reason).toContain("Review-Stau");
+    expect(plan.applySkills).toMatchObject({ label: "Einzelreview", tone: "amber" });
+  });
+
+  it("recommends a small skill generation when route, loop, and queue are calm", () => {
+    const plan = getAutoresearchActionPlan({
+      routeOk: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      openSkillCount: 0,
+      openSkillManualReviewCount: 0,
+      revertedCount: 0,
+      storeBusy: false,
+      pruneBusy: false,
+    });
+
+    expect(plan.generate).toMatchObject({ label: "Empfohlen", tone: "emerald" });
+    expect(plan.scan).toMatchObject({ label: "Optional", tone: "cyan" });
+    expect(plan.applySkills.label).toBe("Nichts offen");
+  });
+
+  it("puts start actions behind route recovery", () => {
+    const plan = getAutoresearchActionPlan({
+      routeOk: false,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      openSkillCount: 0,
+      openSkillManualReviewCount: 0,
+      revertedCount: 2,
+      storeBusy: false,
+      pruneBusy: false,
+    });
+
+    expect(plan.generate).toMatchObject({ label: "Route prüfen", tone: "amber" });
+    expect(plan.scan.after).toContain("Route stabilisieren");
+    expect(plan.prune).toMatchObject({ label: "Aufräumen", tone: "emerald" });
+  });
+
+  it("locks all action explanations while any cockpit action is busy", () => {
+    const plan = getAutoresearchActionPlan({
+      routeOk: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      openSkillCount: 0,
+      openSkillManualReviewCount: 0,
+      revertedCount: 0,
+      storeBusy: true,
+      pruneBusy: false,
+    });
+
+    expect(Object.values(plan).map((item) => item.label)).toEqual(["Warten", "Warten", "Warten", "Warten"]);
+    expect(plan.generate.reason).toContain("Aktion läuft");
+  });
+
+  it("keeps ordinary actions available in the plan while only cleanup is busy", () => {
+    const plan = getAutoresearchActionPlan({
+      routeOk: true,
+      loopRunning: false,
+      openCount: 0,
+      highPriorityCount: 0,
+      openSkillCount: 0,
+      openSkillManualReviewCount: 0,
+      revertedCount: 3,
+      storeBusy: false,
+      pruneBusy: true,
+    });
+
+    expect(plan.generate.label).toBe("Empfohlen");
+    expect(plan.scan.label).toBe("Optional");
+    expect(plan.prune.label).toBe("Warten");
   });
 });
 

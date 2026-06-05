@@ -7,6 +7,7 @@ import { fetchJSON } from "@/lib/api";
 import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
+import { getAutoresearchActionPlan, type AutoresearchActionHint } from "../lib/autoresearchActionPlan";
 import { AUTORESEARCH_ADVANCED_GUIDE, type AutoresearchAdvancedGuideItem } from "../lib/autoresearchAdvanced";
 import { getAutoresearchActivityCard, type AutoresearchActivityCard } from "../lib/autoresearchActivity";
 import { fmtClock } from "../lib/derive";
@@ -135,6 +136,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   );
   const batchBusy = store.busy === "confirm-batch";
   const openSkillManualReviewCount = useMemo(() => store.openSkillProposals.filter(proposalNeedsManualReview).length, [store.openSkillProposals]);
+  const deepAuditRunning = deepAudit.status?.state === "running";
+  const testFoundryRunning = testFoundry.status?.state === "running";
+  const routeOk = loop.routeTone === "emerald";
   const canApplyAllOpenSkills = canApplyAllOpenSkillProposals({
     openSkillProposals: store.openSkillProposals,
     busy: !!store.busy,
@@ -144,14 +148,26 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     selectedManualReviewCount,
     busy: batchBusy,
   });
+  const anyActionBusy = !!store.busy || !!loopBusy || pruneBusy || bulkRevertedBusy || deepAudit.busy || testFoundry.busy || deepAuditRunning || testFoundryRunning;
+  const actionPlan = useMemo(
+    () => getAutoresearchActionPlan({
+      routeOk,
+      loopRunning: loop.running,
+      openCount: open.length,
+      highPriorityCount,
+      openSkillCount: store.openSkillProposals.length,
+      openSkillManualReviewCount,
+      revertedCount: reverted.length,
+      storeBusy: !!store.busy,
+      pruneBusy,
+    }),
+    [highPriorityCount, loop.running, open.length, openSkillManualReviewCount, pruneBusy, reverted.length, routeOk, store.busy, store.openSkillProposals.length],
+  );
   const busyNotice = describeAutoresearchBusy(store.busy);
   const latestActivity = store.activity[0] ?? null;
-  const deepAuditRunning = deepAudit.status?.state === "running";
-  const testFoundryRunning = testFoundry.status?.state === "running";
   const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const effectiveAdvancedOpen = advancedNeedsAttention || advancedOpen;
-  const routeOk = loop.routeTone === "emerald";
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
   const effectiveTestFoundryTarget = testFoundryTarget || testFoundry.targets[0] || "";
   const deepAuditGuidance = useMemo(
@@ -170,9 +186,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       loopRunning: loop.running,
       openCount: open.length,
       highPriorityCount,
-      busy: !!store.busy || !!loopBusy || pruneBusy || bulkRevertedBusy || deepAudit.busy || testFoundry.busy || deepAuditRunning || testFoundryRunning,
+      busy: anyActionBusy,
     }),
-    [bulkRevertedBusy, deepAudit.busy, deepAuditRunning, highPriorityCount, loop.running, loopBusy, open.length, pruneBusy, status.data?.heartbeat_fresh, status.data?.route_status, status.data?.state, store.busy, testFoundry.busy, testFoundryRunning],
+    [anyActionBusy, highPriorityCount, loop.running, open.length, status.data?.heartbeat_fresh, status.data?.route_status, status.data?.state],
   );
   const researchLoopGuidance = useMemo(
     () => getResearchLoopGuidance({ running: loop.running, routeOk, maxIterations: clampLoopIterations(Number(maxIterations)), area: describeArea(area) }),
@@ -433,6 +449,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <OperatorActionCard
                 icon={<Sparkles className="h-5 w-5" />}
                 eyebrow="Schnell"
+                hint={actionPlan.generate}
                 title="Skill-Vorschläge holen"
                 body="Sofort neue Kandidaten aus genutzten Skills erzeugen."
                 button={<Button className="hc-hit w-full justify-center" onClick={store.generate} disabled={!!store.busy} title={de.autoresearch.generateHint} prefix={store.busy === "generate" ? <Spinner /> : <RotateCw className="h-4 w-4" />}>Vorschläge erzeugen</Button>}
@@ -440,6 +457,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <OperatorActionCard
                 icon={<FlaskConical className="h-5 w-5" />}
                 eyebrow="Code"
+                hint={actionPlan.scan}
                 title="Schwächen finden"
                 body="Findet Code-Risiken und legt gegatete Vorschläge an."
                 button={
@@ -464,6 +482,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <OperatorActionCard
                 icon={<ShieldCheck className="h-5 w-5" />}
                 eyebrow="Review"
+                hint={actionPlan.applySkills}
                 title={openSkillManualReviewCount > 0 ? "Erst Review öffnen" : "Sichere Skills übernehmen"}
                 body={openSkillManualReviewCount > 0
                   ? `${openSkillManualReviewCount} Skill-Vorschläge brauchen Einzelreview. Sammelübernahme bleibt gesperrt.`
@@ -481,6 +500,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               <OperatorActionCard
                 icon={<Archive className="h-5 w-5" />}
                 eyebrow="Pflege"
+                hint={actionPlan.prune}
                 title="Queue aufräumen"
                 body="Archiviert Erledigtes und entfernt alte Kandidaten nach Backend-Regeln."
                 button={<Button outlined className="hc-hit w-full justify-center" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
@@ -781,7 +801,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2"><p className="text-xs hc-dim">{label}</p><p className="hc-mono truncate text-sm font-semibold text-white">{value}</p></div>;
 }
 
-function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: React.ReactNode; eyebrow: string; title: string; body: string; button: React.ReactNode }) {
+function OperatorActionCard({ icon, eyebrow, hint, title, body, button }: { icon: React.ReactNode; eyebrow: string; hint: AutoresearchActionHint; title: string; body: string; button: React.ReactNode }) {
   return (
     <article className="flex min-h-[188px] flex-col justify-between rounded-lg border border-white/10 bg-white/[.035] p-3">
       <div>
@@ -789,10 +809,17 @@ function OperatorActionCard({ icon, eyebrow, title, body, button }: { icon: Reac
           <span className="grid h-10 w-10 place-items-center rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]">
             {icon}
           </span>
-          <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] font-medium hc-soft">{eyebrow}</span>
+          <span className="flex flex-wrap justify-end gap-1.5">
+            <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] font-medium hc-soft">{eyebrow}</span>
+            <StatusPill tone={hint.tone} label={hint.label} />
+          </span>
         </div>
         <h3 className="text-sm font-semibold text-white">{title}</h3>
         <p className="mt-1 text-xs leading-5 hc-soft">{body}</p>
+        <div className="mt-3 rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-5 hc-soft">
+          <p><span className="font-semibold text-white">Warum:</span> {hint.reason}</p>
+          <p className="mt-1"><span className="font-semibold text-white">Danach:</span> {hint.after}</p>
+        </div>
       </div>
       <div className="mt-3">{button}</div>
     </article>
