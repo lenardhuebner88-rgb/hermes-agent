@@ -24,7 +24,7 @@ export function getAutoresearchActivityCard(entry: ActivityEntry): AutoresearchA
       label: "Achtung",
       title: "Diese Aktion war nicht neutral.",
       detail: entry.text,
-      next: "Kurz prüfen, ob dadurch Queue, Lauf oder Auswahl anders stehen.",
+      next: "Kurz prüfen, ob dadurch Entscheidungen, Lauf oder Auswahl anders stehen.",
     };
   }
   if (entry.tone === "emerald") {

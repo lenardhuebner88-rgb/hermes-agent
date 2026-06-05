@@ -556,7 +556,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                   ? `${openSkillManualReviewCount} Skill-Vorschläge brauchen Einzelreview. Sammelübernahme bleibt gesperrt.`
                   : "Nur batch-sichere Skill-Vorschläge gesammelt übernehmen; Code läuft einzeln durchs Gate."}
                 button={openSkillManualReviewCount > 0 ? (
-                  <Button outlined className="hc-hit w-full justify-center" onClick={() => scrollTo("autoresearch-queue")} disabled={store.openSkillProposals.length === 0} title="Öffnet die Queue, damit riskante Skill-Vorschläge einzeln geprüft werden." prefix={<ArrowDown className="h-4 w-4" />}>
+                  <Button outlined className="hc-hit w-full justify-center" onClick={() => scrollTo("autoresearch-queue")} disabled={store.openSkillProposals.length === 0} title="Öffnet die Entscheidungen, damit riskante Skill-Vorschläge einzeln geprüft werden." prefix={<ArrowDown className="h-4 w-4" />}>
                     Review öffnen ({store.openSkillProposals.length})
                   </Button>
                 ) : (
@@ -569,7 +569,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 icon={<Archive className="h-5 w-5" />}
                 eyebrow="Pflege"
                 hint={actionPlan.prune}
-                title="Queue aufräumen"
+                title="Entscheidungen aufräumen"
                 body="Archiviert Erledigtes und entfernt alte Kandidaten nach Backend-Regeln."
                 button={<Button outlined className="hc-hit w-full justify-center" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
               />
@@ -729,7 +729,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           <span className="min-w-0">
             <span className="hc-eyebrow">Erweitert</span>
             <span className="mt-1 block text-sm font-semibold text-white">Modelle, Deep-Audit und Test-Foundry</span>
-            <span className="mt-0.5 block text-xs leading-5 hc-soft">Für gezielte Spezialläufe und Modellzuweisung. Der normale Ablauf bleibt oben: Queue prüfen, dann Probelauf starten.</span>
+            <span className="mt-0.5 block text-xs leading-5 hc-soft">Für gezielte Spezialläufe und Modellzuweisung. Der normale Ablauf bleibt oben: Entscheidungen prüfen, dann Probelauf starten.</span>
           </span>
           <StatusPill tone={advancedNeedsAttention ? "amber" : "zinc"} label={advancedNeedsAttention ? "Aufmerksamkeit" : "Optional"} />
         </summary>
@@ -787,7 +787,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 <ToneCallout tone={testFoundryApply ? "amber" : "cyan"}>
                   {testFoundryApply
                     ? "Auto-Apply ist an: validierte Tests werden auf dem separaten Branch f-test-foundry committet, nie auf main."
-                    : "Auto-Apply ist aus: Test-Foundry erzeugt nur Vorschläge in der Queue."}
+                    : "Auto-Apply ist aus: Test-Foundry erzeugt nur Karten zur Prüfung."}
                 </ToneCallout>
                 {testFoundryResultSummary ? (
                   <TestFoundryResultPanel
@@ -1596,17 +1596,18 @@ function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
 }
 
 export function DeepAuditFindings({ findings, proposals }: { findings: DeepAuditFinding[]; proposals: string[] }) {
+  const proposalCardLabel = `${proposals.length} ${proposals.length === 1 ? "Karte" : "Karten"}`;
   if (findings.length === 0) {
     return (
       <div className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
         <div className="flex flex-wrap items-center gap-2">
           <span>Noch keine Deep-Audit-Findings.</span>
-          {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
+          {proposals.length > 0 ? <StatusPill tone="amber" label={proposalCardLabel} /> : null}
         </div>
         <p className="mt-1">
           {proposals.length > 0
-            ? "Der Lauf hat bereits Queue-Karten gemeldet; die Detail-Findings sind in dieser Antwort nicht enthalten."
-            : "Wenn der Lauf fertig ist, erscheinen hier die prüfbaren Risiken und die daraus erzeugten Queue-Karten."}
+            ? "Der Lauf hat bereits Review-Karten gemeldet; die Detail-Findings sind in dieser Antwort nicht enthalten."
+            : "Wenn der Lauf fertig ist, erscheinen hier die prüfbaren Risiken und die daraus erzeugten Review-Karten."}
         </p>
       </div>
     );
@@ -1626,7 +1627,7 @@ export function DeepAuditFindings({ findings, proposals }: { findings: DeepAudit
             <div className="flex flex-wrap items-center gap-2">
               <p className="hc-eyebrow">Audit-Ergebnis</p>
               <StatusPill tone={severityTone(topSeverity)} label={deepAuditSeverityLabel(topSeverity)} />
-              {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
+              {proposals.length > 0 ? <StatusPill tone="amber" label={proposalCardLabel} /> : null}
             </div>
             <h3 className="mt-2 text-base font-semibold text-white">
               {findings.length === 1 ? "1 prüfbares Risiko gefunden." : `${findings.length} prüfbare Risiken gefunden.`}
@@ -1634,7 +1635,7 @@ export function DeepAuditFindings({ findings, proposals }: { findings: DeepAudit
             <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">
               Wichtigster Punkt: {topFinding.title}. Der Deep-Audit schreibt keinen Code; daraus entstehen nur Review-Karten.
             </p>
-            <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> Queue-Karten prüfen, dann nur belegte Fixes übernehmen.</p>
+            <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> Review-Karten prüfen, dann nur belegte Fixes übernehmen.</p>
           </div>
           <div className="grid shrink-0 grid-cols-2 gap-1.5 sm:grid-cols-4 lg:min-w-[360px]">
             {(["critical", "high", "medium", "low"] as const).map((severity) => (

@@ -34,7 +34,7 @@ export function getAutoresearchReadiness(input: {
       label: "Status laden",
       title: "Noch nicht starten.",
       detail: "Der Autoresearch-Status ist noch nicht vollständig geladen. Das Cockpit kann den sicheren nächsten Schritt erst danach bewerten.",
-      next: "Kurz warten oder Status neu laden; danach Queue oder Probelauf wählen.",
+      next: "Kurz warten oder Status neu laden; danach Entscheidungen oder Probelauf wählen.",
       facts,
     };
   }
@@ -67,7 +67,7 @@ export function getAutoresearchReadiness(input: {
       label: "Lauf aktiv",
       title: "Beobachten statt neu starten.",
       detail: "Autoresearch arbeitet gerade. Ein zweiter Start wäre für einen Operator schwer zu verfolgen.",
-      next: "Loop beobachten; neue Karten danach in der Queue entscheiden.",
+      next: "Loop beobachten; neue Karten danach bewusst entscheiden.",
       facts,
     };
   }
@@ -77,7 +77,7 @@ export function getAutoresearchReadiness(input: {
       tone: "violet",
       label: "Aktion läuft",
       title: "Kurz warten.",
-      detail: "Eine Cockpit-Aktion aktualisiert gerade Queue, Status oder Laufdaten.",
+      detail: "Eine Cockpit-Aktion aktualisiert gerade Entscheidungen, Status oder Laufdaten.",
       next: "Warten, bis die Rückmeldung sichtbar ist; danach den nächsten Schritt wählen.",
       facts,
     };
@@ -88,11 +88,11 @@ export function getAutoresearchReadiness(input: {
     return {
       tone: hasHighPriority ? "amber" : "emerald",
       label: "Review bereit",
-      title: hasHighPriority ? "Erst die wichtigen Karten entscheiden." : "Queue ist bereit.",
+      title: hasHighPriority ? "Erst die wichtigen Karten entscheiden." : "Entscheidungen sind bereit.",
       detail: hasHighPriority
-        ? "In der Queue liegen Hoch+-Karten. Sie brauchen zuerst bewusstes Einzelreview."
+        ? "Es liegen Hoch+-Karten offen. Sie brauchen zuerst bewusstes Einzelreview."
         : "Es liegen geprüfte Vorschläge vor. Das ist der normale, sichere Arbeitsmodus.",
-      next: "Queue bearbeiten; danach erst neue Kandidaten holen oder den nächsten Probelauf starten.",
+      next: "Offene Karten bearbeiten; danach erst neue Kandidaten holen oder den nächsten Probelauf starten.",
       facts,
     };
   }
@@ -102,7 +102,7 @@ export function getAutoresearchReadiness(input: {
     label: "Betriebsbereit",
     title: "Bereit für einen kleinen Probelauf.",
     detail: "Route und Loop sehen ruhig aus, und es warten keine offenen Entscheidungen.",
-    next: "Preset wählen und Dry-Run starten; die Ergebnisse landen wieder in der Queue.",
+    next: "Preset wählen und Dry-Run starten; die Ergebnisse erscheinen als neue Karten.",
     facts,
   };
 }
@@ -127,7 +127,7 @@ function readinessFacts(input: {
       tone: input.loopRunning ? "cyan" : input.busy ? "violet" : "emerald",
     },
     {
-      label: "Queue",
+      label: "Offen",
       value: input.openCount === 0 ? "leer" : `${input.openCount} offen`,
       tone: input.openCount === 0 ? "emerald" : "cyan",
     },

@@ -60,7 +60,7 @@ export function getProposalOperatorBrief(proposal: Proposal): ProposalOperatorBr
       facts: [
         { label: "Betroffen", value: affected, tone: "zinc" },
         { label: "Warum", value: "Kein messbarer Nutzen im letzten Lauf.", tone: "zinc" },
-        { label: "Klick", value: "Archivieren räumt ihn aus der Queue.", tone: "zinc" },
+        { label: "Klick", value: "Archivieren räumt ihn aus den offenen Karten.", tone: "zinc" },
       ],
     };
   }

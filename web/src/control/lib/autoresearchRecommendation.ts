@@ -48,9 +48,9 @@ export function getAutoresearchRecommendation(input: {
       eyebrow: "Nächster sinnvoller Schritt",
       title: `${input.openCount} geprüfte ${input.openCount === 1 ? "Verbesserung" : "Verbesserungen"} entscheiden.`,
       detail: input.revertedCount > 0
-        ? `${input.revertedCount} zurückgerollte Kandidaten sind bereits sicher aussortiert. Entscheide zuerst die offene Queue.`
+        ? `${input.revertedCount} zurückgerollte Kandidaten sind bereits sicher aussortiert. Entscheide zuerst die offenen Karten.`
         : "Lies zuerst die Begründung und den Diff der Top-Karte. Übernehmen ist gegatet, Überspringen räumt auf.",
-      primaryLabel: "Queue öffnen",
+      primaryLabel: "Entscheidungen prüfen",
     };
   }
   if (statusUnknown) {

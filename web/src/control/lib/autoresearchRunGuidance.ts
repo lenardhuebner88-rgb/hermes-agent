@@ -39,7 +39,7 @@ export const RESEARCH_LOOP_PRESETS = [
     badge: "klein",
     operatorTitle: "Guter Standardlauf",
     operatorFit: "Nimm das, wenn du einfach frische, harmlose Vorschläge willst.",
-    operatorResult: "Neue Kandidaten landen als Queue-Karten; nichts wird automatisch geändert.",
+    operatorResult: "Neue Kandidaten erscheinen als Review-Karten; nichts wird automatisch geändert.",
     area: "all",
     focus: "recommended_sections",
     maxIterations: "2",
@@ -54,7 +54,7 @@ export const RESEARCH_LOOP_PRESETS = [
     badge: "enger",
     operatorTitle: "Weniger Rauschen",
     operatorFit: "Nimm das, wenn nur viel genutzte Skills verbessert werden sollen.",
-    operatorResult: "Seltene Skills werden ausgelassen, damit die Queue kürzer und relevanter bleibt.",
+    operatorResult: "Seltene Skills werden ausgelassen, damit weniger, relevantere Karten entstehen.",
     area: "all",
     focus: "recommended_sections",
     maxIterations: "3",
@@ -69,7 +69,7 @@ export const RESEARCH_LOOP_PRESETS = [
     badge: "Code",
     operatorTitle: "Dashboard prüfen",
     operatorFit: "Nimm das, wenn das Control-Dashboard selbst untersucht werden soll.",
-    operatorResult: "Code-nahe Vorschläge landen in der Queue und brauchen später Review.",
+    operatorResult: "Code-nahe Vorschläge erscheinen als Karten und brauchen später Review.",
     area: "dashboard",
     focus: "code_review",
     maxIterations: "2",
@@ -149,7 +149,7 @@ export function getResearchLoopStartSummary(input: {
       scope: preset.operatorFit,
       detail: preset.operatorResult,
       cost: preset.cost,
-      safety: "Dry-Run: Änderungen entstehen erst nach Review in der Queue.",
+      safety: "Dry-Run: Änderungen entstehen erst nach Review der Karten.",
       technicalLabel: `${preset.area} · ${preset.focus}`,
     };
   }
@@ -158,7 +158,7 @@ export function getResearchLoopStartSummary(input: {
     scope: `Sucht in ${input.areaLabel}.`,
     detail: `Fokus ${input.focus.trim() || "recommended_sections"}; ${input.minUseCount !== null ? `nur Nutzung >= ${input.minUseCount}` : "ohne Nutzungsfilter"}.`,
     cost: `${input.maxIterations} Iterationen maximal.`,
-    safety: "Dry-Run: Änderungen entstehen erst nach Review in der Queue.",
+    safety: "Dry-Run: Änderungen entstehen erst nach Review der Karten.",
     technicalLabel: "Manuelle Werte",
   };
 }
@@ -200,7 +200,7 @@ export function getResearchLoopStartChecklist(input: {
         : input.busy
           ? "Das Startsignal ist unterwegs. Warte auf Rückmeldung, bevor du erneut klickst."
           : input.highPriorityCount > 0
-      ? "Der Lauf ist möglich, aber die offene Queue hat Vorrang, damit der Review-Stau nicht wächst."
+      ? "Der Lauf ist möglich, aber offene Hoch+-Karten haben Vorrang, damit der Review-Stau nicht wächst."
       : "Diese Punkte zeigen, ob der Start gerade sinnvoll und sicher begrenzt ist.",
     items,
   };
@@ -219,16 +219,16 @@ export function getAdvancedRunChecklist(input: {
   const effectItem = isDeepAudit
     ? {
       label: "Wirkung",
-      value: "nur Queue",
+      value: "nur Karten",
       detail: "Der Lauf schreibt keinen Code; Befunde werden später als Review-Karten entschieden.",
       tone: "emerald",
     } satisfies ResearchLoopStartChecklistItem
     : {
       label: "Wirkung",
-      value: input.autoApply ? "Branch" : "nur Queue",
+      value: input.autoApply ? "Branch" : "nur Karten",
       detail: input.autoApply
         ? "Validierte Tests landen auf f-test-foundry; main bleibt unberührt."
-        : "Der Lauf erzeugt Vorschläge; du entscheidest später in der Queue.",
+        : "Der Lauf erzeugt Vorschläge; du entscheidest später Karte für Karte.",
       tone: input.autoApply ? "amber" : "emerald",
     } satisfies ResearchLoopStartChecklistItem;
   const costItem = {
@@ -249,7 +249,7 @@ export function getAdvancedRunChecklist(input: {
 
   return {
     tone,
-    label: !target ? "Ziel fehlt" : input.running ? "Läuft" : input.busy ? "Startet" : isDeepAudit ? "Teuer" : input.autoApply ? "Branch-Gate" : "Queue-sicher",
+    label: !target ? "Ziel fehlt" : input.running ? "Läuft" : input.busy ? "Startet" : isDeepAudit ? "Teuer" : input.autoApply ? "Branch-Gate" : "Vorschlags-sicher",
     title: isDeepAudit ? "Check vor Deep-Audit" : "Check vor Test-Foundry",
     detail: !target
       ? "Wähle zuerst ein klares Ziel, sonst ist der Speziallauf nicht sinnvoll."
@@ -273,7 +273,7 @@ export function getDeepAuditGuidance(input: { subsystem?: string | null; running
       label: "Läuft gerade",
       outcome: "Sucht systematisch nach Code-Risiken im gewählten Subsystem.",
       cost: "Sehr teuer: typischerweise 1-2 Mio Token.",
-      safety: "Schreibt keinen Code; Findings landen als geprüfte Vorschläge in der Queue.",
+      safety: "Schreibt keinen Code; Findings erscheinen als geprüfte Review-Karten.",
     };
   }
   return {
@@ -281,7 +281,7 @@ export function getDeepAuditGuidance(input: { subsystem?: string | null; running
     label: input.subsystem ? "Teurer Audit" : "Subsystem fehlt",
     outcome: input.subsystem ? `Prüft ${input.subsystem} auf konkrete Risiken.` : "Wähle zuerst ein Subsystem.",
     cost: "Nur starten, wenn ein gezielter Audit sinnvoll ist.",
-    safety: "Keine direkte Code-Änderung; du entscheidest später in der Queue.",
+    safety: "Keine direkte Code-Änderung; du entscheidest später Karte für Karte.",
   };
 }
 
@@ -354,7 +354,7 @@ function startReadinessItem(input: { routeOk: boolean; running: boolean; busy: b
 function queueImpactItem(openCount: number, highPriorityCount: number): ResearchLoopStartChecklistItem {
   if (highPriorityCount > 0) {
     return {
-      label: "Queue-Wirkung",
+      label: "Entscheidungswirkung",
       value: `${highPriorityCount} Hoch+ offen`,
       detail: "Neue Kandidaten würden den Review-Stau erhöhen; erst kritische Karten entscheiden.",
       tone: "amber",
@@ -362,14 +362,14 @@ function queueImpactItem(openCount: number, highPriorityCount: number): Research
   }
   if (openCount > 0) {
     return {
-      label: "Queue-Wirkung",
+      label: "Entscheidungswirkung",
       value: `${openCount} offen`,
-      detail: "Start ist möglich, aber neue Treffer landen zusätzlich in der Queue.",
+      detail: "Start ist möglich, aber neue Treffer kommen zusätzlich zu den offenen Karten.",
       tone: "cyan",
     };
   }
   return {
-    label: "Queue-Wirkung",
+    label: "Entscheidungswirkung",
     value: "leer",
     detail: "Guter Zeitpunkt für neue Kandidaten; es liegt nichts Unerledigtes davor.",
     tone: "emerald",
@@ -408,7 +408,7 @@ export function getTestFoundryGuidance(input: { target?: string | null; running:
     label: input.autoApply ? "Auto-Apply aktiv" : "Nur Vorschläge",
     outcome: input.target ? `Härtet Tests rund um ${input.target}.` : "Wähle zuerst ein Ziel.",
     cost: "Mittel: Laufzeit statt hoher Token-Kosten.",
-    safety: input.autoApply ? "Branch f-test-foundry bleibt getrennt von main." : "Keine direkte Änderung; Vorschläge erscheinen in der Queue.",
+    safety: input.autoApply ? "Branch f-test-foundry bleibt getrennt von main." : "Keine direkte Änderung; Vorschläge erscheinen als Karten zur Prüfung.",
   };
 }
 
@@ -436,7 +436,7 @@ export function getResearchLoopGuidance(input: { running: boolean; routeOk: bool
     label: "Dry-Run",
     outcome: `Sucht Kandidaten in ${input.area}.`,
     cost: `${input.maxIterations} Iterationen, klein genug für einen kontrollierten Lauf.`,
-    safety: "Schreibt keine Änderungen; neue Kandidaten landen zuerst in der Queue.",
+    safety: "Schreibt keine Änderungen; neue Kandidaten erscheinen zuerst als Karten zur Prüfung.",
   };
 }
 
@@ -465,6 +465,6 @@ export function getResearchLoopStartControl(input: { running: boolean; busy: boo
   return {
     disabled: false,
     label: "Research-Loop starten",
-    title: "Startet einen Dry-Run. Änderungen landen erst als Vorschläge in der Queue.",
+    title: "Startet einen Dry-Run. Änderungen erscheinen erst als Vorschläge zur Prüfung.",
   };
 }

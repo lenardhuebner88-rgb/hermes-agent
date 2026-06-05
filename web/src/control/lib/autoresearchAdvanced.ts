@@ -19,7 +19,7 @@ export const AUTORESEARCH_ADVANCED_GUIDE = [
     title: "Modelle nur zuweisen, wenn Auto nicht reicht.",
     when: "Für Spezialfälle, in denen eine Lane bewusst ein anderes Modell braucht.",
     cost: "Keine direkte Laufkosten-Aktion; ändert nur die nächste Ausführung.",
-    safety: "Speichert nur die Modellwahl. Queue und Vorschläge bleiben unverändert.",
+    safety: "Speichert nur die Modellwahl. Offene Karten und Vorschläge bleiben unverändert.",
     tone: "zinc",
   },
   {
@@ -37,7 +37,7 @@ export const AUTORESEARCH_ADVANCED_GUIDE = [
     title: "Test-Foundry härtet Tests, nicht Produktfunktionen.",
     when: "Wenn vorhandene Tests wahrscheinlich Lücken haben.",
     cost: "Mittel: kostet vor allem Laufzeit.",
-    safety: "Ohne Auto-Apply nur Queue-Vorschläge; Auto-Apply bleibt auf separatem Branch.",
+    safety: "Ohne Auto-Apply nur Review-Karten; Auto-Apply bleibt auf separatem Branch.",
     tone: "cyan",
   },
 ] as const satisfies readonly AutoresearchAdvancedGuideItem[];

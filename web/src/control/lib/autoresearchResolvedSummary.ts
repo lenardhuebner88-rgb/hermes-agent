@@ -45,7 +45,7 @@ export function getAutoresearchResolvedSummary(input: {
       label: "Erledigt",
       title: `${applied} ${applied === 1 ? "Vorschlag wurde" : "Vorschläge wurden"} übernommen.`,
       detail: skipped > 0 ? "Übernommene und übersprungene Karten sind abgeschlossen." : "Die erledigten Karten brauchen keine Aktion mehr.",
-      next: "Bei Bedarf Details aufklappen; sonst mit Queue oder Probelauf weiterarbeiten.",
+      next: "Bei Bedarf Details aufklappen; sonst mit Entscheidungen oder Probelauf weiterarbeiten.",
       archiveLabel: null,
       facts,
     };
@@ -56,7 +56,7 @@ export function getAutoresearchResolvedSummary(input: {
     label: "Aussortiert",
     title: `${skipped} ${skipped === 1 ? "Vorschlag wurde" : "Vorschläge wurden"} übersprungen.`,
     detail: "Diese Karten wurden bewusst nicht übernommen und brauchen keine weitere Aktion.",
-    next: "Bei Bedarf Details aufklappen; sonst mit Queue oder Probelauf weiterarbeiten.",
+    next: "Bei Bedarf Details aufklappen; sonst mit Entscheidungen oder Probelauf weiterarbeiten.",
     archiveLabel: null,
     facts,
   };

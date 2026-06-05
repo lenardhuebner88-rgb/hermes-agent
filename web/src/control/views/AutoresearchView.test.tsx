@@ -73,7 +73,7 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(html).toContain("Bug-Risiko");
     expect(html).toContain("hermes_cli/autoresearch_runs.py:23");
     expect(html).toContain("_VALID_LANES");
-    expect(html).toContain("1 in Queue");
+    expect(html).toContain("1 Karte");
     expect(html).toContain("Run lane omitted");
     expect(html).toContain("Fix-Hinweis");
     expect(html).toContain("Evidence anzeigen");
@@ -109,7 +109,7 @@ describe("AutoresearchView Deep-Audit", () => {
     const html = renderToStaticMarkup(<DeepAuditFindings findings={[]} proposals={["deep-audit-x", "deep-audit-y"]} />);
 
     expect(html).toContain("Noch keine Deep-Audit-Findings.");
-    expect(html).toContain("2 in Queue");
+    expect(html).toContain("2 Karten");
     expect(html).toContain("Detail-Findings sind in dieser Antwort nicht enthalten");
   });
 });
@@ -122,7 +122,7 @@ describe("AutoresearchView cockpit recommendation", () => {
       "autoresearch-history",
       "autoresearch-advanced",
     ]);
-    expect(AUTORESEARCH_SECTION_NAV.map((item) => item.label)).toEqual(["Queue", "Probelauf", "Verlauf", "Erweitert"]);
+    expect(AUTORESEARCH_SECTION_NAV.map((item) => item.label)).toEqual(["Entscheidungen", "Probelauf", "Verlauf", "Erweitert"]);
   });
 
   it("sends the operator to review when actionable proposals exist", () => {
@@ -135,7 +135,7 @@ describe("AutoresearchView cockpit recommendation", () => {
     });
 
     expect(recommendation.kind).toBe("review");
-    expect(recommendation.primaryLabel).toBe("Queue öffnen");
+    expect(recommendation.primaryLabel).toBe("Entscheidungen prüfen");
     expect(recommendation.title).toContain("4 geprüfte Verbesserungen");
   });
 
@@ -820,7 +820,7 @@ describe("AutoresearchView run guidance", () => {
     expect(AUTORESEARCH_ADVANCED_GUIDE.map((item) => item.kind)).toEqual(["models", "deep-audit", "test-foundry"]);
     expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "deep-audit")?.cost).toContain("1-2 Mio Token");
     expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "test-foundry")?.safety).toContain("separatem Branch");
-    expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "models")?.safety).toContain("Queue");
+    expect(AUTORESEARCH_ADVANCED_GUIDE.find((item) => item.kind === "models")?.safety).toContain("Offene Karten");
   });
 
   it("keeps plain-language research-loop presets mapped to backend payload values", () => {
@@ -880,7 +880,7 @@ describe("AutoresearchView run guidance", () => {
 
     expect(summary.title).toBe("Weniger Rauschen");
     expect(summary.scope).toContain("viel genutzte Skills");
-    expect(summary.detail).toContain("Queue");
+    expect(summary.detail).toContain("relevantere Karten");
     expect(summary.cost).toContain("Nutzung >= 10");
     expect(summary.safety).toContain("Dry-Run");
     expect(summary.technicalLabel).toBe("all · recommended_sections");
@@ -902,7 +902,7 @@ describe("AutoresearchView run guidance", () => {
     expect(summary.technicalLabel).toBe("Manuelle Werte");
   });
 
-  it("warns in the start checklist when high-priority queue work should happen first", () => {
+  it("warns in the start checklist when high-priority decisions should happen first", () => {
     const checklist = getResearchLoopStartChecklist({
       routeOk: true,
       running: false,
@@ -917,8 +917,8 @@ describe("AutoresearchView run guidance", () => {
       tone: "amber",
       label: "Erst Review",
     });
-    expect(checklist.detail).toContain("Queue hat Vorrang");
-    expect(checklist.items.find((item) => item.label === "Queue-Wirkung")).toMatchObject({
+    expect(checklist.detail).toContain("Hoch+-Karten haben Vorrang");
+    expect(checklist.items.find((item) => item.label === "Entscheidungswirkung")).toMatchObject({
       value: "7 Hoch+ offen",
       tone: "amber",
     });
@@ -938,7 +938,7 @@ describe("AutoresearchView run guidance", () => {
       label: "Nicht starten",
       items: [
         expect.objectContaining({ label: "Startsignal", value: "Route fehlt" }),
-        expect.objectContaining({ label: "Queue-Wirkung", value: "leer" }),
+        expect.objectContaining({ label: "Entscheidungswirkung", value: "leer" }),
         expect.objectContaining({ label: "Sicherheit", value: "Empfohlen" }),
       ],
     });
@@ -1011,12 +1011,12 @@ describe("AutoresearchView run guidance", () => {
     expect(getResearchLoopStartControl({ running: false, busy: false, routeOk: true }).disabled).toBe(false);
   });
 
-  it("explains deep-audit cost and queue-only safety", () => {
+  it("explains deep-audit cost and review-card safety", () => {
     const guidance = getDeepAuditGuidance({ subsystem: "autoresearch", running: false });
 
     expect(guidance.label).toBe("Teurer Audit");
     expect(guidance.cost).toContain("gezielter Audit");
-    expect(guidance.safety).toContain("Queue");
+    expect(guidance.safety).toContain("Karte");
   });
 
   it("adds explicit start checks for expensive deep-audit runs", () => {
@@ -1033,7 +1033,7 @@ describe("AutoresearchView run guidance", () => {
       title: "Check vor Deep-Audit",
     });
     expect(checklist.items.find((item) => item.label === "Wirkung")).toMatchObject({
-      value: "nur Queue",
+      value: "nur Karten",
       tone: "emerald",
     });
     expect(checklist.items.find((item) => item.label === "Aufwand")).toMatchObject({
@@ -1050,7 +1050,7 @@ describe("AutoresearchView run guidance", () => {
     expect(guidance.safety).toContain("f-test-foundry");
   });
 
-  it("keeps test-foundry start checks distinct for queue-only and branch-gated modes", () => {
+  it("keeps test-foundry start checks distinct for review-card and branch-gated modes", () => {
     expect(getAdvancedRunChecklist({
       kind: "test-foundry",
       target: "hermes_state.py",
@@ -1059,7 +1059,7 @@ describe("AutoresearchView run guidance", () => {
       autoApply: false,
     })).toMatchObject({
       tone: "emerald",
-      label: "Queue-sicher",
+      label: "Vorschlags-sicher",
       detail: expect.stringContaining("Vorschlagsmodus"),
     });
 
@@ -1090,11 +1090,11 @@ describe("AutoresearchView run guidance", () => {
 
     expect(summary).toMatchObject({
       tone: "emerald",
-      label: "Queue gefüllt",
+      label: "Karten bereit",
       title: "2 Tests wurden validiert.",
     });
-    expect(summary?.detail).toContain("2 Queue-Karten");
-    expect(summary?.next).toContain("Queue-Karten prüfen");
+    expect(summary?.detail).toContain("2 Karten");
+    expect(summary?.next).toContain("Karten prüfen");
     expect(summary?.facts.find((fact) => fact.label === "Target")?.value).toBe("hermes_state.py");
   });
 
@@ -1149,7 +1149,7 @@ describe("AutoresearchView run guidance", () => {
 
     expect(summary).toMatchObject({
       tone: "emerald",
-      label: "Queue gefüllt",
+      label: "Karten bereit",
       title: "Test-Foundry-Lauf erfolgreich.",
     });
     expect(summary?.facts.find((fact) => fact.label === "Tests")?.value).toBe("n/v");
@@ -1295,7 +1295,7 @@ describe("AutoresearchView run summary", () => {
 
     expect(summary.tone).toBe("emerald");
     expect(summary.label).toBe("Hat geliefert");
-    expect(summary.next).toContain("Queue zuerst leeren");
+    expect(summary.next).toContain("Offene Karten zuerst entscheiden");
     expect(summary.facts.map((fact) => fact.label)).toEqual(["Aufwand", "Treffer", "Fehler", "Quote", "Aufwand/OK"]);
   });
 
@@ -1327,7 +1327,7 @@ describe("AutoresearchView run summary", () => {
     expect(getAutoresearchRunCard({ ...baseRun, proposed: 2 })).toMatchObject({
       tone: "emerald",
       label: "Geliefert",
-      title: "2 neue Karten für die Queue.",
+      title: "2 neue Karten zur Prüfung.",
     });
     expect(getAutoresearchRunCard({ ...baseRun, proposed: 2 }).facts.find((fact) => fact.label === "Aufwand")).toBeTruthy();
     expect(getAutoresearchRunCard({ ...baseRun, errors: 1 })).toMatchObject({
@@ -1383,7 +1383,7 @@ describe("AutoresearchView run summary", () => {
     expect(brief).toMatchObject({
       tone: "emerald",
       label: "Hat geliefert",
-      title: "2 neue Karten für die Queue.",
+      title: "2 neue Karten zur Prüfung.",
     });
     expect(brief.detail).toContain("1 übernommen");
     expect(brief.rawLine).toContain("deep-audit");

@@ -8,8 +8,8 @@ export interface AutoresearchSectionNavItem {
 export const AUTORESEARCH_SECTION_NAV = [
   {
     id: "autoresearch-queue",
-    label: "Queue",
-    detail: "Entscheidungen prüfen",
+    label: "Entscheidungen",
+    detail: "Karten prüfen",
     kind: "review",
   },
   {

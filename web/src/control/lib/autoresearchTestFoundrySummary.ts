@@ -72,7 +72,7 @@ export function getTestFoundryResultSummary(lastRun: unknown): TestFoundryResult
   const facts: TestFoundryResultFact[] = [
     { label: "Target", value: target, tone: "zinc" },
     { label: "Tests", value: formatCount(testsKept), tone: ok && (testsKept ?? 0) > 0 ? "emerald" : "zinc" },
-    { label: "Queue", value: formatCount(proposals), tone: proposals > 0 ? "amber" : "zinc" },
+    { label: "Karten", value: formatCount(proposals), tone: proposals > 0 ? "amber" : "zinc" },
     { label: "Mutanten", value: formatCount(mutantsRun), tone: survivors > 0 ? "cyan" : "zinc" },
     { label: "Tokens", value: formatCount(tokens), tone: tokens && tokens > 0 ? "violet" : "zinc" },
   ];
@@ -107,12 +107,12 @@ export function getTestFoundryResultSummary(lastRun: unknown): TestFoundryResult
   if (ok) {
     return {
       tone: "emerald",
-      label: "Queue gefüllt",
+      label: "Karten bereit",
       title: formatValidatedTitle(testsKept),
       detail: proposals > 0
-        ? `${proposals} ${proposals === 1 ? "Queue-Karte wartet" : "Queue-Karten warten"} auf Review.`
-        : "Der Lauf war erfolgreich, hat aber keine Queue-Karte in dieser Antwort gemeldet.",
-      next: "Queue-Karten prüfen; Tests nur mit sichtbarem Nutzen übernehmen.",
+        ? `${proposals} ${proposals === 1 ? "Karte wartet" : "Karten warten"} auf Review.`
+        : "Der Lauf war erfolgreich, hat aber keine Review-Karte in dieser Antwort gemeldet.",
+      next: "Karten prüfen; Tests nur mit sichtbarem Nutzen übernehmen.",
       rawLabel: "Technische Test-Foundry-Details",
       facts,
     };

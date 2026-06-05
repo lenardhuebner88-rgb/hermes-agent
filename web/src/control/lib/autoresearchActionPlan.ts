@@ -14,7 +14,7 @@ export type AutoresearchActionPlan = Record<AutoresearchActionKey, AutoresearchA
 const WAIT: AutoresearchActionHint = {
   tone: "violet",
   label: "Warten",
-  reason: "Eine Queue-Aktion läuft bereits. Der aktuelle Stand wird gerade aktualisiert.",
+  reason: "Eine Review-Aktion läuft bereits. Der aktuelle Stand wird gerade aktualisiert.",
   after: "Erst die Rückmeldung abwarten.",
 };
 
@@ -84,27 +84,27 @@ function actionForStart(input: {
     return {
       tone: "cyan",
       label: "Nicht parallel",
-      reason: "Der Research-Loop arbeitet schon. Ein zweiter Start macht die Queue unübersichtlich.",
+      reason: "Der Research-Loop arbeitet schon. Ein zweiter Start macht die offenen Entscheidungen unübersichtlich.",
       after: "Loop beobachten und danach neue Starts wählen.",
     };
   }
   if (input.queueHasWork) {
     return {
       tone: input.hasHighPriority ? "amber" : "cyan",
-      label: input.hasHighPriority ? "Erst Hoch+" : "Erst Queue",
+      label: input.hasHighPriority ? "Erst Hoch+" : "Erst entscheiden",
       reason: `Es liegen noch Entscheidungen an. Mehr ${noun} erhöhen nur den Review-Stau.`,
-      after: "Queue entscheiden, dann gezielt nachlegen.",
+      after: "Offene Karten entscheiden, dann gezielt nachlegen.",
     };
   }
   return {
     tone: input.kind === "generate" ? "emerald" : "cyan",
     label: input.kind === "generate" ? "Empfohlen" : "Optional",
     reason: input.kind === "generate"
-      ? "Queue und Loop sind ruhig. Ein kleiner Skill-Lauf ist der leichteste nächste Schritt."
+      ? "Entscheidungsbereich und Loop sind ruhig. Ein kleiner Skill-Lauf ist der leichteste nächste Schritt."
       : "Code-Scan ist sinnvoll, wenn du gezielt technische Risiken suchen willst.",
     after: input.kind === "generate"
-      ? "Neue Karten landen in der Queue."
-      : "Code-Karten landen einzeln gegatet in der Queue.",
+      ? "Neue Karten erscheinen zur Prüfung."
+      : "Code-Karten erscheinen einzeln gegatet zur Prüfung.",
   };
 }
 
@@ -122,7 +122,7 @@ function actionForSkillApply(openSkillCount: number, manualReviewCount: number, 
       tone: "amber",
       label: "Einzelreview",
       reason: `${manualReviewCount} Skill-${manualReviewCount === 1 ? "Karte braucht" : "Karten brauchen"} bewusstes Lesen.`,
-      after: "Queue öffnen und riskante Karten einzeln entscheiden.",
+      after: "Entscheidungen öffnen und riskante Karten einzeln prüfen.",
     };
   }
   return {
@@ -139,7 +139,7 @@ function actionForPrune(revertedCount: number, queueHasWork: boolean): Autoresea
       tone: "emerald",
       label: "Aufräumen",
       reason: `${revertedCount} zurückgerollte ${revertedCount === 1 ? "Karte kann" : "Karten können"} aus dem Weg.`,
-      after: "Die Queue wird kürzer, offene Entscheidungen bleiben erhalten.",
+      after: "Die Liste wird kürzer, offene Entscheidungen bleiben erhalten.",
     };
   }
   return {

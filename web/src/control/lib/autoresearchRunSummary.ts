@@ -62,7 +62,7 @@ export function getAutoresearchLastRunBrief(input: {
       label: "Noch kein Lauf",
       title: "Noch keine Lauf-Auswertung.",
       detail: "Starte einen kleinen Dry-Run, damit hier ein verwertbares Ergebnis erscheint.",
-      next: "Mit einem kleinen Preset starten und danach die Queue prüfen.",
+      next: "Mit einem kleinen Preset starten und danach die neuen Karten prüfen.",
       facts,
       rawLine: null,
     };
@@ -108,11 +108,11 @@ export function getAutoresearchLastRunBrief(input: {
     return {
       tone: "emerald",
       label: "Hat geliefert",
-      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} für die Queue.`,
+      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} zur Prüfung.`,
       detail: kept !== null || reverted !== null
         ? `Backend-Autotest: ${kept ?? 0} übernommen, ${reverted ?? 0} zurückgerollt.`
         : "Der Lauf hat verwertbare Entscheidungen erzeugt.",
-      next: "Jetzt erst Queue bearbeiten; weitere Läufe später gezielter starten.",
+      next: "Jetzt erst die Karten prüfen; weitere Läufe später gezielter starten.",
       facts,
       rawLine,
     };
@@ -170,9 +170,9 @@ export function getAutoresearchRunCard(run: AutoresearchRun): AutoresearchRunCar
     return {
       tone: "emerald",
       label: "Geliefert",
-      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} für die Queue.`,
+      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} zur Prüfung.`,
       detail: "Der Lauf hat verwertbare Entscheidungen erzeugt.",
-      next: "Jetzt erst Queue bearbeiten; weitere Läufe später gezielter starten.",
+      next: "Jetzt erst die Karten prüfen; weitere Läufe später gezielter starten.",
       facts,
     };
   }
@@ -210,7 +210,7 @@ export function getAutoresearchRunSummary(input: {
       label: "Noch kein Lauf",
       title: "Noch keine Lauf-Auswertung.",
       detail: "Starte einen kleinen Dry-Run oder einen gezielten Scan, damit Autoresearch eine messbare Spur bekommt.",
-      next: "Mit 1-2 Iterationen starten und danach die Queue prüfen.",
+      next: "Mit 1-2 Iterationen starten und danach die neuen Karten prüfen.",
       facts: [
         { label: "Läufe", value: "0", tone: "zinc" },
         { label: "Vorschläge", value: "0", tone: "zinc" },
@@ -243,7 +243,7 @@ export function getAutoresearchRunSummary(input: {
       label: "Hat geliefert",
       title: `${latestProposed} neue ${latestProposed === 1 ? "Entscheidung" : "Entscheidungen"} im letzten Lauf.`,
       detail: "Der letzte Lauf hat verwertbare Kandidaten erzeugt. Jetzt ist Review sinnvoller als direkt noch ein Scan.",
-      next: "Queue zuerst leeren, dann den nächsten Lauf kleiner oder gezielter starten.",
+      next: "Offene Karten zuerst entscheiden, dann den nächsten Lauf kleiner oder gezielter starten.",
       facts: runFacts(totalTokens, totalProposed, totalErrors, input.acceptanceRate, input.tokensPerApplied),
     };
   }
@@ -264,7 +264,7 @@ export function getAutoresearchRunSummary(input: {
     label: "Kein Treffer",
     title: "Der letzte Lauf blieb ruhig.",
     detail: "Es wurden keine neuen Entscheidungen erzeugt. Das kann ein gutes Signal sein, wenn der Scope klein war.",
-    next: "Bei Bedarf Scope ändern oder erst bestehende Queue prüfen.",
+    next: "Bei Bedarf Scope ändern oder erst bestehende Karten prüfen.",
     facts: runFacts(totalTokens, totalProposed, totalErrors, input.acceptanceRate, input.tokensPerApplied),
   };
 }
