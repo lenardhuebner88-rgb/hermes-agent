@@ -58,6 +58,7 @@ from hermes_cli.autoresearch_proposals import (  # noqa: E402
     _load_skill_usage_from_root,
     _usage_min_use_count,
     load_proposal,
+    meets_intake_threshold,
     save_proposal,
 )
 from hermes_constants import get_hermes_home  # noqa: E402
@@ -647,6 +648,15 @@ def run(request_path: Path, *, apply: bool, confirm: bool,
                     elif existing is not None and existing.get("status") in _VALID_STATUS:
                         decision = "already_queued"
                         eval_result = f"proposal {pid} already {existing.get('status')}"
+                    elif not meets_intake_threshold(proposal):
+                        # high+-Intake-Gate (H3): medium/low → detection-only, geloggt,
+                        # nicht in die Review-Queue.
+                        decision = "detection_only"
+                        eval_result = (
+                            f"AR3 {proposal.get('severity') or 'low'} finding logged "
+                            "(below intake threshold), not queued"
+                        )
+                        summary["detection_only"] = summary.get("detection_only", 0) + 1
                     else:
                         save_proposal(proposal)
                         decision = "proposed"

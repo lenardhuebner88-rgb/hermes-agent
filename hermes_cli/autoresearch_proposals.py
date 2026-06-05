@@ -122,6 +122,24 @@ def _coerce_severity(value: Any, *, fallback: str) -> str:
     return sev if sev in _SEVERITY_ORDINAL else fallback
 
 
+# Intake-Triage (H3): nur high+ Findings werden als `proposed` in die Review-Queue
+# gelegt; medium/low sind detection-only — vom Producer geloggt (run record), aber
+# NICHT gequeued. Severity liegt am Geburtspunkt jeder spekulativen Finder-Lane vor
+# (modell-zugewiesen bzw. Kategorie-Fallback). So fuellt sich die Queue nicht mit
+# Rauschen. Verifikations-gegatete Lanes (test-foundry: green@HEAD/red@mutant schon
+# bestanden, bevor das Proposal existiert) sind bewusst NICHT severity-gegated.
+_INTAKE_MIN_SEVERITY_ORDINAL = _SEVERITY_ORDINAL["high"]
+
+
+def meets_intake_threshold(proposal: dict[str, Any]) -> bool:
+    """True iff a speculative finding is severe enough (high+) to enter the queue."""
+    sev = str(proposal.get("severity") or "").strip().lower()
+    if sev in _SEVERITY_ORDINAL:
+        return _SEVERITY_ORDINAL[sev] >= _INTAKE_MIN_SEVERITY_ORDINAL
+    # Kein Severity-Signal → nicht still droppen (fail-open); andere Gates greifen.
+    return True
+
+
 def _model_label_from_response(resp: Any, *, task: str = "skills_hub") -> str:
     model = str(getattr(resp, "model", "") or "").strip()
     if model:
@@ -434,7 +452,7 @@ def _archive_destination(path: Path, archive_dir: Path) -> Path:
         idx += 1
 
 
-def prune_proposals(archive_done_older_than_days: int = 7) -> dict[str, int]:
+def prune_proposals(archive_done_older_than_days: int = 7, proposed_ttl_days: int = 30) -> dict[str, int]:
     pdir = _proposals_dir()
     if not pdir.exists():
         return {"archived": 0, "auto_skipped": 0}
@@ -448,13 +466,24 @@ def prune_proposals(archive_done_older_than_days: int = 7) -> dict[str, int]:
             continue
         if not isinstance(data, dict):
             continue
-        if (
-            data.get("status") == "proposed"
+        is_proposed = data.get("status") == "proposed"
+        reverted_stale = (
+            is_proposed
             and data.get("last_outcome") == "reverted_no_improvement"
             and _older_than_days(data.get("created_at"), 14)
-        ):
+        )
+        # TTL-Auto-Reject (H3): ein `proposed`, das nie gegated/reviewed wurde, raeumt
+        # sich nach proposed_ttl_days selbst (created_at-basiert). Sonst bleiben frisch
+        # geborene proposed (last_outcome=None) ewig in der Queue — der reverted-Filter
+        # oben faengt sie nicht.
+        ttl_expired = is_proposed and _older_than_days(data.get("created_at"), proposed_ttl_days)
+        if reverted_stale or ttl_expired:
             data["status"] = "skipped"
-            data["result"] = data.get("result") or "auto-skipped by autoresearch prune: reverted without improvement"
+            data["result"] = data.get("result") or (
+                "auto-skipped by autoresearch prune: reverted without improvement"
+                if reverted_stale
+                else f"auto-skipped by autoresearch prune: proposed >{proposed_ttl_days}d ohne Review (TTL)"
+            )
             save_proposal(data)
             auto_skipped += 1
             auto_skipped_paths.add(path)
@@ -1272,6 +1301,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
     skipped_existing = 0
     skipped_unchanged = 0
     vetoed = 0
+    detection_only = 0  # high+-Intake-Gate: medium/low geloggt, nicht gequeued (H3)
     files_seen = 0
     findings_seen = 0
     tokens = 0
@@ -1326,6 +1356,10 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
             if existing and existing.get("status") in _VALID_STATUS:
                 skipped_existing += 1
                 break
+            if not meets_intake_threshold(proposal):
+                # medium/low → detection-only: geloggt, aber nicht in die Queue.
+                detection_only += 1
+                break
             save_proposal(proposal)
             created.append(proposal["id"])
             break
@@ -1337,6 +1371,7 @@ def generate_code_weakness_proposals(*, limit: int = 3, timeout: float = 120.0,
         "skipped_existing": skipped_existing,
         "skipped_unchanged": skipped_unchanged,
         "vetoed": vetoed,
+        "detection_only": detection_only,
         "files_seen": files_seen,
         "findings_seen": findings_seen,
         "tokens": tokens,
@@ -1368,6 +1403,13 @@ def skip_proposal(pid: str) -> dict[str, Any]:
     proposal["status"] = "skipped"
     proposal["result"] = "übersprungen"
     proposal["applied_at"] = _utc_now()
+    # Ein altes failed/crashed gate.phase aus einem frueheren Lauf neutral stempeln,
+    # damit das uebersprungene Proposal nicht als Gate-Zombie "rot" weiterzaehlt.
+    gate = proposal.get("gate")
+    if isinstance(gate, dict) and gate.get("phase") in {"failed", "crashed", "running"}:
+        gate = dict(gate)
+        gate["phase"] = "skipped"
+        proposal["gate"] = gate
     save_proposal(proposal)
     return {"ok": True, "status": "skipped", "id": pid}
 
@@ -1770,6 +1812,9 @@ def _reconcile_testing(proposal: dict[str, Any]) -> dict[str, Any]:
     gate["finished_at"] = _utc_now()
     proposal["status"] = "proposed"
     proposal["applied_at"] = None
+    # last_outcome stempeln, damit ein wiederholt abgebrochenes Gate in den
+    # prune-Auto-Skip-Filter faellt (sonst akkumulieren crashed-Proposals unbegrenzt).
+    proposal["last_outcome"] = "reverted_no_improvement"
     proposal["result"] = "↩ zurückgerollt — Test-Gate abgebrochen (Prozess beendet ohne Ergebnis)"
     proposal["gate"] = gate
     save_proposal(proposal)

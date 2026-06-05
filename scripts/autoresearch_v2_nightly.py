@@ -239,6 +239,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             traceback.print_exc()
             tf_error = f"{type(exc).__name__}: {exc}"
 
+    # Quellen-Hygiene: alte reverted/crashed proposed auto-skippen + done/skipped
+    # archivieren. Laeuft nightly mit, damit gate.phase-Zombies und alte proposed
+    # nicht unbegrenzt akkumulieren (kein eigener Service noetig).
+    try:
+        from hermes_cli import autoresearch_proposals as _proposals
+
+        prune_summary = _proposals.prune_proposals()
+        print(
+            f"[autoresearch-v2-nightly] prune: {prune_summary.get('auto_skipped', 0)} auto-skipped, "
+            f"{prune_summary.get('archived', 0)} archived"
+        )
+    except Exception as exc:  # Hygiene darf den Report nie killen
+        traceback.print_exc()
+        print(f"[autoresearch-v2-nightly] prune fehlgeschlagen: {exc}", file=sys.stderr)
+
     message = build_summary(when, da_summary, tf_summary, tf_error=tf_error)
     print(message)
 

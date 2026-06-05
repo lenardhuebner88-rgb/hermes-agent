@@ -244,7 +244,7 @@ def test_backfill_missing_severity_from_category(tmp_home):
     assert proposals.load_proposal("already")["severity"] == "critical"
 
 
-def test_prune_archives_old_done_and_keeps_open(tmp_home):
+def test_prune_archives_old_done_and_ttl_reaps_stale_open(tmp_home):
     old = "2026-01-01T00:00:00Z"
     _store_minimal_proposal("old-applied", status="applied", last_outcome="applied", created_at=old)
     _store_minimal_proposal("old-skipped", status="skipped", created_at=old)
@@ -252,15 +252,31 @@ def test_prune_archives_old_done_and_keeps_open(tmp_home):
     _store_minimal_proposal(
         "old-reverted", status="proposed", last_outcome="reverted_no_improvement", created_at=old,
     )
+    # frisch genug → bleibt in der Queue (TTL greift nur bei alten proposed).
+    _store_minimal_proposal("fresh-open", status="proposed")  # created_at default ~now
 
     result = proposals.prune_proposals(archive_done_older_than_days=7)
 
-    assert result == {"archived": 2, "auto_skipped": 1}
+    # old-open (TTL) + old-reverted → beide auto-skipped; old-applied + old-skipped archiviert.
+    assert result == {"archived": 2, "auto_skipped": 2}
     archive = tmp_home / "skill-audit" / "proposals" / "_archive"
     assert (archive / "old-applied.json").exists()
     assert (archive / "old-skipped.json").exists()
-    assert proposals.load_proposal("old-open")["status"] == "proposed"
+    assert proposals.load_proposal("old-open")["status"] == "skipped"      # TTL-gereapt
     assert proposals.load_proposal("old-reverted")["status"] == "skipped"
+    assert proposals.load_proposal("fresh-open")["status"] == "proposed"   # frisch bleibt
+
+
+def test_meets_intake_threshold_high_plus_only():
+    """Intake-Triage (H3): nur high+ qualifiziert sich als `proposed`; kein
+    Severity-Signal faellt fail-open (verifikations-gegatete Lanes wie test-foundry)."""
+    assert proposals.meets_intake_threshold({"severity": "critical"}) is True
+    assert proposals.meets_intake_threshold({"severity": "high"}) is True
+    assert proposals.meets_intake_threshold({"severity": "medium"}) is False
+    assert proposals.meets_intake_threshold({"severity": "low"}) is False
+    # Kein/garbled Severity → fail-open (nicht still droppen).
+    assert proposals.meets_intake_threshold({}) is True
+    assert proposals.meets_intake_threshold({"severity": "weird"}) is True
 
 def _store_minimal_proposal(pid: str, *, status: str = "proposed", last_outcome=None, result=None,
                             category=None, severity=None, mode="skill",
@@ -582,7 +598,27 @@ def test_testing_gate_crash_is_reconciled(tmp_home, tmp_repo, monkeypatch):
     stored = proposals.load_proposal(p["id"])
     assert stored["status"] == "proposed"
     assert stored["gate"]["phase"] == "crashed"
+    # crashed stempelt last_outcome → faellt in den prune-Auto-Skip-Filter (sonst
+    # akkumulieren wiederholt abgebrochene Gates unbegrenzt).
+    assert stored["last_outcome"] == "reverted_no_improvement"
     assert target.read_text(encoding="utf-8") == "a = 1\n"  # restored
+
+
+def test_skip_neutralizes_stale_gate_phase(tmp_home, tmp_repo, monkeypatch):
+    """Ein uebersprungenes Proposal soll kein altes failed/crashed gate.phase als
+    Zombie behalten (Gate-Hygiene H2)."""
+    target = tmp_repo / "agent" / "skipz.py"
+    target.write_text("a = 1\n", encoding="utf-8")
+    p = proposals.build_code_proposal(target, "a = 2\n", title="t", rationale="r")
+    # Einen failed-Gate-Zustand simulieren, dann reopen → skip.
+    stored = proposals.load_proposal(p["id"])
+    stored["gate"] = {"phase": "failed"}
+    proposals.save_proposal(stored)
+    res = proposals.skip_proposal(p["id"])
+    assert res["ok"] is True
+    after = proposals.load_proposal(p["id"])
+    assert after["status"] == "skipped"
+    assert after["gate"]["phase"] == "skipped"  # neutralisiert, zaehlt nicht mehr "rot"
 
 
 def test_route_code_apply_returns_testing(client, tmp_home, tmp_repo, monkeypatch):
@@ -669,6 +705,7 @@ def test_route_generate_code_weaknesses_creates_code_proposal(client, tmp_home, 
         "raw": {
             "finding": {
                 "category": "dead_logic",
+                "severity": "high",  # high+ → passiert das Intake-Gate und wird gequeued (H3)
                 "title": "Doppelter Vendor-Key",
                 "problem": "Der zweite identische Key ist tote Logik und verdeckt die erste Zuordnung.",
                 "evidence_quote": '"trinity": "arcee-ai",',
@@ -819,16 +856,16 @@ def _dup_key_target(monkeypatch):
     return target
 
 
-def test_code_finding_severity_fallback_from_category(tmp_home, monkeypatch):
-    """A finder that omits severity gets the per-category fallback (dead_logic→medium)."""
+def test_code_finding_severity_fallback_below_intake_is_detection_only(tmp_home, monkeypatch):
+    """A finder that omits severity gets the per-category fallback (dead_logic→medium),
+    which is BELOW the high+ intake threshold → detection-only (geloggt, nicht gequeued)."""
     _dup_key_target(monkeypatch)
     monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity=None))
     monkeypatch.setattr(proposals, "_verify_code_finding_importance",
                         lambda *_a, **_k: {"real": True, "reason": "ok", "tokens": 0})
     res = proposals.generate_code_weakness_proposals()
-    assert res["created_count"] == 1
-    stored = proposals.load_proposal(res["created"][0])
-    assert stored["severity"] == "medium"
+    assert res["created_count"] == 0
+    assert res["detection_only"] == 1
 
 
 def test_code_finding_severity_model_assigned_honoured(tmp_home, monkeypatch):
@@ -874,7 +911,8 @@ def test_code_finding_veto_disabled_by_env(tmp_home, monkeypatch):
     """HERMES_AUTORESEARCH_VERIFY=0 skips the veto pass entirely."""
     _dup_key_target(monkeypatch)
     monkeypatch.setenv("HERMES_AUTORESEARCH_VERIFY", "0")
-    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="low"))
+    # high → passiert das Intake-Gate (created_count bleibt 1 trotz H3-Triage).
+    monkeypatch.setattr(proposals, "_call_code_weakness_finder", _dup_key_finder(severity="high"))
     calls = {"n": 0}
 
     def _verify(*_a, **_k):

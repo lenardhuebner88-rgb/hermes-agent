@@ -110,7 +110,10 @@ describe("buildProjectLanes", () => {
     const rows = [
       item({ id: "doing", status: "doing", priority: "high", root: "/home/piet/.hermes/hermes-agent" }),
       item({ id: "ready", status: "todo", priority: "high", root: "/home/piet/projects/family-organizer" }),
+      // todo + owner "" => ruhige Queue, NICHT unowned (vereinheitlichtes Claim-Modell).
       item({ id: "blocked", status: "todo", priority: "medium", dependsOn: ["ghost"], owner: "", root: "/home/piet/projects/family-organizer" }),
+      // review + owner "" => aktiv ohne Owner => zaehlt als unowned.
+      item({ id: "fo-active", status: "review", owner: "", root: "/home/piet/projects/family-organizer" }),
     ];
 
     const lanes = buildProjectLanes(rows, [worker()], NOW);
@@ -119,7 +122,8 @@ describe("buildProjectLanes", () => {
 
     expect(dashboard?.activeWorkers).toBe(1);
     expect(dashboard?.highRisk).toBe(1);
-    expect(fo).toMatchObject({ ready: 1, blocked: 1, unowned: 1 });
+    // unowned zaehlt nur das review-Item, nicht das owner-lose todo.
+    expect(fo).toMatchObject({ blocked: 1, unowned: 1 });
   });
 });
 
@@ -139,7 +143,7 @@ describe("buildAgentOpsSnapshot", () => {
       item({ id: "ready", priority: "high" }),
       item({ id: "blocked", dependsOn: ["ghost"] }),
       item({ id: "plan", planGate: true }),
-      item({ id: "unowned", owner: "", lastProof: "2026-01-01" }),
+      item({ id: "unowned", owner: "", lastProof: "2026-01-01" }), // todo + owner "" => ruhige Queue, kein Owner-Gap
     ];
 
     const snapshot = buildAgentOpsSnapshot({
@@ -165,16 +169,41 @@ describe("buildAgentOpsSnapshot", () => {
     expect(snapshot.reviewItems).toBe(0);
     expect(snapshot.openProposals).toBe(1);
     expect(snapshot.testingProposals).toBe(1);
-    expect(snapshot.gatePassed).toBe(1);
+    // p3 ist applied+gate:passed → kein OFFENES Proposal mehr → nicht mehr in gatePassed.
+    expect(snapshot.gatePassed).toBe(0);
     expect(snapshot.gateRunning).toBe(1);
     expect(snapshot.gatePassRate).toBe(1);
     expect(snapshot.highRiskItems).toBe(1);
     expect(snapshot.staleProofItems).toBeGreaterThanOrEqual(1);
-    expect(snapshot.unownedItems).toBe(1);
+    expect(snapshot.unownedItems).toBe(0); // todo-ohne-Owner ist die ruhige Queue, kein Gap
     expect(snapshot.contractDrift).toBe(2);
     expect(snapshot.operatorDecision.kind).toBe("launch");
     expect(snapshot.readinessGaps.map((item) => item.id)).toContain("contract-drift");
     expect(snapshot.interventions.map((item) => item.id)).toContain("contract-drift");
+  });
+
+  it("counts gate phases only on open proposals (applied/skipped gate-zombies excluded)", () => {
+    const proposals: Proposal[] = [
+      { id: "z1", target: "code", section: null, rationale_plain: "", diff_before_after: "", mode: "code", status: "applied", gate: { phase: "failed" } },
+      { id: "z2", target: "code", section: null, rationale_plain: "", diff_before_after: "", mode: "code", status: "skipped", gate: { phase: "crashed" } },
+      { id: "open-f", target: "code", section: null, rationale_plain: "", diff_before_after: "", mode: "code", status: "proposed", gate: { phase: "failed" } },
+      { id: "open-r", target: "code", section: null, rationale_plain: "", diff_before_after: "", mode: "code", status: "testing", gate: { phase: "running" } },
+      { id: "open-p", target: "code", section: null, rationale_plain: "", diff_before_after: "", mode: "code", status: "testing", gate: { phase: "passed" } },
+    ];
+    const snapshot = buildAgentOpsSnapshot({
+      workers: [],
+      results: [],
+      proposals,
+      orchestrationItems: [],
+      contractHealth,
+      systemHealth: healthy,
+      metrics,
+      nowSec: NOW,
+    });
+    // Nur die offenen (proposed/testing) Gates zaehlen — die applied/skipped-Zombies nicht.
+    expect(snapshot.gateFailed).toBe(1);
+    expect(snapshot.gateRunning).toBe(1);
+    expect(snapshot.gatePassed).toBe(1);
   });
 
   it("builds safe copy text without requiring loaded detail", () => {
@@ -184,6 +213,45 @@ describe("buildAgentOpsSnapshot", () => {
     expect(prompt).toContain("~/orchestration/backlog/f-x.md");
     expect(prompt).toContain("Isoliert arbeiten");
     expect(prompt).toContain("git status --short");
+    // Claim als erste Handlung (vor "Isoliert arbeiten").
+    expect(prompt).toContain("CLAIM zuerst");
+    expect(prompt).toContain("status: doing");
+    expect(prompt.indexOf("CLAIM zuerst")).toBeLessThan(prompt.indexOf("Isoliert arbeiten"));
+  });
+
+  it("flags owner-gap only for actively worked items (doing/review), never the quiet queue", () => {
+    const base = {
+      workers: [],
+      results: [],
+      proposals: [] as Proposal[],
+      contractHealth,
+      systemHealth: healthy,
+      metrics,
+      nowSec: NOW,
+    };
+    // Positiv: doing + review ohne Owner zaehlen; doing MIT Owner und todo ohne Owner nicht.
+    const active = buildAgentOpsSnapshot({
+      ...base,
+      orchestrationItems: [
+        item({ id: "d-noowner", status: "doing", owner: "" }),
+        item({ id: "r-noowner", status: "review", owner: "" }),
+        item({ id: "d-owned", status: "doing", owner: "piet" }),
+        item({ id: "t-noowner", status: "todo", owner: "" }),
+      ],
+    });
+    expect(active.unownedItems).toBe(2);
+    expect(active.readinessGaps.map((gap) => gap.id)).toContain("unowned-items");
+
+    // Negativ: nur ruhige Queue ohne Owner => kein Gap.
+    const quiet = buildAgentOpsSnapshot({
+      ...base,
+      orchestrationItems: [
+        item({ id: "t1", status: "todo", owner: "" }),
+        item({ id: "b1", status: "backlog", owner: "" }),
+      ],
+    });
+    expect(quiet.unownedItems).toBe(0);
+    expect(quiet.readinessGaps.map((gap) => gap.id)).not.toContain("unowned-items");
   });
 
   it("produces a concise morning brief", () => {

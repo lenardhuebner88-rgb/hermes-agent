@@ -153,7 +153,8 @@ def test_read_items_contract_health_preserves_drift_and_quality_flags(tmp_path, 
     _write(tmp_path, "0001-drift.md", id="0001", title="A drift item", status="readyish",
            owner="nobody", risk="urgent", area="lists", updated="2026-05-20",
            body="## Kontext\n\nOhne klare Kriterien.")
-    _write(tmp_path, "0002-ready.md", id="0002", title="A ready item", status="next",
+    # in_progress + unassigned = aktiv ohne Owner → zaehlt als unowned (Claim-Modell).
+    _write(tmp_path, "0002-ready.md", id="0002", title="A ready item", status="in_progress",
            owner="unassigned", risk="high", area="db", updated="2026-06-01",
            body="## Akzeptanzkriterien\n\n- Gate ist gruen.\n\n## Next Action\n\nImplementieren.")
     _write(tmp_path, "0003-stale.md", id="0003", title="A stale item", status="in_progress",
@@ -422,7 +423,8 @@ def test_read_items_quality_issues_taxonomy(tmp_path, monkeypatch):
     _write(tmp_path, "0002-ready.md", id="0002", title="A nicely scoped ready task",
            status="next", owner="claude", risk="low", area="kitchen",
            updated="2026-06-10", body=_READY_BODY)
-    _write(tmp_path, "0003-weak.md", id="0003", title="fix", status="next",
+    # in_progress, damit der Owner-Gap (unclear_owner) feuert — ruhige Queue waere ungeflaggt.
+    _write(tmp_path, "0003-weak.md", id="0003", title="fix", status="in_progress",
            owner="unassigned", risk="low", area="kitchen",
            updated="2026-06-10", body=_READY_BODY)
 
@@ -441,6 +443,30 @@ def test_read_items_quality_issues_taxonomy(tmp_path, monkeypatch):
     severities = {q["code"]: q["severity"] for q in by_id["0003"]["quality_issues"]}
     assert severities["unclear_owner"] == "risk"
     assert severities["weak_title"] == "warn"
+
+
+def test_owner_gap_only_for_in_progress(tmp_path, monkeypatch):
+    """Vereinheitlichtes Claim-Modell: Owner-Gap nur bei in_progress, nie ruhige Queue."""
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    # ruhige Queue, unassigned → KEIN unclear_owner, NICHT in unowned_count
+    _write(tmp_path, "0001-later.md", id="0001", title="A parked later vision item",
+           status="later", owner="unassigned", risk="low", area="kitchen",
+           updated="2026-06-10", body=_READY_BODY)
+    # aktiv bearbeitet, unassigned → unclear_owner, zaehlt in unowned_count
+    _write(tmp_path, "0002-active.md", id="0002", title="An actively worked item",
+           status="in_progress", owner="unassigned", risk="low", area="kitchen",
+           updated="2026-06-10", body=_READY_BODY)
+
+    now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+    out = _read_items_sync(now)
+    by_id = {it["id"]: it for it in out["items"]}
+
+    def codes(item_id):
+        return {q["code"] for q in by_id[item_id]["quality_issues"]}
+
+    assert "unclear_owner" not in codes("0001")   # ruhige Queue bleibt ungeflaggt
+    assert "unclear_owner" in codes("0002")        # aktiv ohne Owner wird geflaggt
+    assert out["contract_health"]["unowned_count"] == 1  # nur das in_progress-Item
 
 
 def test_read_items_readiness_mapping(tmp_path, monkeypatch):
@@ -466,7 +492,7 @@ def test_read_items_readiness_mapping(tmp_path, monkeypatch):
 
 def test_detail_route_includes_v2_facts(monkeypatch):
     client = _detail_client(monkeypatch, [
-        ("0001-a.md", _source_text(id="0001", title="A detail facts item", status="next",
+        ("0001-a.md", _source_text(id="0001", title="A detail facts item", status="in_progress",
                                    owner="unassigned", risk="high", area="db",
                                    updated="2026-06-01")),
     ])
@@ -477,7 +503,7 @@ def test_detail_route_includes_v2_facts(monkeypatch):
     assert data["freshness"] in {"fresh", "aging", "stale", "no_proof"}
     assert data["readiness"] in {"ready", "needs_grooming", "blocked", "drift"}
     assert isinstance(data["quality_issues"], list)
-    # owner unassigned → unclear_owner (now-independent, so deterministic to assert)
+    # in_progress + owner unassigned → unclear_owner (Owner-Gap nur bei aktiver Arbeit)
     assert any(q["code"] == "unclear_owner" for q in data["quality_issues"])
 
 

@@ -924,13 +924,19 @@ def run_request_file(path: Path) -> dict[str, Any]:
         errors = 0
         try:
             from hermes_cli import autoresearch_proposals, autoresearch_runs
+            detection_only = 0  # high+-Intake-Gate: medium/low geloggt, nicht gequeued (H3)
             for finding in result.get("findings") or []:
                 proposal = autoresearch_proposals._build_deep_audit_proposal(finding)
                 existing = autoresearch_proposals.load_proposal(proposal["id"])
                 if existing and existing.get("status") in {"proposed", "testing", "applied", "skipped"}:
                     continue
+                if not autoresearch_proposals.meets_intake_threshold(proposal):
+                    # medium/low → detection-only: bleibt im Finding-Result, nicht in der Queue.
+                    detection_only += 1
+                    continue
                 autoresearch_proposals.save_proposal(proposal)
                 proposed.append(proposal["id"])
+            result["detection_only"] = detection_only
             autoresearch_runs.append_run(
                 lane="deep-audit",
                 request_id=request_id,

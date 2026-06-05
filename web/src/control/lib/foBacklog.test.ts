@@ -140,13 +140,16 @@ describe("FO queue intelligence", () => {
 
   it("summarizes active owner load with high-risk and stale pressure", () => {
     const summary = ownerLoadSummary([
+      // next + unassigned = ruhige Queue → NICHT unready (vereinheitlichtes Claim-Modell).
       item({ id: "a", owner: "unassigned", risk: "high", status: "next" }),
+      // in_progress + unassigned = aktiv ohne Owner → unready.
+      item({ id: "d", owner: "unassigned", risk: "low", status: "in_progress" }),
       item({ id: "b", owner: "claude", risk: "medium", status: "in_progress", stale: true }),
       item({ id: "c", owner: "claude", risk: "low", status: "done" }),
     ]);
     expect(summary).toEqual([
+      { owner: "unassigned", total: 2, highRisk: 1, stale: 0, unready: 1 },
       { owner: "claude", total: 1, highRisk: 0, stale: 1, unready: 0 },
-      { owner: "unassigned", total: 1, highRisk: 1, stale: 0, unready: 1 },
     ]);
   });
 
@@ -186,7 +189,7 @@ describe("FO queue intelligence", () => {
       id: "0009",
       title: "Fix",
       owner: "unassigned",
-      status: "next",
+      status: "in_progress", // aktiv ohne Owner → unclear_owner feuert
       updated: "2026-05-01",
       stale: true,
     });
@@ -409,7 +412,7 @@ describe("prefer-server facts", () => {
   });
 
   it("qualityFlagsForFoItem falls back to client heuristics when the server field is absent (v1)", () => {
-    const v1 = item({ id: "0001", title: "Fix", owner: "unassigned" });
+    const v1 = item({ id: "0001", title: "Fix", owner: "unassigned", status: "in_progress" });
     const kinds = qualityFlagsForFoItem(v1).map((f) => f.kind);
     expect(kinds).toContain("weak_title");
     expect(kinds).toContain("unclear_owner");
@@ -438,7 +441,7 @@ describe("reasonCodesForFoItem", () => {
   it("explains a high-priority candidate via the server facts", () => {
     const candidate = item({
       id: "r",
-      status: "now",
+      status: "in_progress", // aktiv ohne Owner → penalty_unowned feuert
       risk: "high",
       area: "db",
       owner: "unassigned",
@@ -449,7 +452,7 @@ describe("reasonCodesForFoItem", () => {
     const codes = reasonCodesForFoItem(candidate, NOW_SEC);
     expect(codes).toEqual(
       expect.arrayContaining([
-        "now_status",
+        "in_progress",
         "high_risk",
         "high_impact_area",
         "aged",
@@ -480,8 +483,10 @@ describe("readiness + quick views", () => {
     expect(readinessForFoItem(item({ id: "a", readiness: "needs_grooming" }))).toBe("needs_grooming");
     expect(readinessForFoItem(item({ id: "b", status: "blocked" }))).toBe("blocked");
     expect(readinessForFoItem(item({ id: "c", status: "weird" }))).toBe("drift");
-    // v1 fallback: unassigned owner → risk flag → needs_grooming
-    expect(readinessForFoItem(item({ id: "d", owner: "unassigned" }))).toBe("needs_grooming");
+    // v1 fallback: in_progress + unassigned owner → risk flag → needs_grooming
+    expect(readinessForFoItem(item({ id: "d", owner: "unassigned", status: "in_progress" }))).toBe("needs_grooming");
+    // ruhige Queue (next) + unassigned → kein Owner-Risk-Flag mehr → ready
+    expect(readinessForFoItem(item({ id: "d2", owner: "unassigned", status: "next" }))).toBe("ready");
     expect(readinessForFoItem(item({ id: "e", owner: "claude", quality_issues: [] }))).toBe("ready");
   });
 
@@ -489,7 +494,8 @@ describe("readiness + quick views", () => {
     const ready = item({ id: "r", readiness: "ready" });
     const groom = item({ id: "g", readiness: "needs_grooming" });
     const stale = item({ id: "s", freshness: "stale" });
-    const unowned = item({ id: "u", owner: "unassigned" });
+    const unowned = item({ id: "u", owner: "unassigned", status: "in_progress" });
+    const quietUnowned = item({ id: "qu", owner: "unassigned", status: "later" });
 
     expect(matchesFoQuickView(ready, "all")).toBe(true);
     expect(matchesFoQuickView(ready, "ready")).toBe(true);
@@ -497,6 +503,34 @@ describe("readiness + quick views", () => {
     expect(matchesFoQuickView(groom, "groom")).toBe(true);
     expect(matchesFoQuickView(stale, "stale")).toBe(true);
     expect(matchesFoQuickView(ready, "stale")).toBe(false);
+    // unowned quick-view zeigt nur aktiv-ohne-Owner (in_progress), nicht die ruhige Queue.
     expect(matchesFoQuickView(unowned, "unowned")).toBe(true);
+    expect(matchesFoQuickView(quietUnowned, "unowned")).toBe(false);
+  });
+
+  it("owner-gap signals only fire for in_progress, never the quiet queue (unified claim model)", () => {
+    const active = item({ id: "ip", owner: "unassigned", status: "in_progress" });
+    const quiet = item({ id: "lt", owner: "unassigned", status: "later" });
+
+    // Client-Heuristik (v1-Fallback): unclear_owner nur bei in_progress.
+    expect(qualityFlagsForFoItem(active).map((f) => f.kind)).toContain("unclear_owner");
+    expect(qualityFlagsForFoItem(quiet).map((f) => f.kind)).not.toContain("unclear_owner");
+
+    // Reason-Code-Penalty nur bei in_progress.
+    expect(reasonCodesForFoItem(active, NOW_SEC)).toContain("penalty_unowned");
+    expect(reasonCodesForFoItem(quiet, NOW_SEC)).not.toContain("penalty_unowned");
+
+    // HealthStrip-Fallback (kein Server-Count) zaehlt nur in_progress-ohne-Owner.
+    const counts = foHealthStripCounts([active, quiet]);
+    expect(counts.unowned).toBe(1);
+
+    // Server-Pfad: ein ungegatetes unclear_owner vom Server wird bei ruhiger Queue gefiltert.
+    const quietWithServerIssue = item({
+      id: "lt2",
+      owner: "unassigned",
+      status: "later",
+      quality_issues: [{ code: "unclear_owner", severity: "risk" }],
+    });
+    expect(qualityFlagsForFoItem(quietWithServerIssue).map((f) => f.kind)).not.toContain("unclear_owner");
   });
 });

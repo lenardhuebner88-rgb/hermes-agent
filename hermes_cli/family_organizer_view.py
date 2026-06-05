@@ -286,7 +286,10 @@ def _item_facts(
         issues.append({"code": "weak_title", "severity": "warn"})
     if missing_acceptance:
         issues.append({"code": "missing_acceptance", "severity": "risk"})
-    if not owner or owner == "unassigned" or owner not in _OWNERS:
+    # Vereinheitlichtes Claim-Modell: ein fehlender/unklarer Owner ist erst dann
+    # ein Defekt, wenn aktiv gearbeitet wird (in_progress) — die ruhige Queue
+    # (now/next/later/blocked) darf unassigned bleiben.
+    if status == "in_progress" and (not owner or owner == "unassigned" or owner not in _OWNERS):
         issues.append({"code": "unclear_owner", "severity": "risk"})
     if stale:
         issues.append({"code": "stale_update", "severity": "risk"})
@@ -430,7 +433,9 @@ def _read_items_sync(now: int) -> dict[str, Any]:
             invalid_risk_count += 1
         if owner not in _OWNERS:
             invalid_owner_count += 1
-        if owner == "unassigned":
+        # Owner-Gap nur fuer aktiv bearbeitete Items (in_progress) — die ruhige
+        # Queue darf unowned sein (vereinheitlichtes Claim-Modell).
+        if status == "in_progress" and owner == "unassigned":
             unowned_count += 1
         if area not in _AREAS:
             invalid_area_count += 1

@@ -174,6 +174,9 @@ export function qualityFlagsForFoItem(item: BacklogItem, detail?: BacklogDetail)
   if (item.quality_issues) {
     return item.quality_issues
       .filter((issue) => QUALITY_KINDS.has(issue.code))
+      // Owner-Gap nur bei in_progress — robust gegen einen aelteren/ungegateten
+      // Server (vereinheitlichtes Claim-Modell; ruhige Queue darf unowned sein).
+      .filter((issue) => issue.code !== "unclear_owner" || item.status === "in_progress")
       .map((issue) => ({
         kind: issue.code as FoQualityFlagKind,
         label: QUALITY_LABELS[issue.code as FoQualityFlagKind],
@@ -189,7 +192,7 @@ export function qualityFlagsForFoItem(item: BacklogItem, detail?: BacklogDetail)
   if (item.missing_acceptance === true || (detail && !hasAcceptance(detail))) {
     flags.push({ kind: "missing_acceptance", label: "Akzeptanz fehlt", severity: "risk" });
   }
-  if (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner)) {
+  if (item.status === "in_progress" && (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner))) {
     flags.push({ kind: "unclear_owner", label: "Owner unklar", severity: "risk" });
   }
   if (item.stale) {
@@ -212,7 +215,7 @@ export function nextActionForFoItem(item: BacklogItem, detail?: BacklogDetail): 
   if (detail?.next_action?.trim()) return detail.next_action.trim();
   if (item.status === "blocked") return "Blocker prüfen und Entblockungspfad festlegen.";
   if (item.stale) return "Letzten Stand verifizieren und Claim erneuern oder schließen.";
-  if (item.owner === "unassigned") return "Owner setzen oder vor Ziehen präzisieren.";
+  if (item.status === "in_progress" && item.owner === "unassigned") return "Owner setzen oder vor Ziehen präzisieren.";
   if (item.status === "now" || item.status === "next") return "Spec vollständig lesen und Umsetzung vorbereiten.";
   if (item.status === "in_progress") return "Aktuellen Beleg prüfen und nächsten Proof erzeugen.";
   if (item.status === "done") return item.result ?? "Ergebnis prüfen.";
@@ -228,7 +231,7 @@ export function ownerLoadSummary(items: BacklogItem[]): FoOwnerLoad[] {
     current.total += 1;
     if (item.risk === "high") current.highRisk += 1;
     if (item.stale) current.stale += 1;
-    if (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner)) current.unready += 1;
+    if (item.status === "in_progress" && (!item.owner || item.owner === "unassigned" || !KNOWN_OWNERS.has(item.owner))) current.unready += 1;
     byOwner.set(owner, current);
   }
   return [...byOwner.values()].sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
@@ -256,7 +259,7 @@ function rankScore(item: BacklogItem, nowSec: number): number {
   const impact = BUSINESS_IMPACT[item.area] ?? 1;
   const state = STATE_PULL_WEIGHT[item.status] ?? -20;
   const age = Math.min(itemAgeDays(item, nowSec), 30) / 2;
-  const penalties = (item.owner === "unassigned" ? 8 : 0) + (isStale(item) ? 6 : 0);
+  const penalties = (item.status === "in_progress" && item.owner === "unassigned" ? 8 : 0) + (isStale(item) ? 6 : 0);
   return state + risk + impact * 4 + age - penalties;
 }
 
@@ -278,7 +281,7 @@ export function reasonCodesForFoItem(item: BacklogItem, nowSec: number): FoReaso
   if (item.risk === "high") codes.push("high_risk");
   if ((BUSINESS_IMPACT[item.area] ?? 1) >= 3) codes.push("high_impact_area");
   if (itemAgeDays(item, nowSec) >= 7) codes.push("aged");
-  if (item.owner === "unassigned") codes.push("penalty_unowned");
+  if (item.status === "in_progress" && item.owner === "unassigned") codes.push("penalty_unowned");
   if (isStale(item)) codes.push("penalty_stale");
   if (hasIssue("missing_acceptance") || item.missing_acceptance === true) codes.push("missing_acceptance");
   if (hasIssue("missing_next_action") || item.missing_next_action === true) codes.push("missing_next_action");
@@ -321,7 +324,7 @@ export function matchesFoQuickView(item: BacklogItem, view: FoQuickView): boolea
     case "stale":
       return isStale(item);
     case "unowned":
-      return item.owner === "unassigned" || !item.owner;
+      return item.status === "in_progress" && (item.owner === "unassigned" || !item.owner);
     default:
       return true;
   }
@@ -336,7 +339,7 @@ export function foHealthStripCounts(items: BacklogItem[], contractHealth?: Backl
     now: items.filter((item) => queueStateForFoItem(item).state === "now").length,
     nextReady: items.filter((item) => queueStateForFoItem(item).state === "next" && !item.stale).length,
     blocked: items.filter((item) => queueStateForFoItem(item).state === "blocked").length,
-    unowned: contractHealth?.unowned_count ?? items.filter((item) => item.owner === "unassigned").length,
+    unowned: contractHealth?.unowned_count ?? items.filter((item) => item.status === "in_progress" && item.owner === "unassigned").length,
     stale: contractHealth?.stale_count ?? items.filter((item) => item.stale).length,
     highRisk: items.filter((item) => item.risk === "high" && item.status !== "done").length,
     contractDrift,

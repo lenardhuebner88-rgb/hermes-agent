@@ -212,7 +212,7 @@ export function buildProjectLanes(
     if (item.status === "review") lane.review += 1;
     if (item.priority === "high" || item.priority === "urgent") lane.highRisk += 1;
     if (isStaleProof(item, nowSec)) lane.staleProof += 1;
-    if (!item.owner?.trim()) lane.unowned += 1;
+    if ((item.status === "doing" || item.status === "review") && !item.owner?.trim()) lane.unowned += 1;
   }
 
   for (const worker of workers) {
@@ -262,7 +262,13 @@ function gateSummary(proposals: ReadonlyArray<Proposal>): {
   gateRunning: number;
   gatePassRate: number;
 } {
-  const gates = proposals.map((proposal) => proposal.gate).filter((gate): gate is NonNullable<Proposal["gate"]> => Boolean(gate));
+  // Gates nur auf noch OFFENEN Proposals zaehlen (proposed/testing). applied/skipped
+  // tragen oft ein altes gate.phase (failed/crashed/passed) aus einem frueheren Lauf —
+  // das sind keine aktuellen Gate-Resultate und wuerden sonst dauerhaft "rot" zaehlen.
+  const openProposals = proposals.filter(
+    (proposal) => proposal.status === "proposed" || proposal.status === "testing",
+  );
+  const gates = openProposals.map((proposal) => proposal.gate).filter((gate): gate is NonNullable<Proposal["gate"]> => Boolean(gate));
   const gatePassed = gates.filter((gate) => gate.phase === "passed").length;
   const gateFailed = gates.filter((gate) => gate.phase === "failed" || gate.phase === "crashed").length;
   const gateRunning = gates.filter((gate) => gate.phase === "running").length;
@@ -473,7 +479,7 @@ function buildReadinessGaps(input: {
       tone: "amber",
       label: "Owner fehlen",
       count: input.unownedItems,
-      detail: "Tasks ohne Owner bremsen parallele Verantwortung.",
+      detail: "Laufende Tasks (doing/review) ohne Owner — niemand steht drauf.",
       target: "/control/orchestrator",
     });
   }
@@ -664,7 +670,11 @@ export function buildAgentOpsSnapshot(input: {
   const reviewItems = input.orchestrationItems.filter((item) => item.status === "review").length;
   const staleProofItems = activeItems.filter((item) => isStaleProof(item, input.nowSec)).length;
   const highRiskItems = activeItems.filter((item) => item.priority === "high" || item.priority === "urgent").length;
-  const unownedItems = activeItems.filter((item) => !item.owner?.trim()).length;
+  // Owner-Gap nur fuer aktiv bearbeitete Tasks (doing/review) ohne Owner —
+  // die ruhige Queue (backlog/todo) darf unowned sein (vereinheitlichtes Claim-Modell).
+  const unownedItems = activeItems.filter(
+    (item) => (item.status === "doing" || item.status === "review") && !item.owner?.trim(),
+  ).length;
   const openProposals = input.proposals.filter(isActionable).length;
   const contractDrift = contractDriftCount(input.contractHealth);
   const systemStatus = input.systemHealth?.overall ?? "unknown";
@@ -748,11 +758,12 @@ export function buildAgentOpsDispatchPrompt(item: OrchestrationItem): string {
     `SPEC: ~/orchestration/backlog/${item.id}.md`,
     `ROOT: ${root}`,
     "1) Spec vollstaendig lesen, inklusive gate, dependsOn, Constraints und Subtasks.",
-    "2) Isoliert arbeiten: eigener Branch/Worktree oder explizit bestaetigen, dass der ROOT sauber und exklusiv ist.",
-    "3) Preflight im ROOT: git status --short; aktive Locks/Worker pruefen; fremde uncommitted Arbeit nicht veraendern.",
-    "4) Wenn planGate:true: nur Plan liefern und stoppen.",
-    "5) Sonst umsetzen, Gate aus Spec wirklich gruen fahren, Proof/Receipt dokumentieren.",
-    "6) Bei UI/Backend in Hermes: build, service restart und Live-Checks nur nach Operator-Freigabe.",
+    `2) CLAIM zuerst (erste Handlung): in ~/orchestration/backlog/${item.id}.md "owner: <deine-Session-Kennung>" + "status: doing" eintragen und NUR diese Datei committen (Mini-Claim-Commit). Bei fremdem Claim/Konflikt: STOPP, Operator melden.`,
+    "3) Isoliert arbeiten: eigener Branch/Worktree oder explizit bestaetigen, dass der ROOT sauber und exklusiv ist.",
+    "4) Preflight im ROOT: git status --short; aktive Locks/Worker pruefen; fremde uncommitted Arbeit nicht veraendern.",
+    "5) Wenn planGate:true: nur Plan liefern und stoppen.",
+    "6) Sonst umsetzen, Gate aus Spec wirklich gruen fahren, Proof/Receipt dokumentieren.",
+    "7) Bei UI/Backend in Hermes: build, service restart und Live-Checks nur nach Operator-Freigabe.",
   ].join("\n");
 }
 

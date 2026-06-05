@@ -477,6 +477,11 @@ def _save_test_proposal(
         "caught_mutant": _mutant_summary(mutant, mutant_index),
         "affected_tests": affected_tests,
     }
+    # Intake-Triage (H3): test-foundry ist BEWUSST nicht severity-gegated. Das Proposal
+    # entsteht erst, nachdem das Gate green@HEAD + red@mutant bereits bestanden hat —
+    # also ein VERIFIZIERTER Test-Gap mit lauffaehigem Test, kein spekulativer Finding.
+    # Die high+-Schwelle (medium/low → detection-only) gilt nur fuer die Finder-Lanes
+    # (code-weakness/deep-audit/AR3). Hier wuerde sie bereits verifizierte Arbeit wegwerfen.
     autoresearch_proposals.save_proposal(proposal)
     return pid
 
