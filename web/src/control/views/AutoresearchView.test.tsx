@@ -161,7 +161,7 @@ describe("AutoresearchView review flow", () => {
 
     expect(flow.tone).toBe("amber");
     expect(flow.primaryAction).toBe("select-top");
-    expect(flow.primaryLabel).toBe("Top auswählen");
+    expect(flow.primaryLabel).toBe("Top prüfen");
     expect(flow.title).toContain("Hoch+");
     expect(flow.detail).toContain("Secret leak in CLI");
   });

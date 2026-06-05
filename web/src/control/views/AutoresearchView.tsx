@@ -248,6 +248,15 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     await store.confirmBatch(selectedIds);
   };
 
+  const selectOrFocusTopProposal = () => {
+    if (!topProposal) return;
+    if (proposalNeedsManualReview(topProposal)) {
+      document.getElementById(`autoresearch-proposal-${topProposal.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    toggleSelection(topProposal.id, true);
+  };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -262,7 +271,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       if (!action) return;
       event.preventDefault();
       if (action === "select-top" && top) {
-        setSelectedProposalIds((current) => toggleProposalSelection(current, top.id, true));
+        if (proposalNeedsManualReview(top)) {
+          document.getElementById(`autoresearch-proposal-${top.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else {
+          setSelectedProposalIds((current) => toggleProposalSelection(current, top.id, true));
+        }
       }
       if (action === "select-visible") setSelectedProposalIds(selectVisibleProposals(batchSafeVisibleProposalIds));
       if (action === "clear-selection") setSelectedProposalIds(clearProposalSelection());
@@ -321,7 +334,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       void store.generate();
       return;
     }
-    if (topProposal) toggleSelection(topProposal.id, true);
+    selectOrFocusTopProposal();
   };
 
   return (
@@ -492,6 +505,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               density={density}
               busy={store.busy === item.proposal.id}
               selectable
+              batchSelectable={!proposalNeedsManualReview(item.proposal)}
               selected={selectedProposalIds.has(item.proposal.id)}
               batchStatus={store.batchConfirmById[item.proposal.id]}
               onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}
@@ -512,6 +526,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                   density={density}
                   busy={store.busy === item.proposal.id}
                   selectable
+                  batchSelectable={!proposalNeedsManualReview(item.proposal)}
                   selected={selectedProposalIds.has(item.proposal.id)}
                   batchStatus={store.batchConfirmById[item.proposal.id]}
                   onSelectedChange={(proposal, selected) => toggleSelection(proposal.id, selected)}

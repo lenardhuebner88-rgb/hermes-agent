@@ -24,6 +24,7 @@ interface Props {
   busy?: boolean;
   selected?: boolean;
   selectable?: boolean;
+  batchSelectable?: boolean;
   batchStatus?: { status: "pending" | "ok" | "fail"; detail?: string };
   priorityGroup?: ProposalPriorityGroup;
   onApply: (proposal: Proposal) => void;
@@ -85,7 +86,7 @@ function decisionGuide(proposal: Proposal, severity: ProposalSeverity): Decision
   };
 }
 
-export function ProposalCard({ proposal, density, busy, selected, selectable, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
+export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
   const lines = toDiffLines(proposal.diff_before_after);
   const isCode = proposal.mode === "code";
   const isTestHardening = proposal.mode === "test" || proposal.proposal_type === "mutation_test";
@@ -99,7 +100,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   return (
-    <article className={cn("hc-card space-y-4 p-4", density === "compact" && "p-3")}>
+    <article id={`autoresearch-proposal-${proposal.id}`} className={cn("hc-card scroll-mt-6 space-y-4 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -127,16 +128,22 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
           </div>
         </div>
         {selectable ? (
-          <label className="flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white">
-            <input
-              type="checkbox"
-              checked={!!selected}
-              onChange={(event) => onSelectedChange?.(proposal, event.target.checked)}
-              className="h-4 w-4 accent-[var(--hc-accent)]"
-              aria-label={de.autoresearch.selectProposal}
-            />
-            <span>{de.autoresearch.select}</span>
-          </label>
+          batchSelectable ? (
+            <label className="flex shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white">
+              <input
+                type="checkbox"
+                checked={!!selected}
+                onChange={(event) => onSelectedChange?.(proposal, event.target.checked)}
+                className="h-4 w-4 accent-[var(--hc-accent)]"
+                aria-label={de.autoresearch.selectProposal}
+              />
+              <span>{de.autoresearch.select}</span>
+            </label>
+          ) : (
+            <span className="flex shrink-0 items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" title="Diese Karte wird direkt mit Übernehmen oder Überspringen entschieden.">
+              Einzelreview
+            </span>
+          )
         ) : null}
       </div>
 

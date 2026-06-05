@@ -97,7 +97,7 @@ export function getAutoresearchReviewFlow(input: {
       progressLabel,
       progressPercent,
       primaryAction: "select-top",
-      primaryLabel: "Top auswählen",
+      primaryLabel: "Top prüfen",
       steps: [
         { label: "Hoch+", value: String(input.highPriorityCount), tone: "amber" },
         { label: "Sichtbar", value: String(input.visibleCount), tone: "cyan" },

@@ -104,6 +104,27 @@ describe("ProposalCard", () => {
     expect(plain).not.toContain('type="checkbox"');
   });
 
+  it("renders a stable anchor for review-flow focus", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "focus-1", target: "skill/foo" })} density="airy" onApply={noop} onSkip={noop} />,
+    );
+    expect(html).toContain('id="autoresearch-proposal-focus-1"');
+  });
+
+  it("shows manual-review cards as not batch-selectable", () => {
+    const safe = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "p6-safe", target: "skill/foo" })} density="airy" selectable batchSelectable onApply={noop} onSkip={noop} />,
+    );
+    expect(safe).toContain('type="checkbox"');
+    expect(safe).not.toContain("Einzelreview");
+
+    const manual = renderToStaticMarkup(
+      <ProposalCard proposal={proposal({ id: "p6-manual", target: "hermes_cli/foo.py", mode: "code" })} density="airy" selectable batchSelectable={false} onApply={noop} onSkip={noop} />,
+    );
+    expect(manual).not.toContain('type="checkbox"');
+    expect(manual).toContain("Einzelreview");
+  });
+
   it("renders the model-assigned severity badge", () => {
     const html = renderToStaticMarkup(
       <ProposalCard proposal={proposal({ id: "ps1", target: "skill/foo", severity: "critical" })} density="airy" onApply={noop} onSkip={noop} />,
