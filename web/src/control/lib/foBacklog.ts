@@ -361,13 +361,19 @@ export function computeNextFoTaskId(items: BacklogItem[]): string | null {
 }
 
 export function buildFoCommissionPrompt(detail: BacklogDetail): string {
+  // Echten Pfad nutzen: `${detail.id}.md` allein zeigt auf eine nicht existierende Datei
+  // (Items heissen `<id>-<slug>.md`) → der Worker findet die Spec nicht. source_path kommt
+  // aus dem Backend (fo-backlog-v2); Fallback = id-Glob, falls das Feld mal leer ist.
+  const specPath = detail.source_path
+    ? `~/projects/family-organizer/${detail.source_path}`
+    : `~/projects/family-organizer/backlog/items/${detail.id}-*.md`;
   return `Du bist eine Orchestrator-Session auf dem Homeserver mit vollem Zugriff. Arbeite GENAU EINEN FO-Backlog-Task ab.
 TASK: ${detail.title}   (id: ${detail.id})
-SPEC: ~/projects/family-organizer/backlog/items/${detail.id}.md  ← ZUERST vollständig lesen (status, owner, area, risk, Akzeptanzkriterien)
-ROOT: ~/projects/family-organizer   GATE: npm run gate:e2e
+SPEC: ${specPath}  ← ZUERST vollständig lesen (status, owner, area, risk, Akzeptanzkriterien)
+ROOT: ~/projects/family-organizer   GATE: npm run gate
 1) Preflight: cd ~/projects/family-organizer + \`git status\` (FO-Tab liest origin/main → committen, damit Fortschritt sichtbar wird).
 2) Task umsetzen (Next.js/Vitest; orchestrate-Skill / Workflow-Harness erlaubt).
-3) Gate fahren: npm run gate:e2e — WIRKLICH grün (Mocks = Regressions-Wächter, kein Erstbeweis).
+3) Gate: npm run gate — WIRKLICH grün (lint+backlog:check+test+build; Mocks = Regressions-Wächter, kein Erstbeweis). Browser-E2E (npm run gate:e2e) NUR, wenn der Task einen UI-Flow ändert.
 4) NUR bei grün: Item-\`.md\` status→done/in_progress + \`result\`-Zeile aktualisieren; commit + (FO-Repo) push.
 5) Discord-Report (nie nur Telegram): Status + Commit + Ergebnis.
 ABBRUCH (stop & melde, NICHT loopen/raten): Gate 2–3× rot · DB-Migration/destruktiv · Spec mehrdeutig · etwas außerhalb des Task-Scopes müsste geändert werden.`;
