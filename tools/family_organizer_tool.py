@@ -8,10 +8,11 @@ Bearer-Service-Token, die ``X-Request-Id``-Idempotenz und das serverseitige
 Audit werden **unverändert** wiederverwendet — diese Tür wird nicht geschwächt.
 
 Write-Actions: ``add_task_item`` (0077), ``set_presence`` (0077),
-``create_event`` (Termin, 0081), ``add_birthday`` (Geburtstag, 0087) und
-``set_meal_plan`` (Mittagessen, 0088) — die Entitäts-Sub-Slices aus 0078.
-Dazu zwei Read-Helfer (Listen, Anwesenheit) zum Auflösen von Listennamen und
-zum Beantworten von Fragen. Weiterhin nur **anlegen/setzen** — kein Update/Delete.
+``create_event`` (Termin, 0081), ``add_birthday`` (Geburtstag, 0087),
+``set_meal_plan`` (Mittagessen, 0088) sowie **Update/Delete** von Listen-Items
+(0091: ``fo_update_task`` direkt, ``fo_delete_task`` mit Confirm-Rückfrage nach
+ADR-0004 — Löschen nur mit Bestätigung). Dazu Read-Helfer (Listen, Anwesenheit)
+zum Auflösen von Listennamen und zum Beantworten von Fragen.
 
 Konfiguration (Environment):
   FAMILY_ORGANIZER_BASE_URL  Basis-URL der FO-App (Default: http://127.0.0.1:3000)
@@ -108,6 +109,29 @@ def _resolve_list_id(list_name: str) -> Optional[str]:
         if str(item.get("name", "")).strip().casefold() == target:
             return item.get("id")
     return None
+
+
+def _list_items(list_id: str) -> list:
+    data = _request("GET", f"/api/hermes/lists/{list_id}/items", write=False)
+    return list((data or {}).get("items", []))
+
+
+def _resolve_items_by_title(list_id: str, item_title: str) -> list:
+    """Alle Items einer Liste, deren Titel (casefold) exakt passt — 0/1/mehrdeutig
+    entscheidet der Aufrufer."""
+    target = item_title.strip().casefold()
+    return [
+        it
+        for it in _list_items(list_id)
+        if str(it.get("title", "")).strip().casefold() == target
+    ]
+
+
+def _available_item_titles(list_id: str) -> list:
+    try:
+        return [it.get("title") for it in _list_items(list_id)]
+    except Exception:
+        return []
 
 
 # ─── Read-Helfer ─────────────────────────────────────────────────────────────
@@ -312,6 +336,133 @@ def fo_set_meal_plan(
     return tool_result({"updated": True, "mealPlan": (data or {}).get("mealPlan", {})})
 
 
+def fo_update_task(
+    list_name: str,
+    item_title: str,
+    done: Optional[bool] = None,
+    new_title: Optional[str] = None,
+    notes: Optional[str] = None,
+    due_date: Optional[str] = None,
+) -> str:
+    """Ändere ein bestehendes Item einer Familienliste (0091).
+
+    Abhaken/wieder öffnen (done), umbenennen (new_title), Notiz oder Fälligkeit
+    setzen. Mindestens ein Änderungsfeld ist Pflicht. Läuft direkt durch — kein
+    Confirm (ADR-0004: nur Löschen verlangt eine Rückfrage).
+    """
+    list_name = (list_name or "").strip()
+    item_title = (item_title or "").strip()
+    if not list_name:
+        return tool_error("list_name fehlt")
+    if not item_title:
+        return tool_error("item_title fehlt")
+    if done is None and not (new_title or "").strip() and notes is None and not (due_date or "").strip():
+        return tool_error(
+            "nichts zu ändern: gib mindestens done, new_title, notes oder due_date an"
+        )
+    try:
+        list_id = _resolve_list_id(list_name)
+        if not list_id:
+            return tool_error(
+                f"Liste '{list_name}' nicht gefunden",
+                available_lists=_available_list_names(),
+            )
+        matches = _resolve_items_by_title(list_id, item_title)
+        if not matches:
+            return tool_error(
+                f"Item '{item_title}' in '{list_name}' nicht gefunden",
+                available_items=_available_item_titles(list_id),
+            )
+        if len(matches) > 1:
+            return tool_error(
+                f"Mehrere Items heißen '{item_title}' in '{list_name}' — bitte präzisieren",
+            )
+        item_id = matches[0].get("id")
+        body: Dict[str, Any] = {}
+        if done is not None:
+            body["done"] = bool(done)
+        if (new_title or "").strip():
+            body["title"] = new_title.strip()
+        if notes is not None:
+            body["notes"] = notes
+        if (due_date or "").strip():
+            body["dueDate"] = due_date.strip()
+        data = _request(
+            "PATCH",
+            f"/api/hermes/lists/{list_id}/items/{item_id}",
+            write=True,
+            json_body=body,
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result(
+        {"updated": True, "list": list_name, "item": (data or {}).get("item", {})}
+    )
+
+
+def fo_delete_task(
+    list_name: str,
+    item_title: str,
+    confirm: bool = False,
+) -> str:
+    """Lösche ein Item aus einer Familienliste (0091) — mit Confirm-Rückfrage.
+
+    ADR-0004: Löschen verlangt eine Bestätigung. Rufe zuerst OHNE ``confirm`` auf;
+    der Tool gibt dann ``confirm_required`` zurück — frage die Person, ob wirklich
+    gelöscht werden soll, und rufe erst nach deren Ja erneut mit ``confirm=true`` auf.
+    """
+    list_name = (list_name or "").strip()
+    item_title = (item_title or "").strip()
+    if not list_name:
+        return tool_error("list_name fehlt")
+    if not item_title:
+        return tool_error("item_title fehlt")
+    try:
+        list_id = _resolve_list_id(list_name)
+        if not list_id:
+            return tool_error(
+                f"Liste '{list_name}' nicht gefunden",
+                available_lists=_available_list_names(),
+            )
+        matches = _resolve_items_by_title(list_id, item_title)
+        if not matches:
+            return tool_error(
+                f"Item '{item_title}' in '{list_name}' nicht gefunden",
+                available_items=_available_item_titles(list_id),
+            )
+        if len(matches) > 1:
+            return tool_error(
+                f"Mehrere Items heißen '{item_title}' in '{list_name}' — bitte präzisieren",
+            )
+        item = matches[0]
+        item_id = item.get("id")
+        if not confirm:
+            # Confirm-on-Delete (ADR-0004): NICHT löschen, sondern Rückfrage zurückgeben.
+            return tool_result(
+                {
+                    "confirm_required": True,
+                    "message": (
+                        f"Soll ich '{item.get('title')}' wirklich aus der Liste "
+                        f"'{list_name}' löschen? Bestätige mit confirm=true."
+                    ),
+                    "list": list_name,
+                    "item": {"id": item_id, "title": item.get("title")},
+                }
+            )
+        # Bestätigt: DELETE mit leerem JSON-Body ({}), den die FO-Write-Infra erwartet.
+        _request(
+            "DELETE",
+            f"/api/hermes/lists/{list_id}/items/{item_id}",
+            write=True,
+            json_body={},
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result(
+        {"deleted": True, "list": list_name, "item": {"id": item_id, "title": item.get("title")}}
+    )
+
+
 def check_family_organizer_requirements() -> bool:
     """Verfügbar, wenn die FO-Hermes-API /health mit unserem Token mit 200 antwortet."""
     if not _service_token():
@@ -465,6 +616,77 @@ FO_SET_MEAL_PLAN_SCHEMA = {
     },
 }
 
+FO_UPDATE_TASK_SCHEMA = {
+    "name": "fo_update_task",
+    "description": (
+        "Ändere ein bestehendes Item einer Familienliste: abhaken oder wieder "
+        "öffnen (done), umbenennen (new_title), Notiz (notes) oder Fälligkeit "
+        "(due_date) setzen. Identifiziere das Item über Liste + aktuellen Titel; "
+        "nutze fo_list_lists, wenn der Listenname unklar ist. Mindestens ein "
+        "Änderungsfeld ist nötig. Läuft direkt durch (kein Confirm)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "list_name": {
+                "type": "string",
+                "description": "Name der Liste, z. B. 'Einkauf'.",
+            },
+            "item_title": {
+                "type": "string",
+                "description": "Aktueller Titel des zu ändernden Items.",
+            },
+            "done": {
+                "type": "boolean",
+                "description": "true = abhaken, false = wieder öffnen.",
+            },
+            "new_title": {
+                "type": "string",
+                "description": "Neuer Titel (Umbenennen).",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Neue Notiz (leerer String löscht die Notiz).",
+            },
+            "due_date": {
+                "type": "string",
+                "description": "Fälligkeitsdatum im Format YYYY-MM-DD.",
+            },
+        },
+        "required": ["list_name", "item_title"],
+    },
+}
+
+FO_DELETE_TASK_SCHEMA = {
+    "name": "fo_delete_task",
+    "description": (
+        "Lösche ein Item aus einer Familienliste. WICHTIG (ADR-0004 — Löschen "
+        "verlangt eine Rückfrage): Rufe ZUERST ohne confirm auf; der Tool "
+        "antwortet dann mit confirm_required und einer Rückfrage. Frage die "
+        "Person, ob wirklich gelöscht werden soll, und rufe erst nach deren "
+        "Bestätigung erneut mit confirm=true auf. Identifiziere das Item über "
+        "Liste + Titel."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "list_name": {
+                "type": "string",
+                "description": "Name der Liste, z. B. 'Einkauf'.",
+            },
+            "item_title": {
+                "type": "string",
+                "description": "Titel des zu löschenden Items.",
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": "Erst nach Nutzer-Bestätigung auf true setzen; sonst weglassen.",
+            },
+        },
+        "required": ["list_name", "item_title"],
+    },
+}
+
 FO_LIST_LISTS_SCHEMA = {
     "name": "fo_list_lists",
     "description": "Liste alle Familienlisten mit Namen, ID und Item-Anzahl.",
@@ -554,6 +776,35 @@ registry.register(
     ),
     check_fn=check_family_organizer_requirements,
     emoji="🍽️",
+)
+
+registry.register(
+    name="fo_update_task",
+    toolset="family-organizer",
+    schema=FO_UPDATE_TASK_SCHEMA,
+    handler=lambda args, **kw: fo_update_task(
+        list_name=args.get("list_name", ""),
+        item_title=args.get("item_title", ""),
+        done=args.get("done"),
+        new_title=args.get("new_title"),
+        notes=args.get("notes"),
+        due_date=args.get("due_date"),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="✏️",
+)
+
+registry.register(
+    name="fo_delete_task",
+    toolset="family-organizer",
+    schema=FO_DELETE_TASK_SCHEMA,
+    handler=lambda args, **kw: fo_delete_task(
+        list_name=args.get("list_name", ""),
+        item_title=args.get("item_title", ""),
+        confirm=bool(args.get("confirm", False)),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="🗑️",
 )
 
 registry.register(

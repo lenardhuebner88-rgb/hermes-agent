@@ -214,6 +214,108 @@ def test_request_without_token_errors():
     assert "HERMES_SERVICE_TOKEN" in out["error"]
 
 
+# ─── fo_update_task (0091) ───────────────────────────────────────────────────
+
+def test_update_task_resolves_item_and_patches():
+    lists = {"lists": [{"id": "list-uuid", "name": "Einkauf"}]}
+    items = {"items": [{"id": "item-9", "listId": "list-uuid", "title": "Brot", "doneAt": None}]}
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        if method == "GET" and url.endswith("/api/hermes/lists"):
+            return _resp(200, lists)
+        if method == "GET" and url.endswith("/api/hermes/lists/list-uuid/items"):
+            return _resp(200, items)
+        if method == "PATCH" and url.endswith("/api/hermes/lists/list-uuid/items/item-9"):
+            captured["json"] = kw["json"]
+            captured["headers"] = kw["headers"]
+            return _resp(200, {"item": {"id": "item-9", "done": True}})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_update_task(list_name="einkauf", item_title="brot", done=True))
+    assert out["updated"] is True
+    assert captured["json"] == {"done": True}
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_update_task_requires_a_change_field():
+    # Feld-Check greift VOR jedem HTTP-Call.
+    with patch.dict(os.environ, TOKEN_ENV):
+        out = json.loads(fo.fo_update_task(list_name="Einkauf", item_title="Brot"))
+    assert "error" in out
+
+
+def test_update_task_unknown_item_returns_error_with_options():
+    lists = {"lists": [{"id": "list-uuid", "name": "Einkauf"}]}
+    items = {"items": [{"id": "i1", "title": "Milch"}]}
+
+    def fake_request(method, url, **kw):
+        if url.endswith("/api/hermes/lists"):
+            return _resp(200, lists)
+        if url.endswith("/items"):
+            return _resp(200, items)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_update_task(list_name="Einkauf", item_title="Brot", done=True))
+    assert "error" in out
+    assert out["available_items"] == ["Milch"]
+
+
+# ─── fo_delete_task (0091, Confirm-on-Delete) ────────────────────────────────
+
+def test_delete_task_without_confirm_asks_first_and_does_not_delete():
+    lists = {"lists": [{"id": "list-uuid", "name": "Einkauf"}]}
+    items = {"items": [{"id": "item-9", "title": "Brot"}]}
+    calls = []
+
+    def fake_request(method, url, **kw):
+        calls.append(method)
+        if url.endswith("/api/hermes/lists"):
+            return _resp(200, lists)
+        if url.endswith("/items"):
+            return _resp(200, items)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_task(list_name="Einkauf", item_title="Brot"))
+    assert out["confirm_required"] is True
+    assert out["item"]["id"] == "item-9"
+    assert "DELETE" not in calls  # ohne Bestätigung wird NICHT gelöscht
+
+
+def test_delete_task_with_confirm_deletes_with_empty_body():
+    lists = {"lists": [{"id": "list-uuid", "name": "Einkauf"}]}
+    items = {"items": [{"id": "item-9", "title": "Brot"}]}
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        if url.endswith("/api/hermes/lists"):
+            return _resp(200, lists)
+        if method == "GET" and url.endswith("/items"):
+            return _resp(200, items)
+        if method == "DELETE" and url.endswith("/api/hermes/lists/list-uuid/items/item-9"):
+            captured["json"] = kw["json"]
+            captured["headers"] = kw["headers"]
+            return _resp(200, {"ok": True, "id": "item-9"})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(
+                fo.fo_delete_task(list_name="Einkauf", item_title="Brot", confirm=True)
+            )
+    assert out["deleted"] is True
+    assert out["item"]["id"] == "item-9"
+    # DELETE trägt den von der FO-Write-Infra erwarteten leeren JSON-Body + Idempotenz-Key.
+    assert captured["json"] == {}
+    assert "X-Request-Id" in captured["headers"]
+
+
 # ─── registry wiring ─────────────────────────────────────────────────────────
 
 def test_tools_registered_under_family_organizer_toolset():
@@ -225,6 +327,8 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_create_event",
         "fo_add_birthday",
         "fo_set_meal_plan",
+        "fo_update_task",
+        "fo_delete_task",
         "fo_list_lists",
         "fo_list_presence",
     ):
