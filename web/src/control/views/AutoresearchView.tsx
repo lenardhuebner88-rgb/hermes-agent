@@ -8,7 +8,7 @@ import type { AuxiliaryModelsResponse, ModelOptionsResponse } from "@/lib/api";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type DeepAuditFinding, type useProposals } from "../hooks/useControlData";
 import { fmtClock } from "../lib/derive";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
@@ -129,6 +129,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     selectedManualReviewCount,
     busy: batchBusy,
   });
+  const busyNotice = describeAutoresearchBusy(store.busy);
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
   const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
@@ -455,6 +456,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
       {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
+      {busyNotice ? <ToneCallout tone="violet"><Spinner />{busyNotice}</ToneCallout> : null}
 
       <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

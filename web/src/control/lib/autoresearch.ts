@@ -401,6 +401,16 @@ export function codeWeaknessBusyKey(scope: CodeWeaknessScope): string {
   return scope === "full" ? "generate-code-full" : scope === "deep" ? "generate-code-deep" : "generate-code";
 }
 
+export function describeAutoresearchBusy(busy: string | null | undefined): string | null {
+  if (!busy) return null;
+  if (busy === "generate") return "Vorschläge werden erzeugt. Andere Autoresearch-Aktionen warten, bis die Queue aktualisiert ist.";
+  if (busy === "generate-code") return "Geänderte Dateien werden auf Code-Risiken geprüft. Das kann kurz dauern.";
+  if (busy === "generate-code-full") return "Vollscan läuft. Bitte warte, bis die neuen Code-Funde in der Queue liegen.";
+  if (busy === "generate-code-deep") return "Deep-Scan läuft. Das ist der längere Code-Scan; andere Aktionen bleiben pausiert.";
+  if (busy === "confirm-batch") return "Auswahl wird übernommen. Einzelkarten bleiben gesperrt, bis alle markierten Vorschläge verarbeitet sind.";
+  return "Eine Karte wird verarbeitet. Warte auf das Ergebnis, bevor du die nächste Entscheidung triffst.";
+}
+
 export interface RecentRunsSummary {
   runs: number;
   tokens: number;

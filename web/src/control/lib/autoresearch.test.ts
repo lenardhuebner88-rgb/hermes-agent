@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, proposalAgeDays, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "./autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, getProposalPriorityGroup, getProposalSeverity, hasResearchCounters, isActionable, parseMinUseCount, partitionBySeverity, proposalAgeDays, pruneProposalSelection, rankAutoresearchProposals, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityRank, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "./autoresearch";
 import type { AutoresearchStatus, Proposal } from "./types";
 
 const base: AutoresearchStatus = {
@@ -341,6 +341,14 @@ describe("autoresearch run-history (ROI panel) helpers", () => {
     expect(codeWeaknessBusyKey("incremental")).toBe("generate-code");
     expect(codeWeaknessBusyKey("full")).toBe("generate-code-full");
     expect(codeWeaknessBusyKey("deep")).toBe("generate-code-deep");
+  });
+
+  it("describes busy states in plain operator language", () => {
+    expect(describeAutoresearchBusy(null)).toBeNull();
+    expect(describeAutoresearchBusy("generate")).toContain("Vorschläge werden erzeugt");
+    expect(describeAutoresearchBusy("generate-code-deep")).toContain("Deep-Scan läuft");
+    expect(describeAutoresearchBusy("confirm-batch")).toContain("Auswahl wird übernommen");
+    expect(describeAutoresearchBusy("proposal-1")).toContain("Eine Karte wird verarbeitet");
   });
 
   it("describeArea returns a plain-German scope for known areas, raw value otherwise", () => {
