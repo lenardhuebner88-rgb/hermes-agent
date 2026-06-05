@@ -148,12 +148,12 @@ export const de = {
     recentRunsEmpty: "Noch keine Läufe protokolliert.",
     runsColTime: "Zeit",
     runsColLane: "Lane",
-    runsColTokens: "Tokens",
+    runsColTokens: "Aufwand (Tokens)",
     runsColProposed: "Vorschläge",
     runsColErrors: "Fehler",
     runsColVetoed: "verworfen",
     runsColScanned: "geprüft",
-    runsTokensTotal: "MiniMax-Tokens gesamt",
+    runsTokensTotal: "Modellaufwand gesamt",
     // A1 — "Warum 0" im Idle-Zustand
     lastRunFallback: (scanned: number, proposed: number) => `Letzter Lauf: ${scanned} gescannt · ${proposed} ${proposed === 1 ? "Vorschlag" : "Vorschläge"}`,
     lastRunZeroHint: "0 Vorschläge heißt: nichts hat die Schwelle überschritten — der Stand ist sauber/konvergiert, kein Fehler.",
@@ -164,15 +164,15 @@ export const de = {
     revertedCount: (n: number) => `${n} zurückgerollt`,
     skipAllReverted: "Alle zurückgerollten verwerfen",
     ageDays: (n: number) => `vor ${n} ${n === 1 ? "Tag" : "Tagen"}`,
-    // A3 — ROI „Letzte 7 Tage"
-    roi7dHeading: "Letzte 7 Tage",
-    roi7dLine: (runs: number, tokens: number, proposed: number, scanned: number) => `${runs} ${runs === 1 ? "Lauf" : "Läufe"} · ${tokens.toLocaleString("de-DE")} Tokens · ${proposed} Vorschläge · ${scanned} gescannt`,
+    // A3 — Kosten-Nutzen „Letzte 7 Tage"
+    roi7dHeading: "Kosten-Nutzen",
+    roi7dLine: (runs: number, tokens: number, proposed: number, scanned: number) => `${runs} ${runs === 1 ? "Lauf" : "Läufe"} · ${proposed} ${proposed === 1 ? "Treffer" : "Treffer"} · ${scanned} geprüft · Aufwand ${tokens.toLocaleString("de-DE")}`,
     roi7dEmpty: "Keine Läufe in den letzten 7 Tagen.",
-    roi7dAcceptedNote: "Übernahme-Quote aus aktuellen Proposal-Status; Tokens aus den Läufen der letzten 7 Tage.",
+    roi7dAcceptedNote: "Kosten-Nutzen aus aktuellen Proposal-Status und Modellaufwand der Läufe der letzten 7 Tage.",
     roi7dAcceptedLine: (rate: number | null, applied: number, decided: number, tokensPerApplied: number | null) => {
       const quote = rate === null ? "n/v" : `${Math.round(rate * 100)}%`;
       const tokens = tokensPerApplied === null ? "n/v" : Math.round(tokensPerApplied).toLocaleString("de-DE");
-      return `Übernahme-Quote ${quote} (${applied}/${decided}) · ${tokens} Tokens pro übernommenem Proposal`;
+      return `Übernommen ${quote} (${applied}/${decided}) · Aufwand pro OK ${tokens}`;
     },
     prune: "Aufräumen",
     pruneHint: "Archiviert erledigte Einträge und verwirft alte offene Vorschläge nach Backend-Regeln.",

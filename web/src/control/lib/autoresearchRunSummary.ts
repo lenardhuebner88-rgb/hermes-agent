@@ -52,7 +52,7 @@ export function getAutoresearchLastRunBrief(input: {
   const facts = [
     { label: "Vorschläge", value: proposed === null ? "-" : String(proposed), tone: proposed && proposed > 0 ? "emerald" : "zinc" },
     { label: "Geprüft", value: scanned === null ? "-" : String(scanned), tone: scanned && scanned > 0 ? "cyan" : "zinc" },
-    { label: "Tokens", value: tokens === null || tokens <= 0 ? "-" : tokens.toLocaleString("de-DE"), tone: tokens && tokens > 150_000 ? "amber" : "zinc" },
+    { label: "Aufwand", value: tokens === null || tokens <= 0 ? "-" : tokens.toLocaleString("de-DE"), tone: tokens && tokens > 150_000 ? "amber" : "zinc" },
     { label: "Fehler", value: errors === null ? "-" : String(errors), tone: errors && errors > 0 ? "red" : "emerald" },
   ] satisfies AutoresearchLastRunBrief["facts"];
 
@@ -123,7 +123,7 @@ export function getAutoresearchLastRunBrief(input: {
       tone: "amber",
       label: "Teuer ruhig",
       title: "Viel Aufwand ohne neue Karten.",
-      detail: "Der Lauf hat spürbar Tokens verbraucht, aber keine neue Entscheidung erzeugt.",
+      detail: "Der Lauf hatte spürbaren Modellaufwand, aber keine neue Entscheidung erzeugt.",
       next: "Scope enger wählen oder einen anderen Lauf-Typ nutzen.",
       facts,
       rawLine,
@@ -150,7 +150,7 @@ export function getAutoresearchRunCard(run: AutoresearchRun): AutoresearchRunCar
   const facts = [
     { label: "Vorschläge", value: String(proposed), tone: proposed > 0 ? "emerald" : "zinc" },
     { label: "Geprüft", value: String(scanned), tone: scanned > 0 ? "cyan" : "zinc" },
-    { label: "Tokens", value: tokens > 0 ? tokens.toLocaleString("de-DE") : "-", tone: tokens > 150_000 ? "amber" : "zinc" },
+    { label: "Aufwand", value: tokens > 0 ? tokens.toLocaleString("de-DE") : "-", tone: tokens > 150_000 ? "amber" : "zinc" },
     { label: "Fehler", value: String(errors), tone: errors > 0 ? "red" : "emerald" },
     { label: "Veto", value: String(vetoed), tone: vetoed > 0 ? "amber" : "zinc" },
   ] satisfies AutoresearchRunCard["facts"];
@@ -252,7 +252,7 @@ export function getAutoresearchRunSummary(input: {
     return {
       tone: "amber",
       label: "Teuer ohne Treffer",
-      title: "Der letzte Lauf fand nichts, kostete aber spürbar Tokens.",
+      title: "Der letzte Lauf fand nichts, hatte aber hohen Aufwand.",
       detail: "Das ist nicht zwingend schlecht, aber ein weiterer gleicher Lauf wird wahrscheinlich wenig bringen.",
       next: "Scope enger wählen oder Code-/Deep-Audit statt breitem Skill-Scan nutzen.",
       facts: runFacts(totalTokens, totalProposed, totalErrors, input.acceptanceRate, input.tokensPerApplied),
@@ -271,11 +271,11 @@ export function getAutoresearchRunSummary(input: {
 
 function runFacts(totalTokens: number, totalProposed: number, totalErrors: number, acceptanceRate: number | null, tokensPerApplied: number | null): AutoresearchRunSummary["facts"] {
   return [
-    { label: "Tokens", value: totalTokens > 0 ? totalTokens.toLocaleString("de-DE") : "-", tone: totalTokens > 500_000 ? "amber" : "zinc" },
-    { label: "Vorschläge", value: String(totalProposed), tone: totalProposed > 0 ? "emerald" : "zinc" },
+    { label: "Aufwand", value: totalTokens > 0 ? totalTokens.toLocaleString("de-DE") : "-", tone: totalTokens > 500_000 ? "amber" : "zinc" },
+    { label: "Treffer", value: String(totalProposed), tone: totalProposed > 0 ? "emerald" : "zinc" },
     { label: "Fehler", value: String(totalErrors), tone: totalErrors > 0 ? "red" : "emerald" },
-    { label: "Annahme", value: acceptanceRate === null ? "-" : `${Math.round(acceptanceRate * 100)}%`, tone: acceptanceRate === null ? "zinc" : acceptanceRate >= 0.5 ? "emerald" : "amber" },
-    { label: "Token/OK", value: tokensPerApplied === null ? "-" : Math.round(tokensPerApplied).toLocaleString("de-DE"), tone: tokensPerApplied === null ? "zinc" : tokensPerApplied > 250_000 ? "amber" : "cyan" },
+    { label: "Quote", value: acceptanceRate === null ? "-" : `${Math.round(acceptanceRate * 100)}%`, tone: acceptanceRate === null ? "zinc" : acceptanceRate >= 0.5 ? "emerald" : "amber" },
+    { label: "Aufwand/OK", value: tokensPerApplied === null ? "-" : Math.round(tokensPerApplied).toLocaleString("de-DE"), tone: tokensPerApplied === null ? "zinc" : tokensPerApplied > 250_000 ? "amber" : "cyan" },
   ];
 }
 

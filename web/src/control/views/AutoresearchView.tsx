@@ -1879,9 +1879,9 @@ function RecentRuns({ runs, proposals }: { runs: AutoresearchRun[]; proposals: P
               <RunHistoryCard key={`${run.at}-${run.request_id ?? i}`} run={run} card={card} />
             ))}
           </div>
-          {runs.length > runCards.length ? <p className="text-xs hc-dim">Weitere {runs.length - runCards.length} ältere Läufe stehen in den Rohdaten.</p> : null}
+          {runs.length > runCards.length ? <p className="text-xs hc-dim">Weitere {runs.length - runCards.length} ältere Läufe stehen in der technischen Tabelle.</p> : null}
           <details className="rounded-lg border border-white/10 bg-black/20 p-3">
-            <summary className="cursor-pointer text-sm font-medium text-white">Rohdaten-Tabelle anzeigen</summary>
+            <summary className="cursor-pointer text-sm font-medium text-white">Technische Tabelle anzeigen</summary>
             <div className="mt-3 overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead className="hc-dim">

@@ -17,6 +17,7 @@ import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRun
 import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
+import { de } from "../i18n/de";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
@@ -1278,6 +1279,7 @@ describe("AutoresearchView run summary", () => {
     expect(summary.tone).toBe("emerald");
     expect(summary.label).toBe("Hat geliefert");
     expect(summary.next).toContain("Queue zuerst leeren");
+    expect(summary.facts.map((fact) => fact.label)).toEqual(["Aufwand", "Treffer", "Fehler", "Quote", "Aufwand/OK"]);
   });
 
   it("prioritizes error investigation before more runs", () => {
@@ -1310,6 +1312,7 @@ describe("AutoresearchView run summary", () => {
       label: "Geliefert",
       title: "2 neue Karten für die Queue.",
     });
+    expect(getAutoresearchRunCard({ ...baseRun, proposed: 2 }).facts.find((fact) => fact.label === "Aufwand")).toBeTruthy();
     expect(getAutoresearchRunCard({ ...baseRun, errors: 1 })).toMatchObject({
       tone: "red",
       label: "Fehler",
@@ -1427,6 +1430,12 @@ describe("AutoresearchView run summary", () => {
       label: "Ruhig",
     });
     expect(calmBrief.detail).toContain("4 Ziele geprüft");
+  });
+
+  it("frames run history value in plain cost-benefit wording", () => {
+    expect(de.autoresearch.roi7dHeading).toBe("Kosten-Nutzen");
+    expect(de.autoresearch.roi7dLine(2, 12345, 3, 8)).toBe("2 Läufe · 3 Treffer · 8 geprüft · Aufwand 12.345");
+    expect(de.autoresearch.roi7dAcceptedLine(0.5, 1, 2, 45678)).toBe("Übernommen 50% (1/2) · Aufwand pro OK 45.678");
   });
 });
 
