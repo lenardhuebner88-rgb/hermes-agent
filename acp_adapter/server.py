@@ -513,6 +513,24 @@ class HermesACPAgent(acp.Agent):
         value: key for key, value in _MODE_TO_EDIT_APPROVAL_POLICY.items()
     }
 
+    @classmethod
+    def _default_mode(cls) -> str:
+        """Initial edit-approval mode for sessions that haven't picked one.
+
+        Modes are not persisted (``set_session_mode`` is in-memory only), so a
+        fresh or restarted session has no ``mode`` attribute and falls back
+        here. Operators can default new sessions to an auto-approve mode by
+        setting ``HERMES_ACP_DEFAULT_MODE`` (``default`` / ``accept_edits`` /
+        ``dont_ask``) in ``~/.hermes/.env``. Sensitive paths (``.env``,
+        ``.ssh``, ``.git``, private keys) are still prompted regardless of mode,
+        and dangerous-command approvals are unaffected. Unset or invalid →
+        ``default`` (ask before edits), preserving upstream behaviour.
+        """
+        requested = str(os.environ.get("HERMES_ACP_DEFAULT_MODE", "") or "").strip().lower()
+        if requested in cls._MODE_TO_EDIT_APPROVAL_POLICY:
+            return requested
+        return cls._MODE_DEFAULT
+
     def __init__(self, session_manager: SessionManager | None = None):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
@@ -535,9 +553,9 @@ class HermesACPAgent(acp.Agent):
         policy onto modes instead of advertising config options.
         """
 
-        current = str(getattr(state, "mode", "") or self._MODE_DEFAULT)
+        current = str(getattr(state, "mode", "") or self._default_mode())
         if current not in self._MODE_TO_EDIT_APPROVAL_POLICY:
-            current = self._MODE_DEFAULT
+            current = self._default_mode()
         return SessionModeState(
             current_mode_id=current,
             available_modes=[
@@ -560,7 +578,7 @@ class HermesACPAgent(acp.Agent):
         )
 
     def _edit_approval_policy_for_state(self, state: SessionState) -> tuple[str, str | None]:
-        mode = str(getattr(state, "mode", "") or self._MODE_DEFAULT)
+        mode = str(getattr(state, "mode", "") or self._default_mode())
         policy = self._MODE_TO_EDIT_APPROVAL_POLICY.get(mode, self._EDIT_APPROVAL_POLICY_DEFAULT)
         return policy, state.cwd
 
