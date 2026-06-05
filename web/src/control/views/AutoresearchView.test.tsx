@@ -5,7 +5,7 @@ import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
@@ -356,18 +356,21 @@ describe("AutoresearchView run guidance", () => {
     expect(RESEARCH_LOOP_PRESETS).toHaveLength(3);
     expect(getResearchLoopPreset("recommended")).toMatchObject({
       label: "Empfohlen",
+      operatorTitle: "Guter Standardlauf",
       area: "all",
       focus: "recommended_sections",
       maxIterations: "2",
       minUseCount: "",
     });
     expect(getResearchLoopPreset("popular")).toMatchObject({
+      operatorTitle: "Weniger Rauschen",
       area: "all",
       focus: "recommended_sections",
       maxIterations: "3",
       minUseCount: "10",
     });
     expect(getResearchLoopPreset("dashboard")).toMatchObject({
+      operatorTitle: "Dashboard prüfen",
       area: "dashboard",
       focus: "code_review",
       maxIterations: "2",
@@ -393,6 +396,39 @@ describe("AutoresearchView run guidance", () => {
       maxIterations: "7",
       minUseCount: "",
     })).toBeNull();
+  });
+
+  it("summarizes selected research-loop presets without exposing raw controls first", () => {
+    const summary = getResearchLoopStartSummary({
+      selectedPresetId: "popular",
+      areaLabel: "alle Skills",
+      focus: "recommended_sections",
+      maxIterations: 3,
+      minUseCount: 10,
+    });
+
+    expect(summary.title).toBe("Weniger Rauschen");
+    expect(summary.scope).toContain("viel genutzte Skills");
+    expect(summary.detail).toContain("Queue");
+    expect(summary.cost).toContain("Nutzung >= 10");
+    expect(summary.safety).toContain("Dry-Run");
+    expect(summary.technicalLabel).toBe("all · recommended_sections");
+  });
+
+  it("keeps custom research-loop summaries explicit when values no longer match a preset", () => {
+    const summary = getResearchLoopStartSummary({
+      selectedPresetId: null,
+      areaLabel: "Dashboard",
+      focus: "code_review",
+      maxIterations: 5,
+      minUseCount: null,
+    });
+
+    expect(summary.title).toBe("Eigene Feinsteuerung");
+    expect(summary.scope).toContain("Dashboard");
+    expect(summary.detail).toContain("code_review");
+    expect(summary.cost).toBe("5 Iterationen maximal.");
+    expect(summary.technicalLabel).toBe("Manuelle Werte");
   });
 
   it("warns before starting the research loop when the model route is not ready", () => {

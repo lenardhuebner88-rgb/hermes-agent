@@ -13,7 +13,7 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -159,6 +159,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const selectedLoopPresetId = useMemo(
     () => getSelectedResearchLoopPresetId({ area, focus, maxIterations, minUseCount }),
     [area, focus, maxIterations, minUseCount],
+  );
+  const researchLoopStartSummary = useMemo(
+    () => getResearchLoopStartSummary({
+      selectedPresetId: selectedLoopPresetId,
+      areaLabel: describeArea(area),
+      focus,
+      maxIterations: clampLoopIterations(Number(maxIterations)),
+      minUseCount: parseMinUseCount(minUseCount),
+    }),
+    [area, focus, maxIterations, minUseCount, selectedLoopPresetId],
   );
   const applyLoopPreset = (presetId: ResearchLoopPresetId) => {
     const preset = getResearchLoopPreset(presetId);
@@ -600,7 +610,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 <input id="loop-iterations" type="number" min={1} max={50} value={maxIterations} onChange={(event) => setMaxIterations(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
               </div>
             </details>
-            <TargetingPreview area={area} focus={focus} maxIterations={maxIterations} minUseCount={minUseCount} />
+            <TargetingPreview summary={researchLoopStartSummary} />
             <Button className="hc-hit" onClick={startLoop} disabled={researchLoopStart.disabled} title={researchLoopStart.title} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>{researchLoopStart.label}</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
@@ -856,7 +866,10 @@ function LoopPresetPicker({ selectedId, disabled, onSelect }: { selectedId: Rese
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <p className="hc-eyebrow">Start-Preset</p>
+        <div>
+          <p className="hc-eyebrow">Start-Preset</p>
+          <p className="mt-0.5 text-xs hc-soft">Wähle zuerst den Zweck, nicht die Technik.</p>
+        </div>
         <StatusPill tone={selectedId ? "emerald" : "amber"} label={selectedId ? "Preset aktiv" : "Eigene Werte"} />
       </div>
       <div className="grid gap-2">
@@ -872,18 +885,20 @@ function LoopPresetPicker({ selectedId, disabled, onSelect }: { selectedId: Rese
               aria-label={`${preset.label}: ${preset.summary} ${preset.cost}.`}
               aria-pressed={selected}
               className={cn(
-                "hc-hit min-h-[74px] rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
+                "hc-hit min-h-[118px] rounded-lg border px-3 py-2.5 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
                 selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-white/10 bg-black/20 hover:bg-white/[.04]",
               )}
             >
               <span className="flex items-start justify-between gap-3">
                 <span className="min-w-0">
                   <span className="block text-sm font-semibold text-white">{preset.label}</span>
-                  <span className="mt-1 block text-xs leading-5 hc-soft">{preset.summary}</span>
+                  <span className="mt-0.5 block text-xs font-medium text-white/85">{preset.operatorTitle}</span>
                 </span>
                 <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium", selected ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft")}>{preset.badge}</span>
               </span>
-              <span className="mt-1.5 block hc-mono text-[11px] hc-dim">{preset.cost}</span>
+              <span className="mt-2 block text-xs leading-5 hc-soft">{preset.operatorFit}</span>
+              <span className="mt-1 block text-xs leading-5 hc-dim">{preset.operatorResult}</span>
+              <span className="mt-2 block hc-mono text-[11px] hc-dim">{preset.cost}</span>
             </button>
           );
         })}
@@ -1007,19 +1022,20 @@ function LaneModelPanel() {
   );
 }
 
-// Live, plain-language readback of the targeting inputs so the operator sees in
-// normal German exactly what the loop will do before hitting Start — using the
-// *effective* (clamped/parsed) values, not the raw input strings.
-function TargetingPreview({ area, focus, maxIterations, minUseCount }: { area: string; focus: string; maxIterations: string; minUseCount: string }) {
-  const iters = clampLoopIterations(Number(maxIterations));
-  const muc = parseMinUseCount(minUseCount);
+function TargetingPreview({ summary }: { summary: ResearchLoopStartSummary }) {
   return (
     <div className="rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2 text-xs text-[var(--hc-accent-text)]">
-      <p className="flex items-center gap-1.5 font-semibold"><Target className="h-3.5 w-3.5" />{de.autoresearch.targetingPreviewHeading}</p>
-      <p className="mt-1.5">{de.autoresearch.targetingScans} <span className="font-semibold">{describeArea(area)}</span></p>
-      <p className="mt-0.5">{de.autoresearch.targetingFocusLabel} <span className="font-semibold">{focus.trim() || "recommended_sections"}</span> · {de.autoresearch.targetingIterations(iters)}</p>
-      <p className="mt-0.5">{muc !== null ? de.autoresearch.targetingMinUseValue(muc) : de.autoresearch.targetingMinUseDefault}</p>
-      <p className="mt-1 opacity-80">{de.autoresearch.targetingDryRunNote}</p>
+      <div className="flex items-start gap-2">
+        <Target className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div className="min-w-0">
+          <p className="font-semibold">{summary.title}</p>
+          <p className="mt-1.5 leading-5">{summary.scope}</p>
+          <p className="mt-0.5 leading-5">{summary.detail}</p>
+          <p className="mt-1.5 leading-5"><span className="font-semibold">Aufwand:</span> {summary.cost}</p>
+          <p className="mt-0.5 leading-5"><span className="font-semibold">Sicherheit:</span> {summary.safety}</p>
+          <p className="mt-1 hc-mono text-[11px] opacity-75">{summary.technicalLabel}</p>
+        </div>
+      </div>
     </div>
   );
 }

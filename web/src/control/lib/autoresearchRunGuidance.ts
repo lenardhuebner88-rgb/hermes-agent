@@ -20,6 +20,9 @@ export interface ResearchLoopPreset {
   id: ResearchLoopPresetId;
   label: string;
   badge: string;
+  operatorTitle: string;
+  operatorFit: string;
+  operatorResult: string;
   area: string;
   focus: string;
   maxIterations: string;
@@ -34,6 +37,9 @@ export const RESEARCH_LOOP_PRESETS = [
     id: "recommended",
     label: "Empfohlen",
     badge: "klein",
+    operatorTitle: "Guter Standardlauf",
+    operatorFit: "Nimm das, wenn du einfach frische, harmlose Vorschläge willst.",
+    operatorResult: "Neue Kandidaten landen als Queue-Karten; nichts wird automatisch geändert.",
     area: "all",
     focus: "recommended_sections",
     maxIterations: "2",
@@ -46,6 +52,9 @@ export const RESEARCH_LOOP_PRESETS = [
     id: "popular",
     label: "Häufig genutzt",
     badge: "enger",
+    operatorTitle: "Weniger Rauschen",
+    operatorFit: "Nimm das, wenn nur viel genutzte Skills verbessert werden sollen.",
+    operatorResult: "Seltene Skills werden ausgelassen, damit die Queue kürzer und relevanter bleibt.",
     area: "all",
     focus: "recommended_sections",
     maxIterations: "3",
@@ -58,6 +67,9 @@ export const RESEARCH_LOOP_PRESETS = [
     id: "dashboard",
     label: "Dashboard",
     badge: "Code",
+    operatorTitle: "Dashboard prüfen",
+    operatorFit: "Nimm das, wenn das Control-Dashboard selbst untersucht werden soll.",
+    operatorResult: "Code-nahe Vorschläge landen in der Queue und brauchen später Review.",
     area: "dashboard",
     focus: "code_review",
     maxIterations: "2",
@@ -87,6 +99,43 @@ export function getSelectedResearchLoopPresetId(input: {
     && preset.maxIterations === maxIterations
     && preset.minUseCount === minUseCount
   ))?.id ?? null;
+}
+
+export interface ResearchLoopStartSummary {
+  title: string;
+  scope: string;
+  detail: string;
+  cost: string;
+  safety: string;
+  technicalLabel: string;
+}
+
+export function getResearchLoopStartSummary(input: {
+  selectedPresetId: ResearchLoopPresetId | null;
+  areaLabel: string;
+  focus: string;
+  maxIterations: number;
+  minUseCount: number | null;
+}): ResearchLoopStartSummary {
+  const preset = input.selectedPresetId ? getResearchLoopPreset(input.selectedPresetId) : null;
+  if (preset) {
+    return {
+      title: preset.operatorTitle,
+      scope: preset.operatorFit,
+      detail: preset.operatorResult,
+      cost: preset.cost,
+      safety: "Dry-Run: Änderungen entstehen erst nach Review in der Queue.",
+      technicalLabel: `${preset.area} · ${preset.focus}`,
+    };
+  }
+  return {
+    title: "Eigene Feinsteuerung",
+    scope: `Sucht in ${input.areaLabel}.`,
+    detail: `Fokus ${input.focus.trim() || "recommended_sections"}; ${input.minUseCount !== null ? `nur Nutzung >= ${input.minUseCount}` : "ohne Nutzungsfilter"}.`,
+    cost: `${input.maxIterations} Iterationen maximal.`,
+    safety: "Dry-Run: Änderungen entstehen erst nach Review in der Queue.",
+    technicalLabel: "Manuelle Werte",
+  };
 }
 
 export function getDeepAuditGuidance(input: { subsystem?: string | null; running: boolean }): AutoresearchRunGuidance {
