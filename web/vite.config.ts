@@ -1,4 +1,5 @@
-import { defineConfig, type Plugin } from "vite";
+import type { Plugin } from "vite";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
@@ -108,5 +109,8 @@ export default defineConfig({
       // or receive index.html in dev.
       "/dashboard-plugins": BACKEND,
     },
+  },
+  test: {
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });

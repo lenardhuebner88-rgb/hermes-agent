@@ -117,9 +117,9 @@ function CommandButton({ buttonRef, onOpen }: { buttonRef?: React.RefObject<HTML
 
 function MoreNav() {
   return (
-    <details className="relative">
+    <details className="group relative">
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
-      <div className="absolute right-0 top-12 z-50 w-52 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl">
+      <div className="absolute right-0 top-12 z-50 hidden w-52 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
         {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
       </div>
     </details>
