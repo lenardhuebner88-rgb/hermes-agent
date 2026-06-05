@@ -130,6 +130,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     busy: batchBusy,
   });
   const busyNotice = describeAutoresearchBusy(store.busy);
+  const latestActivity = store.activity[0] ?? null;
   const deepAuditRunning = deepAudit.status?.state === "running";
   const testFoundryRunning = testFoundry.status?.state === "running";
   const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
@@ -457,6 +458,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
       {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
       {busyNotice ? <ToneCallout tone="violet"><Spinner />{busyNotice}</ToneCallout> : null}
+      {latestActivity ? (
+        <ToneCallout tone={latestActivity.tone}>
+          <span className="font-semibold">Letzte Aktion:</span> <span className="hc-mono hc-dim">{fmtClock(latestActivity.at)}</span> {latestActivity.text}
+        </ToneCallout>
+      ) : null}
 
       <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
