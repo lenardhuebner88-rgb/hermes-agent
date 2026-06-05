@@ -6,7 +6,7 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
-import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -593,6 +593,30 @@ describe("AutoresearchView run summary", () => {
     expect(summary.tone).toBe("amber");
     expect(summary.label).toBe("Teuer ohne Treffer");
     expect(summary.next).toContain("Scope enger");
+  });
+
+  it("turns individual runs into readable operator cards", () => {
+    expect(getAutoresearchRunCard({ ...baseRun, proposed: 2 })).toMatchObject({
+      tone: "emerald",
+      label: "Geliefert",
+      title: "2 neue Karten für die Queue.",
+    });
+    expect(getAutoresearchRunCard({ ...baseRun, errors: 1 })).toMatchObject({
+      tone: "red",
+      label: "Fehler",
+    });
+    expect(getAutoresearchRunCard({ ...baseRun, tokens: 180_000, proposed: 0 })).toMatchObject({
+      tone: "amber",
+      label: "Teuer ruhig",
+    });
+  });
+
+  it("prioritizes run-card errors over delivered proposals", () => {
+    expect(getAutoresearchRunCard({ ...baseRun, proposed: 3, errors: 1 })).toMatchObject({
+      tone: "red",
+      label: "Fehler",
+      title: "1 Fehler im Lauf.",
+    });
   });
 });
 

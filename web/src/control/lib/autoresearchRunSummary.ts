@@ -9,6 +9,72 @@ export interface AutoresearchRunSummary {
   facts: { label: string; value: string; tone: ToneName }[];
 }
 
+export interface AutoresearchRunCard {
+  tone: ToneName;
+  label: string;
+  title: string;
+  detail: string;
+  next: string;
+  facts: { label: string; value: string; tone: ToneName }[];
+}
+
+export function getAutoresearchRunCard(run: AutoresearchRun): AutoresearchRunCard {
+  const tokens = safeNumber(run.tokens);
+  const proposed = safeNumber(run.proposed);
+  const errors = safeNumber(run.errors);
+  const scanned = safeNumber(run.scanned);
+  const vetoed = safeNumber(run.vetoed ?? 0);
+  const facts = [
+    { label: "Vorschläge", value: String(proposed), tone: proposed > 0 ? "emerald" : "zinc" },
+    { label: "Geprüft", value: String(scanned), tone: scanned > 0 ? "cyan" : "zinc" },
+    { label: "Tokens", value: tokens > 0 ? tokens.toLocaleString("de-DE") : "-", tone: tokens > 150_000 ? "amber" : "zinc" },
+    { label: "Fehler", value: String(errors), tone: errors > 0 ? "red" : "emerald" },
+    { label: "Veto", value: String(vetoed), tone: vetoed > 0 ? "amber" : "zinc" },
+  ] satisfies AutoresearchRunCard["facts"];
+
+  if (errors > 0) {
+    return {
+      tone: "red",
+      label: "Fehler",
+      title: `${errors} ${errors === 1 ? "Fehler" : "Fehler"} im Lauf.`,
+      detail: "Dieser Lauf ist kein gutes Signal für weitere Starts mit gleichem Setup.",
+      next: "Receipt und Aktivität prüfen, bevor du erneut startest.",
+      facts,
+    };
+  }
+
+  if (proposed > 0) {
+    return {
+      tone: "emerald",
+      label: "Geliefert",
+      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} für die Queue.`,
+      detail: "Der Lauf hat verwertbare Entscheidungen erzeugt.",
+      next: "Jetzt erst Queue bearbeiten; weitere Läufe später gezielter starten.",
+      facts,
+    };
+  }
+
+  if (tokens > 150_000) {
+    return {
+      tone: "amber",
+      label: "Teuer ruhig",
+      title: "Viel Aufwand ohne neue Karten.",
+      detail: "Das kann bedeuten, dass der Scope leer ist oder zu breit gesucht wurde.",
+      next: "Scope enger wählen oder einen anderen Lauf-Typ nutzen.",
+      facts,
+    };
+  }
+
+  return {
+    tone: "cyan",
+    label: "Ruhig",
+    title: "Keine neuen Karten.",
+    detail: scanned > 0 ? `${scanned} Ziele geprüft, ohne neue Entscheidungen.` : "Der Lauf blieb ohne messbare Treffer.",
+    next: "Nur neu starten, wenn du den Scope bewusst änderst.",
+    facts,
+  };
+}
+
 export function getAutoresearchRunSummary(input: {
   runs: readonly AutoresearchRun[];
   acceptanceRate: number | null;
