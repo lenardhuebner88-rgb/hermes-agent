@@ -1,10 +1,15 @@
-import type { Plugin } from "vite";
-import { configDefaults, defineConfig } from "vitest/config";
+import { defineConfig, type Plugin, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 const BACKEND = process.env.HERMES_DASHBOARD_URL ?? "http://127.0.0.1:9119";
+
+type ViteConfigWithVitest = UserConfig & {
+  test?: {
+    exclude?: string[];
+  };
+};
 
 /**
  * In production the Python `hermes dashboard` server injects a one-shot
@@ -111,6 +116,6 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: [...configDefaults.exclude, "e2e/**"],
+    exclude: ["node_modules/**", "dist/**", "e2e/**"],
   },
-});
+} as ViteConfigWithVitest);
