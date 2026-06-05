@@ -18,6 +18,129 @@ export interface AutoresearchRunCard {
   facts: { label: string; value: string; tone: ToneName }[];
 }
 
+export interface AutoresearchLastRunBrief {
+  tone: ToneName;
+  label: string;
+  title: string;
+  detail: string;
+  next: string;
+  facts: { label: string; value: string; tone: ToneName }[];
+  rawLine: string | null;
+}
+
+export function getAutoresearchLastRunBrief(input: {
+  lastRun: unknown | null | undefined;
+  latestRun: AutoresearchRun | null;
+  receipt?: string | null;
+  note?: string | null;
+}): AutoresearchLastRunBrief {
+  const objectRun = input.lastRun && typeof input.lastRun === "object" ? input.lastRun as Record<string, unknown> : null;
+  const fallbackRun = objectRun ? null : input.latestRun;
+  const proposed = numberFrom(objectRun?.proposed ?? fallbackRun?.proposed);
+  const kept = numberFrom(objectRun?.kept);
+  const reverted = numberFrom(objectRun?.reverted);
+  const scanned = numberFrom(objectRun?.skills_researched ?? fallbackRun?.scanned);
+  const errors = numberFrom(objectRun?.research_errors ?? fallbackRun?.errors);
+  const tokens = numberFrom(objectRun?.research_tokens ?? fallbackRun?.tokens);
+  const refused = stringFrom(objectRun?.refused);
+  const stopped = objectRun?.stopped === true;
+  const mode = stringFrom(objectRun?.mode);
+  const finishedAt = stringFrom(objectRun?.finished_at);
+  const rawLine = [mode, finishedAt ? new Date(finishedAt).toLocaleString("de-DE") : null, input.receipt ? `Receipt ${input.receipt}` : null]
+    .filter(Boolean)
+    .join(" · ") || stringFrom(input.lastRun) || input.note || null;
+  const facts = [
+    { label: "Vorschläge", value: proposed === null ? "-" : String(proposed), tone: proposed && proposed > 0 ? "emerald" : "zinc" },
+    { label: "Geprüft", value: scanned === null ? "-" : String(scanned), tone: scanned && scanned > 0 ? "cyan" : "zinc" },
+    { label: "Tokens", value: tokens === null || tokens <= 0 ? "-" : tokens.toLocaleString("de-DE"), tone: tokens && tokens > 150_000 ? "amber" : "zinc" },
+    { label: "Fehler", value: errors === null ? "-" : String(errors), tone: errors && errors > 0 ? "red" : "emerald" },
+  ] satisfies AutoresearchLastRunBrief["facts"];
+
+  if (!objectRun && !input.latestRun && !input.receipt && !input.note) {
+    return {
+      tone: "zinc",
+      label: "Noch kein Lauf",
+      title: "Noch keine Lauf-Auswertung.",
+      detail: "Starte einen kleinen Dry-Run, damit hier ein verwertbares Ergebnis erscheint.",
+      next: "Mit einem kleinen Preset starten und danach die Queue prüfen.",
+      facts,
+      rawLine: null,
+    };
+  }
+
+  if (errors && errors > 0) {
+    return {
+      tone: "red",
+      label: "Fehler prüfen",
+      title: `${errors} ${errors === 1 ? "Fehler" : "Fehler"} im letzten Lauf.`,
+      detail: "Der Lauf ist kein gutes Signal für einen weiteren Start mit gleichem Setup.",
+      next: "Aktivität und Receipt prüfen, bevor du erneut startest.",
+      facts,
+      rawLine,
+    };
+  }
+
+  if (refused) {
+    return {
+      tone: "amber",
+      label: "Abgelehnt",
+      title: "Der letzte Lauf wurde vom Backend abgelehnt.",
+      detail: refused,
+      next: "Route, Scope oder laufende Prozesse prüfen; danach erneut klein starten.",
+      facts,
+      rawLine,
+    };
+  }
+
+  if (stopped) {
+    return {
+      tone: "cyan",
+      label: "Gestoppt",
+      title: "Der letzte Lauf wurde bewusst gestoppt.",
+      detail: "Das Stop-Signal wurde verarbeitet. Es ist kein automatischer Fehler.",
+      next: "Nur neu starten, wenn der Scope jetzt klarer ist.",
+      facts,
+      rawLine,
+    };
+  }
+
+  if (proposed && proposed > 0) {
+    return {
+      tone: "emerald",
+      label: "Hat geliefert",
+      title: `${proposed} neue ${proposed === 1 ? "Karte" : "Karten"} für die Queue.`,
+      detail: kept !== null || reverted !== null
+        ? `Backend-Autotest: ${kept ?? 0} übernommen, ${reverted ?? 0} zurückgerollt.`
+        : "Der Lauf hat verwertbare Entscheidungen erzeugt.",
+      next: "Jetzt erst Queue bearbeiten; weitere Läufe später gezielter starten.",
+      facts,
+      rawLine,
+    };
+  }
+
+  if (tokens && tokens > 150_000) {
+    return {
+      tone: "amber",
+      label: "Teuer ruhig",
+      title: "Viel Aufwand ohne neue Karten.",
+      detail: "Der Lauf hat spürbar Tokens verbraucht, aber keine neue Entscheidung erzeugt.",
+      next: "Scope enger wählen oder einen anderen Lauf-Typ nutzen.",
+      facts,
+      rawLine,
+    };
+  }
+
+  return {
+    tone: "cyan",
+    label: "Ruhig",
+    title: "Keine neuen Karten.",
+    detail: scanned && scanned > 0 ? `${scanned} Ziele geprüft, ohne neue Entscheidungen.` : "Der Lauf blieb ohne messbare Treffer.",
+    next: "Nur neu starten, wenn du den Scope bewusst änderst.",
+    facts,
+    rawLine,
+  };
+}
+
 export function getAutoresearchRunCard(run: AutoresearchRun): AutoresearchRunCard {
   const tokens = safeNumber(run.tokens);
   const proposed = safeNumber(run.proposed);
@@ -158,4 +281,14 @@ function runFacts(totalTokens: number, totalProposed: number, totalErrors: numbe
 
 function safeNumber(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function numberFrom(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : null;
+}
+
+function stringFrom(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number") return String(value);
+  return null;
 }

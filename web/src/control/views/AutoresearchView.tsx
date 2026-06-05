@@ -20,7 +20,7 @@ import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary, type Au
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
-import { getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun, ToneName } from "../lib/types";
@@ -1284,51 +1284,72 @@ function LastRun({ status, latestRun }: { status: ReturnType<typeof useAutoresea
   const receipt = status?.last_receipt;
   const note = status?.note;
   const lastRun = status?.last_run;
-  const lastRunText = typeof lastRun === "string" || typeof lastRun === "number" ? String(lastRun) : null;
   const objectRun = lastRun && typeof lastRun === "object" ? lastRun as Record<string, unknown> : null;
-  const finishedAt = typeof objectRun?.finished_at === "string" ? objectRun.finished_at : null;
-  const mode = typeof objectRun?.mode === "string" ? objectRun.mode : null;
   const proposed = typeof objectRun?.proposed === "number" ? objectRun.proposed : null;
   const kept = typeof objectRun?.kept === "number" ? objectRun.kept : null;
   const reverted = typeof objectRun?.reverted === "number" ? objectRun.reverted : null;
-  const refused = typeof objectRun?.refused === "string" ? objectRun.refused : null;
   const stopped = objectRun?.stopped === true ? "Signal erhalten" : null;
-  const summary = objectRun ? [mode, finishedAt ? new Date(finishedAt).toLocaleString("de-DE") : null].filter(Boolean).join(" · ") : lastRunText;
+  const brief = getAutoresearchLastRunBrief({ lastRun, latestRun, receipt, note });
+  const rawPayload = formatLastRunRawPayload(lastRun);
   // f-autoresearch-tab-driver: surface the observability counters so "0 proposed"
   // reads as converged-healthy vs broken, plus the real MiniMax token spend.
   const counters = readLastRunCounters(lastRun);
   const showCounters = hasResearchCounters(counters);
   const showErrorBadge = shouldShowResearchErrorBadge(counters.researchErrors);
 
-  if (!summary && !receipt && !note && !showCounters) {
-    if (latestRun) {
-      return (
-        <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
-          <p>{de.autoresearch.lastRunFallback(latestRun.scanned, latestRun.proposed)}</p>
-          {latestRun.proposed === 0 ? <p className="mt-1 text-xs hc-dim">{de.autoresearch.lastRunZeroHint}</p> : null}
-        </div>
-      );
-    }
-    return <p className="text-sm hc-soft">{de.autoresearch.lastRunEmpty}</p>;
-  }
   return (
-    <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
-      <p><span className="text-white">Letzter Lauf:</span> {summary || "Backend liefert nur Statusnotiz"}</p>
-      {proposed !== null || kept !== null || reverted !== null ? <p className="mt-1 hc-mono">proposed={proposed ?? "?"} · übernommen={kept ?? "?"} · zurückgerollt={reverted ?? "?"}</p> : null}
-      {showCounters ? (
-        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 hc-mono">
-          <span>{de.autoresearch.skillsResearched}={counters.skillsResearched ?? "?"} · {de.autoresearch.researchErrors}={counters.researchErrors ?? "?"} · {de.autoresearch.skillsWithFindings}={counters.skillsWithFindings ?? "?"}</span>
-          {showErrorBadge ? <span className="rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-xs text-red-200">{de.autoresearch.researchErrorBadge}</span> : null}
-        </p>
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(brief.tone))}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Letzter Lauf</p>
+            <StatusPill tone={brief.tone} label={brief.label} />
+          </div>
+          <h3 className="mt-2 text-sm font-semibold text-white">{brief.title}</h3>
+          <p className="mt-1 text-sm leading-6 hc-soft">{brief.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Nächster Schritt:</span> {brief.next}</p>
+        </div>
+        <div className="grid shrink-0 grid-cols-2 gap-1.5 sm:grid-cols-4 lg:min-w-[360px]">
+          {brief.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}>
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+      {brief.rawLine || rawPayload || proposed !== null || kept !== null || reverted !== null || showCounters || stopped || receipt || note ? (
+        <details className="mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft">
+          <summary className="cursor-pointer font-semibold text-white">Technische Details</summary>
+          {brief.rawLine ? <p className="mt-2"><span className="text-white">Rohstatus:</span> {brief.rawLine}</p> : null}
+          {rawPayload ? <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 hc-mono text-[11px] leading-5 text-white/80">{rawPayload}</pre> : null}
+          {proposed !== null || kept !== null || reverted !== null ? <p className="mt-1 hc-mono">proposed={proposed ?? "?"} · übernommen={kept ?? "?"} · zurückgerollt={reverted ?? "?"}</p> : null}
+          {showCounters ? (
+            <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 hc-mono">
+              <span>{de.autoresearch.skillsResearched}={counters.skillsResearched ?? "?"} · {de.autoresearch.researchErrors}={counters.researchErrors ?? "?"} · {de.autoresearch.skillsWithFindings}={counters.skillsWithFindings ?? "?"}</span>
+              {showErrorBadge ? <span className="rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-xs text-red-200">{de.autoresearch.researchErrorBadge}</span> : null}
+            </p>
+          ) : null}
+          {showCounters ? <p className="mt-1 hc-mono">{de.autoresearch.researchTokens}: {formatResearchTokens(counters.researchTokens)}</p> : null}
+          {showCounters ? <p className="mt-1 text-xs hc-dim">{de.autoresearch.counterLegend}</p> : null}
+          {stopped ? <p className="mt-1">Stop: {stopped}</p> : null}
+          {receipt ? <p className="mt-1 truncate text-xs hc-dim" title={receipt}>Receipt: {receipt}</p> : null}
+          {note ? <p className="mt-1">{note}</p> : null}
+        </details>
       ) : null}
-      <p className="mt-1 hc-mono">{de.autoresearch.researchTokens}: {formatResearchTokens(counters.researchTokens)}</p>
-      {showCounters ? <p className="mt-1 text-xs hc-dim">{de.autoresearch.counterLegend}</p> : null}
-      {refused ? <p className="mt-1">Abgelehnt: {refused}</p> : null}
-      {stopped ? <p className="mt-1">{stopped}</p> : null}
-      {receipt ? <p className="mt-1 truncate text-xs hc-dim" title={receipt}>Receipt: {receipt}</p> : null}
-      {note ? <p className="mt-1">{note}</p> : null}
     </div>
   );
+}
+
+function formatLastRunRawPayload(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return null;
+  }
 }
 
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {

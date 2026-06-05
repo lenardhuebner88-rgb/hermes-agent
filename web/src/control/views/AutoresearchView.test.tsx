@@ -12,7 +12,7 @@ import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
-import { getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -889,6 +889,107 @@ describe("AutoresearchView run summary", () => {
       label: "Fehler",
       title: "1 Fehler im Lauf.",
     });
+  });
+
+  it("turns a raw last-run error into an operator recovery brief", () => {
+    const brief = getAutoresearchLastRunBrief({
+      lastRun: {
+        mode: "dry-run",
+        research_errors: 2,
+        research_tokens: 2400,
+      },
+      latestRun: null,
+      receipt: "receipt-123",
+    });
+
+    expect(brief).toMatchObject({
+      tone: "red",
+      label: "Fehler prüfen",
+    });
+    expect(brief.next).toContain("Receipt");
+    expect(brief.rawLine).toContain("dry-run");
+    expect(brief.rawLine).toContain("receipt-123");
+  });
+
+  it("summarizes delivered last-run proposals without exposing counters first", () => {
+    const brief = getAutoresearchLastRunBrief({
+      lastRun: {
+        mode: "deep-audit",
+        finished_at: "2026-06-04T20:15:00Z",
+        proposed: 2,
+        kept: 1,
+        reverted: 1,
+      },
+      latestRun: null,
+    });
+
+    expect(brief).toMatchObject({
+      tone: "emerald",
+      label: "Hat geliefert",
+      title: "2 neue Karten für die Queue.",
+    });
+    expect(brief.detail).toContain("1 übernommen");
+    expect(brief.rawLine).toContain("deep-audit");
+  });
+
+  it("keeps refused and stopped last-run outcomes distinct from errors", () => {
+    expect(getAutoresearchLastRunBrief({
+      lastRun: { refused: "Route ist nicht konfiguriert." },
+      latestRun: { ...baseRun, errors: 1 },
+    })).toMatchObject({
+      tone: "amber",
+      label: "Abgelehnt",
+      detail: "Route ist nicht konfiguriert.",
+    });
+
+    expect(getAutoresearchLastRunBrief({
+      lastRun: { stopped: true },
+      latestRun: null,
+    })).toMatchObject({
+      tone: "cyan",
+      label: "Gestoppt",
+    });
+  });
+
+  it("does not let stale run history override a structured last-run payload", () => {
+    expect(getAutoresearchLastRunBrief({
+      lastRun: { research_errors: 2 },
+      latestRun: { ...baseRun, errors: 0, tokens: 180_000 },
+    })).toMatchObject({
+      tone: "red",
+      label: "Fehler prüfen",
+    });
+
+    expect(getAutoresearchLastRunBrief({
+      lastRun: { refused: "Route fehlt." },
+      latestRun: { ...baseRun, errors: 3 },
+    })).toMatchObject({
+      tone: "amber",
+      label: "Abgelehnt",
+      detail: "Route fehlt.",
+    });
+  });
+
+  it("uses the latest run as fallback when the backend has no structured last-run payload", () => {
+    expect(getAutoresearchLastRunBrief({
+      lastRun: null,
+      latestRun: { ...baseRun, tokens: 180_000, proposed: 0 },
+    })).toMatchObject({
+      tone: "amber",
+      label: "Teuer ruhig",
+      title: "Viel Aufwand ohne neue Karten.",
+    });
+
+    const calmBrief = getAutoresearchLastRunBrief({
+      lastRun: undefined,
+      latestRun: { ...baseRun, scanned: 4, tokens: 1200, proposed: 0 },
+    });
+
+    expect(calmBrief).toMatchObject({
+      tone: "cyan",
+      label: "Ruhig",
+    });
+    expect(calmBrief.detail).toContain("4 Ziele geprüft");
   });
 });
 
