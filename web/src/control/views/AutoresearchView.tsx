@@ -11,11 +11,12 @@ import { getAutoresearchActionPlan, type AutoresearchActionHint } from "../lib/a
 import { AUTORESEARCH_ADVANCED_GUIDE, type AutoresearchAdvancedGuideItem } from "../lib/autoresearchAdvanced";
 import { getAutoresearchActivityCard, type AutoresearchActivityCard } from "../lib/autoresearchActivity";
 import { fmtClock } from "../lib/derive";
-import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
+import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../lib/autoresearchReadiness";
+import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
@@ -46,9 +47,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const reverted = split.reverted;
   const applied = split.applied;
   const skipped = split.skipped;
-  const [severityFilter, setSeverityFilter] = useState<"all" | "high">("all");
+  const [queueMode, setQueueMode] = useState<AutoresearchQueueMode>("all");
   const distribution = useMemo(() => severityDistribution(open), [open]);
-  const filteredOpen = useMemo(() => (severityFilter === "high" ? filterBySeverityThreshold(open, "high") : open), [open, severityFilter]);
+  const queueModeSummary = useMemo(() => getAutoresearchQueueModeSummary(open, queueMode), [open, queueMode]);
+  const filteredOpen = useMemo(() => filterAutoresearchQueueByMode(open, queueMode), [open, queueMode]);
+  const filteredDistribution = useMemo(() => severityDistribution(filteredOpen), [filteredOpen]);
   const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
   // BLOCKER FIX: "Sichtbare auswählen" must only target the shortlist the
@@ -71,6 +74,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     [loop.running, open.length, reverted.length, status.data?.route_status, status.data?.state],
   );
   const highPriorityCount = distribution.bySeverity.critical + distribution.bySeverity.high;
+  const filteredHighPriorityCount = filteredDistribution.bySeverity.critical + filteredDistribution.bySeverity.high;
   const topProposal = relevanceQueue.shortlist[0]?.proposal ?? null;
   const topCardMode = topProposal ? describeTopCardMode(topProposal) : null;
   const [maxIterations, setMaxIterations] = useState("2");
@@ -99,30 +103,30 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const selectedManualReviewCount = useMemo(() => selectedProposals.filter(proposalNeedsManualReview).length, [selectedProposals]);
   const reviewFlow = useMemo(
     () => getAutoresearchReviewFlow({
-      openCount: open.length,
+      openCount: filteredOpen.length,
       decidedCount: applied.length + skipped.length + reverted.length,
       selectedCount: selectedIds.length,
       visibleCount: visibleProposalIds.length,
       batchSafeVisibleCount: batchSafeVisibleProposalIds.length,
-      highPriorityCount,
+      highPriorityCount: filteredHighPriorityCount,
       selectedManualReviewCount,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
       topTitle: topProposal?.title?.trim() || topProposal?.target,
     }),
-    [applied.length, batchSafeVisibleProposalIds.length, highPriorityCount, open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
+    [applied.length, batchSafeVisibleProposalIds.length, filteredHighPriorityCount, filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedManualReviewCount, skipped.length, topProposal?.target, topProposal?.title, visibleProposalIds.length],
   );
   const decisionGuide = useMemo(
     () => getAutoresearchDecisionGuide({
       visibleProposals,
       selectedProposals,
-      openCount: open.length,
+      openCount: filteredOpen.length,
       selectedCount: selectedIds.length,
       backlogCount: relevanceQueue.summary.remaining,
       revertedCount: reverted.length,
       topTitle: topProposal?.title?.trim() || topProposal?.target,
     }),
-    [open.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
+    [filteredOpen.length, relevanceQueue.summary.remaining, reverted.length, selectedIds.length, selectedProposals, topProposal?.target, topProposal?.title, visibleProposals],
   );
   const queueActionSummary = useMemo(
     () => getAutoresearchQueueActionSummary({
@@ -319,7 +323,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("input,textarea,[contenteditable='true'],[role='dialog']")) return;
-      const top = relevanceQueue.shortlist.find((item) => item.proposal.status === "proposed")?.proposal ?? open[0];
+      const top = relevanceQueue.shortlist.find((item) => item.proposal.status === "proposed")?.proposal ?? null;
       const action = getAutoresearchKeyboardAction({
         key: event.key,
         hasTopProposal: !!top,
@@ -340,7 +344,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [batchSafeVisibleProposalIds, open, relevanceQueue.shortlist, selectedIds.length, visibleProposalIds]);
+  }, [batchSafeVisibleProposalIds, relevanceQueue.shortlist, selectedIds.length, visibleProposalIds]);
 
   const pruneAutoresearch = async () => {
     setPruneBusy(true);
@@ -372,6 +376,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   };
 
   const runReviewFlowPrimary = () => {
+    if (open.length > 0 && filteredOpen.length === 0) {
+      return;
+    }
     if (reviewFlow.primaryAction === "confirm-selection") {
       void confirmSelected();
       return;
@@ -538,14 +545,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             ) : null}
           </div>
           <div className="flex flex-col gap-2 sm:items-end">
-            <div className="inline-flex overflow-hidden rounded-lg border border-white/10 text-sm">
-              <button type="button" onClick={() => setSeverityFilter("all")} className={cn("px-3 py-1", severityFilter === "all" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                {de.autoresearch.severityFilterAll}
-              </button>
-              <button type="button" onClick={() => setSeverityFilter("high")} className={cn("px-3 py-1", severityFilter === "high" ? "bg-[var(--hc-accent)] text-white" : "hc-soft")}>
-                {de.autoresearch.severityFilterHighPlus}
-              </button>
-            </div>
+            <QueueModePicker summary={queueModeSummary} activeMode={queueMode} onChange={setQueueMode} />
             {store.loading ? <Spinner /> : null}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
@@ -562,13 +562,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             <QueueActionSummaryPanel summary={queueActionSummary} />
           </div>
         </div>
-        <ReviewFlowPanel
-          flow={reviewFlow}
-          busy={batchBusy || bulkRevertedBusy || !!store.busy}
-          onPrimary={runReviewFlowPrimary}
-        />
-        <DecisionGuidePanel guide={decisionGuide} />
+        {open.length > 0 && filteredOpen.length === 0 ? null : (
+          <ReviewFlowPanel
+            flow={reviewFlow}
+            busy={batchBusy || bulkRevertedBusy || !!store.busy}
+            onPrimary={runReviewFlowPrimary}
+          />
+        )}
+        {open.length > 0 && filteredOpen.length === 0 ? null : <DecisionGuidePanel guide={decisionGuide} />}
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
+        {open.length > 0 && filteredOpen.length === 0 && !store.loading ? <Empty icon={<ListChecks className="h-5 w-5" />} text={`Keine Karten im Modus ${queueModeSummary.active.label}.`} /> : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
             <ProposalCard
@@ -1012,6 +1015,36 @@ function QueueActionSummaryPanel({ summary }: { summary: AutoresearchQueueAction
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function QueueModePicker({ summary, activeMode, onChange }: { summary: ReturnType<typeof getAutoresearchQueueModeSummary>; activeMode: AutoresearchQueueMode; onChange: (mode: AutoresearchQueueMode) => void }) {
+  return (
+    <div className="max-w-3xl rounded-lg border border-white/10 bg-white/[.025] p-2 text-left">
+      <div className="grid gap-1.5 sm:grid-cols-4">
+        {summary.options.map((option) => {
+          const active = option.id === activeMode;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onChange(option.id)}
+              aria-pressed={active}
+              className={cn(
+                "hc-hit rounded-md border px-2 py-1.5 text-left transition",
+                active ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-white/10 bg-black/20 hover:bg-white/[.04]",
+              )}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-white">{option.label}</span>
+                <StatusPill tone={option.tone} label={String(option.count)} />
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-xs leading-5 hc-soft"><span className="font-semibold text-white">{summary.active.label}:</span> {summary.active.detail}</p>
     </div>
   );
 }

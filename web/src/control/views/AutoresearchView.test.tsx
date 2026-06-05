@@ -7,6 +7,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
+import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary } from "../lib/autoresearchQueueMode";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
@@ -358,6 +359,33 @@ describe("AutoresearchView action plan", () => {
     expect(plan.generate.label).toBe("Empfohlen");
     expect(plan.scan.label).toBe("Optional");
     expect(plan.prune.label).toBe("Warten");
+  });
+});
+
+describe("AutoresearchView queue modes", () => {
+  const safe = proposal({ id: "safe", severity: "low", mode: "skill", title: "Safe skill" });
+  const high = proposal({ id: "high", severity: "high", mode: "skill", title: "High skill" });
+  const code = proposal({ id: "code", severity: "medium", mode: "code", title: "Code patch" });
+  const safety = proposal({ id: "safety", severity: "low", mode: "skill", title: "Token safety note" });
+  const proposals = [safe, high, code, safety];
+
+  it("builds operator review modes with counts and plain labels", () => {
+    const summary = getAutoresearchQueueModeSummary(proposals, "manual");
+
+    expect(summary.active.label).toBe("Einzelreview");
+    expect(summary.options.map((option) => [option.id, option.count])).toEqual([
+      ["all", 4],
+      ["high", 1],
+      ["manual", 3],
+      ["safe", 1],
+    ]);
+  });
+
+  it("filters the queue by risk and review style without dropping the source queue", () => {
+    expect(filterAutoresearchQueueByMode(proposals, "all").map((item) => item.id)).toEqual(["safe", "high", "code", "safety"]);
+    expect(filterAutoresearchQueueByMode(proposals, "high").map((item) => item.id)).toEqual(["high"]);
+    expect(filterAutoresearchQueueByMode(proposals, "manual").map((item) => item.id)).toEqual(["high", "code", "safety"]);
+    expect(filterAutoresearchQueueByMode(proposals, "safe").map((item) => item.id)).toEqual(["safe"]);
   });
 });
 
