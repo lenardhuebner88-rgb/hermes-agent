@@ -125,6 +125,39 @@ describe("ProposalCard", () => {
     expect(manual).toContain("Einzelreview");
   });
 
+  it("opens the diff by default for actionable manual-review cards", () => {
+    const manual = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({ id: "manual-diff", target: "hermes_cli/foo.py", mode: "code", diff_before_after: "- risky()\n+ guarded()" })}
+        density="airy"
+        selectable
+        batchSelectable={false}
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(manual).toContain("Diese Änderung ist geöffnet");
+    expect(manual).not.toContain("hidden md:block");
+    expect(manual).toContain("guarded()");
+  });
+
+  it("keeps batch-selectable card diffs collapsed by default", () => {
+    const safe = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({ id: "safe-diff", target: "skill/foo", diff_before_after: "- alt\n+ neu" })}
+        density="airy"
+        selectable
+        batchSelectable
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(safe).not.toContain("Diese Änderung ist geöffnet");
+    expect(safe).toContain("hidden md:block");
+  });
+
   it("renders the model-assigned severity badge", () => {
     const html = renderToStaticMarkup(
       <ProposalCard proposal={proposal({ id: "ps1", target: "skill/foo", severity: "critical" })} density="airy" onApply={noop} onSkip={noop} />,

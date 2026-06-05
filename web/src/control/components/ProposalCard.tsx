@@ -99,6 +99,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const guide = decisionGuide(proposal, severity);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
+  const opensDiffByDefault = isActionable && selectable && !batchSelectable;
   return (
     <article id={`autoresearch-proposal-${proposal.id}`} className={cn("hc-card scroll-mt-6 space-y-4 p-4", density === "compact" && "p-3")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -167,7 +168,8 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
 
       <div className="space-y-2">
         <p className="hc-eyebrow">{de.autoresearch.fixDiff}</p>
-        <DiffView lines={lines} showLineNumbers={density === "compact"} collapsible defaultCollapsed />
+        {opensDiffByDefault ? <p className="text-xs leading-5 hc-dim">Einzelreview: Diese Änderung ist geöffnet, damit du sie vor Übernehmen oder Überspringen direkt prüfen kannst.</p> : null}
+        <DiffView lines={lines} showLineNumbers={density === "compact"} collapsible defaultCollapsed={!opensDiffByDefault} />
       </div>
 
       {batchStatus?.status === "fail" && batchStatus.detail ? <ToneCallout tone="red">{batchStatus.detail}</ToneCallout> : null}
