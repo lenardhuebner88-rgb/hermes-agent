@@ -66,6 +66,61 @@ describe("BacklogResponseSchema (Family Organizer contract health)", () => {
     expect(parsed.next_action).toBe("Starten");
     expect(parsed.links[0].label).toBe("Runbook");
   });
+
+  it("parses the v2 per-item facts (age_days/freshness/quality_issues/readiness)", () => {
+    const parsed = parseOrThrow(BacklogResponseSchema, {
+      schema: "fo-backlog-v2",
+      checked_at: 1780000000,
+      items: [{
+        id: "0090",
+        title: "A v2 item",
+        status: "next",
+        owner: "claude",
+        risk: "high",
+        area: "db",
+        updated: "2026-06-01",
+        stale: false,
+        age_days: 4,
+        freshness: "aging",
+        quality_issues: [{ code: "missing_acceptance", severity: "risk" }],
+        readiness: "needs_grooming",
+      }],
+      counts: { now: 0, next: 1, in_progress: 0, blocked: 0, later: 0, done: 0 },
+      source: { dir: "/x", ref: "git:origin/main", count: 1 },
+      error: null,
+    }, "family-organizer/backlog");
+
+    expect(parsed.schema).toBe("fo-backlog-v2");
+    expect(parsed.items[0].age_days).toBe(4);
+    expect(parsed.items[0].freshness).toBe("aging");
+    expect(parsed.items[0].quality_issues).toEqual([{ code: "missing_acceptance", severity: "risk" }]);
+    expect(parsed.items[0].readiness).toBe("needs_grooming");
+  });
+
+  it("stays back-compatible with a v1 payload (new fields absent → undefined)", () => {
+    const parsed = parseOrThrow(BacklogResponseSchema, {
+      schema: "fo-backlog-v1",
+      checked_at: 1770000000,
+      items: [{
+        id: "0001",
+        title: "A v1 item",
+        status: "next",
+        owner: "claude",
+        risk: "low",
+        area: "lists",
+        updated: "2026-06-01",
+        stale: false,
+      }],
+      counts: { now: 0, next: 1, in_progress: 0, blocked: 0, later: 0, done: 0 },
+      source: { dir: "/x", ref: "git:origin/main", count: 1 },
+      error: null,
+    }, "family-organizer/backlog");
+
+    expect(parsed.items[0].age_days).toBeUndefined();
+    expect(parsed.items[0].freshness).toBeUndefined();
+    expect(parsed.items[0].quality_issues).toBeUndefined();
+    expect(parsed.items[0].readiness).toBeUndefined();
+  });
 });
 
 

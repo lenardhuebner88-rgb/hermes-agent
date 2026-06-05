@@ -1,6 +1,40 @@
 import type { BacklogContractHealth, BacklogItem, BacklogDetail } from "./schemas";
 
 export type FoSortKey = "risk" | "age" | "status";
+
+// Reason codes explain a candidate's queue rank. Derived ONCE on the client from the
+// server-computed per-item facts (status/risk/area/age/owner/quality/readiness) so the
+// next-task spotlight and the compare strip can never disagree.
+export type FoReasonCode =
+  | "now_status"
+  | "next_status"
+  | "in_progress"
+  | "high_risk"
+  | "high_impact_area"
+  | "aged"
+  | "penalty_unowned"
+  | "penalty_stale"
+  | "missing_acceptance"
+  | "missing_next_action"
+  | "needs_grooming"
+  | "drift";
+
+export const FO_REASON_LABELS: Record<FoReasonCode, string> = {
+  now_status: "Status now",
+  next_status: "Status next",
+  in_progress: "Läuft",
+  high_risk: "Hohes Risiko",
+  high_impact_area: "Wichtiger Bereich",
+  aged: "Lange offen",
+  penalty_unowned: "Kein Owner",
+  penalty_stale: "Stale",
+  missing_acceptance: "Akzeptanz fehlt",
+  missing_next_action: "Next Action fehlt",
+  needs_grooming: "Grooming nötig",
+  drift: "Vertragsdrift",
+};
+
+export type FoRankedCandidate = { item: BacklogItem; score: number; reasonCodes: FoReasonCode[] };
 export type FoQueueState = "now" | "next" | "in_progress" | "blocked" | "later" | "done";
 export type FoQueueStateResult =
   | { state: FoQueueState; reason?: undefined }
@@ -18,8 +52,19 @@ export type FoQualityFlag = { kind: FoQualityFlagKind; label: string; severity: 
 
 export type FoStaleSignal =
   | { state: "fresh"; label: string }
+  | { state: "aging"; label: string }
   | { state: "missing_update"; label: string }
   | { state: "stale"; label: string };
+
+const QUALITY_LABELS: Record<FoQualityFlagKind, string> = {
+  weak_title: "Titel schwach",
+  missing_acceptance: "Akzeptanz fehlt",
+  unclear_owner: "Owner unklar",
+  stale_update: "Stale Update",
+  large_scope: "Scope gross",
+  missing_next_action: "Next Action fehlt",
+};
+const QUALITY_KINDS = new Set<string>(Object.keys(QUALITY_LABELS));
 
 export type FoOwnerLoad = { owner: string; total: number; highRisk: number; stale: number; unready: number };
 
@@ -77,7 +122,24 @@ export function queueStateForFoItem(item: Pick<BacklogItem, "status">): FoQueueS
   return { state: "drift", reason: "unknown_status" };
 }
 
-export function staleSignalForFoItem(item: Pick<BacklogItem, "status" | "updated" | "stale">, nowSec: number): FoStaleSignal {
+export function staleSignalForFoItem(
+  item: Pick<BacklogItem, "status" | "updated" | "stale" | "freshness" | "age_days">,
+  nowSec: number,
+): FoStaleSignal {
+  // Prefer the server-computed freshness fact (v2); fall back to client heuristics (v1).
+  if (item.freshness) {
+    const days = typeof item.age_days === "number" ? item.age_days : null;
+    switch (item.freshness) {
+      case "no_proof":
+        return { state: "missing_update", label: "kein Beleg" };
+      case "stale":
+        return { state: "stale", label: days != null && days > 0 ? `${days} Tage ohne Beleg` : "überfällig" };
+      case "aging":
+        return { state: "aging", label: days != null ? `${days} Tage` : "altert" };
+      default:
+        return { state: "fresh", label: days != null ? (days <= 0 ? "heute" : `${days} Tage`) : "frisch" };
+    }
+  }
   if (!item.updated) return { state: "missing_update", label: "kein Update" };
   if (item.status === "done") return { state: "fresh", label: "abgeschlossen" };
   const updated = Date.parse(`${item.updated.slice(0, 10)}T00:00:00Z`);
@@ -107,6 +169,18 @@ function bodyScopeScore(detail?: Pick<BacklogDetail, "body">): number {
 }
 
 export function qualityFlagsForFoItem(item: BacklogItem, detail?: BacklogDetail): FoQualityFlag[] {
+  // Prefer the server-computed taxonomy (v2) — it sees the full body (so `large_scope`
+  // and acceptance/next-action depth are available in the list, not only the drawer).
+  if (item.quality_issues) {
+    return item.quality_issues
+      .filter((issue) => QUALITY_KINDS.has(issue.code))
+      .map((issue) => ({
+        kind: issue.code as FoQualityFlagKind,
+        label: QUALITY_LABELS[issue.code as FoQualityFlagKind],
+        severity: issue.severity === "risk" ? "risk" : "warn",
+      }));
+  }
+  // Fallback: client heuristics (v1 backend, or detail-derived signals).
   const flags: FoQualityFlag[] = [];
   const title = item.title.trim();
   if (title.length < 12 || ["fix", "bug", "todo", "misc", "cleanup"].includes(title.toLowerCase())) {
@@ -160,24 +234,97 @@ export function ownerLoadSummary(items: BacklogItem[]): FoOwnerLoad[] {
   return [...byOwner.values()].sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
 }
 
-function ageDays(updated: string): number {
+function ageDays(updated: string, nowSec: number): number {
   if (!updated) return 0;
   const parsed = Date.parse(`${updated.slice(0, 10)}T00:00:00Z`);
   if (Number.isNaN(parsed)) return 0;
-  return Math.max(0, Math.floor((Date.now() - parsed) / 86_400_000));
+  return Math.max(0, Math.floor((nowSec * 1000 - parsed) / 86_400_000));
 }
 
-function rankScore(item: BacklogItem): number {
+// Prefer the server-computed `age_days` fact (deterministic); fall back to client clock.
+function itemAgeDays(item: Pick<BacklogItem, "updated" | "age_days">, nowSec: number): number {
+  if (typeof item.age_days === "number") return item.age_days;
+  return ageDays(item.updated, nowSec);
+}
+
+function isStale(item: Pick<BacklogItem, "stale" | "freshness">): boolean {
+  return item.stale || item.freshness === "stale";
+}
+
+function rankScore(item: BacklogItem, nowSec: number): number {
   const risk = RISK_ORDER[item.risk] === 0 ? 16 : RISK_ORDER[item.risk] === 1 ? 8 : 2;
   const impact = BUSINESS_IMPACT[item.area] ?? 1;
   const state = STATE_PULL_WEIGHT[item.status] ?? -20;
-  const age = Math.min(ageDays(item.updated), 30) / 2;
-  const penalties = (item.owner === "unassigned" ? 8 : 0) + (item.stale ? 6 : 0);
+  const age = Math.min(itemAgeDays(item, nowSec), 30) / 2;
+  const penalties = (item.owner === "unassigned" ? 8 : 0) + (isStale(item) ? 6 : 0);
   return state + risk + impact * 4 + age - penalties;
 }
 
-export function rankFoItems<T extends BacklogItem>(items: T[]): T[] {
-  return [...items].sort((a, b) => rankScore(b) - rankScore(a) || a.id.localeCompare(b.id));
+export function rankFoItems<T extends BacklogItem>(items: T[], nowSec: number): T[] {
+  return [...items].sort((a, b) => rankScore(b, nowSec) - rankScore(a, nowSec) || a.id.localeCompare(b.id));
+}
+
+// Reason codes for one item — why it ranks where it does. Prefers server facts
+// (quality_issues, freshness, readiness) and degrades to the v1 booleans.
+export function reasonCodesForFoItem(item: BacklogItem, nowSec: number): FoReasonCode[] {
+  const codes: FoReasonCode[] = [];
+  const issues = item.quality_issues ?? [];
+  const hasIssue = (code: string) => issues.some((q) => q.code === code);
+
+  if (item.status === "now") codes.push("now_status");
+  else if (item.status === "next") codes.push("next_status");
+  else if (item.status === "in_progress") codes.push("in_progress");
+
+  if (item.risk === "high") codes.push("high_risk");
+  if ((BUSINESS_IMPACT[item.area] ?? 1) >= 3) codes.push("high_impact_area");
+  if (itemAgeDays(item, nowSec) >= 7) codes.push("aged");
+  if (item.owner === "unassigned") codes.push("penalty_unowned");
+  if (isStale(item)) codes.push("penalty_stale");
+  if (hasIssue("missing_acceptance") || item.missing_acceptance === true) codes.push("missing_acceptance");
+  if (hasIssue("missing_next_action") || item.missing_next_action === true) codes.push("missing_next_action");
+  if (item.readiness === "needs_grooming") codes.push("needs_grooming");
+  if (item.readiness === "drift" || queueStateForFoItem(item).state === "drift") codes.push("drift");
+  return codes;
+}
+
+// The ranked active queue with per-candidate reason codes — computed ONCE and reused by
+// the next-task spotlight and the compare-top-candidates strip so they can't drift.
+export function rankedQueueWithReasons(items: BacklogItem[], nowSec: number): FoRankedCandidate[] {
+  const active = items.filter((item) => item.status !== "done");
+  return rankFoItems(active, nowSec).map((item) => ({
+    item,
+    score: rankScore(item, nowSec),
+    reasonCodes: reasonCodesForFoItem(item, nowSec),
+  }));
+}
+
+export type FoQuickView = "all" | "ready" | "groom" | "stale" | "unowned";
+
+export function isFoItemStale(item: Pick<BacklogItem, "stale" | "freshness">): boolean {
+  return isStale(item);
+}
+
+// Server `readiness` fact with a v1 client fallback (graceful degrade if backend is old).
+export function readinessForFoItem(item: BacklogItem): string {
+  if (item.readiness) return item.readiness;
+  if (queueStateForFoItem(item).state === "drift") return "drift";
+  if (item.status === "blocked") return "blocked";
+  return qualityFlagsForFoItem(item).some((flag) => flag.severity === "risk") ? "needs_grooming" : "ready";
+}
+
+export function matchesFoQuickView(item: BacklogItem, view: FoQuickView): boolean {
+  switch (view) {
+    case "ready":
+      return readinessForFoItem(item) === "ready";
+    case "groom":
+      return readinessForFoItem(item) === "needs_grooming";
+    case "stale":
+      return isStale(item);
+    case "unowned":
+      return item.owner === "unassigned" || !item.owner;
+    default:
+      return true;
+  }
 }
 
 export function foHealthStripCounts(items: BacklogItem[], contractHealth?: BacklogContractHealth): FoHealthStripCounts {

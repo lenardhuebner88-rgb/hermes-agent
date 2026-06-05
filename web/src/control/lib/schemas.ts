@@ -262,6 +262,13 @@ export const ProposalsResponseSchema = z.object({
 // Read-only family-organizer backlog board. Mirrors the frontmatter "Feld-Vertrag"
 // (family-organizer backlog/README.md) served by GET /api/family-organizer/backlog.
 // Tolerant (.catch defaults) so a partial/stale payload still renders the board.
+// v2 per-item facts (deterministic, server-computed). Optional + tolerant so a v1
+// payload (fields absent) still parses and the client falls back to its own heuristics.
+export const BacklogQualityIssueSchema = z.object({
+  code: z.string().catch(""),
+  severity: z.string().catch("warn"),
+});
+
 export const BacklogItemSchema = z.object({
   id: z.string().catch(""),
   title: z.string().catch("Ohne Titel"),
@@ -277,6 +284,10 @@ export const BacklogItemSchema = z.object({
   source_path: z.string().optional().catch(undefined),
   missing_acceptance: z.boolean().optional().catch(undefined),
   missing_next_action: z.boolean().optional().catch(undefined),
+  age_days: z.number().nullable().optional().catch(undefined),
+  freshness: z.string().optional().catch(undefined),
+  quality_issues: z.array(BacklogQualityIssueSchema).optional().catch(undefined),
+  readiness: z.string().optional().catch(undefined),
 });
 
 export const BacklogDetailSchema = z.object({
@@ -290,6 +301,12 @@ export const BacklogDetailSchema = z.object({
   lane: z.string().nullable().catch(null),
   result: z.string().nullable().catch(null),
   stale: z.boolean().catch(false),
+  age_days: z.number().nullable().optional().catch(undefined),
+  freshness: z.string().optional().catch(undefined),
+  quality_issues: z.array(BacklogQualityIssueSchema).optional().catch(undefined),
+  readiness: z.string().optional().catch(undefined),
+  missing_acceptance: z.boolean().optional().catch(undefined),
+  missing_next_action: z.boolean().optional().catch(undefined),
   body: z.string().catch(""),
   decision: z.array(z.string()).catch([]),
   acceptance_criteria: z.array(z.string()).catch([]),
@@ -349,6 +366,7 @@ export type BacklogItem = z.infer<typeof BacklogItemSchema>;
 export type BacklogDetail = z.infer<typeof BacklogDetailSchema>;
 export type BacklogContractHealth = z.infer<typeof BacklogContractHealthSchema>;
 export type BacklogResponse = z.infer<typeof BacklogResponseSchema>;
+export type BacklogQualityIssue = z.infer<typeof BacklogQualityIssueSchema>;
 
 // Read-only Orchestrator backlog board. Mirrors the Backlog.md-style frontmatter
 // (status/priority/dependsOn/planGate/created) served by GET /api/orchestration/backlog.

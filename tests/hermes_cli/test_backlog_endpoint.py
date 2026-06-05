@@ -132,7 +132,7 @@ def test_read_items_counts_stale_and_id_from_filename(tmp_path, monkeypatch):
     now = int(dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc).timestamp())
     out = _read_items_sync(now)
 
-    assert out["schema"] == "fo-backlog-v1"
+    assert out["schema"] == "fo-backlog-v2"
     assert out["source"]["count"] == 3
     assert out["source"]["ref"].startswith("fs:")  # tmp dir is not a git repo → working-tree fallback
     assert out["counts"]["done"] == 1
@@ -209,7 +209,7 @@ def test_route_returns_json(tmp_path, monkeypatch):
     r = client.get("/api/family-organizer/backlog")
     assert r.status_code == 200
     data = r.json()
-    assert data["schema"] == "fo-backlog-v1"
+    assert data["schema"] == "fo-backlog-v2"
     assert data["source"]["count"] == 1
     assert data["items"][0]["id"] == "0001"
     assert data["items"][0]["title"] == "A"
@@ -381,3 +381,112 @@ def test_detail_route_empty_and_unknown_id_return_error(monkeypatch):
     assert unknown.status_code == 200
     assert blank.json()["error"]
     assert unknown.json()["error"]
+
+
+# --- v2 per-item facts (age_days / freshness / quality_issues / readiness) -----------
+
+_READY_BODY = "## Akzeptanzkriterien\n\n- Gate ist gruen.\n\n## Next Action\n\nUmsetzen."
+
+
+def test_read_items_age_and_freshness_buckets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-fresh.md", id="0001", title="Fresh active task", status="next",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-10")
+    _write(tmp_path, "0002-aging.md", id="0002", title="Aging active task", status="next",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-05")
+    _write(tmp_path, "0003-stale.md", id="0003", title="Stale running task", status="in_progress",
+           owner="claude", risk="low", area="kitchen", updated="2026-05-20")
+    # no `updated` field at all → unparseable → no_proof / age_days None
+    _write(tmp_path, "0004-noproof.md", id="0004", title="No proof task", status="next",
+           owner="claude", risk="low", area="kitchen")
+
+    now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+    by_id = {it["id"]: it for it in _read_items_sync(now)["items"]}
+
+    assert by_id["0001"]["age_days"] == 0
+    assert by_id["0001"]["freshness"] == "fresh"
+    assert by_id["0002"]["age_days"] == 5
+    assert by_id["0002"]["freshness"] == "aging"  # >3 days, not yet stale
+    assert by_id["0003"]["freshness"] == "stale"  # in_progress + ancient
+    assert by_id["0003"]["stale"] is True
+    assert by_id["0004"]["age_days"] is None
+    assert by_id["0004"]["freshness"] == "no_proof"
+
+
+def test_read_items_quality_issues_taxonomy(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    big_body = "## Kontext\n\n" + "\n".join(f"- punkt {i}" for i in range(12))
+    _write(tmp_path, "0001-big.md", id="0001", title="A well-scoped larger task title",
+           status="next", owner="claude", risk="low", area="kitchen",
+           updated="2026-06-10", body=big_body)
+    _write(tmp_path, "0002-ready.md", id="0002", title="A nicely scoped ready task",
+           status="next", owner="claude", risk="low", area="kitchen",
+           updated="2026-06-10", body=_READY_BODY)
+    _write(tmp_path, "0003-weak.md", id="0003", title="fix", status="next",
+           owner="unassigned", risk="low", area="kitchen",
+           updated="2026-06-10", body=_READY_BODY)
+
+    now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+    by_id = {it["id"]: it for it in _read_items_sync(now)["items"]}
+
+    def codes(item_id):
+        return {q["code"] for q in by_id[item_id]["quality_issues"]}
+
+    assert "large_scope" in codes("0001")     # 12 bullets ≥ scope threshold
+    assert codes("0002") == set()             # acceptance + next action + good title/owner
+    assert "large_scope" not in codes("0002")
+    assert "weak_title" in codes("0003")      # title "fix"
+    assert "unclear_owner" in codes("0003")   # owner unassigned
+
+    severities = {q["code"]: q["severity"] for q in by_id["0003"]["quality_issues"]}
+    assert severities["unclear_owner"] == "risk"
+    assert severities["weak_title"] == "warn"
+
+
+def test_read_items_readiness_mapping(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-drift.md", id="0001", title="Drift status item", status="bogus",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-10", body=_READY_BODY)
+    _write(tmp_path, "0002-blocked.md", id="0002", title="Blocked but documented", status="blocked",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-10", body=_READY_BODY)
+    _write(tmp_path, "0003-groom.md", id="0003", title="Needs grooming item", status="next",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-10",
+           body="## Kontext\n\nNur Kontext, keine Kriterien.")
+    _write(tmp_path, "0004-ready.md", id="0004", title="A ready scoped task", status="next",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-10", body=_READY_BODY)
+
+    now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+    by_id = {it["id"]: it for it in _read_items_sync(now)["items"]}
+
+    assert by_id["0001"]["readiness"] == "drift"            # unknown status
+    assert by_id["0002"]["readiness"] == "blocked"          # blocked dominates
+    assert by_id["0003"]["readiness"] == "needs_grooming"   # risk-severity issues
+    assert by_id["0004"]["readiness"] == "ready"            # complete + clean
+
+
+def test_detail_route_includes_v2_facts(monkeypatch):
+    client = _detail_client(monkeypatch, [
+        ("0001-a.md", _source_text(id="0001", title="A detail facts item", status="next",
+                                   owner="unassigned", risk="high", area="db",
+                                   updated="2026-06-01")),
+    ])
+
+    data = client.get("/api/family-organizer/backlog/0001").json()
+
+    assert "age_days" in data
+    assert data["freshness"] in {"fresh", "aging", "stale", "no_proof"}
+    assert data["readiness"] in {"ready", "needs_grooming", "blocked", "drift"}
+    assert isinstance(data["quality_issues"], list)
+    # owner unassigned → unclear_owner (now-independent, so deterministic to assert)
+    assert any(q["code"] == "unclear_owner" for q in data["quality_issues"])
+
+
+def test_read_items_deterministic_for_fixed_now(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-a.md", id="0001", title="First task title here", status="next",
+           owner="claude", risk="low", area="kitchen", updated="2026-06-05", body=_READY_BODY)
+    _write(tmp_path, "0002-b.md", id="0002", title="Second running task", status="in_progress",
+           owner="hermes", risk="high", area="db", updated="2026-05-20")
+
+    now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+    assert _read_items_sync(now) == _read_items_sync(now)

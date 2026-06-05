@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { FoBacklogQueueTable, FoHealthStrip } from "./BacklogView";
+import { FoBacklogQueueTable, FoHealthStrip, ReasonChips } from "./BacklogView";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
 
 function item(overrides: Partial<BacklogItem> & { id: string }): BacklogItem {
@@ -71,5 +71,54 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).toContain("Ready task");
     expect(html).toContain("Akzeptanz");
     expect(html).toContain("backlog/items/0002-task.md");
+  });
+
+  it("shows the server quality taxonomy (incl. large_scope) in the list without a detail fetch", () => {
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[
+          item({
+            id: "0005",
+            title: "Server-flagged item",
+            status: "next",
+            // v2: large_scope is body-derived and only the server can compute it for the list
+            quality_issues: [
+              { code: "large_scope", severity: "warn" },
+              { code: "missing_acceptance", severity: "risk" },
+            ],
+          }),
+        ]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Scope gross");
+    expect(html).toContain("Akzeptanz fehlt");
+  });
+
+  it("highlights the keyboard-active row via aria-current + ring", () => {
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item({ id: "0002", status: "next" }), item({ id: "0003", status: "next" })]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        activeId="0003"
+        onOpen={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain("ring-cyan-400/70");
+  });
+
+  it("renders queue reason codes as German labels", () => {
+    const html = renderToStaticMarkup(
+      <ReasonChips codes={["now_status", "high_risk", "penalty_unowned"]} />,
+    );
+    expect(html).toContain("Status now");
+    expect(html).toContain("Hohes Risiko");
+    expect(html).toContain("Kein Owner");
   });
 });

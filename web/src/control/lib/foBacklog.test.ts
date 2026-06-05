@@ -6,9 +6,13 @@ import {
   foHealthStripCounts,
   nextActionForFoItem,
   ownerLoadSummary,
+  matchesFoQuickView,
   qualityFlagsForFoItem,
   queueStateForFoItem,
   rankFoItems,
+  rankedQueueWithReasons,
+  readinessForFoItem,
+  reasonCodesForFoItem,
   sortFoItems,
   staleSignalForFoItem,
 } from "./foBacklog";
@@ -145,13 +149,35 @@ describe("FO queue intelligence", () => {
     ]);
   });
 
-  it("ranks risk, age, and business impact ahead of low-impact later work", () => {
+  it("ranks risk, age, and business impact ahead of low-impact later work (deterministic with nowSec)", () => {
+    const nowSec = Math.floor(Date.parse("2026-06-10T00:00:00Z") / 1000);
     const ranked = rankFoItems([
       item({ id: "low", status: "later", risk: "low", area: "process", updated: "2026-06-01" }),
       item({ id: "high", status: "next", risk: "high", area: "db", updated: "2026-06-03" }),
       item({ id: "old", status: "next", risk: "medium", area: "lists", updated: "2026-05-01" }),
-    ]);
+    ], nowSec);
     expect(ranked.map((it) => it.id)).toEqual(["high", "old", "low"]);
+  });
+
+  it("ranking is stable for a fixed nowSec regardless of wall-clock", () => {
+    const items = [
+      item({ id: "a", status: "next", risk: "high", area: "db", updated: "2026-06-03" }),
+      item({ id: "b", status: "later", risk: "low", area: "process", updated: "2026-06-01" }),
+    ];
+    const a = rankFoItems(items, 1_750_000_000).map((it) => it.id);
+    const b = rankFoItems(items, 1_750_000_000).map((it) => it.id);
+    expect(a).toEqual(b);
+  });
+
+  it("rankScore prefers the server age_days fact over the client clock", () => {
+    const nowSec = Math.floor(Date.parse("2026-06-10T00:00:00Z") / 1000);
+    // Two next items, equal except one carries a large server-provided age_days.
+    const [aged, fresh] = rankFoItems([
+      item({ id: "fresh", status: "next", risk: "low", area: "lists", updated: "2026-06-09", age_days: 1 }),
+      item({ id: "aged", status: "next", risk: "low", area: "lists", updated: "2026-06-09", age_days: 30 }),
+    ], nowSec);
+    // The item with the bigger server age_days outranks its otherwise-identical twin.
+    expect([aged.id, fresh.id]).toEqual(["aged", "fresh"]);
   });
 
   it("derives next action and task-quality flags without mutating backlog data", () => {
@@ -321,5 +347,120 @@ describe("sortFoItems", () => {
     const orig = [...items];
     sortFoItems(items, "risk");
     expect(items.map((it) => it.id)).toEqual(orig.map((it) => it.id));
+  });
+});
+
+// --- v2: prefer server-computed facts, with graceful client fallback ---
+
+const NOW_SEC = Math.floor(Date.parse("2026-06-10T00:00:00Z") / 1000);
+
+describe("prefer-server facts", () => {
+  it("qualityFlagsForFoItem uses the server taxonomy when present (server is authoritative)", () => {
+    const withServer = item({
+      id: "0001",
+      title: "Fix",          // would be a client weak_title
+      owner: "unassigned",   // would be a client unclear_owner
+      quality_issues: [
+        { code: "missing_acceptance", severity: "risk" },
+        { code: "large_scope", severity: "warn" },
+      ],
+    });
+    // Only the server-listed issues surface — client heuristics do not re-fire.
+    expect(qualityFlagsForFoItem(withServer).map((f) => f.kind)).toEqual([
+      "missing_acceptance",
+      "large_scope",
+    ]);
+  });
+
+  it("qualityFlagsForFoItem falls back to client heuristics when the server field is absent (v1)", () => {
+    const v1 = item({ id: "0001", title: "Fix", owner: "unassigned" });
+    const kinds = qualityFlagsForFoItem(v1).map((f) => f.kind);
+    expect(kinds).toContain("weak_title");
+    expect(kinds).toContain("unclear_owner");
+  });
+
+  it("staleSignalForFoItem prefers server freshness/age_days", () => {
+    const stale = item({ id: "x", status: "in_progress", updated: "2026-06-09", freshness: "stale", age_days: 12 });
+    expect(staleSignalForFoItem(stale, NOW_SEC)).toEqual({ state: "stale", label: "12 Tage ohne Beleg" });
+
+    const aging = item({ id: "y", status: "next", updated: "2026-06-05", freshness: "aging", age_days: 5 });
+    expect(staleSignalForFoItem(aging, NOW_SEC).state).toBe("aging");
+
+    const noProof = item({ id: "z", status: "next", updated: "", freshness: "no_proof", age_days: null });
+    expect(staleSignalForFoItem(noProof, NOW_SEC).state).toBe("missing_update");
+  });
+
+  it("staleSignalForFoItem falls back to client logic when freshness is absent (v1)", () => {
+    const v1 = item({ id: "a", status: "in_progress", updated: "2026-05-01", stale: true });
+    expect(staleSignalForFoItem(v1, NOW_SEC).state).toBe("stale");
+  });
+});
+
+// --- v2: reason codes + ranked queue ---
+
+describe("reasonCodesForFoItem", () => {
+  it("explains a high-priority candidate via the server facts", () => {
+    const candidate = item({
+      id: "r",
+      status: "now",
+      risk: "high",
+      area: "db",
+      owner: "unassigned",
+      updated: "2026-05-20",
+      quality_issues: [{ code: "missing_acceptance", severity: "risk" }],
+      readiness: "needs_grooming",
+    });
+    const codes = reasonCodesForFoItem(candidate, NOW_SEC);
+    expect(codes).toEqual(
+      expect.arrayContaining([
+        "now_status",
+        "high_risk",
+        "high_impact_area",
+        "aged",
+        "penalty_unowned",
+        "missing_acceptance",
+        "needs_grooming",
+      ]),
+    );
+  });
+});
+
+describe("rankedQueueWithReasons", () => {
+  it("excludes done items, ranks active work, and attaches reason codes + score", () => {
+    const ranked = rankedQueueWithReasons([
+      item({ id: "done1", status: "done" }),
+      item({ id: "hi", status: "now", risk: "high", area: "db", updated: "2026-06-09" }),
+      item({ id: "lo", status: "later", risk: "low", area: "process", updated: "2026-06-09" }),
+    ], NOW_SEC);
+
+    expect(ranked.map((c) => c.item.id)).toEqual(["hi", "lo"]);
+    expect(ranked[0].reasonCodes).toContain("now_status");
+    expect(ranked.every((c) => typeof c.score === "number")).toBe(true);
+  });
+});
+
+describe("readiness + quick views", () => {
+  it("readinessForFoItem prefers the server fact, falls back to client heuristics", () => {
+    expect(readinessForFoItem(item({ id: "a", readiness: "needs_grooming" }))).toBe("needs_grooming");
+    expect(readinessForFoItem(item({ id: "b", status: "blocked" }))).toBe("blocked");
+    expect(readinessForFoItem(item({ id: "c", status: "weird" }))).toBe("drift");
+    // v1 fallback: unassigned owner → risk flag → needs_grooming
+    expect(readinessForFoItem(item({ id: "d", owner: "unassigned" }))).toBe("needs_grooming");
+    expect(readinessForFoItem(item({ id: "e", owner: "claude", quality_issues: [] }))).toBe("ready");
+  });
+
+  it("matchesFoQuickView selects the right working set", () => {
+    const ready = item({ id: "r", readiness: "ready" });
+    const groom = item({ id: "g", readiness: "needs_grooming" });
+    const stale = item({ id: "s", freshness: "stale" });
+    const unowned = item({ id: "u", owner: "unassigned" });
+
+    expect(matchesFoQuickView(ready, "all")).toBe(true);
+    expect(matchesFoQuickView(ready, "ready")).toBe(true);
+    expect(matchesFoQuickView(groom, "ready")).toBe(false);
+    expect(matchesFoQuickView(groom, "groom")).toBe(true);
+    expect(matchesFoQuickView(stale, "stale")).toBe(true);
+    expect(matchesFoQuickView(ready, "stale")).toBe(false);
+    expect(matchesFoQuickView(unowned, "unowned")).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, ClipboardCopy, ExternalLink, LayoutGrid, List, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, ClipboardCopy, ExternalLink, Keyboard, LayoutGrid, List, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -9,20 +9,56 @@ import { StatusPill, ToneCallout } from "../components/atoms";
 import {
   buildFoCommissionPrompt,
   computeNextFoTaskId,
+  FO_REASON_LABELS,
   filterFoItems,
   foHealthStripCounts,
+  matchesFoQuickView,
   nextActionForFoItem,
   ownerLoadSummary,
   qualityFlagsForFoItem,
   queueStateForFoItem,
   rankFoItems,
+  rankedQueueWithReasons,
+  reasonCodesForFoItem,
   sortFoItems,
   staleSignalForFoItem,
 } from "../lib/foBacklog";
-import type { FoSortKey } from "../lib/foBacklog";
+import type { FoQuickView, FoReasonCode, FoSortKey } from "../lib/foBacklog";
 import type { Density } from "../hooks/useDensity";
 import type { BacklogContractHealth, BacklogDetail, BacklogItem } from "../lib/schemas";
 import type { ToneName } from "../lib/types";
+
+const QUICK_VIEWS: Array<{ id: FoQuickView; label: string }> = [
+  { id: "all", label: "Alle" },
+  { id: "ready", label: "Commission-ready" },
+  { id: "groom", label: "Grooming nötig" },
+  { id: "stale", label: "Stale" },
+  { id: "unowned", label: "Ohne Owner" },
+];
+
+const VIEW_STORAGE_KEY = "fo-backlog-view-v1";
+
+export function ReasonChips({ codes, max = 4 }: { codes: FoReasonCode[]; max?: number }) {
+  if (!codes.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {codes.slice(0, max).map((code) => {
+        const negative = code.startsWith("penalty_") || code === "needs_grooming" || code === "drift" || code === "missing_acceptance" || code === "missing_next_action";
+        return (
+          <span
+            key={code}
+            className={cn(
+              "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
+              negative ? "bg-amber-500/10 text-amber-200" : "bg-cyan-500/10 text-cyan-200",
+            )}
+          >
+            {FO_REASON_LABELS[code] ?? code}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 type Status = "now" | "next" | "in_progress" | "blocked" | "later" | "done";
 type ViewMode = "queue" | "board";
@@ -154,12 +190,14 @@ export function FoBacklogQueueTable({
   items,
   nowSec,
   nextTaskId,
+  activeId = null,
   detailById = {},
   onOpen,
 }: {
   items: BacklogItem[];
   nowSec: number;
   nextTaskId: string | null;
+  activeId?: string | null;
   detailById?: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
 }) {
@@ -188,7 +226,9 @@ export function FoBacklogQueueTable({
             return (
               <tr
                 key={item.id}
+                data-fo-row={item.id}
                 tabIndex={0}
+                aria-current={item.id === activeId ? "true" : undefined}
                 onClick={() => onOpen(item.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
@@ -199,6 +239,7 @@ export function FoBacklogQueueTable({
                 className={cn(
                   "cursor-pointer border-t border-[var(--hc-border)] align-top outline-none hover:bg-white/[.035] focus-visible:bg-white/[.045]",
                   item.id === nextTaskId && "bg-cyan-500/[.06]",
+                  item.id === activeId && "bg-white/[.05] ring-2 ring-inset ring-cyan-400/70",
                 )}
               >
                 <td className="px-3 py-2">
@@ -386,18 +427,55 @@ function FoDetailDrawer({
   );
 }
 
+type PersistedView = {
+  viewMode?: ViewMode;
+  filterRisk?: string;
+  filterStale?: boolean;
+  filterOwner?: string;
+  sortKey?: FoSortKey;
+  quickView?: FoQuickView;
+};
+
+function loadPersistedView(): PersistedView {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(VIEW_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as PersistedView) : {};
+  } catch {
+    return {};
+  }
+}
+
 export function BacklogView({ density }: { density: Density }) {
   const backlog = useBacklog();
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
+  const [persisted] = useState(loadPersistedView);
   const [showAllDone, setShowAllDone] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("queue");
+  const [viewMode, setViewMode] = useState<ViewMode>(persisted.viewMode ?? "queue");
   const [q, setQ] = useState("");
-  const [filterOwner, setFilterOwner] = useState("");
-  const [filterRisk, setFilterRisk] = useState("");
-  const [filterStale, setFilterStale] = useState(false);
-  const [sortKey, setSortKey] = useState<FoSortKey>("status");
+  const [filterOwner, setFilterOwner] = useState(persisted.filterOwner ?? "");
+  const [filterRisk, setFilterRisk] = useState(persisted.filterRisk ?? "");
+  const [filterStale, setFilterStale] = useState(persisted.filterStale ?? false);
+  const [sortKey, setSortKey] = useState<FoSortKey>(persisted.sortKey ?? "status");
+  const [quickView, setQuickView] = useState<FoQuickView>(persisted.quickView ?? "all");
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [showHelp, setShowHelp] = useState(false);
   const [fallbackNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const queueRef = useRef<HTMLDivElement>(null);
+
+  // Persist the operator's working view (not the transient search text).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        VIEW_STORAGE_KEY,
+        JSON.stringify({ viewMode, filterRisk, filterStale, filterOwner, sortKey, quickView }),
+      );
+    } catch {
+      /* storage blocked / quota — view persistence is best-effort */
+    }
+  }, [viewMode, filterRisk, filterStale, filterOwner, sortKey, quickView]);
 
   const data = backlog.data;
   const allItems = data?.items ?? EMPTY_ITEMS;
@@ -428,15 +506,27 @@ export function BacklogView({ density }: { density: Density }) {
   }, [allItems]);
 
   const filteredActive = useMemo(() => {
-    const active = allItems.filter((item) => item.status !== "done");
+    const active = allItems.filter((item) => item.status !== "done" && matchesFoQuickView(item, quickView));
     const filtered = filterFoItems(active, q, {
       owner: filterOwner || undefined,
       risk: filterRisk || undefined,
       stale: filterStale || undefined,
     });
     const sorted = sortFoItems(filtered, sortKey);
-    return sortKey === "risk" ? rankFoItems(sorted) : sorted;
-  }, [allItems, q, filterOwner, filterRisk, filterStale, sortKey]);
+    return sortKey === "risk" ? rankFoItems(sorted, nowSec) : sorted;
+  }, [allItems, quickView, q, filterOwner, filterRisk, filterStale, sortKey, nowSec]);
+
+  // Ranked active candidates + reason codes, computed once and reused by the next-task
+  // spotlight and the compare-top-candidates strip so they cannot disagree.
+  const ranked = useMemo(() => rankedQueueWithReasons(allItems, nowSec), [allItems, nowSec]);
+  const topCandidates = useMemo(() => ranked.slice(0, 3), [ranked]);
+
+  // Prefetch detail for the top candidates so their commission prompts are ready.
+  useEffect(() => {
+    for (const candidate of topCandidates) {
+      if (!detailById[candidate.item.id]) void fetchDetail(candidate.item.id);
+    }
+  }, [topCandidates, detailById, fetchDetail]);
 
   const filteredByStatus = useMemo(() => {
     const map: Record<string, BacklogItem[]> = {};
@@ -456,6 +546,54 @@ export function BacklogView({ density }: { density: Density }) {
   const selectedItem = openId ? allItems.find((item) => item.id === openId) : undefined;
   const detail = openId ? detailById[openId] : undefined;
   const commissionPrompt = detail ? buildFoCommissionPrompt(detail) : undefined;
+
+  // Clamp the roving selection to the current filtered set at render time (no effect →
+  // no cascading-render lint). Movements below also clamp, so it self-corrects.
+  const clampedIndex = activeIndex >= filteredActive.length ? filteredActive.length - 1 : activeIndex;
+  const activeId = clampedIndex >= 0 ? (filteredActive[clampedIndex]?.id ?? null) : null;
+
+  // Bring the roving row into view when it changes.
+  useEffect(() => {
+    if (!activeId || !queueRef.current) return;
+    queueRef.current.querySelector<HTMLElement>(`[data-fo-row="${activeId}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [activeId]);
+
+  // Queue keyboard nav: j/k move, Enter opens, ? toggles help. Ignores typing in inputs
+  // and yields to the drawer (which owns Escape while open).
+  const onQueueKey = useCallback(
+    (event: KeyboardEvent) => {
+      if (viewMode !== "queue" || openId) return;
+      const target = event.target as HTMLElement | null;
+      if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+      if (event.key === "?") {
+        event.preventDefault();
+        setShowHelp((value) => !value);
+        return;
+      }
+      if (event.key === "Escape" && showHelp) {
+        setShowHelp(false);
+        return;
+      }
+      if (!filteredActive.length) return;
+      const last = filteredActive.length - 1;
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setActiveIndex((index) => Math.min(last, Math.min(index, last) + 1));
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setActiveIndex((index) => Math.max(0, Math.min(index, last) - 1));
+      } else if (event.key === "Enter" && clampedIndex >= 0) {
+        event.preventDefault();
+        setOpenId(filteredActive[clampedIndex].id);
+      }
+    },
+    [viewMode, openId, showHelp, filteredActive, clampedIndex],
+  );
+
+  useEffect(() => {
+    window.addEventListener("keydown", onQueueKey);
+    return () => window.removeEventListener("keydown", onQueueKey);
+  }, [onQueueKey]);
 
   return (
     <div className="space-y-4">
@@ -485,17 +623,48 @@ export function BacklogView({ density }: { density: Density }) {
 
       {nextTask ? (
         <section className="rounded-md border border-cyan-400/25 bg-cyan-500/5 p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
               <p className="text-[11px] font-semibold uppercase text-cyan-300">{de.backlog.nextTask}</p>
               <p className="mt-0.5 truncate text-sm font-medium text-white">{nextTask.title}</p>
               <p className="mt-0.5 hc-mono text-[11px] hc-dim">{sourceRef(nextTask)}</p>
+              <div className="mt-1.5">
+                <ReasonChips codes={reasonCodesForFoItem(nextTask, nowSec)} />
+              </div>
             </div>
             <CopyButton text={detailById[nextTask.id] ? buildFoCommissionPrompt(detailById[nextTask.id]) : undefined} label={de.backlog.commission} copiedLabel={de.backlog.commissionCopied} />
           </div>
         </section>
       ) : allItems.length > 0 ? (
         <ToneCallout tone="zinc">{de.backlog.noNextTask}</ToneCallout>
+      ) : null}
+
+      {topCandidates.length > 1 ? (
+        <section className="rounded-md border border-[var(--hc-border)] bg-white/[.02] p-3" aria-label="Top-Kandidaten vergleichen">
+          <p className="mb-2 text-[11px] font-semibold uppercase text-zinc-400">Top-Kandidaten vergleichen</p>
+          <div className="grid gap-2 md:grid-cols-3">
+            {topCandidates.map((candidate, index) => {
+              const item = candidate.item;
+              const candidateDetail = detailById[item.id];
+              return (
+                <article key={item.id} className="flex min-w-0 flex-col gap-1.5 rounded-md border border-[var(--hc-border)] bg-white/[.02] p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="hc-mono text-[10px] text-zinc-500">#{index + 1} · {item.id}</span>
+                    <StatusPill tone={STATUS_TONE[item.status] ?? "amber"} label={item.status || "?"} />
+                  </div>
+                  <button type="button" onClick={() => setOpenId(item.id)} className="truncate text-left text-sm font-medium text-white hover:text-cyan-200">
+                    {item.title}
+                  </button>
+                  <p className="text-[11px] hc-dim">{item.risk || "?"} · {item.area || "?"} · {staleSignalForFoItem(item, nowSec).label}</p>
+                  <ReasonChips codes={candidate.reasonCodes} max={3} />
+                  <div className="mt-auto pt-1">
+                    <CopyButton text={candidateDetail ? buildFoCommissionPrompt(candidateDetail) : undefined} label={de.backlog.commission} copiedLabel={de.backlog.commissionCopied} />
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
       ) : null}
 
       {ownerLoad.length ? (
@@ -509,6 +678,44 @@ export function BacklogView({ density }: { density: Density }) {
               <p className="mt-1 text-xs hc-dim">High {owner.highRisk} · Stale {owner.stale} · Unready {owner.unready}</p>
             </div>
           ))}
+        </section>
+      ) : null}
+
+      {allItems.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Gespeicherte Ansichten">
+          {QUICK_VIEWS.map((view) => (
+            <button
+              key={view.id}
+              type="button"
+              aria-pressed={quickView === view.id}
+              onClick={() => { setQuickView(view.id); setActiveIndex(-1); }}
+              className={cn(
+                "rounded-md border px-2.5 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70",
+                quickView === view.id ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
+              )}
+            >
+              {view.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-pressed={showHelp}
+            onClick={() => setShowHelp((value) => !value)}
+            title="Tastenkürzel"
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1 text-xs text-zinc-400 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70"
+          >
+            <Keyboard className="h-3.5 w-3.5" /> Tasten
+          </button>
+        </div>
+      ) : null}
+
+      {showHelp ? (
+        <section className="rounded-md border border-cyan-400/25 bg-cyan-500/5 px-3 py-2 text-xs text-zinc-200" aria-label="Tastenkürzel">
+          <span className="font-semibold text-cyan-200">Tastatur:</span>{" "}
+          <kbd className="hc-mono">j</kbd>/<kbd className="hc-mono">k</kbd> bewegen ·{" "}
+          <kbd className="hc-mono">Enter</kbd> öffnen ·{" "}
+          <kbd className="hc-mono">Esc</kbd> schließen ·{" "}
+          <kbd className="hc-mono">?</kbd> Hilfe
         </section>
       ) : null}
 
@@ -530,7 +737,9 @@ export function BacklogView({ density }: { density: Density }) {
 
       {viewMode === "queue" ? (
         filteredActive.length ? (
-          <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} detailById={detailById} onOpen={setOpenId} />
+          <div ref={queueRef}>
+            <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} activeId={activeId} detailById={detailById} onOpen={setOpenId} />
+          </div>
         ) : (
           <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
         )

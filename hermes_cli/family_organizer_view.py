@@ -35,15 +35,21 @@ from fastapi import FastAPI
 
 from hermes_cli.error_sanitize import scrub_detail
 
-_SCHEMA = "fo-backlog-v1"
+_SCHEMA = "fo-backlog-v2"
 _DEFAULT_DIR = "/home/piet/projects/family-organizer/backlog/items"
 # in_progress/blocked items whose `updated` is older than this are flagged stale
 # (mirrors the Stale-Claim-Sweep in family-organizer backlog/README.md).
 _STALE_AFTER_S = 7 * 24 * 3600
+# active items older than this (but not yet stale) are flagged "aging" for freshness.
+_AGING_AFTER_DAYS = 3
 _STATUSES = ("now", "next", "in_progress", "blocked", "later", "done")
 _RISKS = ("low", "medium", "high")
 _OWNERS = ("hermes", "claude", "codex", "piet", "unassigned")
 _AREAS = ("kitchen", "lists", "shopping", "admin", "calendar", "hermes-api", "db", "process")
+# Titles too short or generic to describe a task (mirrors the client quality lens).
+_WEAK_TITLES = frozenset({"fix", "bug", "todo", "misc", "cleanup"})
+# A body bullet line (mirrors the client `bodyScopeScore` heuristic).
+_BODY_BULLET_RE = re.compile(r"(?:^|\n)\s*(?:[-*]|\d+\.)\s+")
 _log = logging.getLogger(__name__)
 
 
@@ -208,12 +214,106 @@ def _extract_links(text: str, max_links: int = 8) -> list[dict[str, str]]:
     return links
 
 
-def _has_acceptance(text: str) -> bool:
-    return bool(_extract_section_lines(text, ("akzeptanz", "acceptance", "criteria"), max_lines=1))
+def _section_present_in_body(body: str, heading_tokens: tuple[str, ...]) -> bool:
+    """True if a matching ``## heading`` section holds at least one content line.
+
+    Body-level twin of ``_extract_section_lines(..., max_lines=1)`` — operates on a
+    body string already extracted once per item so the read loop doesn't re-derive it.
+    """
+    in_section = False
+    for raw in body.split("\n"):
+        stripped = raw.strip()
+        heading = _MD_HEADING_RE.match(stripped)
+        if heading:
+            title = _MD_HEADING_RE.sub("", stripped).lower()
+            if any(token in title for token in heading_tokens):
+                in_section = True
+                continue
+            if in_section:
+                break
+        if not in_section:
+            continue
+        if _clean_markdown_line(raw):
+            return True
+    return False
 
 
-def _has_next_action(text: str) -> bool:
-    return bool(_extract_section_lines(text, ("next action", "next step", "nächster", "naechster", "vorgehen"), max_lines=1))
+def _body_scope_score(body: str) -> int:
+    """Coarse size proxy: bullet count + body length in 1500-char units (mirrors client)."""
+    bullets = len(_BODY_BULLET_RE.findall(body))
+    return bullets + len(body) // 1500
+
+
+def _item_facts(
+    text: str,
+    *,
+    title: str,
+    status: str,
+    owner: str,
+    stale: bool,
+    epoch: int | None,
+    now: int,
+) -> dict[str, Any]:
+    """Derive the deterministic per-item operator facts (v2).
+
+    Server is the single source of truth for *facts* (freshness, age, the quality-issue
+    taxonomy, readiness); ranking/reason codes stay a client view concern. Computed from
+    the body extracted once here, reused by both the list and detail read paths.
+    """
+    body = _body_after_frontmatter(text)
+    has_acceptance = _section_present_in_body(body, ("akzeptanz", "acceptance", "criteria"))
+    has_next_action = _section_present_in_body(
+        body, ("next action", "next step", "nächster", "naechster", "vorgehen")
+    )
+    missing_acceptance = not has_acceptance
+    missing_next_action = status != "done" and not has_next_action
+
+    age_days = None if epoch is None else max(0, (now - epoch) // 86400)
+    if epoch is None:
+        freshness = "no_proof"
+    elif status == "done":
+        freshness = "fresh"
+    elif stale:
+        freshness = "stale"
+    elif age_days is not None and age_days > _AGING_AFTER_DAYS:
+        freshness = "aging"
+    else:
+        freshness = "fresh"
+
+    issues: list[dict[str, str]] = []
+    trimmed = (title or "").strip()
+    if len(trimmed) < 12 or trimmed.lower() in _WEAK_TITLES:
+        issues.append({"code": "weak_title", "severity": "warn"})
+    if missing_acceptance:
+        issues.append({"code": "missing_acceptance", "severity": "risk"})
+    if not owner or owner == "unassigned" or owner not in _OWNERS:
+        issues.append({"code": "unclear_owner", "severity": "risk"})
+    if stale:
+        issues.append({"code": "stale_update", "severity": "risk"})
+    if _body_scope_score(body) >= 10:
+        issues.append({"code": "large_scope", "severity": "warn"})
+    if missing_next_action:
+        issues.append({"code": "missing_next_action", "severity": "risk"})
+
+    if status not in _STATUSES:
+        readiness = "drift"
+    elif status == "blocked":
+        readiness = "blocked"
+    elif status == "done":
+        readiness = "ready"
+    elif any(issue["severity"] == "risk" for issue in issues):
+        readiness = "needs_grooming"
+    else:
+        readiness = "ready"
+
+    return {
+        "age_days": age_days,
+        "freshness": freshness,
+        "quality_issues": issues,
+        "readiness": readiness,
+        "missing_acceptance": missing_acceptance,
+        "missing_next_action": missing_next_action,
+    }
 
 
 def _detail_sections(text: str) -> dict[str, Any]:
@@ -291,15 +391,19 @@ def _read_items_sync(now: int) -> dict[str, Any]:
         owner = str(fm.get("owner") or "unassigned")
         risk = str(fm.get("risk") or "")
         area = str(fm.get("area") or "")
-        missing_acceptance = not _has_acceptance(text)
-        missing_next_action = status != "done" and not _has_next_action(text)
+        title = str(fm.get("title") or stem)
+        facts = _item_facts(
+            text, title=title, status=status, owner=owner, stale=bool(stale), epoch=epoch, now=now
+        )
+        missing_acceptance = facts["missing_acceptance"]
+        missing_next_action = facts["missing_next_action"]
         items.append(
             {
                 # Canonical 4-digit id from the filename (the family-organizer
                 # validator enforces id == filename); the YAML-parsed `id` is not
                 # trustworthy — PyYAML coerces "0001" to the int 1 (YAML 1.1 octal).
                 "id": stem[:4],
-                "title": str(fm.get("title") or stem),
+                "title": title,
                 "status": status,
                 "owner": owner,
                 "risk": risk,
@@ -312,6 +416,10 @@ def _read_items_sync(now: int) -> dict[str, Any]:
                 "source_path": _source_path(source, base, source_ref),
                 "missing_acceptance": missing_acceptance,
                 "missing_next_action": missing_next_action,
+                "age_days": facts["age_days"],
+                "freshness": facts["freshness"],
+                "quality_issues": facts["quality_issues"],
+                "readiness": facts["readiness"],
             }
         )
         if status in counts:
@@ -445,17 +553,28 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
                 and epoch is not None
                 and (now - epoch) > _STALE_AFTER_S
             )
+            title = str(fm.get("title") or stem)
+            owner = str(fm.get("owner") or "unassigned")
+            facts = _item_facts(
+                text, title=title, status=status, owner=owner, stale=bool(stale), epoch=epoch, now=now
+            )
             detail = {
                 "id": stem[:4],
-                "title": str(fm.get("title") or stem),
+                "title": title,
                 "status": status,
-                "owner": str(fm.get("owner") or "unassigned"),
+                "owner": owner,
                 "risk": str(fm.get("risk") or ""),
                 "area": str(fm.get("area") or ""),
                 "updated": str(updated) if updated is not None else "",
                 "lane": str(fm.get("lane")) if fm.get("lane") is not None else None,
                 "result": str(fm.get("result")) if fm.get("result") is not None else None,
                 "stale": bool(stale),
+                "age_days": facts["age_days"],
+                "freshness": facts["freshness"],
+                "quality_issues": facts["quality_issues"],
+                "readiness": facts["readiness"],
+                "missing_acceptance": facts["missing_acceptance"],
+                "missing_next_action": facts["missing_next_action"],
                 "body": _body_after_frontmatter(text),
                 "source_path": _source_path(source, base, source_ref),
                 "source_ref": source_ref,
