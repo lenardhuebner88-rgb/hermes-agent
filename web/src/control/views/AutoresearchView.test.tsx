@@ -54,7 +54,7 @@ describe("AutoresearchView Deep-Audit", () => {
     expect(runLaneTone("test")).toBe("emerald");
   });
 
-  it("renders structured findings with fileline, evidence, and proposal count", () => {
+  it("renders structured findings as an operator-readable audit report", () => {
     const finding: DeepAuditFinding = {
       fileline: "hermes_cli/autoresearch_runs.py:23",
       severity: "high",
@@ -65,10 +65,50 @@ describe("AutoresearchView Deep-Audit", () => {
       fix_hint: "Keep the deep-audit lane in the run history allowlist.",
     };
     const html = renderToStaticMarkup(<DeepAuditFindings findings={[finding]} proposals={["deep-audit-x"]} />);
+    expect(html).toContain("Audit-Ergebnis");
+    expect(html).toContain("1 prüfbares Risiko gefunden.");
+    expect(html).toContain("Hoch");
+    expect(html).toContain("Bug-Risiko");
     expect(html).toContain("hermes_cli/autoresearch_runs.py:23");
     expect(html).toContain("_VALID_LANES");
     expect(html).toContain("1 in Queue");
     expect(html).toContain("Run lane omitted");
+    expect(html).toContain("Fix-Hinweis");
+    expect(html).toContain("Evidence anzeigen");
+  });
+
+  it("summarizes the highest-risk finding as the most important point", () => {
+    const lowFinding: DeepAuditFinding = {
+      fileline: "skills/example/SKILL.md:10",
+      severity: "low",
+      category: "missing_section",
+      title: "Minor copy gap",
+      problem: "A hint is short.",
+      evidence: "hint",
+      fix_hint: "Add one sentence.",
+    };
+    const criticalFinding: DeepAuditFinding = {
+      fileline: "gateway/run.py:88",
+      severity: "critical",
+      category: "security",
+      title: "Token leak risk",
+      problem: "A token can be exposed.",
+      evidence: "token",
+      fix_hint: "Redact before logging.",
+    };
+
+    const html = renderToStaticMarkup(<DeepAuditFindings findings={[lowFinding, criticalFinding]} proposals={[]} />);
+
+    expect(html).toContain("Kritisch");
+    expect(html).toContain("Wichtigster Punkt: Token leak risk");
+  });
+
+  it("keeps proposal-only audit responses from looking empty", () => {
+    const html = renderToStaticMarkup(<DeepAuditFindings findings={[]} proposals={["deep-audit-x", "deep-audit-y"]} />);
+
+    expect(html).toContain("Noch keine Deep-Audit-Findings.");
+    expect(html).toContain("2 in Queue");
+    expect(html).toContain("Detail-Findings sind in dieser Antwort nicht enthalten");
   });
 });
 

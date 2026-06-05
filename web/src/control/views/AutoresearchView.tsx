@@ -173,7 +173,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   );
   const busyNotice = describeAutoresearchBusy(store.busy);
   const latestActivity = store.activity[0] ?? null;
-  const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
+  const deepAuditHasFindings = (deepAudit.findings?.findings.length ?? 0) > 0 || (deepAudit.findings?.proposals.length ?? 0) > 0;
+  const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || deepAuditHasFindings || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const effectiveAdvancedOpen = advancedNeedsAttention || advancedOpen;
   const effectiveDeepAuditSubsystem = deepAuditSubsystem || deepAudit.subsystems[0] || "";
@@ -1534,31 +1535,112 @@ function Empty({ icon, text }: { icon: React.ReactNode; text: string }) {
 
 export function DeepAuditFindings({ findings, proposals }: { findings: DeepAuditFinding[]; proposals: string[] }) {
   if (findings.length === 0) {
-    return <div className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">Noch keine Deep-Audit-Findings.</div>;
+    return (
+      <div className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm hc-soft">
+        <div className="flex flex-wrap items-center gap-2">
+          <span>Noch keine Deep-Audit-Findings.</span>
+          {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
+        </div>
+        <p className="mt-1">
+          {proposals.length > 0
+            ? "Der Lauf hat bereits Queue-Karten gemeldet; die Detail-Findings sind in dieser Antwort nicht enthalten."
+            : "Wenn der Lauf fertig ist, erscheinen hier die prüfbaren Risiken und die daraus erzeugten Queue-Karten."}
+        </p>
+      </div>
+    );
   }
+  const severityCounts = findings.reduce<Record<DeepAuditFinding["severity"], number>>((counts, finding) => {
+    counts[finding.severity] += 1;
+    return counts;
+  }, { critical: 0, high: 0, medium: 0, low: 0 });
+  const topSeverity = (["critical", "high", "medium", "low"] as const).find((severity) => severityCounts[severity] > 0) ?? "low";
+  const topFinding = findings.find((finding) => finding.severity === topSeverity) ?? findings[0];
+
   return (
     <div className="mt-4 space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="hc-eyebrow">Findings</p>
-        {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
-      </div>
+      <section className={cn("rounded-lg border p-3", reviewStepToneClass(severityTone(topSeverity)))}>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="hc-eyebrow">Audit-Ergebnis</p>
+              <StatusPill tone={severityTone(topSeverity)} label={deepAuditSeverityLabel(topSeverity)} />
+              {proposals.length > 0 ? <StatusPill tone="amber" label={`${proposals.length} in Queue`} /> : null}
+            </div>
+            <h3 className="mt-2 text-base font-semibold text-white">
+              {findings.length === 1 ? "1 prüfbares Risiko gefunden." : `${findings.length} prüfbare Risiken gefunden.`}
+            </h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">
+              Wichtigster Punkt: {topFinding.title}. Der Deep-Audit schreibt keinen Code; daraus entstehen nur Review-Karten.
+            </p>
+            <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> Queue-Karten prüfen, dann nur belegte Fixes übernehmen.</p>
+          </div>
+          <div className="grid shrink-0 grid-cols-2 gap-1.5 sm:grid-cols-4 lg:min-w-[360px]">
+            {(["critical", "high", "medium", "low"] as const).map((severity) => (
+              <div key={severity} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(severityTone(severity)))}>
+                <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{deepAuditSeverityLabel(severity)}</p>
+                <p className="mt-1 text-sm font-semibold text-white">{severityCounts[severity]}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
       <div className="grid gap-3">
         {findings.map((finding, index) => (
-          <article key={`${finding.fileline}-${index}`} className="rounded-lg border border-white/10 bg-black/20 p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusPill tone={severityTone(finding.severity)} label={finding.severity} />
-              <StatusPill tone="cyan" label={finding.category || "audit"} />
-              <span className="hc-mono text-xs hc-soft">{finding.fileline}</span>
+          <article key={`${finding.fileline}-${index}`} className={cn("rounded-lg border p-3", reviewStepToneClass(severityTone(finding.severity)))}>
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusPill tone={severityTone(finding.severity)} label={deepAuditSeverityLabel(finding.severity)} />
+                  <StatusPill tone="cyan" label={deepAuditCategoryLabel(finding.category)} />
+                </div>
+                <h3 className="mt-2 text-sm font-semibold text-white">{finding.title}</h3>
+                <p className="mt-1 text-sm leading-6 hc-soft">{finding.problem}</p>
+                <p className="mt-2 text-sm text-white"><span className="font-semibold">Fix-Hinweis:</span> {finding.fix_hint}</p>
+              </div>
+              <div className="shrink-0 rounded-md border border-white/10 bg-black/20 px-2.5 py-2 lg:max-w-sm">
+                <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">Technische Spur</p>
+                <p className="mt-1 break-all hc-mono text-xs hc-soft">{finding.fileline}</p>
+              </div>
             </div>
-            <h3 className="mt-2 text-sm font-semibold text-white">{finding.title}</h3>
-            <p className="mt-1 text-sm leading-6 hc-soft">{finding.problem}</p>
-            <blockquote className="mt-2 whitespace-pre-wrap rounded border border-white/10 bg-white/[.03] px-3 py-2 text-xs text-zinc-100">{finding.evidence}</blockquote>
-            <p className="mt-2 text-xs hc-dim">{finding.fix_hint}</p>
+            <details className="mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft">
+              <summary className="cursor-pointer font-semibold text-white">Evidence anzeigen</summary>
+              <blockquote className="mt-2 whitespace-pre-wrap rounded border border-white/10 bg-white/[.03] px-3 py-2 text-xs text-zinc-100">{finding.evidence}</blockquote>
+            </details>
           </article>
         ))}
       </div>
     </div>
   );
+}
+
+function deepAuditSeverityLabel(severity: DeepAuditFinding["severity"]): string {
+  switch (severity) {
+    case "critical":
+      return "Kritisch";
+    case "high":
+      return "Hoch";
+    case "medium":
+      return "Mittel";
+    case "low":
+      return "Niedrig";
+  }
+}
+
+function deepAuditCategoryLabel(category: string): string {
+  switch (category) {
+    case "bug_risk":
+      return "Bug-Risiko";
+    case "security":
+      return "Sicherheit";
+    case "contradiction":
+      return "Widerspruch";
+    case "missing_section":
+      return "Lücke";
+    case "operational_risk":
+      return "Betriebsrisiko";
+    default:
+      return category || "Audit";
+  }
 }
 
 function CodeAuditSlotPicker() {
