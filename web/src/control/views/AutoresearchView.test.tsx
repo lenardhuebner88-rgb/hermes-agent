@@ -16,7 +16,7 @@ import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance,
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySummary";
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
-import { DeepAuditFindings } from "./AutoresearchView";
+import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
 
@@ -500,6 +500,19 @@ describe("AutoresearchView activity timeline", () => {
       label: "Info",
       tone: "cyan",
     });
+  });
+
+  it("renders the latest activity as an operator status card", () => {
+    const card = getAutoresearchActivityCard({ at: 1_780_653_600, text: "Batch übernommen", tone: "emerald" });
+    const html = renderToStaticMarkup(<LatestActivityPanel at={1_780_653_600} card={card} />);
+
+    expect(html).toContain("Letzte Autoresearch Aktion");
+    expect(html).toContain("Letzte Aktion");
+    expect(html).toContain("Erledigt");
+    expect(html).toContain("Die Aktion ist abgeschlossen.");
+    expect(html).toContain("Batch übernommen");
+    expect(html).toContain("Jetzt sinnvoll:");
+    expect(html).toContain("Weiter mit dem nächsten sicheren Schritt");
   });
 });
 

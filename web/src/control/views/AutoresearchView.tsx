@@ -174,6 +174,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   );
   const busyNotice = describeAutoresearchBusy(store.busy);
   const latestActivity = store.activity[0] ?? null;
+  const latestActivityCard = useMemo(() => latestActivity ? getAutoresearchActivityCard(latestActivity) : null, [latestActivity]);
   const deepAuditHasFindings = (deepAudit.findings?.findings.length ?? 0) > 0 || (deepAudit.findings?.proposals.length ?? 0) > 0;
   const testFoundryResultSummary = useMemo(() => getTestFoundryResultSummary(testFoundry.status?.last_run), [testFoundry.status?.last_run]);
   const advancedNeedsAttention = deepAuditRunning || testFoundryRunning || deepAuditHasFindings || !!testFoundryResultSummary || !!deepAudit.error || !!testFoundry.error || !!deepAuditMessage || !!testFoundryMessage;
@@ -579,11 +580,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       {store.loading && open.length === 0 ? <ToneCallout tone="violet">Quelle wird geprüft...</ToneCallout> : null}
       {store.error ? <ToneCallout tone="red">{store.error}</ToneCallout> : null}
       {busyNotice ? <ToneCallout tone="violet"><Spinner />{busyNotice}</ToneCallout> : null}
-      {latestActivity ? (
-        <ToneCallout tone={latestActivity.tone}>
-          <span className="font-semibold">Letzte Aktion:</span> <span className="hc-mono hc-dim">{fmtClock(latestActivity.at)}</span> {latestActivity.text}
-        </ToneCallout>
-      ) : null}
+      {latestActivity && latestActivityCard ? <LatestActivityPanel at={latestActivity.at} card={latestActivityCard} /> : null}
 
       <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -1052,6 +1049,27 @@ function ActivityTimelineItem({ at, card }: { at: number; card: AutoresearchActi
         <p className="max-w-sm text-xs leading-5 hc-dim"><span className="font-semibold text-white/80">Danach:</span> {card.next}</p>
       </div>
     </article>
+  );
+}
+
+export function LatestActivityPanel({ at, card }: { at: number; card: AutoresearchActivityCard }) {
+  return (
+    <section className={cn("rounded-lg border p-3", reviewStepToneClass(card.tone))} aria-label="Letzte Autoresearch Aktion">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Letzte Aktion</p>
+            <span className="hc-mono text-xs hc-dim">{fmtClock(at)}</span>
+            <StatusPill tone={card.tone} label={card.label} />
+          </div>
+          <h2 className="mt-2 text-sm font-semibold text-white">{card.title}</h2>
+          <p className="mt-1 text-sm leading-6 hc-soft">{card.detail}</p>
+        </div>
+        <p className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs leading-5 hc-soft sm:max-w-sm">
+          <span className="font-semibold text-white">Jetzt sinnvoll:</span> {card.next}
+        </p>
+      </div>
+    </section>
   );
 }
 
