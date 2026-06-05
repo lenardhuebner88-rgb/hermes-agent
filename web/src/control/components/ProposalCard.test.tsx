@@ -246,6 +246,64 @@ describe("ProposalCard", () => {
     expect(codeHtml).toContain("automatisch zurückgerollt");
   });
 
+  it("shows click outcomes before the operator has to read diff details", () => {
+    const html = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "outcome-1",
+          target: "hermes_cli/foo.py",
+          mode: "code",
+          diff_before_after: "- risky()\n+ guarded()",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+
+    expect(html).toContain("Was passiert beim Klick?");
+    expect(html).toContain("Schreibt Code und startet danach das Gate.");
+    expect(html).toContain("Keine Datei wird geändert; die Karte ist erledigt.");
+    expect(html).toContain("Roter Lauf wird automatisch zurückgerollt.");
+    expect(html.indexOf("Was passiert beim Klick?")).toBeLessThan(html.indexOf("Kurzbriefing"));
+    expect(html.indexOf("Was passiert beim Klick?")).toBeLessThan(html.indexOf(de.autoresearch.fixDiff));
+  });
+
+  it("adapts click outcomes for reverted and completed cards", () => {
+    const revertedHtml = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "outcome-reverted",
+          target: "skill/foo",
+          last_outcome: "reverted_no_improvement",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+    expect(revertedHtml).toContain("Archivieren");
+    expect(revertedHtml).toContain("Räumt die Karte aus den offenen Entscheidungen.");
+    expect(revertedHtml).toContain("Startet genau diesen Kandidaten bewusst neu.");
+
+    const doneHtml = renderToStaticMarkup(
+      <ProposalCard
+        proposal={proposal({
+          id: "outcome-done",
+          target: "skill/foo",
+          status: "applied",
+          result: "Gate passed.",
+        })}
+        density="airy"
+        onApply={noop}
+        onSkip={noop}
+      />,
+    );
+    expect(doneHtml).toContain("Schon übernommen.");
+    expect(doneHtml).toContain("Keine Entscheidung offen.");
+    expect(doneHtml).toContain("Gate passed.");
+  });
+
   it("renders a structured decision guide for non-technical review", () => {
     const html = renderToStaticMarkup(
       <ProposalCard

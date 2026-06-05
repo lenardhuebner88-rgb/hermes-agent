@@ -47,6 +47,12 @@ interface DecisionGuide {
   consequence: string;
 }
 
+interface ActionOutcome {
+  label: string;
+  value: string;
+  tone: ToneName;
+}
+
 function decisionGuide(proposal: Proposal, severity: ProposalSeverity): DecisionGuide {
   if (proposal.last_outcome === "reverted_no_improvement") {
     return {
@@ -88,6 +94,56 @@ function decisionGuide(proposal: Proposal, severity: ProposalSeverity): Decision
   };
 }
 
+function actionOutcomes(proposal: Proposal, guide: DecisionGuide): ActionOutcome[] {
+  if (proposal.status === "applied") {
+    return [
+      { label: "Stand", value: "Schon übernommen.", tone: "emerald" },
+      { label: "Nächster Klick", value: "Keine Entscheidung offen.", tone: "zinc" },
+      { label: "Ergebnis", value: proposal.result || "Änderung wurde angewendet.", tone: "emerald" },
+    ];
+  }
+  if (proposal.status === "skipped") {
+    return [
+      { label: "Stand", value: "Schon übersprungen.", tone: "zinc" },
+      { label: "Nächster Klick", value: "Keine Übernahme offen.", tone: "zinc" },
+      { label: "Ergebnis", value: proposal.result || "Vorschlag wurde aussortiert.", tone: "zinc" },
+    ];
+  }
+  if (proposal.status === "testing") {
+    return [
+      { label: "Stand", value: "Gate läuft gerade.", tone: "violet" },
+      { label: "Nächster Klick", value: "Warten, bis das Ergebnis da ist.", tone: "zinc" },
+      { label: "Schutz", value: "Währenddessen keine zweite Entscheidung nötig.", tone: "violet" },
+    ];
+  }
+  if (proposal.last_outcome === "reverted_no_improvement") {
+    return [
+      { label: "Archivieren", value: "Räumt die Karte aus den offenen Entscheidungen.", tone: "zinc" },
+      { label: "Erneut prüfen", value: "Startet genau diesen Kandidaten bewusst neu.", tone: "amber" },
+      { label: "Schutz", value: "Er war schon getestet und ohne Nutzen zurückgerollt.", tone: "zinc" },
+    ];
+  }
+  if (proposal.mode === "code") {
+    return [
+      { label: "Übernehmen", value: "Schreibt Code und startet danach das Gate.", tone: "amber" },
+      { label: "Überspringen", value: "Keine Datei wird geändert; die Karte ist erledigt.", tone: "zinc" },
+      { label: "Schutz", value: "Roter Lauf wird automatisch zurückgerollt.", tone: "violet" },
+    ];
+  }
+  if (proposal.mode === "test" || proposal.proposal_type === "mutation_test") {
+    return [
+      { label: "Übernehmen", value: "Legt die Test-Härtung an.", tone: "cyan" },
+      { label: "Überspringen", value: "Produktivcode bleibt unverändert.", tone: "zinc" },
+      { label: "Schutz", value: "Der Vorschlag zielt auf Absicherung, nicht Feature-Code.", tone: "cyan" },
+    ];
+  }
+  return [
+    { label: "Übernehmen", value: "Schreibt den Skill-Text direkt.", tone: guide.tone },
+    { label: "Überspringen", value: "Keine Änderung; der Vorschlag wird aussortiert.", tone: "zinc" },
+    { label: "Schutz", value: "Kein Code-Gate, kein Branch-Wechsel.", tone: "cyan" },
+  ];
+}
+
 export function ProposalCard({ proposal, density, busy, selected, selectable, batchSelectable = true, batchStatus, priorityGroup, onApply, onSkip, onSelectedChange }: Props) {
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const lines = toDiffLines(proposal.diff_before_after);
@@ -101,6 +157,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
   const severity = getProposalSeverity(proposal);
   const guide = decisionGuide(proposal, severity);
   const brief = getProposalOperatorBrief(proposal);
+  const outcomes = actionOutcomes(proposal, guide);
   const evidence = proposal.evidence?.trim() ? proposal.evidence : null;
   const ageDays = isActionable && !isReverted ? proposalAgeDays(proposal) : null;
   const opensDiffByDefault = isActionable && selectable && !batchSelectable;
@@ -129,6 +186,7 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
               <span className="font-semibold text-zinc-300">{category.label}:</span> {category.help}
             </p>
           ) : null}
+          <ActionOutcomeStrip outcomes={outcomes} />
           <ProposalBriefPanel brief={brief} />
           <div className="space-y-1">
             <p className="hc-eyebrow">{de.autoresearch.why}</p>
@@ -215,6 +273,25 @@ export function ProposalCard({ proposal, density, busy, selected, selectable, ba
         </div>
       ) : null}
     </article>
+  );
+}
+
+function ActionOutcomeStrip({ outcomes }: { outcomes: ActionOutcome[] }) {
+  return (
+    <section className="rounded-lg border border-white/10 bg-black/20 p-3" aria-label="Klick-Folgen">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="hc-eyebrow">Was passiert beim Klick?</p>
+        <span className="text-xs leading-5 hc-dim">Kurz vor Diff und Details</span>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        {outcomes.map((outcome) => (
+          <div key={outcome.label} className={cn("min-w-0 rounded-md border px-3 py-2", briefFactToneClass(outcome.tone))}>
+            <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{outcome.label}</p>
+            <p className="mt-1 text-sm leading-5 hc-soft">{outcome.value}</p>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
