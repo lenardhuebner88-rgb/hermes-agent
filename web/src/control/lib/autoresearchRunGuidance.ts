@@ -110,6 +110,21 @@ export interface ResearchLoopStartSummary {
   technicalLabel: string;
 }
 
+export interface ResearchLoopStartChecklistItem {
+  label: string;
+  value: string;
+  detail: string;
+  tone: ToneName;
+}
+
+export interface ResearchLoopStartChecklist {
+  tone: ToneName;
+  label: string;
+  title: string;
+  detail: string;
+  items: ResearchLoopStartChecklistItem[];
+}
+
 export function getResearchLoopStartSummary(input: {
   selectedPresetId: ResearchLoopPresetId | null;
   areaLabel: string;
@@ -138,6 +153,49 @@ export function getResearchLoopStartSummary(input: {
   };
 }
 
+export function getResearchLoopStartChecklist(input: {
+  routeOk: boolean;
+  running: boolean;
+  busy: boolean;
+  selectedPresetId: ResearchLoopPresetId | null;
+  maxIterations: number;
+  openCount: number;
+  highPriorityCount: number;
+}): ResearchLoopStartChecklist {
+  const preset = input.selectedPresetId ? getResearchLoopPreset(input.selectedPresetId) : null;
+  const startItem = startReadinessItem(input);
+  const queueItem = queueImpactItem(input.openCount, input.highPriorityCount);
+  const safetyItem = safetyEffortItem({
+    presetLabel: preset?.label ?? null,
+    maxIterations: input.maxIterations,
+    customValues: !preset,
+  });
+  const items = [startItem, queueItem, safetyItem];
+  const tone = !input.routeOk
+    ? "amber"
+    : input.running
+      ? "cyan"
+      : input.busy || input.highPriorityCount > 0
+        ? input.busy ? "violet" : "amber"
+        : "emerald";
+
+  return {
+    tone,
+    label: !input.routeOk ? "Nicht starten" : input.running ? "Beobachten" : input.busy ? "Startet" : input.highPriorityCount > 0 ? "Erst Review" : "Startklar",
+    title: "Start-Check vor dem Probelauf",
+    detail: !input.routeOk
+      ? "Die Modellroute ist noch nicht bereit; der Start bleibt gesperrt, bis die Route bestätigt ist."
+      : input.running
+        ? "Ein Lauf ist aktiv. Beobachte den Fortschritt, statt parallel einen zweiten Lauf zu starten."
+        : input.busy
+          ? "Das Startsignal ist unterwegs. Warte auf Rückmeldung, bevor du erneut klickst."
+          : input.highPriorityCount > 0
+      ? "Der Lauf ist möglich, aber die offene Queue hat Vorrang, damit der Review-Stau nicht wächst."
+      : "Diese Punkte zeigen, ob der Start gerade sinnvoll und sicher begrenzt ist.",
+    items,
+  };
+}
+
 export function getDeepAuditGuidance(input: { subsystem?: string | null; running: boolean }): AutoresearchRunGuidance {
   if (input.running) {
     return {
@@ -154,6 +212,81 @@ export function getDeepAuditGuidance(input: { subsystem?: string | null; running
     outcome: input.subsystem ? `Prüft ${input.subsystem} auf konkrete Risiken.` : "Wähle zuerst ein Subsystem.",
     cost: "Nur starten, wenn ein gezielter Audit sinnvoll ist.",
     safety: "Keine direkte Code-Änderung; du entscheidest später in der Queue.",
+  };
+}
+
+function startReadinessItem(input: { routeOk: boolean; running: boolean; busy: boolean }): ResearchLoopStartChecklistItem {
+  if (!input.routeOk) {
+    return {
+      label: "Startsignal",
+      value: "Route fehlt",
+      detail: "Erst Modellroute prüfen; sonst kann der Lauf direkt scheitern.",
+      tone: "amber",
+    };
+  }
+  if (input.running) {
+    return {
+      label: "Startsignal",
+      value: "läuft bereits",
+      detail: "Keinen zweiten Lauf starten; beobachte Heartbeat und letzten Schritt.",
+      tone: "cyan",
+    };
+  }
+  if (input.busy) {
+    return {
+      label: "Startsignal",
+      value: "unterwegs",
+      detail: "Das Startsignal wurde gesendet und wartet auf Rückmeldung.",
+      tone: "violet",
+    };
+  }
+  return {
+    label: "Startsignal",
+    value: "bereit",
+    detail: "Die Route steht; der Button startet einen begrenzten Dry-Run.",
+    tone: "emerald",
+  };
+}
+
+function queueImpactItem(openCount: number, highPriorityCount: number): ResearchLoopStartChecklistItem {
+  if (highPriorityCount > 0) {
+    return {
+      label: "Queue-Wirkung",
+      value: `${highPriorityCount} Hoch+ offen`,
+      detail: "Neue Kandidaten würden den Review-Stau erhöhen; erst kritische Karten entscheiden.",
+      tone: "amber",
+    };
+  }
+  if (openCount > 0) {
+    return {
+      label: "Queue-Wirkung",
+      value: `${openCount} offen`,
+      detail: "Start ist möglich, aber neue Treffer landen zusätzlich in der Queue.",
+      tone: "cyan",
+    };
+  }
+  return {
+    label: "Queue-Wirkung",
+    value: "leer",
+    detail: "Guter Zeitpunkt für neue Kandidaten; es liegt nichts Unerledigtes davor.",
+    tone: "emerald",
+  };
+}
+
+function safetyEffortItem(input: { presetLabel: string | null; maxIterations: number; customValues: boolean }): ResearchLoopStartChecklistItem {
+  if (input.customValues) {
+    return {
+      label: "Sicherheit",
+      value: "eigene Werte",
+      detail: `Dry-Run mit maximal ${input.maxIterations} Iterationen; prüfe Scope und Fokus bewusst.`,
+      tone: input.maxIterations > 5 ? "amber" : "cyan",
+    };
+  }
+  return {
+    label: "Sicherheit",
+    value: input.presetLabel ?? "Preset",
+    detail: `Dry-Run mit maximal ${input.maxIterations} Iterationen; Stop bleibt jederzeit möglich.`,
+    tone: input.maxIterations > 3 ? "cyan" : "emerald",
   };
 }
 

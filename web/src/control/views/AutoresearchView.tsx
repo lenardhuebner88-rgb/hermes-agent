@@ -19,7 +19,7 @@ import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../
 import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
@@ -215,6 +215,18 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       minUseCount: parseMinUseCount(minUseCount),
     }),
     [area, focus, maxIterations, minUseCount, selectedLoopPresetId],
+  );
+  const researchLoopStartChecklist = useMemo(
+    () => getResearchLoopStartChecklist({
+      routeOk,
+      running: loop.running,
+      busy: !!loopBusy,
+      selectedPresetId: selectedLoopPresetId,
+      maxIterations: clampLoopIterations(Number(maxIterations)),
+      openCount: open.length,
+      highPriorityCount,
+    }),
+    [highPriorityCount, loop.running, loopBusy, maxIterations, open.length, routeOk, selectedLoopPresetId],
   );
   const applyLoopPreset = (presetId: ResearchLoopPresetId) => {
     const preset = getResearchLoopPreset(presetId);
@@ -656,6 +668,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
               </div>
             </details>
             <TargetingPreview summary={researchLoopStartSummary} />
+            <StartChecklistPanel checklist={researchLoopStartChecklist} />
             <Button className="hc-hit" onClick={startLoop} disabled={researchLoopStart.disabled} title={researchLoopStart.title} prefix={loopBusy === "start" ? <Spinner /> : <Play className="h-4 w-4" />}>{researchLoopStart.label}</Button>
             <Button outlined className="hc-hit" onClick={stopLoop} disabled={!loop.running || !!loopBusy} prefix={loopBusy === "stop" ? <Spinner /> : <Square className="h-4 w-4" />}>Stop</Button>
           </div>
@@ -1275,6 +1288,32 @@ function TargetingPreview({ summary }: { summary: ResearchLoopStartSummary }) {
           <p className="mt-0.5 leading-5"><span className="font-semibold">Sicherheit:</span> {summary.safety}</p>
           <p className="mt-1 hc-mono text-[11px] opacity-75">{summary.technicalLabel}</p>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function StartChecklistPanel({ checklist }: { checklist: ResearchLoopStartChecklist }) {
+  return (
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(checklist.tone))}>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">Start-Check</p>
+          <h3 className="mt-1 text-sm font-semibold text-white">{checklist.title}</h3>
+          <p className="mt-1 text-xs leading-5 hc-soft">{checklist.detail}</p>
+        </div>
+        <StatusPill tone={checklist.tone} label={checklist.label} />
+      </div>
+      <div className="grid gap-2">
+        {checklist.items.map((item) => (
+          <div key={item.label} className="rounded-md border border-white/10 bg-black/20 px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{item.label}</p>
+              <StatusPill tone={item.tone} label={item.value} />
+            </div>
+            <p className="mt-1 text-xs leading-5 hc-soft">{item.detail}</p>
+          </div>
+        ))}
       </div>
     </div>
   );

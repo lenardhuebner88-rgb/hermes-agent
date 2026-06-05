@@ -11,7 +11,7 @@ import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary } from "
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
+import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
@@ -777,6 +777,91 @@ describe("AutoresearchView run guidance", () => {
     expect(summary.detail).toContain("code_review");
     expect(summary.cost).toBe("5 Iterationen maximal.");
     expect(summary.technicalLabel).toBe("Manuelle Werte");
+  });
+
+  it("warns in the start checklist when high-priority queue work should happen first", () => {
+    const checklist = getResearchLoopStartChecklist({
+      routeOk: true,
+      running: false,
+      busy: false,
+      selectedPresetId: "recommended",
+      maxIterations: 2,
+      openCount: 20,
+      highPriorityCount: 7,
+    });
+
+    expect(checklist).toMatchObject({
+      tone: "amber",
+      label: "Erst Review",
+    });
+    expect(checklist.detail).toContain("Queue hat Vorrang");
+    expect(checklist.items.find((item) => item.label === "Queue-Wirkung")).toMatchObject({
+      value: "7 Hoch+ offen",
+      tone: "amber",
+    });
+  });
+
+  it("keeps start checklist route, safety, and custom values explicit", () => {
+    expect(getResearchLoopStartChecklist({
+      routeOk: false,
+      running: false,
+      busy: false,
+      selectedPresetId: "recommended",
+      maxIterations: 2,
+      openCount: 0,
+      highPriorityCount: 0,
+    })).toMatchObject({
+      tone: "amber",
+      label: "Nicht starten",
+      items: [
+        expect.objectContaining({ label: "Startsignal", value: "Route fehlt" }),
+        expect.objectContaining({ label: "Queue-Wirkung", value: "leer" }),
+        expect.objectContaining({ label: "Sicherheit", value: "Empfohlen" }),
+      ],
+    });
+
+    expect(getResearchLoopStartChecklist({
+      routeOk: true,
+      running: false,
+      busy: false,
+      selectedPresetId: null,
+      maxIterations: 8,
+      openCount: 0,
+      highPriorityCount: 0,
+    }).items.find((item) => item.label === "Sicherheit")).toMatchObject({
+      value: "eigene Werte",
+      tone: "amber",
+    });
+  });
+
+  it("keeps start checklist headline aligned with disabled or in-flight start states", () => {
+    expect(getResearchLoopStartChecklist({
+      routeOk: true,
+      running: false,
+      busy: true,
+      selectedPresetId: "recommended",
+      maxIterations: 2,
+      openCount: 0,
+      highPriorityCount: 0,
+    })).toMatchObject({
+      tone: "violet",
+      label: "Startet",
+      detail: expect.stringContaining("Startsignal ist unterwegs"),
+    });
+
+    expect(getResearchLoopStartChecklist({
+      routeOk: false,
+      running: false,
+      busy: false,
+      selectedPresetId: "recommended",
+      maxIterations: 2,
+      openCount: 20,
+      highPriorityCount: 7,
+    })).toMatchObject({
+      tone: "amber",
+      label: "Nicht starten",
+      detail: expect.stringContaining("Route"),
+    });
   });
 
   it("warns before starting the research loop when the model route is not ready", () => {
