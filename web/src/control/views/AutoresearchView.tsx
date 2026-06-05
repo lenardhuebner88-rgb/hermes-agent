@@ -16,7 +16,7 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../lib/autoresearchReadiness";
-import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
+import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary, type AutoresearchEmptyQueueModeGuidance, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
@@ -52,6 +52,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const distribution = useMemo(() => severityDistribution(open), [open]);
   const queueModeSummary = useMemo(() => getAutoresearchQueueModeSummary(open, queueMode), [open, queueMode]);
   const filteredOpen = useMemo(() => filterAutoresearchQueueByMode(open, queueMode), [open, queueMode]);
+  const emptyQueueModeGuidance = useMemo(() => getAutoresearchEmptyQueueModeGuidance(queueModeSummary), [queueModeSummary]);
   const filteredDistribution = useMemo(() => severityDistribution(filteredOpen), [filteredOpen]);
   const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
@@ -600,7 +601,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         )}
         {open.length > 0 && filteredOpen.length === 0 ? null : <DecisionGuidePanel guide={decisionGuide} />}
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
-        {open.length > 0 && filteredOpen.length === 0 && !store.loading ? <Empty icon={<ListChecks className="h-5 w-5" />} text={`Keine Karten im Modus ${queueModeSummary.active.label}.`} /> : null}
+        {open.length > 0 && filteredOpen.length === 0 && !store.loading && emptyQueueModeGuidance ? (
+          <EmptyQueueModePanel guidance={emptyQueueModeGuidance} onChangeMode={setQueueMode} />
+        ) : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
             <ProposalCard
@@ -1075,6 +1078,34 @@ function QueueModePicker({ summary, activeMode, onChange }: { summary: ReturnTyp
         })}
       </div>
       <p className="mt-2 text-xs leading-5 hc-soft"><span className="font-semibold text-white">{summary.active.label}:</span> {summary.active.detail}</p>
+    </div>
+  );
+}
+
+function EmptyQueueModePanel({ guidance, onChangeMode }: { guidance: AutoresearchEmptyQueueModeGuidance; onChangeMode: (mode: AutoresearchQueueMode) => void }) {
+  return (
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(guidance.tone))}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Filter leer</p>
+            <StatusPill tone={guidance.tone} label={guidance.label} />
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{guidance.title}</h3>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{guidance.detail}</p>
+        </div>
+        <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => onChangeMode(guidance.primaryMode)} prefix={<ListChecks className="h-4 w-4" />}>
+          {guidance.primaryLabel}
+        </Button>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-4">
+        {guidance.facts.map((fact) => (
+          <div key={fact.label} className={cn("rounded-md border px-2.5 py-2", reviewStepToneClass(fact.tone))}>
+            <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+            <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

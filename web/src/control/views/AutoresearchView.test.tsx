@@ -7,7 +7,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
-import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary } from "../lib/autoresearchQueueMode";
+import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary } from "../lib/autoresearchQueueMode";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
@@ -408,6 +408,34 @@ describe("AutoresearchView queue modes", () => {
     expect(filterAutoresearchQueueByMode(proposals, "high").map((item) => item.id)).toEqual(["high"]);
     expect(filterAutoresearchQueueByMode(proposals, "manual").map((item) => item.id)).toEqual(["high", "code", "safety"]);
     expect(filterAutoresearchQueueByMode(proposals, "safe").map((item) => item.id)).toEqual(["safe"]);
+  });
+
+  it("guides operators out of empty queue filter modes", () => {
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary([safe], "high"))).toMatchObject({
+      tone: "cyan",
+      label: "Kein Hoch+",
+      primaryMode: "safe",
+      primaryLabel: "Sammel-sicher zeigen",
+    });
+
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary([safe], "manual"))).toMatchObject({
+      tone: "emerald",
+      label: "Sammel-sicher",
+      primaryMode: "safe",
+    });
+
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary([high, code], "safe"))).toMatchObject({
+      tone: "amber",
+      label: "Erst lesen",
+      primaryMode: "manual",
+      detail: expect.stringContaining("Einzelreview"),
+    });
+  });
+
+  it("does not show empty-filter guidance for non-empty or fully empty queues", () => {
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary(proposals, "all"))).toBeNull();
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary(proposals, "manual"))).toBeNull();
+    expect(getAutoresearchEmptyQueueModeGuidance(getAutoresearchQueueModeSummary([], "safe"))).toBeNull();
   });
 });
 
