@@ -7,6 +7,7 @@ import { useBacklog, useBacklogDetail } from "../hooks/useControlData";
 import { FoBacklogCard } from "../components/FoBacklogCard";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import {
+  buildFoAuditPrompt,
   buildFoCommissionPrompt,
   computeNextFoTaskId,
   FO_REASON_LABELS,
@@ -543,6 +544,25 @@ export function BacklogView({ density }: { density: Density }) {
   const ownerLoad = useMemo(() => ownerLoadSummary(allItems).slice(0, 4), [allItems]);
   const counts = data?.counts;
   const activeTotal = counts ? counts.now + counts.next + counts.in_progress + counts.blocked + counts.later : allItems.filter((item) => item.status !== "done").length;
+  const doneTotal = useMemo(() => allItems.filter((item) => item.status === "done").length, [allItems]);
+  // Plain-language status breakdown + a one-click audit prompt seeded with the live board
+  // state. Both read from the data the view already has — no new backend.
+  const breakdown = useMemo(() => {
+    const by = (status: string) => allItems.filter((item) => item.status === status).length;
+    return { now: by("now"), next: by("next"), in_progress: by("in_progress"), blocked: by("blocked"), later: by("later") };
+  }, [allItems]);
+  const auditPrompt = useMemo(() => {
+    const health = foHealthStripCounts(allItems, data?.contract_health);
+    return buildFoAuditPrompt({
+      active: activeTotal,
+      done: doneTotal,
+      stale: health.stale,
+      unowned: health.unowned,
+      highRisk: health.highRisk,
+      missingAcceptance: health.missingAcceptance,
+      contractDrift: health.contractDrift,
+    });
+  }, [allItems, data?.contract_health, activeTotal, doneTotal]);
   const selectedItem = openId ? allItems.find((item) => item.id === openId) : undefined;
   const detail = openId ? detailById[openId] : undefined;
   const commissionPrompt = detail ? buildFoCommissionPrompt(detail) : undefined;
@@ -601,11 +621,16 @@ export function BacklogView({ density }: { density: Density }) {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <p className="hc-eyebrow">{de.backlog.eyebrow}</p>
-            <h2 className="mt-1 text-xl font-semibold text-white">{de.backlog.title} · {activeTotal} aktiv</h2>
-            <p className="mt-1 text-xs hc-soft">{de.backlog.subtitle}</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">{de.backlog.title} · {de.backlog.summaryLine(activeTotal, doneTotal)}</h2>
+            {activeTotal > 0 ? (
+              <p className="mt-1 text-xs hc-soft">{de.backlog.summaryBreakdown(breakdown.now, breakdown.next, breakdown.in_progress, breakdown.blocked, breakdown.later)}</p>
+            ) : (
+              <p className="mt-1 text-xs hc-soft">{de.backlog.subtitle}</p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="mr-2 text-xs hc-soft">{backlog.loading && !data ? de.backlog.loading : de.backlog.updatedAt(clockLabel(nowSec))}</div>
+            <CopyButton text={auditPrompt} label={de.backlog.audit} copiedLabel={de.backlog.auditCopied} />
             <button type="button" onClick={() => setViewMode("queue")} className={cn("grid h-9 w-9 place-items-center rounded-md border", viewMode === "queue" ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:text-zinc-200")} title="Queue">
               <List className="h-4 w-4" />
             </button>

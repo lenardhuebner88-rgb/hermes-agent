@@ -1,6 +1,19 @@
 export const de = {
   app: { name: "Hermes Control", operator: "pieter_pan" },
-  tabs: { overview: "Übersicht", workstreams: "Ströme", hermes: "Hermes", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
+  tabs: { overview: "Übersicht", inbox: "Postfach", workstreams: "Ströme", hermes: "Hermes", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
+  inbox: {
+    eyebrow: "Postfach",
+    title: "Was braucht mich gerade?",
+    subtitle: (n: number) => (n === 0 ? "Nichts wartet auf dich." : `${n} ${n === 1 ? "Sache wartet" : "Sachen warten"} auf deine Entscheidung.`),
+    loading: "lädt …",
+    filterAll: "Alle",
+    surfaceAutoresearch: "Autoresearch",
+    surfaceFamily: "Family",
+    surfaceOrchestrator: "Orchestrator",
+    empty: "Nichts wartet auf dich.",
+    emptyHint: "Keine offenen Entscheidungen über Autoresearch, Family Organizer und Orchestrator.",
+    do: "Tun",
+  },
   shell: { density: "Dichte", auto: "Auto", airy: "Luftig", compact: "Kompakt" },
   overview: {
     healthyTitle: "Alles läuft ruhig.",
@@ -247,6 +260,14 @@ export const de = {
     commissionHint: "Kopiert den Dispatch-Prompt in die Zwischenablage — in eine Remote-Claude-Session einfügen.",
     commissionDrawer: "Commission-Prompt kopieren",
     noNextTask: "Alle Tasks blockiert oder kein Now/Next offen.",
+    // Audit-Knopf: kopiert einen read-first Audit-Prompt für das FO-Projekt
+    audit: "Audit beauftragen",
+    auditCopied: "Audit-Prompt kopiert ✓",
+    auditHint: "Kopiert einen Audit-Prompt (Backlog-Gesundheit + neue Item-Vorschläge) — in eine Remote-Session einfügen.",
+    // Klartext-Zusammenfassung des aktiven Sets im Header
+    summaryLine: (active: number, done: number) => `${active} aktiv · ${done} erledigt`,
+    summaryBreakdown: (now: number, next: number, inProgress: number, blocked: number, later: number) =>
+      `${now} jetzt · ${next} als Nächstes · ${inProgress} in Arbeit · ${blocked} blockiert · ${later} später`,
     // Controls bar
     searchPlaceholder: "Suche (Titel, Id, Bereich, Owner …)",
     filterAll: "Alle",

@@ -379,6 +379,39 @@ ROOT: ~/projects/family-organizer   GATE: npm run gate
 ABBRUCH (stop & melde, NICHT loopen/raten): Gate 2–3× rot · DB-Migration/destruktiv · Spec mehrdeutig · etwas außerhalb des Task-Scopes müsste geändert werden.`;
 }
 
+// Per-Knopfdruck-Audit: kein einzelner Task, sondern ein read-first Gesundheits-Audit
+// des FO-Backlogs. Spiegelt den Ton von buildFoCommissionPrompt (Root, Gate, Abbruch),
+// liefert aber einen geschriebenen Befund + priorisierte neue Backlog-Items statt Code.
+// `summary` ist optional: wenn der Operator es übergibt, sieht der Auditor den aktuellen
+// Board-Stand schon im Prompt (was zählt, was driftet) und muss nicht raten.
+export function buildFoAuditPrompt(summary?: {
+  active: number;
+  done: number;
+  stale: number;
+  unowned: number;
+  highRisk: number;
+  missingAcceptance: number;
+  contractDrift: number;
+}): string {
+  const stand = summary
+    ? `AKTUELLER STAND (Dashboard): ${summary.active} aktiv · ${summary.done} erledigt · ` +
+      `${summary.stale} stale · ${summary.unowned} ohne Owner · ${summary.highRisk} High-Risk · ` +
+      `${summary.missingAcceptance} ohne Akzeptanz · ${summary.contractDrift} Vertragsdrift.\n`
+    : "";
+  return `Du bist eine Orchestrator-Session auf dem Homeserver mit vollem Zugriff. Mach ein READ-FIRST AUDIT des Family-Organizer-Backlogs — KEIN Code, KEINE Statuswechsel, nur Befund + Vorschläge.
+ROOT: ~/projects/family-organizer   QUELLE: backlog/items/*.md (git ist die Wahrheit)   GATE (nur falls du später baust): npm run gate
+${stand}1) Preflight: cd ~/projects/family-organizer + \`git status\` (additiv, fremde uncommittete Arbeit in Ruhe lassen).
+2) Backlog lesen: alle aktiven Items (status now/next/in_progress/blocked/later) + die letzten ~10 erledigten. backlog/README.md für den Feld-Vertrag.
+3) BEFUND schreiben (nüchtern, mit Item-IDs als Beleg):
+   - Vertrags-Gesundheit: unbekannte Status, fehlende Owner/Akzeptanz/Next-Action, stale Claims (Item beansprucht aber kein Beleg).
+   - Risiko & Drift: High-Risk-Items ohne Plan, Items die sich überholt haben (superseded-Kandidaten), Doppelungen.
+   - Lücken: welche FO-Bereiche (calendar, shopping, lists, kitchen, admin, db, hermes-api, process) sind unterversorgt vs. überladen.
+4) 3–5 NEUE Backlog-Items vorschlagen — je mit Titel, Bereich, Risiko, Akzeptanzkriterien-Skizze und 1-Satz-Begründung "warum jetzt". Höchster Hebel zuerst.
+5) EMPFEHLUNG: den EINEN Task nennen, den ich als Nächstes beauftragen sollte (id + Warum) — passend zur Next-Task-Logik des Dashboards.
+6) Ausgabe: Befund als Markdown nach ~/projects/family-organizer/backlog/AUDIT-$(date +%F).md schreiben (NICHT committen ohne mein Go) + Discord-Report (nie nur Telegram) mit den Top-3-Punkten.
+ABBRUCH (stop & melde, NICHT raten): Backlog-Verzeichnis fehlt · Spec-Konvention unklar · etwas außerhalb des Audits müsste geändert werden.`;
+}
+
 export function filterFoItems(
   items: BacklogItem[],
   q: string,

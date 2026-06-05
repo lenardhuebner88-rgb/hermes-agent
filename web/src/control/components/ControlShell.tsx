@@ -1,14 +1,15 @@
-import { Bot, Clock, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Bot, Clock, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: de.tabs.overview, mobileLabel: "Übers.", path: "/control", icon: LayoutDashboard },
+  { id: "inbox", label: de.tabs.inbox, mobileLabel: "Postf.", path: "/control/inbox", icon: Inbox },
   { id: "workstreams", label: de.tabs.workstreams, mobileLabel: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
   { id: "hermes", label: de.tabs.hermes, mobileLabel: "Hermes", path: "/control/hermes", icon: Bot },
   { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeNextFoTaskId,
+  buildFoAuditPrompt,
   buildFoCommissionPrompt,
   filterFoItems,
   foHealthStripCounts,
@@ -269,6 +270,38 @@ describe("buildFoCommissionPrompt", () => {
   it("is a non-empty string", () => {
     const d = detail({ id: "0001", title: "X" });
     expect(buildFoCommissionPrompt(d).length).toBeGreaterThan(50);
+  });
+});
+
+// --- buildFoAuditPrompt ---
+
+describe("buildFoAuditPrompt", () => {
+  it("targets the FO project root and is read-first (no code)", () => {
+    const prompt = buildFoAuditPrompt();
+    expect(prompt).toContain("~/projects/family-organizer");
+    expect(prompt).toContain("READ-FIRST AUDIT");
+    expect(prompt).toContain("KEIN Code");
+  });
+
+  it("asks for new backlog item proposals and a next-task recommendation", () => {
+    const prompt = buildFoAuditPrompt();
+    expect(prompt).toContain("NEUE Backlog-Items");
+    expect(prompt).toContain("EMPFEHLUNG");
+  });
+
+  it("embeds the live board summary when provided", () => {
+    const prompt = buildFoAuditPrompt({ active: 14, done: 99, stale: 2, unowned: 1, highRisk: 3, missingAcceptance: 4, contractDrift: 0 });
+    expect(prompt).toContain("AKTUELLER STAND");
+    expect(prompt).toContain("14 aktiv");
+    expect(prompt).toContain("99 erledigt");
+  });
+
+  it("omits the board summary line when no counts are passed", () => {
+    expect(buildFoAuditPrompt()).not.toContain("AKTUELLER STAND");
+  });
+
+  it("is a non-empty string", () => {
+    expect(buildFoAuditPrompt().length).toBeGreaterThan(50);
   });
 });
 
