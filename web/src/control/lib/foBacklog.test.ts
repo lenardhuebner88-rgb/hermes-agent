@@ -253,14 +253,17 @@ describe("buildFoCommissionPrompt", () => {
   });
 
   it("references the correct spec path", () => {
-    const d = detail({ id: "0042", title: "X" });
+    const d = detail({ id: "0042", title: "X", source_path: "backlog/items/0042-x.md" });
     const prompt = buildFoCommissionPrompt(d);
-    expect(prompt).toContain("~/projects/family-organizer/backlog/items/0042.md");
+    expect(prompt).toContain("~/projects/family-organizer/backlog/items/0042-x.md");
   });
 
   it("includes the gate command", () => {
     const d = detail({ id: "0001", title: "X" });
-    expect(buildFoCommissionPrompt(d)).toContain("npm run gate:e2e");
+    const prompt = buildFoCommissionPrompt(d);
+    // Default-Gate ist das schnelle (lint+test+build), nicht das Browser-E2E-Gate.
+    expect(prompt).toContain("GATE: npm run gate\n");
+    expect(prompt).toContain("npm run gate:e2e");
   });
 
   it("is a non-empty string", () => {
