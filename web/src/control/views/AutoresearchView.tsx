@@ -16,11 +16,13 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../lib/autoresearchReadiness";
-import { filterAutoresearchQueueByMode, getAutoresearchQueueModeSummary, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
+import { getAutoresearchResolvedSummary, type AutoresearchResolvedSummary } from "../lib/autoresearchResolvedSummary";
+import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary, type AutoresearchEmptyQueueModeGuidance, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
+import { getAdvancedRunChecklist, getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchAdvancedRunChecklist, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun, ToneName } from "../lib/types";
@@ -51,6 +53,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const distribution = useMemo(() => severityDistribution(open), [open]);
   const queueModeSummary = useMemo(() => getAutoresearchQueueModeSummary(open, queueMode), [open, queueMode]);
   const filteredOpen = useMemo(() => filterAutoresearchQueueByMode(open, queueMode), [open, queueMode]);
+  const emptyQueueModeGuidance = useMemo(() => getAutoresearchEmptyQueueModeGuidance(queueModeSummary), [queueModeSummary]);
   const filteredDistribution = useMemo(() => severityDistribution(filteredOpen), [filteredOpen]);
   const relevanceQueue = useMemo(() => rankAutoresearchReviewQueue(filteredOpen, 10), [filteredOpen]);
   const queueProposalIds = useMemo(() => [...relevanceQueue.shortlist, ...relevanceQueue.backlog].map((item) => item.proposal.id), [relevanceQueue.backlog, relevanceQueue.shortlist]);
@@ -77,6 +80,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const filteredHighPriorityCount = filteredDistribution.bySeverity.critical + filteredDistribution.bySeverity.high;
   const topProposal = relevanceQueue.shortlist[0]?.proposal ?? null;
   const topCardMode = topProposal ? describeTopCardMode(topProposal) : null;
+  const topProposalBrief = useMemo(() => topProposal ? getProposalOperatorBrief(topProposal) : null, [topProposal]);
   const [maxIterations, setMaxIterations] = useState("2");
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
@@ -178,9 +182,28 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
     () => getDeepAuditGuidance({ subsystem: effectiveDeepAuditSubsystem, running: deepAuditRunning }),
     [deepAuditRunning, effectiveDeepAuditSubsystem],
   );
+  const deepAuditChecklist = useMemo(
+    () => getAdvancedRunChecklist({
+      kind: "deep-audit",
+      target: effectiveDeepAuditSubsystem,
+      running: deepAuditRunning,
+      busy: deepAudit.busy,
+    }),
+    [deepAudit.busy, deepAuditRunning, effectiveDeepAuditSubsystem],
+  );
   const testFoundryGuidance = useMemo(
     () => getTestFoundryGuidance({ target: effectiveTestFoundryTarget, running: testFoundryRunning, autoApply: testFoundryApply }),
     [effectiveTestFoundryTarget, testFoundryApply, testFoundryRunning],
+  );
+  const testFoundryChecklist = useMemo(
+    () => getAdvancedRunChecklist({
+      kind: "test-foundry",
+      target: effectiveTestFoundryTarget,
+      running: testFoundryRunning,
+      busy: testFoundry.busy,
+      autoApply: testFoundryApply,
+    }),
+    [effectiveTestFoundryTarget, testFoundry.busy, testFoundryApply, testFoundryRunning],
   );
   const readiness = useMemo(
     () => getAutoresearchReadiness({
@@ -227,6 +250,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       highPriorityCount,
     }),
     [highPriorityCount, loop.running, loopBusy, maxIterations, open.length, routeOk, selectedLoopPresetId],
+  );
+  const resolvedSummary = useMemo(
+    () => getAutoresearchResolvedSummary({ reverted, applied, skipped }),
+    [applied, reverted, skipped],
   );
   const applyLoopPreset = (presetId: ResearchLoopPresetId) => {
     const preset = getResearchLoopPreset(presetId);
@@ -434,17 +461,32 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {recommendation.detail}
               </p>
               {topProposal ? (
-                <div className="mt-3 flex max-w-2xl flex-col gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white sm:flex-row sm:items-center sm:justify-between">
-                  <span className="min-w-0 space-y-1">
-                    <span className="flex flex-wrap items-center gap-2">
-                      <span>Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span></span>
-                      {topCardMode ? <StatusPill tone={topCardMode.tone} label={topCardMode.label} /> : null}
-                    </span>
-                    {topCardMode ? <span className="block text-xs leading-5 hc-soft">{topCardMode.detail}</span> : null}
-                  </span>
-                  <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
-                    Top-Karte öffnen
-                  </Button>
+                <div className="mt-3 max-w-3xl rounded-lg border border-white/10 bg-white/[.03] px-3 py-3 text-sm text-white">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="hc-eyebrow">Als Erstes</p>
+                        {topProposalBrief ? <StatusPill tone={topProposalBrief.tone} label={topProposalBrief.label} /> : null}
+                        {topCardMode ? <StatusPill tone={topCardMode.tone} label={topCardMode.label} /> : null}
+                      </div>
+                      <h2 className="mt-2 text-base font-semibold leading-6 text-white">{topProposalBrief?.title ?? "Nächste Karte prüfen."}</h2>
+                      <p className="mt-1 text-sm leading-6 hc-soft">{topProposalBrief?.summary ?? topProposal.title?.trim() ?? topProposal.target}</p>
+                      {topCardMode ? <p className="mt-1 text-xs leading-5 hc-dim">{topCardMode.detail}</p> : null}
+                    </div>
+                    <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
+                      Top-Karte öffnen
+                    </Button>
+                  </div>
+                  {topProposalBrief ? (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      {topProposalBrief.facts.map((fact) => (
+                        <div key={fact.label} className={cn("min-w-0 rounded-md border px-2.5 py-2", reviewStepToneClass(fact.tone))}>
+                          <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+                          <p className="mt-1 line-clamp-2 text-xs leading-5 hc-soft" title={fact.value}>{fact.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
@@ -583,7 +625,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         )}
         {open.length > 0 && filteredOpen.length === 0 ? null : <DecisionGuidePanel guide={decisionGuide} />}
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Vorschläge." /> : null}
-        {open.length > 0 && filteredOpen.length === 0 && !store.loading ? <Empty icon={<ListChecks className="h-5 w-5" />} text={`Keine Karten im Modus ${queueModeSummary.active.label}.`} /> : null}
+        {open.length > 0 && filteredOpen.length === 0 && !store.loading && emptyQueueModeGuidance ? (
+          <EmptyQueueModePanel guidance={emptyQueueModeGuidance} onChangeMode={setQueueMode} />
+        ) : null}
         <div className="grid gap-4">
           {relevanceQueue.shortlist.map((item) => (
             <ProposalCard
@@ -715,6 +759,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
                 <input id="deep-audit-focus" value={deepAuditFocus} onChange={(event) => setDeepAuditFocus(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />
                 <CodeAuditSlotPicker />
+                <AdvancedRunChecklistPanel checklist={deepAuditChecklist} />
                 <Button className="hc-hit" onClick={() => void startDeepAudit()} disabled={deepAudit.loading || deepAudit.busy || deepAuditRunning || !effectiveDeepAuditSubsystem} prefix={deepAudit.busy || deepAuditRunning ? <Spinner /> : <SearchCode className="h-4 w-4" />}>
                   Deep-Audit starten
                 </Button>
@@ -763,6 +808,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                     <span className="block text-xs hc-soft">Beweis-gegatet auf Branch f-test-foundry; main bleibt unberührt.</span>
                   </span>
                 </label>
+                <AdvancedRunChecklistPanel checklist={testFoundryChecklist} />
                 <Button className="hc-hit" onClick={() => void startTestFoundry()} disabled={testFoundry.loading || testFoundry.busy || testFoundryRunning || !effectiveTestFoundryTarget} prefix={testFoundry.busy || testFoundryRunning ? <Spinner /> : <FlaskConical className="h-4 w-4" />}>
                   Test-Foundry starten
                 </Button>
@@ -772,14 +818,20 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       </details>
 
+      {resolvedSummary ? (
+        <ResolvedQueueSummaryPanel
+          summary={resolvedSummary}
+          archiveBusy={bulkRevertedBusy}
+          archiveDisabled={!!store.busy || bulkRevertedBusy}
+          onArchiveReverted={() => void skipAllReverted()}
+        />
+      ) : null}
+
       {reverted.length > 0 ? (
         <details className="space-y-3 border-t border-white/10 pt-4">
           <summary className="cursor-pointer text-lg font-semibold text-white" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedSummary(reverted.length)}</summary>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-2">
             <p className="text-sm hc-soft">{de.autoresearch.revertedExplain}</p>
-            <Button outlined className="hc-hit" onClick={() => void skipAllReverted()} disabled={!!store.busy || bulkRevertedBusy} prefix={bulkRevertedBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
-              {de.autoresearch.skipAllReverted}
-            </Button>
           </div>
           <div className="mt-3 grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
         </details>
@@ -862,6 +914,37 @@ function ReadinessPanel({ summary }: { summary: AutoresearchReadinessSummary }) 
               <p className="mt-1 truncate text-sm font-semibold text-white">{fact.value}</p>
             </div>
           ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ResolvedQueueSummaryPanel({ summary, archiveBusy, archiveDisabled, onArchiveReverted }: { summary: AutoresearchResolvedSummary; archiveBusy: boolean; archiveDisabled: boolean; onArchiveReverted: () => void }) {
+  return (
+    <section className={cn("rounded-lg border p-3", reviewStepToneClass(summary.tone))} aria-label="Autoresearch Abschluss und Aufräumen">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Abschluss & Aufräumen</p>
+            <StatusPill tone={summary.tone} label={summary.label} />
+          </div>
+          <h2 className="mt-2 text-base font-semibold text-white">{summary.title}</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{summary.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> {summary.next}</p>
+        </div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-3 lg:min-w-[360px]">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}>
+              <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
+          {summary.archiveLabel ? (
+            <Button outlined className="hc-hit sm:col-span-3" onClick={onArchiveReverted} disabled={archiveDisabled} prefix={archiveBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
+              {summary.archiveLabel}
+            </Button>
+          ) : null}
         </div>
       </div>
     </section>
@@ -1058,6 +1141,34 @@ function QueueModePicker({ summary, activeMode, onChange }: { summary: ReturnTyp
         })}
       </div>
       <p className="mt-2 text-xs leading-5 hc-soft"><span className="font-semibold text-white">{summary.active.label}:</span> {summary.active.detail}</p>
+    </div>
+  );
+}
+
+function EmptyQueueModePanel({ guidance, onChangeMode }: { guidance: AutoresearchEmptyQueueModeGuidance; onChangeMode: (mode: AutoresearchQueueMode) => void }) {
+  return (
+    <div className={cn("rounded-lg border p-3", reviewStepToneClass(guidance.tone))}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Filter leer</p>
+            <StatusPill tone={guidance.tone} label={guidance.label} />
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{guidance.title}</h3>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{guidance.detail}</p>
+        </div>
+        <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => onChangeMode(guidance.primaryMode)} prefix={<ListChecks className="h-4 w-4" />}>
+          {guidance.primaryLabel}
+        </Button>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-4">
+        {guidance.facts.map((fact) => (
+          <div key={fact.label} className={cn("rounded-md border px-2.5 py-2", reviewStepToneClass(fact.tone))}>
+            <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+            <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1309,6 +1420,32 @@ function StartChecklistPanel({ checklist }: { checklist: ResearchLoopStartCheckl
           <div key={item.label} className="rounded-md border border-white/10 bg-black/20 px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{item.label}</p>
+              <StatusPill tone={item.tone} label={item.value} />
+            </div>
+            <p className="mt-1 text-xs leading-5 hc-soft">{item.detail}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdvancedRunChecklistPanel({ checklist }: { checklist: AutoresearchAdvancedRunChecklist }) {
+  return (
+    <div className={cn("rounded-lg border p-2.5", reviewStepToneClass(checklist.tone))}>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="hc-eyebrow">Start-Check</p>
+          <h3 className="mt-1 text-sm font-semibold text-white">{checklist.title}</h3>
+          <p className="mt-1 text-xs leading-5 hc-soft">{checklist.detail}</p>
+        </div>
+        <StatusPill tone={checklist.tone} label={checklist.label} />
+      </div>
+      <div className="grid gap-1.5">
+        {checklist.items.map((item) => (
+          <div key={item.label} className="rounded-md border border-white/10 bg-black/20 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{item.label}</p>
               <StatusPill tone={item.tone} label={item.value} />
             </div>
             <p className="mt-1 text-xs leading-5 hc-soft">{item.detail}</p>
