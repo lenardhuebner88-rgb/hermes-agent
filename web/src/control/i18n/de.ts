@@ -1,6 +1,6 @@
 export const de = {
   app: { name: "Hermes Control", operator: "pieter_pan" },
-  tabs: { overview: "Übersicht", hermes: "Hermes", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
+  tabs: { overview: "Übersicht", workstreams: "Ströme", hermes: "Hermes", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
   shell: { density: "Dichte", auto: "Auto", airy: "Luftig", compact: "Kompakt" },
   overview: {
     healthyTitle: "Alles läuft ruhig.",

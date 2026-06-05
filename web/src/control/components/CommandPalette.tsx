@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Bot, FlaskConical, LayoutDashboard, Search } from "lucide-react";
+import { ArrowRight, Bot, FlaskConical, GitBranch, LayoutDashboard, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KEYMAP } from "../lib/keymap";
 import type { Worker } from "../lib/types";
@@ -42,6 +42,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
   const items = useMemo<CommandItem[]>(() => {
     const nav: CommandItem[] = [
       { id: "nav-overview", group: "Navigation", label: "Übersicht", hint: "/control", icon: <LayoutDashboard className="h-4 w-4" />, action: () => onNavigate("/control") },
+      { id: "nav-workstreams", group: "Navigation", label: "Arbeitsströme", hint: "/control/workstreams", icon: <GitBranch className="h-4 w-4" />, action: () => onNavigate("/control/workstreams") },
       { id: "nav-hermes", group: "Navigation", label: "Hermes-Worker", hint: "/control/hermes", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/hermes") },
       { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
     ];
@@ -134,4 +135,3 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
     </div>
   );
 }
-

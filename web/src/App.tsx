@@ -537,12 +537,12 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-64 min-h-0 flex-col",
+              "fixed top-0 left-0 z-50 h-dvh max-h-dvh w-64 min-h-0 flex-col",
               "border-r border-current/20",
               "bg-background-base/95 backdrop-blur-sm",
               "transition-[transform] duration-200 ease-out",
-              mobileOpen ? "translate-x-0" : "-translate-x-full",
-              "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0 lg:overflow-hidden",
+              mobileOpen ? "flex translate-x-0" : "hidden -translate-x-full pointer-events-none",
+              "lg:sticky lg:top-0 lg:flex lg:translate-x-0 lg:shrink-0 lg:overflow-hidden lg:pointer-events-auto",
               "lg:transition-[width] lg:duration-[600ms] lg:ease-[cubic-bezier(0.33,1.35,0.62,1)]",
               collapsed && "lg:w-14",
             )}
