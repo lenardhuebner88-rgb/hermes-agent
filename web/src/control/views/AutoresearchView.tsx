@@ -16,6 +16,7 @@ import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV, type AutoresearchSectionNavItem } from "../lib/autoresearchNavigation";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchReadiness, type AutoresearchReadinessSummary } from "../lib/autoresearchReadiness";
+import { getAutoresearchResolvedSummary, type AutoresearchResolvedSummary } from "../lib/autoresearchResolvedSummary";
 import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary, type AutoresearchEmptyQueueModeGuidance, type AutoresearchQueueMode } from "../lib/autoresearchQueueMode";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide, type AutoresearchQueueActionSummary } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
@@ -249,6 +250,10 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       highPriorityCount,
     }),
     [highPriorityCount, loop.running, loopBusy, maxIterations, open.length, routeOk, selectedLoopPresetId],
+  );
+  const resolvedSummary = useMemo(
+    () => getAutoresearchResolvedSummary({ reverted, applied, skipped }),
+    [applied, reverted, skipped],
   );
   const applyLoopPreset = (presetId: ResearchLoopPresetId) => {
     const preset = getResearchLoopPreset(presetId);
@@ -813,14 +818,20 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       </details>
 
+      {resolvedSummary ? (
+        <ResolvedQueueSummaryPanel
+          summary={resolvedSummary}
+          archiveBusy={bulkRevertedBusy}
+          archiveDisabled={!!store.busy || bulkRevertedBusy}
+          onArchiveReverted={() => void skipAllReverted()}
+        />
+      ) : null}
+
       {reverted.length > 0 ? (
         <details className="space-y-3 border-t border-white/10 pt-4">
           <summary className="cursor-pointer text-lg font-semibold text-white" title={de.autoresearch.revertedExplain}>{de.autoresearch.revertedSummary(reverted.length)}</summary>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-2">
             <p className="text-sm hc-soft">{de.autoresearch.revertedExplain}</p>
-            <Button outlined className="hc-hit" onClick={() => void skipAllReverted()} disabled={!!store.busy || bulkRevertedBusy} prefix={bulkRevertedBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
-              {de.autoresearch.skipAllReverted}
-            </Button>
           </div>
           <div className="mt-3 grid gap-3 opacity-85">{reverted.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} density={density} onApply={store.apply} onSkip={store.skip} />)}</div>
         </details>
@@ -903,6 +914,37 @@ function ReadinessPanel({ summary }: { summary: AutoresearchReadinessSummary }) 
               <p className="mt-1 truncate text-sm font-semibold text-white">{fact.value}</p>
             </div>
           ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ResolvedQueueSummaryPanel({ summary, archiveBusy, archiveDisabled, onArchiveReverted }: { summary: AutoresearchResolvedSummary; archiveBusy: boolean; archiveDisabled: boolean; onArchiveReverted: () => void }) {
+  return (
+    <section className={cn("rounded-lg border p-3", reviewStepToneClass(summary.tone))} aria-label="Autoresearch Abschluss und Aufräumen">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Abschluss & Aufräumen</p>
+            <StatusPill tone={summary.tone} label={summary.label} />
+          </div>
+          <h2 className="mt-2 text-base font-semibold text-white">{summary.title}</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 hc-soft">{summary.detail}</p>
+          <p className="mt-2 text-sm text-white"><span className="font-semibold">Jetzt sinnvoll:</span> {summary.next}</p>
+        </div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-3 lg:min-w-[360px]">
+          {summary.facts.map((fact) => (
+            <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}>
+              <p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
+            </div>
+          ))}
+          {summary.archiveLabel ? (
+            <Button outlined className="hc-hit sm:col-span-3" onClick={onArchiveReverted} disabled={archiveDisabled} prefix={archiveBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>
+              {summary.archiveLabel}
+            </Button>
+          ) : null}
         </div>
       </div>
     </section>

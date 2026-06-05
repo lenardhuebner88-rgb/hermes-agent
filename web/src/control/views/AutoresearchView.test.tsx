@@ -8,6 +8,7 @@ import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { AUTORESEARCH_SECTION_NAV } from "../lib/autoresearchNavigation";
 import { filterAutoresearchQueueByMode, getAutoresearchEmptyQueueModeGuidance, getAutoresearchQueueModeSummary } from "../lib/autoresearchQueueMode";
+import { getAutoresearchResolvedSummary } from "../lib/autoresearchResolvedSummary";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
@@ -1044,6 +1045,62 @@ describe("AutoresearchView run guidance", () => {
       tone: "violet",
       label: "Startet",
       detail: expect.stringContaining("Startsignal ist unterwegs"),
+    });
+  });
+});
+
+describe("AutoresearchView resolved work summary", () => {
+  it("stays hidden while no resolved work exists", () => {
+    expect(getAutoresearchResolvedSummary({
+      reverted: [],
+      applied: [],
+      skipped: [],
+    })).toBeNull();
+  });
+
+  it("prioritizes reverted cards and exposes a cleanup action", () => {
+    const summary = getAutoresearchResolvedSummary({
+      reverted: [proposal({ id: "r1", last_outcome: "reverted_no_improvement" })],
+      applied: [proposal({ id: "a1", status: "applied" })],
+      skipped: [proposal({ id: "s1", status: "skipped" })],
+    });
+
+    expect(summary).toMatchObject({
+      tone: "amber",
+      label: "Aufräumen",
+      archiveLabel: "Karte archivieren",
+    });
+    expect(summary?.next).toContain("archivieren");
+    expect(summary?.facts.map((fact) => [fact.label, fact.value])).toEqual([
+      ["Zurückgerollt", "1"],
+      ["Übernommen", "1"],
+      ["Übersprungen", "1"],
+    ]);
+  });
+
+  it("summarizes applied-only work without archive action", () => {
+    expect(getAutoresearchResolvedSummary({
+      reverted: [],
+      applied: [proposal({ id: "a1", status: "applied" }), proposal({ id: "a2", status: "applied" })],
+      skipped: [],
+    })).toMatchObject({
+      tone: "emerald",
+      label: "Erledigt",
+      archiveLabel: null,
+      title: "2 Vorschläge wurden übernommen.",
+    });
+  });
+
+  it("summarizes skipped-only work as intentionally sorted out", () => {
+    expect(getAutoresearchResolvedSummary({
+      reverted: [],
+      applied: [],
+      skipped: [proposal({ id: "s1", status: "skipped" })],
+    })).toMatchObject({
+      tone: "zinc",
+      label: "Aussortiert",
+      archiveLabel: null,
+      title: "1 Vorschlag wurde übersprungen.",
     });
   });
 });
