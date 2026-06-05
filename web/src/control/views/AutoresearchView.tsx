@@ -452,7 +452,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   return (
     <div className="space-y-5">
       <section className="hc-card overflow-hidden border-[var(--hc-border-strong)]">
-        <div className="grid gap-0 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,.95fr)]">
+        <div className="grid gap-0">
           <div className="space-y-5 p-4 sm:p-6">
             <div className="flex flex-wrap items-center gap-2">
               {status.loading ? <Spinner /> : <StatusPill tone={statusTone} label={status.data?.state ?? "unbekannt"} dot={loop.running ? "live" : status.data?.state === "crashed" ? "error" : "idle"} />}
@@ -515,8 +515,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             </div>
             <CockpitSectionNav items={AUTORESEARCH_SECTION_NAV} onJump={scrollTo} />
           </div>
-          <div className="border-t border-[var(--hc-border)] bg-black/20 p-4 sm:p-5 xl:border-l xl:border-t-0">
-            <div className="grid gap-3 md:grid-cols-2">
+          <details className="border-t border-[var(--hc-border)] bg-black/20 p-4 sm:p-5">
+            <summary className="cursor-pointer text-sm font-semibold text-white">
+              Weitere Aktionen <span className="ml-1 text-xs font-normal hc-soft">— Erzeugen · Scannen · Übernehmen · Aufräumen</span>
+            </summary>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <OperatorActionCard
                 icon={<Sparkles className="h-5 w-5" />}
                 eyebrow="Schnell"
@@ -577,7 +580,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 button={<Button outlined className="hc-hit w-full justify-center" onClick={() => void pruneAutoresearch()} disabled={!!store.busy || pruneBusy} title={de.autoresearch.pruneHint} prefix={pruneBusy ? <Spinner /> : <Archive className="h-4 w-4" />}>{de.autoresearch.prune}</Button>}
               />
             </div>
-          </div>
+          </details>
         </div>
       </section>
 
