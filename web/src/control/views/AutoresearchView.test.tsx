@@ -4,7 +4,7 @@ import { runLaneLabel, runLaneTone } from "../lib/autoresearch";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
 import { DeepAuditFindings } from "./AutoresearchView";
@@ -329,6 +329,17 @@ describe("AutoresearchView decision guide", () => {
     ]);
 
     expect(ids).toEqual(["safe-low", "safe-medium"]);
+  });
+
+  it("labels the cockpit top card review mode with the same manual-review rule", () => {
+    expect(describeTopCardMode(proposal({ id: "safe", severity: "low" }))).toMatchObject({
+      label: "Sammel-sicher",
+      tone: "emerald",
+    });
+    expect(describeTopCardMode(proposal({ id: "code", mode: "code", severity: "medium" }))).toMatchObject({
+      label: "Einzelreview",
+      tone: "amber",
+    });
   });
 
   it("blocks global apply-all when open skill proposals need manual review", () => {

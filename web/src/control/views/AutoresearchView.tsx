@@ -11,7 +11,7 @@ import { fmtClock } from "../lib/derive";
 import { AUTORESEARCH_AREAS, clampLoopIterations, clearProposalSelection, codeWeaknessBusyKey, describeArea, describeAutoresearchBusy, describeLoopStatus, filterBySeverityThreshold, formatResearchTokens, formatRunTime, hasResearchCounters, parseMinUseCount, rankAutoresearchReviewQueue, readLastRunCounters, runLaneLabel, runLaneTone, runModelLabel, runVetoedCount, selectVisibleProposals, severityDistribution, severityTone, shouldShowResearchErrorBadge, splitAutoresearchProposals, summarizeProposalRoi, summarizeRecentRuns, sumRunTokens, toggleProposalSelection } from "../lib/autoresearch";
 import { getAutoresearchKeyboardAction } from "../lib/autoresearchKeyboard";
 import { getAutoresearchRecommendation } from "../lib/autoresearchRecommendation";
-import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
+import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getBatchSafeVisibleProposalIds, proposalNeedsManualReview, type AutoresearchDecisionGuide } from "../lib/autoresearchDecisionGuide";
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartControl, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchRunSummary, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
@@ -67,6 +67,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   );
   const highPriorityCount = distribution.bySeverity.critical + distribution.bySeverity.high;
   const topProposal = relevanceQueue.shortlist[0]?.proposal ?? null;
+  const topCardMode = topProposal ? describeTopCardMode(topProposal) : null;
   const [maxIterations, setMaxIterations] = useState("2");
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
@@ -362,9 +363,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {recommendation.detail}
               </p>
               {topProposal ? (
-                <div className="mt-3 flex max-w-2xl flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white sm:flex-row sm:items-center sm:justify-between">
-                  <span className="min-w-0">
-                    Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span>
+                <div className="mt-3 flex max-w-2xl flex-col gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white sm:flex-row sm:items-center sm:justify-between">
+                  <span className="min-w-0 space-y-1">
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span>Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span></span>
+                      {topCardMode ? <StatusPill tone={topCardMode.tone} label={topCardMode.label} /> : null}
+                    </span>
+                    {topCardMode ? <span className="block text-xs leading-5 hc-soft">{topCardMode.detail}</span> : null}
                   </span>
                   <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
                     Top-Karte öffnen

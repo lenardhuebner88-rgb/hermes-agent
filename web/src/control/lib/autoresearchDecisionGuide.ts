@@ -10,6 +10,12 @@ export interface AutoresearchDecisionGuide {
   facts: { label: string; value: string; tone: ToneName }[];
 }
 
+export interface AutoresearchTopCardMode {
+  tone: ToneName;
+  label: string;
+  detail: string;
+}
+
 export function canBatchConfirmAutoresearchSelection(input: {
   selectedCount: number;
   selectedManualReviewCount: number;
@@ -33,6 +39,21 @@ export function proposalNeedsManualReview(proposal: Proposal): boolean {
   if (proposal.mode !== "skill") return true;
   if (SEVERITY_ORDER[getProposalSeverity(proposal)] >= SEVERITY_ORDER.high) return true;
   return getProposalPriorityGroup(proposal).key === "safety";
+}
+
+export function describeTopCardMode(proposal: Proposal): AutoresearchTopCardMode {
+  if (proposalNeedsManualReview(proposal)) {
+    return {
+      tone: "amber",
+      label: "Einzelreview",
+      detail: "Diese Karte bitte einzeln lesen; Sammelübernahme bleibt aus.",
+    };
+  }
+  return {
+    tone: "emerald",
+    label: "Sammel-sicher",
+    detail: "Diese Karte darf in die sichere Sammelauswahl.",
+  };
 }
 
 export function getAutoresearchDecisionGuide(input: {
