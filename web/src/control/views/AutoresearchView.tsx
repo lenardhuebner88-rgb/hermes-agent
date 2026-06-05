@@ -158,8 +158,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const canConfirmSelection = canBatchConfirmAutoresearchSelection({
     selectedCount: selectedIds.length,
     selectedManualReviewCount,
-    busy: batchBusy,
+    busy: !!store.busy,
   });
+  const selectionControlsBusy = batchBusy || !!store.busy;
   const anyActionBusy = !!store.busy || !!loopBusy || pruneBusy || bulkRevertedBusy || deepAudit.busy || testFoundry.busy || deepAuditRunning || testFoundryRunning;
   const actionPlan = useMemo(
     () => getAutoresearchActionPlan({
@@ -606,13 +607,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
             {store.loading ? <Spinner /> : null}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm hc-soft">{de.autoresearch.selectedCount(selectedIds.length)}</span>
-              <Button outlined className="hc-hit" onClick={selectQueue} disabled={batchSafeVisibleProposalIds.length === 0 || batchBusy} title={manualReviewVisibleCount > 0 ? "Markiert nur sichtbare Vorschläge ohne Code, Hoch+-Risiko oder Safety-Bezug." : undefined} prefix={<ListChecks className="h-4 w-4" />}>
+              <Button outlined className="hc-hit" onClick={selectQueue} disabled={batchSafeVisibleProposalIds.length === 0 || selectionControlsBusy} title={manualReviewVisibleCount > 0 ? "Markiert nur sichtbare Vorschläge ohne Code, Hoch+-Risiko oder Safety-Bezug." : undefined} prefix={<ListChecks className="h-4 w-4" />}>
                 {manualReviewVisibleCount > 0 ? `Sichere markieren (${batchSafeVisibleProposalIds.length})` : de.autoresearch.selectAllVisible}
               </Button>
-              <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || batchBusy} prefix={<X className="h-4 w-4" />}>
+              <Button outlined className="hc-hit" onClick={clearSelection} disabled={selectedIds.length === 0 || selectionControlsBusy} prefix={<X className="h-4 w-4" />}>
                 {de.autoresearch.clearSelection}
               </Button>
-              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={!canConfirmSelection} title={selectedManualReviewCount > 0 ? "Riskante Auswahl einzeln prüfen oder Auswahl leeren." : undefined} prefix={batchBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+              <Button className="hc-hit" onClick={() => void confirmSelected()} disabled={!canConfirmSelection} title={selectedManualReviewCount > 0 ? "Riskante Auswahl einzeln prüfen oder Auswahl leeren." : undefined} prefix={selectionControlsBusy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
                 {de.autoresearch.batchConfirm}
               </Button>
             </div>
@@ -627,6 +628,16 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
           />
         )}
         {open.length > 0 && filteredOpen.length === 0 ? null : <DecisionGuidePanel guide={decisionGuide} />}
+        {selectedIds.length > 0 ? (
+          <SelectionActionBar
+            summary={queueActionSummary}
+            selectedCount={selectedIds.length}
+            canConfirm={canConfirmSelection}
+            busy={selectionControlsBusy}
+            onConfirm={() => void confirmSelected()}
+            onClear={clearSelection}
+          />
+        ) : null}
         {open.length === 0 && !store.loading ? <Empty icon={<FlaskConical className="h-5 w-5" />} text="Keine offenen Entscheidungen." /> : null}
         {open.length > 0 && filteredOpen.length === 0 && !store.loading && emptyQueueModeGuidance ? (
           <EmptyQueueModePanel guidance={emptyQueueModeGuidance} onChangeMode={setQueueMode} />
@@ -1139,6 +1150,45 @@ function QueueActionSummaryPanel({ summary }: { summary: AutoresearchQueueAction
               <p className="mt-1 text-sm font-semibold text-white">{fact.value}</p>
             </div>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectionActionBar({
+  summary,
+  selectedCount,
+  canConfirm,
+  busy,
+  onConfirm,
+  onClear,
+}: {
+  summary: AutoresearchQueueActionSummary;
+  selectedCount: number;
+  canConfirm: boolean;
+  busy: boolean;
+  onConfirm: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className={cn("sticky bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] z-30 rounded-lg border p-3 shadow-2xl shadow-black/40 backdrop-blur lg:bottom-3", reviewStepToneClass(summary.tone))}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="hc-eyebrow">Auswahl bereit</p>
+            <StatusPill tone={summary.tone} label={`${selectedCount} markiert`} />
+          </div>
+          <h3 className="mt-1 text-sm font-semibold text-white">{summary.title}</h3>
+          <p className="mt-1 max-w-3xl text-xs leading-5 hc-soft">{summary.confirmLine}</p>
+        </div>
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          <Button outlined className="hc-hit justify-center" onClick={onClear} disabled={busy} prefix={<X className="h-4 w-4" />}>
+            Auswahl leeren
+          </Button>
+          <Button className="hc-hit justify-center" onClick={onConfirm} disabled={!canConfirm} title={canConfirm ? "Übernimmt nur die markierten sammelsicheren Karten." : "Riskante Auswahl erst leeren oder einzeln prüfen."} prefix={busy ? <Spinner /> : <CheckCheck className="h-4 w-4" />}>
+            Auswahl übernehmen
+          </Button>
         </div>
       </div>
     </div>
