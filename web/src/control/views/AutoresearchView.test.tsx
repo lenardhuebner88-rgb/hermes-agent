@@ -13,6 +13,7 @@ import { getAutoresearchReadiness } from "../lib/autoresearchReadiness";
 import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, describeTopCardMode, getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary, getBatchSafeVisibleProposalIds } from "../lib/autoresearchDecisionGuide";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings } from "./AutoresearchView";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -159,6 +160,27 @@ describe("AutoresearchView cockpit recommendation", () => {
     expect(recommendation.kind).toBe("inspect");
     expect(recommendation.title).toContain("Status prüfen");
     expect(recommendation.primaryLabel).toBe("Status ansehen");
+  });
+
+  it("keeps the cockpit top-card brief readable for technical code proposals", () => {
+    const brief = getProposalOperatorBrief(proposal({
+      id: "top-code",
+      mode: "code",
+      severity: "high",
+      category: "bug_risk",
+      target: "hermes_cli/web_server.py:6420",
+      title: "Deep-Audit in hermes_cli/web_server.py:6420: subprocess.Popen with shell-built start and osascript",
+      rationale_plain: "subprocess.Popen is called with shell-built commands.",
+    }));
+
+    expect(brief).toMatchObject({
+      tone: "amber",
+      label: "Code mit Gate",
+      title: "Erst lesen, dann übernehmen.",
+    });
+    expect(brief.summary).toContain("Gate");
+    expect(brief.facts.find((fact) => fact.label === "Betroffen")?.value).toContain("hermes_cli/web_server.py");
+    expect(brief.facts.find((fact) => fact.label === "Klick")?.value).toContain("Code-Änderung plus Test-Gate");
   });
 });
 

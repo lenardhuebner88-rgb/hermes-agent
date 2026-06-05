@@ -21,6 +21,7 @@ import { canApplyAllOpenSkillProposals, canBatchConfirmAutoresearchSelection, de
 import { getAutoresearchReviewFlow, type AutoresearchReviewFlow } from "../lib/autoresearchReviewFlow";
 import { getDeepAuditGuidance, getResearchLoopGuidance, getResearchLoopPreset, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, getSelectedResearchLoopPresetId, RESEARCH_LOOP_PRESETS, getTestFoundryGuidance, type AutoresearchRunGuidance, type ResearchLoopPresetId, type ResearchLoopStartChecklist, type ResearchLoopStartSummary } from "../lib/autoresearchRunGuidance";
 import { getAutoresearchLastRunBrief, getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRunCard, type AutoresearchRunSummary } from "../lib/autoresearchRunSummary";
+import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { AutoresearchRun, ToneName } from "../lib/types";
@@ -77,6 +78,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const filteredHighPriorityCount = filteredDistribution.bySeverity.critical + filteredDistribution.bySeverity.high;
   const topProposal = relevanceQueue.shortlist[0]?.proposal ?? null;
   const topCardMode = topProposal ? describeTopCardMode(topProposal) : null;
+  const topProposalBrief = useMemo(() => topProposal ? getProposalOperatorBrief(topProposal) : null, [topProposal]);
   const [maxIterations, setMaxIterations] = useState("2");
   const [area, setArea] = useState("all");
   const [focus, setFocus] = useState("recommended_sections");
@@ -434,17 +436,32 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {recommendation.detail}
               </p>
               {topProposal ? (
-                <div className="mt-3 flex max-w-2xl flex-col gap-3 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white sm:flex-row sm:items-center sm:justify-between">
-                  <span className="min-w-0 space-y-1">
-                    <span className="flex flex-wrap items-center gap-2">
-                      <span>Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span></span>
-                      {topCardMode ? <StatusPill tone={topCardMode.tone} label={topCardMode.label} /> : null}
-                    </span>
-                    {topCardMode ? <span className="block text-xs leading-5 hc-soft">{topCardMode.detail}</span> : null}
-                  </span>
-                  <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
-                    Top-Karte öffnen
-                  </Button>
+                <div className="mt-3 max-w-3xl rounded-lg border border-white/10 bg-white/[.03] px-3 py-3 text-sm text-white">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="hc-eyebrow">Als Erstes</p>
+                        {topProposalBrief ? <StatusPill tone={topProposalBrief.tone} label={topProposalBrief.label} /> : null}
+                        {topCardMode ? <StatusPill tone={topCardMode.tone} label={topCardMode.label} /> : null}
+                      </div>
+                      <h2 className="mt-2 text-base font-semibold leading-6 text-white">{topProposalBrief?.title ?? "Nächste Karte prüfen."}</h2>
+                      <p className="mt-1 text-sm leading-6 hc-soft">{topProposalBrief?.summary ?? topProposal.title?.trim() ?? topProposal.target}</p>
+                      {topCardMode ? <p className="mt-1 text-xs leading-5 hc-dim">{topCardMode.detail}</p> : null}
+                    </div>
+                    <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
+                      Top-Karte öffnen
+                    </Button>
+                  </div>
+                  {topProposalBrief ? (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      {topProposalBrief.facts.map((fact) => (
+                        <div key={fact.label} className={cn("min-w-0 rounded-md border px-2.5 py-2", reviewStepToneClass(fact.tone))}>
+                          <p className="text-[10px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p>
+                          <p className="mt-1 line-clamp-2 text-xs leading-5 hc-soft" title={fact.value}>{fact.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
