@@ -7,6 +7,7 @@ import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { OverviewView } from "./views/OverviewView";
 import { InboxView } from "./views/InboxView";
+import { PulseView } from "./views/PulseView";
 import { AgentOpsView } from "./views/AgentOpsView";
 import { HermesFleet } from "./views/HermesFleet";
 import { AutoresearchView } from "./views/AutoresearchView";
@@ -16,6 +17,7 @@ import { CronView } from "./views/CronView";
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/inbox")) return "inbox";
+  if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/hermes")) return "hermes";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
@@ -28,6 +30,7 @@ function activeFromPath(pathname: string): ControlTab {
 const tabPath: Record<ControlTab, string> = {
   overview: "/control",
   inbox: "/control/inbox",
+  pulse: "/control/pulse",
   workstreams: "/control/workstreams",
   hermes: "/control/hermes",
   autoresearch: "/control/autoresearch",
@@ -68,7 +71,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", h: "hermes", a: "autoresearch", u: "overview", i: "inbox" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", h: "hermes", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -96,6 +99,7 @@ export default function ControlPage() {
           <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="inbox" element={<InboxView density={density.density} />} />
+          <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />
           <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />

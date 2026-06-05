@@ -1,15 +1,16 @@
-import { Bot, Clock, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, Bot, Clock, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 
-export type ControlTab = "overview" | "inbox" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: de.tabs.overview, mobileLabel: "Übers.", path: "/control", icon: LayoutDashboard },
   { id: "inbox", label: de.tabs.inbox, mobileLabel: "Postf.", path: "/control/inbox", icon: Inbox },
+  { id: "pulse", label: de.tabs.pulse, mobileLabel: "Puls", path: "/control/pulse", icon: Activity },
   { id: "workstreams", label: de.tabs.workstreams, mobileLabel: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
   { id: "hermes", label: de.tabs.hermes, mobileLabel: "Hermes", path: "/control/hermes", icon: Bot },
   { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
@@ -65,7 +66,7 @@ function ShellAiry({ active, children, density, pinned, openProposals, onNavigat
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
-        <div className="grid grid-cols-7">
+        <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} openProposals={openProposals} onClick={() => onNavigate(tab.id)} />)}
         </div>
       </nav>
