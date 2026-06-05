@@ -52,6 +52,10 @@ hermes_agent.egg-info/
 wandb/
 testlogs
 
+# Playwright E2E output
+web/test-results/
+web/playwright-report/
+
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml
 

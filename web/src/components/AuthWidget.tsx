@@ -47,6 +47,12 @@ export function AuthWidget({ className }: AuthWidgetProps) {
 
   useEffect(() => {
     let cancelled = false;
+    if (!window.__HERMES_AUTH_REQUIRED__) {
+      setHidden(true);
+      return () => {
+        cancelled = true;
+      };
+    }
     api
       .getAuthMe()
       .then((data) => {
