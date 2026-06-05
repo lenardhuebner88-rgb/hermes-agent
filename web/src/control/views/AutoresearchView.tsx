@@ -225,6 +225,9 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+  const focusProposal = (proposalId: string) => {
+    document.getElementById(`autoresearch-proposal-${proposalId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   const runPrimaryRecommendation = () => {
     if (recommendation.kind === "review") {
@@ -251,7 +254,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const selectOrFocusTopProposal = () => {
     if (!topProposal) return;
     if (proposalNeedsManualReview(topProposal)) {
-      document.getElementById(`autoresearch-proposal-${topProposal.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      focusProposal(topProposal.id);
       return;
     }
     toggleSelection(topProposal.id, true);
@@ -272,7 +275,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       event.preventDefault();
       if (action === "select-top" && top) {
         if (proposalNeedsManualReview(top)) {
-          document.getElementById(`autoresearch-proposal-${top.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+          focusProposal(top.id);
         } else {
           setSelectedProposalIds((current) => toggleProposalSelection(current, top.id, true));
         }
@@ -357,9 +360,14 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
                 {recommendation.detail}
               </p>
               {topProposal ? (
-                <p className="mt-3 max-w-2xl rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white">
-                  Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span>
-                </p>
+                <div className="mt-3 flex max-w-2xl flex-col gap-2 rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm text-white sm:flex-row sm:items-center sm:justify-between">
+                  <span className="min-w-0">
+                    Als Erstes: <span className="font-semibold">{topProposal.title?.trim() || topProposal.target}</span>
+                  </span>
+                  <Button outlined className="hc-hit shrink-0 justify-center" onClick={() => focusProposal(topProposal.id)} prefix={<ArrowDown className="h-4 w-4" />}>
+                    Top-Karte öffnen
+                  </Button>
+                </div>
               ) : null}
               {status.error ? <p className="mt-2 text-sm text-red-200">{status.error}</p> : null}
             </div>
