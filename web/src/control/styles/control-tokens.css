@@ -75,3 +75,71 @@
 @media (prefers-reduced-motion: reduce) { .hc-led-live, .hc-led-warn, .hc-led-error { animation: none; } }
 
 @media (min-width: 1024px) { .hc-page { margin-left: -1.5rem; margin-right: -1.5rem; } }
+
+/* ── f5 · Decision-spine hierarchy ────────────────────────────────────────
+   The landing answers one question — "Was braucht mich?" — so its surfaces
+   carry deliberate hierarchy instead of a uniform wall of hc-cards:
+   one HERO with real weight, ROWS whose severity you SEE before you read.
+   All additive on the existing --hc-* tokens (no second style system). */
+
+/* Hero — the spine. Soft tone-driven gradient + accent edge so it reads as
+   the dashboard's centre of gravity. --hc-hero-accent sets the mood
+   (emerald = calm, amber/red = attention); defaults to the brand accent. */
+.hc-hero {
+  position: relative;
+  border: 1px solid var(--hc-border-strong);
+  border-radius: calc(var(--hc-radius) * 1.75);
+  background:
+    radial-gradient(130% 150% at 0% 0%, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 16%, transparent) 0%, transparent 56%),
+    linear-gradient(180deg, var(--hc-panel-2) 0%, var(--hc-panel) 100%);
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 10px 44px rgba(0,0,0,.42);
+  overflow: hidden;
+}
+.hc-hero::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 72%, transparent) 45%, transparent);
+}
+
+/* The single headline number: oversized, tabular, tone inherited from color. */
+.hc-count { font-variant-numeric: tabular-nums; font-weight: 700; line-height: .95; letter-spacing: -.03em; }
+
+/* Decision row: a left spine bar makes severity pre-attentive — the eye lands
+   on red before it reads a word. One class, severity via --hc-sev. */
+.hc-decision {
+  position: relative;
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-radius);
+  background: color-mix(in srgb, var(--hc-panel-card) 78%, transparent);
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+}
+.hc-decision::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  border-radius: var(--hc-radius) 0 0 var(--hc-radius);
+  background: var(--hc-sev, var(--hc-zinc));
+}
+.hc-decision:hover {
+  background: color-mix(in srgb, var(--hc-panel-active) 86%, transparent);
+  border-color: color-mix(in srgb, var(--hc-sev, var(--hc-border-strong)) 45%, var(--hc-border));
+}
+.hc-decision:focus-visible { outline: 2px solid color-mix(in srgb, var(--hc-sev, var(--hc-accent)) 70%, transparent); outline-offset: 2px; }
+
+.hc-sev-critical { --hc-sev: var(--hc-red); }
+.hc-sev-high     { --hc-sev: var(--hc-amber); }
+.hc-sev-info     { --hc-sev: var(--hc-cyan); }
+.hc-sev-calm     { --hc-sev: var(--hc-emerald); }
+
+/* Gentle staggered entrance for the decision list (motion-safe only). */
+@media (prefers-reduced-motion: no-preference) {
+  .hc-rise { animation: hc-rise .34s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes hc-rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+}
+
+/* Count badge on a tab/rail when work is waiting (replaces the bare dot). */
+.hc-badge {
+  min-width: 1.05rem; height: 1.05rem; padding: 0 .3rem; border-radius: 999px;
+  font-size: 10px; font-weight: 700; line-height: 1.05rem; text-align: center;
+  font-variant-numeric: tabular-nums; color: #fff;
+}
+.hc-badge-amber { background: var(--hc-amber); color: #1a1206; }
+.hc-badge-red   { background: var(--hc-red); }
+.hc-badge-accent{ background: var(--hc-accent); }

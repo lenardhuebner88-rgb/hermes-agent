@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Check, ClipboardCopy, ExternalLink, Keyboard, LayoutGrid, List, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -452,7 +453,12 @@ export function BacklogView({ density }: { density: Density }) {
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
   const [persisted] = useState(loadPersistedView);
   const [showAllDone, setShowAllDone] = useState(false);
-  const [openId, setOpenId] = useState<string | null>(null);
+  // Deep-link from the Decision Inbox: /control/backlog?focus=<id> seeds the open
+  // drawer at mount. The drawer only renders once the item is found in the loaded
+  // backlog (selectedItem guard below), so seeding before data arrives is safe and
+  // needs no effect/setState — keeps render pure.
+  const [focusParams] = useSearchParams();
+  const [openId, setOpenId] = useState<string | null>(() => focusParams.get("focus"));
   const [viewMode, setViewMode] = useState<ViewMode>(persisted.viewMode ?? "queue");
   const [q, setQ] = useState("");
   const [filterOwner, setFilterOwner] = useState(persisted.filterOwner ?? "");

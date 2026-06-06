@@ -42,6 +42,13 @@ export interface InboxSummary {
 const SEVERITY_WEIGHT: Record<string, number> = { critical: 95, high: 80, medium: 55, low: 40 };
 const SURFACE_ORDER: Record<InboxSurface, number> = { autoresearch: 0, family: 1, orchestrator: 2 };
 
+// Interventions that merely SUMMARIZE a surface already enumerated per-item above
+// would double-count the inbox total: `open-proposals` is one row saying "5 offen"
+// on TOP of the 5 actionable-proposal rows from section 1, so 5 decisions read as 6
+// and the headline never matches reality. We drop such summaries HERE (in the inbox
+// fold) only — they remain valid in the AgentOps summary view, which is not per-item.
+const REDUNDANT_INTERVENTION_IDS = new Set<string>(["open-proposals"]);
+
 function proposalTone(severity: string): ToneName {
   if (severity === "critical") return "red";
   if (severity === "high") return "amber";
@@ -87,7 +94,9 @@ export function buildDecisionInbox(input: {
       why: [p.category ?? (p.mode === "code" ? "Code-Änderung" : "Skill"), severity].filter(Boolean).join(" · "),
       nextAction: "Prüfen & entscheiden",
       tone: proposalTone(severity),
-      target: "/control/autoresearch",
+      // Deep-link to the exact proposal card, not the whole tab — AutoresearchView
+      // reads ?focus and scrolls/focuses `autoresearch-proposal-${id}`.
+      target: `/control/autoresearch?focus=${encodeURIComponent(p.id)}`,
       weight: SEVERITY_WEIGHT[severity] ?? 40,
     });
   }
@@ -107,13 +116,17 @@ export function buildDecisionInbox(input: {
       why: reasons || (candidate.item.area || "Family Organizer"),
       nextAction: nextActionForFoItem(candidate.item),
       tone: w >= 85 ? "red" : w >= 65 ? "amber" : "cyan",
-      target: "/control/backlog",
+      // Deep-link to the exact backlog item — BacklogView reads ?focus and opens
+      // that item's detail drawer.
+      target: `/control/backlog?focus=${encodeURIComponent(candidate.item.id)}`,
       weight: w,
     });
   }
 
   // 3) Orchestrator — interventions are already the "needs an operator" set.
+  //    Skip summaries that duplicate a per-item surface (see REDUNDANT_INTERVENTION_IDS).
   for (const iv of input.interventions) {
+    if (REDUNDANT_INTERVENTION_IDS.has(iv.id)) continue;
     items.push({
       key: `orch:${iv.id}`,
       surface: "orchestrator",

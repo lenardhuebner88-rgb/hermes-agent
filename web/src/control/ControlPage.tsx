@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
-import { useHermesWorkers, useProposals } from "./hooks/useControlData";
+import { useDecisionInbox, useHermesWorkers, useProposals } from "./hooks/useControlData";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { OverviewView } from "./views/OverviewView";
@@ -16,7 +16,7 @@ import { OrchestratorBacklogView } from "./views/OrchestratorBacklogView";
 import { CronView } from "./views/CronView";
 
 function activeFromPath(pathname: string): ControlTab {
-  if (pathname.includes("/control/inbox")) return "inbox";
+  if (pathname.includes("/control/overview")) return "overview";
   if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/hermes")) return "hermes";
@@ -24,12 +24,13 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
-  return "overview";
+  // Root /control (and the legacy /control/inbox) is the Decision-Inbox landing.
+  return "inbox";
 }
 
 const tabPath: Record<ControlTab, string> = {
-  overview: "/control",
-  inbox: "/control/inbox",
+  inbox: "/control",
+  overview: "/control/overview",
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
   hermes: "/control/hermes",
@@ -45,6 +46,7 @@ export default function ControlPage() {
   const location = useLocation();
   const proposals = useProposals();
   const workers = useHermesWorkers();
+  const inbox = useDecisionInbox();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const gPendingRef = useRef<number>(0);
@@ -89,6 +91,8 @@ export default function ControlPage() {
         density={density.density}
         pinned={density.pinned}
         openProposals={proposals.openSkillProposals.length}
+        inboxTotal={inbox.summary.total}
+        inboxTone={inbox.worstTone}
         onNavigate={(tab) => navigate(tabPath[tab])}
         setDensity={density.setDensity}
         resetToAuto={density.resetToAuto}
@@ -96,9 +100,9 @@ export default function ControlPage() {
         onOpenCommand={() => setPaletteOpen(true)}
       >
         <Routes>
-          <Route index element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
-          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
+          <Route index element={<InboxView density={density.density} />} />
           <Route path="inbox" element={<InboxView density={density.density} />} />
+          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
           <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
           <Route path="hermes" element={<HermesFleet density={density.density} />} />

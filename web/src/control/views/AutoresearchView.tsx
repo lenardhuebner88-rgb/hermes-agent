@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Archive, ArrowDown, CheckCheck, ClipboardCheck, FlaskConical, GitPullRequestArrow, ListChecks, Play, Radar, RotateCw, SearchCode, Settings2, ShieldCheck, Sparkles, Square, Target, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
@@ -334,6 +335,19 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
   const focusProposal = (proposalId: string) => {
     document.getElementById(`autoresearch-proposal-${proposalId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
+
+  // Deep-link from the Decision Inbox: /control/autoresearch?focus=<id> scrolls
+  // straight to that proposal card. Ref-guarded so it fires once per id (the 6s
+  // poll re-runs this effect) and waits until the proposal has actually loaded.
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get("focus");
+  const consumedFocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusId || consumedFocusRef.current === focusId) return;
+    if (!store.proposals.some((p) => p.id === focusId)) return;
+    consumedFocusRef.current = focusId;
+    focusProposal(focusId);
+  }, [focusId, store.proposals]);
 
   const runPrimaryRecommendation = () => {
     if (recommendation.kind === "review") {
