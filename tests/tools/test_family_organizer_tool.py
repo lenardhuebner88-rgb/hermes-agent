@@ -400,6 +400,56 @@ def test_create_event_reports_other_same_day_events_without_blocking():
     assert out["also_that_day"][0]["title"] == "Sport"
 
 
+# ─── fo_set_vacation (0078-S2) ───────────────────────────────────────────────
+
+def test_set_vacation_posts_payload():
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kw["json"]
+        captured["headers"] = kw["headers"]
+        return _resp(201, {"vacations": [{"id": "vac-1", "label": "Urlaub"}]})
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(
+                fo.fo_set_vacation(
+                    member_role="Papa", start_date="2026-07-01", end_date="2026-07-14"
+                )
+            )
+    assert out["created"] is True
+    assert out["vacations"][0]["id"] == "vac-1"
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://fo.test/api/hermes/vacations"
+    assert captured["json"] == {
+        "memberRoles": ["papa"],
+        "startDate": "2026-07-01",
+        "endDate": "2026-07-14",
+        "label": "Urlaub",
+    }
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_set_vacation_rejects_bad_role():
+    with patch.dict(os.environ, TOKEN_ENV):
+        out = json.loads(
+            fo.fo_set_vacation(member_role="opa", start_date="2026-07-01", end_date="2026-07-14")
+        )
+    assert "error" in out
+
+
+def test_set_vacation_requires_dates():
+    with patch.dict(os.environ, TOKEN_ENV):
+        assert "error" in json.loads(
+            fo.fo_set_vacation(member_role="papa", start_date="", end_date="2026-07-14")
+        )
+        assert "error" in json.loads(
+            fo.fo_set_vacation(member_role="papa", start_date="2026-07-01", end_date="")
+        )
+
+
 # ─── registry wiring ─────────────────────────────────────────────────────────
 
 def test_tools_registered_under_family_organizer_toolset():
@@ -413,6 +463,7 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_set_meal_plan",
         "fo_update_task",
         "fo_delete_task",
+        "fo_set_vacation",
         "fo_list_lists",
         "fo_list_presence",
     ):

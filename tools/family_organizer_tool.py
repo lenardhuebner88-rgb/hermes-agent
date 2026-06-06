@@ -502,6 +502,48 @@ def fo_delete_task(
     )
 
 
+def fo_set_vacation(
+    member_role: str,
+    start_date: str,
+    end_date: str,
+    label: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> str:
+    """Trage Urlaub/Abwesenheit eines Mitglieds ein (0078).
+
+    member_role: papa | mama | kind_1 | kind_2
+    start_date:  YYYY-MM-DD (Pflicht) — relative Angaben vorher ausrechnen
+    end_date:    YYYY-MM-DD (Pflicht); muss >= start_date sein
+    label:       kurze Bezeichnung (Default 'Urlaub')
+    notes:       optionale Notiz
+    """
+    member_role = (member_role or "").strip().lower()
+    start_date = (start_date or "").strip()
+    end_date = (end_date or "").strip()
+    label = (label or "").strip() or "Urlaub"
+    if member_role not in MEMBER_ROLES:
+        return tool_error(
+            f"member_role muss eines von {list(MEMBER_ROLES)} sein", got=member_role
+        )
+    if not start_date or not end_date:
+        return tool_error("start_date und end_date (YYYY-MM-DD) sind Pflicht")
+    try:
+        body: Dict[str, Any] = {
+            "memberRoles": [member_role],
+            "startDate": start_date,
+            "endDate": end_date,
+            "label": label,
+        }
+        if notes:
+            body["notes"] = notes
+        data = _request("POST", "/api/hermes/vacations", write=True, json_body=body)
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result(
+        {"created": True, "vacations": (data or {}).get("vacations", [])}
+    )
+
+
 def check_family_organizer_requirements() -> bool:
     """Verfügbar, wenn die FO-Hermes-API /health mit unserem Token mit 200 antwortet."""
     if not _service_token():
@@ -735,6 +777,35 @@ FO_DELETE_TASK_SCHEMA = {
     },
 }
 
+FO_SET_VACATION_SCHEMA = {
+    "name": "fo_set_vacation",
+    "description": (
+        "Trage Urlaub/Abwesenheit eines Familienmitglieds für einen Zeitraum ein "
+        "(0078). " + _ROLE_HINT + " Start- und Enddatum müssen als YYYY-MM-DD "
+        "übergeben werden (Ende >= Start) — rechne relative Angaben anhand des "
+        "heutigen Datums aus dem Kontext aus. Schreibt direkt in die echten "
+        "Familiendaten und ist danach unter /admin/urlaub sichtbar."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "member_role": {
+                "type": "string",
+                "enum": list(MEMBER_ROLES),
+                "description": "Rolle des Mitglieds. " + _ROLE_HINT,
+            },
+            "start_date": {"type": "string", "description": "Startdatum YYYY-MM-DD."},
+            "end_date": {"type": "string", "description": "Enddatum YYYY-MM-DD (>= Start)."},
+            "label": {
+                "type": "string",
+                "description": "Kurze Bezeichnung (Default 'Urlaub').",
+            },
+            "notes": {"type": "string", "description": "Optionale Notiz."},
+        },
+        "required": ["member_role", "start_date", "end_date"],
+    },
+}
+
 FO_LIST_LISTS_SCHEMA = {
     "name": "fo_list_lists",
     "description": "Liste alle Familienlisten mit Namen, ID und Item-Anzahl.",
@@ -854,6 +925,21 @@ registry.register(
     ),
     check_fn=check_family_organizer_requirements,
     emoji="🗑️",
+)
+
+registry.register(
+    name="fo_set_vacation",
+    toolset="family-organizer",
+    schema=FO_SET_VACATION_SCHEMA,
+    handler=lambda args, **kw: fo_set_vacation(
+        member_role=args.get("member_role", ""),
+        start_date=args.get("start_date", ""),
+        end_date=args.get("end_date", ""),
+        label=args.get("label"),
+        notes=args.get("notes"),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="🏖️",
 )
 
 registry.register(
