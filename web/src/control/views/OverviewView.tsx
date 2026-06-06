@@ -1,12 +1,10 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Inbox } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useAutoresearchStatus, useBacklog, useHermesRecentResults, useHermesWorkers, useMetricsLite, useOrchestrationBacklog, useSystemHealth } from "../hooks/useControlData";
+import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLite, useSystemHealth } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
-import { buildAgentOpsSnapshot } from "../lib/agentOps";
-import { buildDecisionInbox, inboxSummary } from "../lib/decisionInbox";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { Proposal } from "../lib/types";
@@ -35,42 +33,15 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   const health = useSystemHealth();
   const metrics = useMetricsLite();
   const autoresearch = useAutoresearchStatus();
-  const results = useHermesRecentResults();
-  const backlog = useBacklog();
-  const orchestration = useOrchestrationBacklog();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
   const [copied, setCopied] = useState(false);
 
-  // Cross-surface Entscheidungs-Postfach (gleiche getestete Logik wie der Postfach-Tab),
-  // damit die Übersicht ehrlich ist: "Ruhig" nur, wenn AUCH nichts auf eine Entscheidung
-  // wartet — nicht nur, wenn die Worker gesund sind.
-  const snapshot = useMemo(
-    () =>
-      buildAgentOpsSnapshot({
-        workers: workers.data?.workers ?? [],
-        results: results.data?.results ?? [],
-        proposals,
-        orchestrationItems: orchestration.data?.items ?? [],
-        contractHealth: orchestration.data?.contract_health,
-        systemHealth: health.data,
-        metrics: metrics.data,
-        nowSec: orchestration.data?.checked_at ?? now,
-      }),
-    [workers.data, results.data, proposals, orchestration.data, health.data, metrics.data, now],
-  );
-  const inbox = useMemo(
-    () =>
-      buildDecisionInbox({
-        proposals,
-        foItems: backlog.data?.items ?? [],
-        foNowSec: backlog.data?.checked_at ?? now,
-        interventions: snapshot.interventions,
-      }),
-    [proposals, backlog.data, snapshot.interventions, now],
-  );
-  const inboxCounts = useMemo(() => inboxSummary(inbox), [inbox]);
+  // The SAME deduped decision inbox the Postfach landing uses (useDecisionInbox)
+  // — one source of truth for "Was braucht mich?", so the Übersicht count can't
+  // drift from the inbox. "Ruhig" only when nothing waits AND workers are healthy.
+  const inboxCounts = useDecisionInbox().summary;
 
   const allCalm = overview.allHealthy && inboxCounts.total === 0;
   const title = allCalm ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length + inboxCounts.total);
@@ -157,7 +128,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
         <Tile icon={<Bot />} label="Hermes laufen" value={`${overview.hermesRunning}/${overview.hermesTotal}`} active={focus === "hermes"} onClick={() => toggle("hermes")} />
         <Tile icon={<Activity />} label="Autoresearch" value={arValue} onClick={() => navigate("/control/autoresearch")} />
         <Tile icon={<FlaskConical />} label={de.overview.proposals} value={proposalValue} active={focus === "proposals"} onClick={() => toggle("proposals")} />
-        <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(hermesWarnings.length)} active={focus === "warnings"} onClick={() => toggle("warnings")} />
+        <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(hermesWarnings.length)} tone={hermesWarnings.length > 0 ? "amber" : undefined} active={focus === "warnings"} onClick={() => toggle("warnings")} />
       </section>
 
       {focus === "hermes" ? (
@@ -198,6 +169,11 @@ function Drilldown({ title, tab, navigate, items, empty }: { title: string; tab:
   );
 }
 
-function Tile({ icon, label, value, active, onClick }: { icon: React.ReactNode; label: string; value: string; active?: boolean; onClick: () => void }) {
-  return <Button outlined onClick={onClick} aria-pressed={active} className={cn("hc-card hc-hit flex h-auto items-center justify-start gap-3 p-4 text-left", active && "ring-1 ring-[var(--hc-accent-border)]")}><span className="text-[var(--hc-accent-text)]">{icon}</span><span><span className="block text-sm hc-soft">{label}</span><span className="block text-2xl font-semibold text-white">{value}</span></span></Button>;
+function Tile({ icon, label, value, active, tone, onClick }: { icon: React.ReactNode; label: string; value: string; active?: boolean; tone?: "amber" | "red"; onClick: () => void }) {
+  // Conditional tone: a non-zero warnings/problem count turns the tile amber/red
+  // so "good vs bad" is pre-attentive instead of read-and-reason.
+  const toned = tone === "red" ? "border-red-500/40 bg-red-500/[.06]" : tone === "amber" ? "border-amber-500/40 bg-amber-500/[.06]" : "";
+  const iconColor = tone === "red" ? "text-red-300" : tone === "amber" ? "text-amber-300" : "text-[var(--hc-accent-text)]";
+  const valueColor = tone === "red" ? "text-red-200" : tone === "amber" ? "text-amber-200" : "text-white";
+  return <Button outlined onClick={onClick} aria-pressed={active} className={cn("hc-card hc-hit flex h-auto items-center justify-start gap-3 p-4 text-left", toned, active && "ring-1 ring-[var(--hc-accent-border)]")}><span className={iconColor}>{icon}</span><span><span className="block text-sm hc-soft">{label}</span><span className={cn("block text-2xl font-semibold", valueColor)}>{value}</span></span></Button>;
 }

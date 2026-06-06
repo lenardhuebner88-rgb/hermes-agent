@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hmac
 import html
 import json
 import math
@@ -46,7 +47,7 @@ from typing import Any
 # resolve handler annotations like ``request: Request`` against module globals.
 # This module is only imported by the dashboard, where fastapi is guaranteed.
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ValidationError
 
 # Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
@@ -90,6 +91,63 @@ def _heartbeat_ttl() -> float:
         return float(os.environ.get("HERMES_AUTORESEARCH_HEARTBEAT_TTL", _DEFAULT_HEARTBEAT_TTL))
     except (TypeError, ValueError):
         return _DEFAULT_HEARTBEAT_TTL
+
+
+# ---------------------------------------------------------------------------
+# Opt-in token gate for MUTATING routes (trigger/stop/apply/generate/…).
+#
+# Reads (status/audit/proposals/runs/…) stay on the dashboard's loopback
+# session gate, unchanged. The mutating routes additionally honour a dedicated
+# ``HERMES_AUTORESEARCH_TOKEN``:
+#   - token NOT set in the environment  → no extra check; today's loopback
+#     session gate is the only barrier (single-user workflow is preserved).
+#   - token set                         → the caller must present the exact
+#     same value, via the ``X-Hermes-Autoresearch-Token`` header or a
+#     ``?token=`` query param, or the request is rejected with a structured
+#     403 (never a raw exception).
+# This is OPT-IN hardening: enforced only when the operator configures it.
+# ---------------------------------------------------------------------------
+_AUTORESEARCH_TOKEN_HEADER = "X-Hermes-Autoresearch-Token"
+
+
+def _required_autoresearch_token() -> str:
+    """The configured mutating-route token, or "" when the gate is disabled."""
+    return (os.environ.get("HERMES_AUTORESEARCH_TOKEN") or "").strip()
+
+
+def _presented_autoresearch_token(request: Request) -> str:
+    """Token the caller presented (header preferred, then ``?token=`` query)."""
+    header = request.headers.get(_AUTORESEARCH_TOKEN_HEADER, "")
+    if header:
+        return header
+    return request.query_params.get("token", "")
+
+
+def _mutation_token_denied(request: Request) -> JSONResponse | None:
+    """Return a structured 403 if the opt-in token gate is on and unmet, else None.
+
+    Graceful default: when ``HERMES_AUTORESEARCH_TOKEN`` is unset the gate is a
+    no-op and this returns ``None`` (loopback session gate only — today's
+    behaviour). When set, a missing/mismatched token yields a JSON 403 the
+    frontend's ``parseOrThrow``/``fetchJSON`` can read instead of a raw 500.
+    """
+    expected = _required_autoresearch_token()
+    if not expected:
+        return None
+    presented = _presented_autoresearch_token(request)
+    if presented and hmac.compare_digest(presented.encode(), expected.encode()):
+        return None
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error": "autoresearch_token_required",
+            "detail": (
+                "This mutating autoresearch endpoint requires the configured "
+                "HERMES_AUTORESEARCH_TOKEN (X-Hermes-Autoresearch-Token header "
+                "or ?token= query)."
+            ),
+        },
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -1117,7 +1175,29 @@ def register_autoresearch_routes(app: Any) -> None:
 
     @app.get("/api/autoresearch/status")
     async def autoresearch_status() -> dict[str, Any]:
-        return read_runner_status()
+        # Polled every 5s. A truncated/mid-write state file must degrade to a
+        # schema-valid envelope (HTTP 200), not a raw 500 that flips the panel
+        # to error every poll. Mirrors metrics_lite's degrade convention.
+        try:
+            return read_runner_status()
+        except Exception as exc:
+            return {
+                "schema": "autoresearch-runner-status-v1",
+                "state": "idle",
+                "pid": None,
+                "request_id": None,
+                "iteration": None,
+                "max": None,
+                "last_step": None,
+                "last_eval": None,
+                "route_status": None,
+                "heartbeat_age_s": None,
+                "heartbeat_fresh": False,
+                "last_receipt": None,
+                "last_run": None,
+                "note": None,
+                "error": str(exc),
+            }
 
     @app.get("/api/autoresearch/audit")
     async def autoresearch_audit() -> dict[str, Any]:
@@ -1132,7 +1212,10 @@ def register_autoresearch_routes(app: Any) -> None:
         return scan_open_scaffolds()
 
     @app.post("/api/autoresearch/trigger")
-    async def autoresearch_trigger(body: TriggerBody) -> dict[str, Any]:
+    async def autoresearch_trigger(request: Request, body: TriggerBody) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return start_runner(
             area=body.area, focus=body.focus, mode=body.mode,
             confirm=body.confirm, max_iterations=body.max_iterations,
@@ -1140,33 +1223,62 @@ def register_autoresearch_routes(app: Any) -> None:
         )
 
     @app.post("/api/autoresearch/stop")
-    async def autoresearch_stop() -> dict[str, Any]:
+    async def autoresearch_stop(request: Request) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return stop_runner()
 
     # --- Sprint A1: One-Click proposals (persistent store + apply-by-id) ---
     @app.get("/api/autoresearch/proposals")
     async def autoresearch_proposals() -> dict[str, Any]:
-        return _proposals.proposals_payload()
+        # Polled every 6s. Degrade a mid-write proposal store to an empty,
+        # schema-valid envelope instead of a raw 500 (see metrics_lite).
+        try:
+            return _proposals.proposals_payload()
+        except Exception as exc:
+            return {
+                "schema": "autoresearch-proposals-v1",
+                "count": 0,
+                "open_count": 0,
+                "reverted_count": 0,
+                "testing_count": 0,
+                "applied_count": 0,
+                "skipped_count": 0,
+                "proposals": [],
+                "error": str(exc),
+            }
 
     @app.post("/api/autoresearch/generate")
-    async def autoresearch_generate() -> dict[str, Any]:
+    async def autoresearch_generate(request: Request) -> Any:
         """Deterministic (A1): discover skill-improvement candidates and persist
-        them as previewable proposals. No mutation."""
+        them as previewable proposals (writes the proposal store)."""
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return _proposals.generate_proposals()
 
     @app.get("/api/autoresearch/runs")
     async def autoresearch_runs() -> dict[str, Any]:
         """P2: recent run history (skill loops + code scans) for the ROI panel."""
-        return {"schema": "autoresearch-runs-v1", "runs": _runs.read_runs()}
+        # Degrade to an empty, schema-valid envelope on any read error rather
+        # than a raw 500 (see metrics_lite).
+        try:
+            return {"schema": "autoresearch-runs-v1", "runs": _runs.read_runs()}
+        except Exception as exc:
+            return {"schema": "autoresearch-runs-v1", "runs": [], "error": str(exc)}
 
     @app.post("/api/autoresearch/prune")
-    async def autoresearch_prune() -> dict[str, Any]:
+    async def autoresearch_prune(request: Request) -> Any:
         """Archive closed proposals and auto-skip stale reverted proposals."""
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         result = _proposals.prune_proposals()
         return {"ok": True, **result}
 
     @app.post("/api/autoresearch/generate-code-weaknesses")
-    async def autoresearch_generate_code_weaknesses(body: CodeWeaknessBody | None = None) -> dict[str, Any]:
+    async def autoresearch_generate_code_weaknesses(request: Request, body: CodeWeaknessBody | None = None) -> Any:
         """Aux-model-backed, allowlisted code weakness finder. It only persists
         mode=code proposals; applying them uses the existing code gate.
 
@@ -1175,6 +1287,9 @@ def register_autoresearch_routes(app: Any) -> None:
         The finder makes one synchronous aux-model call per scanned file (each up to
         ~120s), so it runs on a worker thread — otherwise it would block the
         dashboard's event loop and stall every other request."""
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         b = body or CodeWeaknessBody()
         return await asyncio.to_thread(
             _proposals.generate_code_weakness_proposals, scope=b.scope, max_files=b.max_files, limit=b.limit,
@@ -1185,7 +1300,10 @@ def register_autoresearch_routes(app: Any) -> None:
         return {"schema": "deep-audit-subsystems-v1", "subsystems": sorted(_deep_audit.SUBSYSTEM_GLOBS)}
 
     @app.post("/api/autoresearch/deep-audit/trigger")
-    async def autoresearch_deep_audit_trigger(body: DeepAuditBody) -> dict[str, Any]:
+    async def autoresearch_deep_audit_trigger(request: Request, body: DeepAuditBody) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return trigger_deep_audit(subsystem=body.subsystem, focus=body.focus, max_files=body.max_files)
 
     @app.get("/api/autoresearch/deep-audit/status")
@@ -1197,7 +1315,10 @@ def register_autoresearch_routes(app: Any) -> None:
         return _deep_audit.read_findings()
 
     @app.post("/api/autoresearch/test-foundry/trigger")
-    async def autoresearch_test_foundry_trigger(body: TestFoundryBody) -> dict[str, Any]:
+    async def autoresearch_test_foundry_trigger(request: Request, body: TestFoundryBody) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return trigger_test_foundry(target=body.target, max_mutants=body.max_mutants, apply=body.apply)
 
     @app.get("/api/autoresearch/test-foundry/status")
@@ -1209,14 +1330,20 @@ def register_autoresearch_routes(app: Any) -> None:
         return {"schema": "test-foundry-targets-v1", "targets": _test_foundry.curated_targets()}
 
     @app.post("/api/autoresearch/apply")
-    async def autoresearch_apply_proposal(body: ApplyProposalBody) -> dict[str, Any]:
+    async def autoresearch_apply_proposal(request: Request, body: ApplyProposalBody) -> Any:
         """Apply exactly one stored proposal: backup → write → eval-gate →
         keep/auto-revert. Code-mode goes through the detached test-suite gate."""
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return _proposals.apply_proposal(body.id, confirm=body.confirm)
 
     @app.post("/api/autoresearch/confirm-batch")
-    async def autoresearch_confirm_batch(request: Request) -> dict[str, Any]:
+    async def autoresearch_confirm_batch(request: Request) -> Any:
         """Judge each skill proposal, then delegate accepted ids to apply_proposal."""
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
         except ValueError:
@@ -1236,5 +1363,8 @@ def register_autoresearch_routes(app: Any) -> None:
         return confirm_batch_proposals(body.ids, confirm=body.confirm)
 
     @app.post("/api/autoresearch/skip")
-    async def autoresearch_skip_proposal(body: SkipProposalBody) -> dict[str, Any]:
+    async def autoresearch_skip_proposal(request: Request, body: SkipProposalBody) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
         return _proposals.skip_proposal(body.id)

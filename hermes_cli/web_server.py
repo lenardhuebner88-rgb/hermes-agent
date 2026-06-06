@@ -8643,10 +8643,18 @@ _mount_plugin_api_routes()
 from hermes_cli.dashboard_auth.routes import router as _dashboard_auth_router  # noqa: E402
 app.include_router(_dashboard_auth_router)
 
-# Read-only /autoresearch view (Phase 4): live loop status + audit history.
-# GET status/audit are open (read-only, safe over the tailnet); POST
-# trigger/stop exist but are token-gated (403 without HERMES_AUTORESEARCH_TOKEN).
-# Registered before the SPA catch-all so these explicit paths take precedence.
+# /autoresearch view (Phase 4): live loop status + audit history + mutators.
+# All routes sit under /api/ → inherit the dashboard's loopback session gate.
+# GET status/audit/proposals/runs are read-only (safe over the tailnet) and
+# degrade to a schema-valid envelope on a mid-write state file (no raw 500).
+# The MUTATING POSTs (trigger/stop/apply/generate/prune/skip/confirm-batch/
+# generate-code-weaknesses/deep-audit+test-foundry triggers) additionally honour
+# an OPT-IN HERMES_AUTORESEARCH_TOKEN: when that env var is set the caller must
+# present it (X-Hermes-Autoresearch-Token header or ?token= query) or the route
+# returns a structured 403; when it is UNSET the loopback session gate is the
+# only barrier, preserving the single-user workflow. See _mutation_token_denied
+# in autoresearch_view.py. Registered before the SPA catch-all so these explicit
+# paths take precedence.
 from hermes_cli.autoresearch_view import register_autoresearch_routes  # noqa: E402
 register_autoresearch_routes(app)
 

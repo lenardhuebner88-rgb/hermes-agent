@@ -82,14 +82,47 @@ describe("buildDecisionInbox", () => {
     expect(items[0].surface).toBe("family");
   });
 
-  it("carries the navigation target per surface", () => {
+  it("deep-links each row to its exact item, not the bare tab", () => {
     const items = buildDecisionInbox({
       proposals: [proposal({ id: "p1", severity: "high" })],
+      foItems: [foItem({ id: "0001", status: "blocked" })],
+      foNowSec: NOW,
+      interventions: [],
+    });
+    const ar = items.find((i) => i.surface === "autoresearch");
+    const fo = items.find((i) => i.surface === "family");
+    expect(ar?.target).toBe("/control/autoresearch?focus=p1");
+    expect(fo?.target).toBe("/control/backlog?focus=0001");
+  });
+
+  it("encodes item ids that contain URL-special characters", () => {
+    const items = buildDecisionInbox({
+      proposals: [proposal({ id: "a/b c", severity: "high" })],
       foItems: [],
       foNowSec: NOW,
       interventions: [],
     });
-    expect(items[0].target).toBe("/control/autoresearch");
+    expect(items[0].target).toBe("/control/autoresearch?focus=a%2Fb%20c");
+  });
+
+  it("does NOT double-count proposals via the open-proposals summary intervention", () => {
+    // The open-proposals intervention summarizes the SAME proposals already
+    // enumerated per-item, so folding it would inflate the count. It must be
+    // dropped here while a genuine orchestrator summary (blocked-items) stays.
+    const items = buildDecisionInbox({
+      proposals: [proposal({ id: "p1", severity: "high" }), proposal({ id: "p2", severity: "low" })],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [
+        intervention({ id: "open-proposals", tone: "cyan", target: "/control/autoresearch" }),
+        intervention({ id: "blocked-items", tone: "red" }),
+      ],
+    });
+    const summary = inboxSummary(items);
+    // 2 proposals + 1 real orchestrator summary = 3, NOT 4.
+    expect(summary).toEqual({ total: 3, autoresearch: 2, family: 0, orchestrator: 1 });
+    expect(items.some((i) => i.key === "orch:open-proposals")).toBe(false);
+    expect(items.some((i) => i.key === "orch:blocked-items")).toBe(true);
   });
 
   it("is deterministic for equal weights (stable key tiebreak)", () => {

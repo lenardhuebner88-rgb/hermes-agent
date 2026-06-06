@@ -54,3 +54,21 @@ export const agentColorVar: Record<string, string> = {
 
 /** Status-Punkt-Variante (siehe .mc-dot-* in theme.css). */
 export type DotKind = 'live' | 'warn' | 'error' | 'ready' | 'idle' | 'offline';
+
+/**
+ * Decision-row severity spine (f5): ein Ton wird zu einer pre-attentiven
+ * linken Akzent-Leiste (.hc-sev-* in control-tokens.css). So *sieht* der
+ * Operator die Schwere einer Entscheidung, bevor er sie liest. Rot/Rose =
+ * kritisch, Amber = hoch, Emerald = ruhig, der Rest = Info.
+ */
+export const severitySpine: Record<ToneName, string> = {
+  red: 'hc-sev-critical',
+  rose: 'hc-sev-critical',
+  amber: 'hc-sev-high',
+  emerald: 'hc-sev-calm',
+  cyan: 'hc-sev-info',
+  sky: 'hc-sev-info',
+  indigo: 'hc-sev-info',
+  violet: 'hc-sev-info',
+  zinc: 'hc-sev-info',
+};

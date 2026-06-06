@@ -39,6 +39,8 @@ export const de = {
     empty: "Nichts wartet auf dich.",
     emptyHint: "Keine offenen Entscheidungen über Autoresearch, Family Organizer und Orchestrator.",
     do: "Tun",
+    calm: "Ruhig",
+    attention: "Aufmerksamkeit",
   },
   shell: { density: "Dichte", auto: "Auto", airy: "Luftig", compact: "Kompakt" },
   overview: {
