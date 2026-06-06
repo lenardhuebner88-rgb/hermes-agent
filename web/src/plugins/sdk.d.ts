@@ -50,7 +50,7 @@ import type { ComponentType } from "react";
 export type FetchJSON = <T = unknown>(
   url: string,
   init?: RequestInit,
-  options?: { allowUnauthorized?: boolean },
+  options?: { skipStaleTokenReload?: boolean },
 ) => Promise<T>;
 
 /**
