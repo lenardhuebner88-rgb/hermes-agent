@@ -544,6 +544,36 @@ def fo_set_vacation(
     )
 
 
+def fo_upsert_recipe(
+    name: str,
+    ingredients: Optional[list] = None,
+    notes: Optional[str] = None,
+) -> str:
+    """Lege ein Rezept an (0078).
+
+    name:        Name des Rezepts (Pflicht)
+    ingredients: Liste von Zutaten-Namen (z. B. ['Hackfleisch','Tomaten']); Slugs
+                 werden serverseitig abgeleitet, Duplikate entfernt
+    notes:       optionale Notiz / Zubereitung
+
+    Ein bereits existierender Rezeptname wird als Fehler gemeldet (kein Doppel).
+    """
+    name = (name or "").strip()
+    if not name:
+        return tool_error("name fehlt")
+    ingredient_names = [
+        str(item).strip() for item in (ingredients or []) if str(item).strip()
+    ]
+    try:
+        body: Dict[str, Any] = {"name": name, "ingredients": ingredient_names}
+        if notes:
+            body["notes"] = notes
+        data = _request("POST", "/api/hermes/recipes", write=True, json_body=body)
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result({"created": True, "recipe": (data or {}).get("recipe", {})})
+
+
 def check_family_organizer_requirements() -> bool:
     """Verfügbar, wenn die FO-Hermes-API /health mit unserem Token mit 200 antwortet."""
     if not _service_token():
@@ -806,6 +836,32 @@ FO_SET_VACATION_SCHEMA = {
     },
 }
 
+FO_UPSERT_RECIPE_SCHEMA = {
+    "name": "fo_upsert_recipe",
+    "description": (
+        "Lege ein Rezept fürs Rezeptbuch an (0078). Zutaten als Liste von Namen; "
+        "Slugs werden serverseitig abgeleitet und Duplikate entfernt. Ein bereits "
+        "existierender Rezeptname wird als Fehler gemeldet. Schreibt direkt in die "
+        "echten Familiendaten und ist danach unter /admin/rezepte sichtbar."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name des Rezepts."},
+            "ingredients": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Liste der Zutaten-Namen, z. B. ['Hackfleisch','Tomaten'].",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Optionale Notiz / Zubereitung.",
+            },
+        },
+        "required": ["name"],
+    },
+}
+
 FO_LIST_LISTS_SCHEMA = {
     "name": "fo_list_lists",
     "description": "Liste alle Familienlisten mit Namen, ID und Item-Anzahl.",
@@ -940,6 +996,19 @@ registry.register(
     ),
     check_fn=check_family_organizer_requirements,
     emoji="🏖️",
+)
+
+registry.register(
+    name="fo_upsert_recipe",
+    toolset="family-organizer",
+    schema=FO_UPSERT_RECIPE_SCHEMA,
+    handler=lambda args, **kw: fo_upsert_recipe(
+        name=args.get("name", ""),
+        ingredients=args.get("ingredients"),
+        notes=args.get("notes"),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="🍲",
 )
 
 registry.register(

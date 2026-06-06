@@ -450,6 +450,40 @@ def test_set_vacation_requires_dates():
         )
 
 
+# ─── fo_upsert_recipe (0078-S3) ──────────────────────────────────────────────
+
+def test_upsert_recipe_posts_payload():
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kw["json"]
+        captured["headers"] = kw["headers"]
+        return _resp(201, {"recipe": {"id": "rec-1", "name": "Lasagne"}})
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(
+                fo.fo_upsert_recipe(name="Lasagne", ingredients=["Hackfleisch", "Tomaten"])
+            )
+    assert out["created"] is True
+    assert out["recipe"]["id"] == "rec-1"
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://fo.test/api/hermes/recipes"
+    assert captured["json"] == {
+        "name": "Lasagne",
+        "ingredients": ["Hackfleisch", "Tomaten"],
+    }
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_upsert_recipe_requires_name():
+    with patch.dict(os.environ, TOKEN_ENV):
+        out = json.loads(fo.fo_upsert_recipe(name="  "))
+    assert "error" in out
+
+
 # ─── registry wiring ─────────────────────────────────────────────────────────
 
 def test_tools_registered_under_family_organizer_toolset():
@@ -464,6 +498,7 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_update_task",
         "fo_delete_task",
         "fo_set_vacation",
+        "fo_upsert_recipe",
         "fo_list_lists",
         "fo_list_presence",
     ):
