@@ -95,6 +95,17 @@ def test_format_footer_context_pct_clamped_to_100():
     assert out == "100%"
 
 
+def test_format_footer_token_detail_shows_context_tokens_and_pct():
+    out = format_runtime_footer(
+        model="m",
+        context_tokens=12_345,
+        context_length=32_768,
+        cwd="",
+        fields=("token_detail",),
+    )
+    assert out == "12.3k/32.8k tok (38%)"
+
+
 def test_format_footer_context_pct_never_negative():
     out = format_runtime_footer(
         model="m",
