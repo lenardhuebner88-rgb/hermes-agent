@@ -36,10 +36,8 @@ the port.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
-import os
 import sqlite3
 import time
 from dataclasses import asdict, is_dataclass
@@ -70,23 +68,37 @@ FreeText = Annotated[str, Field(max_length=_FREE_TEXT_MAX_LENGTH)]
 # existing plugin-bypass; this is documented above).
 # ---------------------------------------------------------------------------
 
-def _check_ws_token(provided: Optional[str]) -> bool:
-    """Constant-time compare against the dashboard session token.
+def _ws_upgrade_authorized(ws: "WebSocket") -> bool:
+    """Authorize a WebSocket upgrade by delegating to the dashboard's canonical
+    WS auth gate (``hermes_cli.web_server._ws_auth_ok``).
+
+    Delegating (rather than re-implementing a ``_SESSION_TOKEN``-only check)
+    means this endpoint transparently accepts whatever the core gate accepts
+    in each mode:
+
+      * loopback / ``--insecure``: legacy ``?token=<_SESSION_TOKEN>``
+      * gated OAuth: single-use ``?ticket=`` (the browser SDK's
+        ``buildWsUrl`` mints one per connect)
+      * server-internal: the process-lifetime ``?internal=`` credential
+
+    The previous bespoke check only understood ``_SESSION_TOKEN``, so the
+    kanban live-events WS was rejected on every OAuth-gated deployment even
+    though the rest of the dashboard worked. Routing through the shared gate
+    also means this can never drift from core auth again.
 
     Imported lazily so the plugin still loads in test contexts where the
-    dashboard web_server module isn't importable (e.g. the bare-FastAPI
-    test harness).
+    dashboard ``web_server`` module isn't importable (e.g. the bare-FastAPI
+    test harness); there we accept so the tail loop stays testable, matching
+    the prior behaviour.
     """
-    if not provided:
-        return False
     try:
         from hermes_cli import web_server as _ws
     except Exception:
-        return False
-    expected = getattr(_ws, "_SESSION_TOKEN", None)
-    if not expected:
-        return False
-    return hmac.compare_digest(str(provided), str(expected))
+        # No dashboard context (tests). Accept so the tail loop is still
+        # testable; in production the dashboard module always imports
+        # cleanly because it's the caller.
+        return True
+    return bool(_ws._ws_auth_ok(ws))
 
 
 def _ws_host_origin_is_allowed(ws: WebSocket) -> bool:
@@ -1904,10 +1916,12 @@ def specify_task_endpoint(
     """
     board = _resolve_board(board)
     # Pin the board for the duration of this call so the specifier module
-    # (which calls ``kb.connect()`` with no args) hits the right DB.
-    prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-    try:
-        os.environ["HERMES_KANBAN_BOARD"] = board or kanban_db.DEFAULT_BOARD
+    # (which calls ``kb.connect()`` with no args) hits the right DB. Use a
+    # context-local override rather than mutating the process-global
+    # HERMES_KANBAN_BOARD env var — this endpoint runs in FastAPI's
+    # threadpool, so two concurrent requests for different boards would
+    # otherwise race on the shared env var and cross-write (issue #38323).
+    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
         # Import lazily so a missing auxiliary client at import time
         # doesn't break plugin load.
         from hermes_cli import kanban_specify  # noqa: WPS433 (intentional)
@@ -1916,11 +1930,6 @@ def specify_task_endpoint(
             task_id,
             author=(payload.author or None),
         )
-    finally:
-        if prev_env is None:
-            os.environ.pop("HERMES_KANBAN_BOARD", None)
-        else:
-            os.environ["HERMES_KANBAN_BOARD"] = prev_env
 
     return {
         "ok": bool(outcome.ok),
@@ -2503,19 +2512,16 @@ def decompose_task_endpoint(
     can take minutes on reasoning models.
     """
     board = _resolve_board(board)
-    prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-    try:
-        os.environ["HERMES_KANBAN_BOARD"] = board or kanban_db.DEFAULT_BOARD
+    # Context-local board pin (see specify endpoint above): this sync
+    # endpoint runs in FastAPI's threadpool, so mutating the process-global
+    # HERMES_KANBAN_BOARD env var would let concurrent requests for
+    # different boards race and cross-write (issue #38323).
+    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
         from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
         outcome = kanban_decompose.decompose_task(
             task_id,
             author=(payload.author or None),
         )
-    finally:
-        if prev_env is None:
-            os.environ.pop("HERMES_KANBAN_BOARD", None)
-        else:
-            os.environ["HERMES_KANBAN_BOARD"] = prev_env
 
     return {
         "ok": bool(outcome.ok),
@@ -2657,16 +2663,12 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
-    if not _ws_host_origin_is_allowed(ws):
-        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
-        return
-
-    # Browsers cannot set Authorization on WS upgrades. Genuine loopback
-    # dashboard clients are accepted tokenlessly; every non-loopback mode
-    # must present the dashboard session token in the query string.
-    if not _ws_is_loopback_connection(ws) and not _check_ws_token(
-        ws.query_params.get("token")
-    ):
+    # Authorize the upgrade via the dashboard's canonical WS gate so the
+    # correct credential is accepted in every mode (loopback token / gated
+    # single-use ticket / server-internal credential). Browsers can't set
+    # Authorization on a WS upgrade, so the credential rides in the query
+    # string — the browser SDK's buildWsUrl() assembles it.
+    if not _ws_upgrade_authorized(ws):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
         return
     await ws.accept()
