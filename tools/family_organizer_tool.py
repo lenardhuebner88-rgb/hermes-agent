@@ -574,6 +574,144 @@ def fo_upsert_recipe(
     return tool_result({"created": True, "recipe": (data or {}).get("recipe", {})})
 
 
+def fo_delete_recipe(name: str, confirm: bool = False) -> str:
+    """Lösche ein Rezept aus dem Rezeptbuch (0078) — mit Confirm-Rückfrage.
+
+    Identifiziert das Rezept über den Namen (eindeutig). ADR-0004: Löschen verlangt
+    eine Bestätigung — rufe ZUERST ohne confirm auf (gibt confirm_required zurück),
+    frage die Person, und rufe erst nach deren Ja mit confirm=true erneut auf.
+    """
+    name = (name or "").strip()
+    if not name:
+        return tool_error("name fehlt")
+    try:
+        data = _request("GET", "/api/hermes/recipes", write=False) or {}
+        recipes = data.get("recipes", [])
+        target = name.casefold()
+        matches = [r for r in recipes if str(r.get("name", "")).strip().casefold() == target]
+        if not matches:
+            return tool_error(
+                f"Rezept '{name}' nicht gefunden",
+                available_recipes=[r.get("name") for r in recipes][:30],
+            )
+        if len(matches) > 1:
+            return tool_error(f"Mehrere Rezepte heißen '{name}' — bitte präzisieren")
+        recipe = matches[0]
+        if not confirm:
+            return tool_result(
+                {
+                    "confirm_required": True,
+                    "message": (
+                        f"Soll ich das Rezept '{recipe.get('name')}' wirklich löschen? "
+                        f"Bestätige mit confirm=true."
+                    ),
+                    "recipe": {"id": recipe.get("id"), "name": recipe.get("name")},
+                }
+            )
+        _request(
+            "DELETE",
+            f"/api/hermes/recipes/{recipe.get('id')}",
+            write=True,
+            json_body={},
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result(
+        {"deleted": True, "recipe": {"id": recipe.get("id"), "name": recipe.get("name")}}
+    )
+
+
+def fo_delete_vacation(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    label: Optional[str] = None,
+    vacation_id: Optional[str] = None,
+    confirm: bool = False,
+) -> str:
+    """Lösche einen Urlaubs-Eintrag (0078) — mit Confirm-Rückfrage.
+
+    Identifiziere den Urlaub ENTWEDER über ``vacation_id`` (z. B. aus einem vorherigen
+    Eintrag) ODER über den Zeitraum ``start_date`` (+ optional ``end_date`` / ``label``).
+    Der GET kennt keine Mitglieds-Rolle — bei mehreren Treffern (z. B. Familien-Urlaub
+    mit mehreren Personen am selben Datum) gibt der Tool die Kandidaten mit id zurueck;
+    waehle dann per ``vacation_id``. ADR-0004: erst ohne confirm aufrufen (Rueckfrage),
+    nach dem Ja mit confirm=true.
+    """
+    vacation_id = (vacation_id or "").strip()
+    label = (label or "").strip()
+    try:
+        if vacation_id:
+            vacation = {"id": vacation_id, "label": label or None, "startDate": None, "endDate": None}
+        else:
+            start_date = (start_date or "").strip()
+            if not start_date:
+                return tool_error(
+                    "Gib entweder vacation_id oder start_date (Zeitraum YYYY-MM-DD) an"
+                )
+            window_end = (end_date or "").strip() or start_date
+            data = _request(
+                "GET",
+                f"/api/hermes/vacations?from={start_date}&to={window_end}",
+                write=False,
+            ) or {}
+            candidates = data.get("vacations", [])
+            if label:
+                lc = label.casefold()
+                candidates = [
+                    v for v in candidates
+                    if str(v.get("label") or "").strip().casefold() == lc
+                ]
+            if not candidates:
+                detail = f" mit Bezeichnung '{label}'" if label else ""
+                return tool_error(
+                    f"Kein Urlaub im Zeitraum {start_date}..{window_end}{detail} gefunden"
+                )
+            if len(candidates) > 1:
+                return tool_result(
+                    {
+                        "ambiguous": True,
+                        "message": (
+                            "Mehrere Urlaube passen — bitte einen per vacation_id auswaehlen."
+                        ),
+                        "vacations": [
+                            {
+                                "id": v.get("id"),
+                                "label": v.get("label"),
+                                "startDate": v.get("startDate"),
+                                "endDate": v.get("endDate"),
+                            }
+                            for v in candidates
+                        ],
+                    }
+                )
+            vacation = candidates[0]
+        if not confirm:
+            span = ""
+            if vacation.get("startDate"):
+                span = f" ({vacation.get('startDate')}–{vacation.get('endDate')})"
+            return tool_result(
+                {
+                    "confirm_required": True,
+                    "message": (
+                        f"Soll ich den Urlaub '{vacation.get('label')}'{span} wirklich "
+                        f"löschen? Bestätige mit confirm=true."
+                    ),
+                    "vacation": {"id": vacation.get("id"), "label": vacation.get("label")},
+                }
+            )
+        _request(
+            "DELETE",
+            f"/api/hermes/vacations/{vacation.get('id')}",
+            write=True,
+            json_body={},
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+    return tool_result(
+        {"deleted": True, "vacation": {"id": vacation.get("id"), "label": vacation.get("label")}}
+    )
+
+
 def check_family_organizer_requirements() -> bool:
     """Verfügbar, wenn die FO-Hermes-API /health mit unserem Token mit 200 antwortet."""
     if not _service_token():
@@ -862,6 +1000,62 @@ FO_UPSERT_RECIPE_SCHEMA = {
     },
 }
 
+FO_DELETE_RECIPE_SCHEMA = {
+    "name": "fo_delete_recipe",
+    "description": (
+        "Lösche ein Rezept aus dem Rezeptbuch (0078) — identifiziert über den Namen. "
+        "WICHTIG (ADR-0004, Löschen verlangt Rückfrage): Rufe ZUERST ohne confirm auf; "
+        "der Tool antwortet mit confirm_required. Frage die Person, ob wirklich gelöscht "
+        "werden soll, und rufe erst nach deren Bestätigung erneut mit confirm=true auf."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name des zu löschenden Rezepts."},
+            "confirm": {
+                "type": "boolean",
+                "description": "Erst nach Nutzer-Bestätigung auf true setzen; sonst weglassen.",
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+FO_DELETE_VACATION_SCHEMA = {
+    "name": "fo_delete_vacation",
+    "description": (
+        "Lösche einen Urlaubs-Eintrag (0078). Identifiziere ihn ENTWEDER über "
+        "vacation_id (z. B. aus einem vorherigen Eintrag/aus einer ambiguous-Liste) "
+        "ODER über den Zeitraum start_date (+ optional end_date / label). Bei mehreren "
+        "Treffern gibt der Tool die Kandidaten mit id zurück — dann per vacation_id "
+        "auswählen. WICHTIG (ADR-0004): zuerst ohne confirm aufrufen (Rückfrage), nach "
+        "Bestätigung mit confirm=true."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "start_date": {
+                "type": "string",
+                "description": "Zeitraum-Anker YYYY-MM-DD (zur Identifikation).",
+            },
+            "end_date": {
+                "type": "string",
+                "description": "Optionales Zeitraum-Ende YYYY-MM-DD.",
+            },
+            "label": {"type": "string", "description": "Optionale Bezeichnung zur Eingrenzung."},
+            "vacation_id": {
+                "type": "string",
+                "description": "Direkte id des Urlaubs (statt Zeitraum-Auflösung).",
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": "Erst nach Nutzer-Bestätigung auf true setzen; sonst weglassen.",
+            },
+        },
+        "required": [],
+    },
+}
+
 FO_LIST_LISTS_SCHEMA = {
     "name": "fo_list_lists",
     "description": "Liste alle Familienlisten mit Namen, ID und Item-Anzahl.",
@@ -1009,6 +1203,33 @@ registry.register(
     ),
     check_fn=check_family_organizer_requirements,
     emoji="🍲",
+)
+
+registry.register(
+    name="fo_delete_recipe",
+    toolset="family-organizer",
+    schema=FO_DELETE_RECIPE_SCHEMA,
+    handler=lambda args, **kw: fo_delete_recipe(
+        name=args.get("name", ""),
+        confirm=bool(args.get("confirm", False)),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="🗑️",
+)
+
+registry.register(
+    name="fo_delete_vacation",
+    toolset="family-organizer",
+    schema=FO_DELETE_VACATION_SCHEMA,
+    handler=lambda args, **kw: fo_delete_vacation(
+        start_date=args.get("start_date"),
+        end_date=args.get("end_date"),
+        label=args.get("label"),
+        vacation_id=args.get("vacation_id"),
+        confirm=bool(args.get("confirm", False)),
+    ),
+    check_fn=check_family_organizer_requirements,
+    emoji="🗑️",
 )
 
 registry.register(

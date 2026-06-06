@@ -484,6 +484,121 @@ def test_upsert_recipe_requires_name():
     assert "error" in out
 
 
+# ─── fo_delete_recipe (0078, Confirm-on-Delete) ──────────────────────────────
+
+def test_delete_recipe_without_confirm_asks_first():
+    recipes = {"recipes": [{"id": "rec-9", "name": "Lasagne"}]}
+    calls = []
+
+    def fake_request(method, url, **kw):
+        calls.append(method)
+        if method == "GET" and url.endswith("/api/hermes/recipes"):
+            return _resp(200, recipes)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_recipe(name="lasagne"))
+    assert out["confirm_required"] is True
+    assert out["recipe"]["id"] == "rec-9"
+    assert "DELETE" not in calls
+
+
+def test_delete_recipe_with_confirm_deletes():
+    recipes = {"recipes": [{"id": "rec-9", "name": "Lasagne"}]}
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        if method == "GET":
+            return _resp(200, recipes)
+        if method == "DELETE" and url.endswith("/api/hermes/recipes/rec-9"):
+            captured["json"] = kw["json"]
+            captured["headers"] = kw["headers"]
+            return _resp(200, {"ok": True, "id": "rec-9"})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_recipe(name="Lasagne", confirm=True))
+    assert out["deleted"] is True
+    assert captured["json"] == {}
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_delete_recipe_unknown_returns_error():
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch(
+            "tools.family_organizer_tool.httpx.request",
+            return_value=_resp(200, {"recipes": [{"id": "r1", "name": "Pizza"}]}),
+        ):
+            out = json.loads(fo.fo_delete_recipe(name="Lasagne"))
+    assert "error" in out
+
+
+# ─── fo_delete_vacation (0078, Confirm-on-Delete) ────────────────────────────
+
+def test_delete_vacation_by_date_confirm_flow():
+    vacs = {"vacations": [
+        {"id": "vac-9", "label": "Sommer", "startDate": "2031-03-01", "endDate": "2031-03-08"},
+    ]}
+    calls = []
+
+    def fake_request(method, url, **kw):
+        calls.append(method)
+        if method == "GET" and "/api/hermes/vacations" in url:
+            return _resp(200, vacs)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_vacation(start_date="2031-03-01"))
+    assert out["confirm_required"] is True
+    assert out["vacation"]["id"] == "vac-9"
+    assert "DELETE" not in calls
+
+
+def test_delete_vacation_with_confirm_deletes_by_id():
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        if method == "DELETE" and url.endswith("/api/hermes/vacations/vac-9"):
+            captured["json"] = kw["json"]
+            captured["headers"] = kw["headers"]
+            return _resp(200, {"ok": True, "id": "vac-9"})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_vacation(vacation_id="vac-9", confirm=True))
+    assert out["deleted"] is True
+    assert captured["json"] == {}
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_delete_vacation_ambiguous_returns_candidates():
+    vacs = {"vacations": [
+        {"id": "v1", "label": "Trip", "startDate": "2031-03-01", "endDate": "2031-03-08"},
+        {"id": "v2", "label": "Trip", "startDate": "2031-03-01", "endDate": "2031-03-08"},
+    ]}
+
+    def fake_request(method, url, **kw):
+        if method == "GET":
+            return _resp(200, vacs)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_delete_vacation(start_date="2031-03-01"))
+    assert out["ambiguous"] is True
+    assert len(out["vacations"]) == 2
+
+
+def test_delete_vacation_requires_anchor():
+    with patch.dict(os.environ, TOKEN_ENV):
+        out = json.loads(fo.fo_delete_vacation())
+    assert "error" in out
+
+
 # ─── registry wiring ─────────────────────────────────────────────────────────
 
 def test_tools_registered_under_family_organizer_toolset():
@@ -499,6 +614,8 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_delete_task",
         "fo_set_vacation",
         "fo_upsert_recipe",
+        "fo_delete_recipe",
+        "fo_delete_vacation",
         "fo_list_lists",
         "fo_list_presence",
     ):
