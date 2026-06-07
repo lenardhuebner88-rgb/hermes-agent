@@ -1238,3 +1238,7 @@ rg "pattern" $(opensrc path <owner>/<repo>)
 > `--cwd <project>`) so the lockfile/`node_modules` version is used. The cache is pre-warmed at
 > installed/pinned versions weekly via `~/.hermes/bin/opensrc-prewarm.sh`. Before bumping a pin,
 > review the source delta with `~/.hermes/bin/opensrc-dep-diff.sh <spec> <old> <new>`.
+
+> **@xterm addons:** the `@xterm/addon-*` packages don't resolve standalone (opensrc monorepo bug),
+> but their source ships inside the xterm.js monorepo — read it at
+> `$(opensrc path @xterm/xterm)/addons/<addon>/src/` (e.g. `addon-fit/src/FitAddon.ts`).
