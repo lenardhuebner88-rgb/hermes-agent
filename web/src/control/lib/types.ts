@@ -100,6 +100,30 @@ export interface SystemHealthResponse {
   };
 }
 
+export interface VaultProvenanceOpenSession {
+  agent: string;
+  started: string;
+  task: string;
+  path: string;
+  age_hours: number | null;
+  stale: boolean;
+}
+
+export interface VaultProvenanceReceipt {
+  when: string;
+  agent: string;
+  file: string;
+  path: string;
+}
+
+export interface VaultProvenanceResponse {
+  schema: string;
+  error: string | null;
+  stale_count: number;
+  open_sessions: VaultProvenanceOpenSession[];
+  recent_receipts: VaultProvenanceReceipt[];
+}
+
 export interface CronLatestOutput {
   filename: string | null;
   mtime: number | null;

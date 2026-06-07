@@ -3,13 +3,14 @@ import { Activity, AlertTriangle, Bot, Check, ClipboardCopy, FlaskConical, Inbox
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLite, useSystemHealth } from "../hooks/useControlData";
+import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLite, useSystemHealth, useVaultProvenance } from "../hooks/useControlData";
 import { isActionable } from "../lib/autoresearch";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
+import { ProvenanceStrip } from "../components/ProvenanceStrip";
 
 type Focus = "hermes" | "proposals" | "warnings" | null;
 
@@ -33,6 +34,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   const health = useSystemHealth();
   const metrics = useMetricsLite();
   const autoresearch = useAutoresearchStatus();
+  const provenance = useVaultProvenance();
   const now = nowSec();
   const overview = buildOverview(workers.data?.workers ?? [], [], proposals, now);
   const [focus, setFocus] = useState<Focus>(null);
@@ -84,6 +86,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   return (
     <div className="space-y-5">
       <SystemHealthStrip data={health.data} error={health.error} now={now} metrics={metrics.data} />
+      <ProvenanceStrip data={provenance.data} error={provenance.error} />
 
       <section className="hc-card p-5 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">

@@ -81,6 +81,14 @@ export const de = {
     metricsError: "nicht ladbar",
     metricsErrorBadge: "Erhöhte Fehlerquote",
   },
+  provenance: {
+    title: "Provenienz",
+    staleBadge: (n: number) => `${n}× stale`,
+    staleInline: "stale",
+    openTitle: "Wer arbeitet gerade",
+    openEmpty: "Niemand eingecheckt",
+    recentTitle: "Zuletzt geliefert",
+  },
   crons: {
     eyebrow: "Geplante Jobs",
     title: "Crons",

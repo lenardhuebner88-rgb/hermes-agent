@@ -109,6 +109,26 @@ export const SystemHealthResponseSchema = z.object({
   }),
 });
 
+export const VaultProvenanceResponseSchema = z.object({
+  schema: z.string().catch("hermes-vault-provenance-v1"),
+  error: z.string().nullable().catch(null),
+  stale_count: z.coerce.number().catch(0),
+  open_sessions: z.array(z.object({
+    agent: z.string().catch("?"),
+    started: z.string().catch("?"),
+    task: z.string().catch(""),
+    path: z.string().catch(""),
+    age_hours: z.number().nullable().catch(null),
+    stale: z.boolean().catch(false),
+  })).catch([]),
+  recent_receipts: z.array(z.object({
+    when: z.string().catch(""),
+    agent: z.string().catch("?"),
+    file: z.string().catch(""),
+    path: z.string().catch(""),
+  })).catch([]),
+});
+
 const CronLatestOutputSchema = z.object({
   filename: z.string().nullable().catch(null),
   mtime: z.coerce.number().nullable().catch(null),

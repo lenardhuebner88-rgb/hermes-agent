@@ -16,6 +16,7 @@ import {
   RunInspectSchema,
   SystemHealthResponseSchema,
   WorkersResponseSchema,
+  VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse } from "../lib/schemas";
@@ -24,7 +25,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, ToneName, WorkersResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -535,6 +536,14 @@ export function useSystemHealth() {
     "health-status",
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
     5000,
+  );
+}
+
+export function useVaultProvenance() {
+  return usePolling<VaultProvenanceResponse>(
+    "vault-provenance",
+    async () => parseOrThrow(VaultProvenanceResponseSchema, await fetchJSON<unknown>("/api/vault/provenance"), "vault-provenance"),
+    20000,
   );
 }
 

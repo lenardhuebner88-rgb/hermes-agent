@@ -10219,6 +10219,11 @@ register_backlog_routes(app)
 from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes  # noqa: E402
 register_orchestration_backlog_routes(app)
 
+# Read-only Vault provenance (open coordination check-ins + recent receipts) for the
+# Übersicht tile. Under /api/ → inherits the session-token gate. Before the SPA catch-all.
+from hermes_cli.vault_provenance_view import register_vault_provenance_routes  # noqa: E402
+register_vault_provenance_routes(app)
+
 mount_spa(app)
 
 
