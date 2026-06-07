@@ -1231,3 +1231,10 @@ rg "pattern" $(opensrc path <owner>/<repo>)
 ```
 
 <!-- opensrc:end -->
+
+> **Version accuracy (homeserver):** `opensrc path pypi:<pkg>` returns the *latest* PyPI release,
+> not the installed pin. To read the version that actually runs, append the pin from
+> `pyproject.toml`: `opensrc path pypi:<pkg>@<ver>`. For npm, run inside the project (or pass
+> `--cwd <project>`) so the lockfile/`node_modules` version is used. The cache is pre-warmed at
+> installed/pinned versions weekly via `~/.hermes/bin/opensrc-prewarm.sh`. Before bumping a pin,
+> review the source delta with `~/.hermes/bin/opensrc-dep-diff.sh <spec> <old> <new>`.
