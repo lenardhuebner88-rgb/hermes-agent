@@ -117,8 +117,28 @@ def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_p
     )
 
 
+def test_default_orchestrator_profile_without_kanban_toolset_has_no_board_tools(monkeypatch, tmp_path):
+    """The target default=Orchestrator profile stays planning-only by default."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("toolsets:\n  - hermes-cli\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+
+    import tools.kanban_tools  # ensure registered
+    from tools.registry import invalidate_check_fn_cache, registry
+    from toolsets import resolve_toolset
+
+    invalidate_check_fn_cache()
+    schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
+    names = {s["function"].get("name") for s in schema if "function" in s}
+    kanban = {n for n in names if n and n.startswith("kanban_")}
+    assert kanban == set()
+
+
 def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
-    """Orchestrator profiles with toolsets: [kanban] see all kanban tools."""
+    """Explicit board-router profiles with toolsets: [kanban] see all kanban tools."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     home = tmp_path / ".hermes"
     home.mkdir()

@@ -3,8 +3,9 @@
 These tools are registered into the model's schema when the agent is
 running under the dispatcher (env var ``HERMES_KANBAN_TASK`` set) or when
 the active profile explicitly enables the ``kanban`` toolset for
-orchestrator work. A normal ``hermes chat`` session still sees **zero**
-kanban tools in its schema unless configured.
+orchestrator work. A normal ``hermes chat`` session — including the
+``default`` Orchestrator profile while it lacks the ``kanban`` toolset — still
+sees **zero** kanban tools in its schema unless configured.
 
 Why tools instead of just shelling out to ``hermes kanban``?
 
@@ -64,7 +65,9 @@ def _check_kanban_mode() -> bool:
 
     1. ``HERMES_KANBAN_TASK`` is set (dispatcher-spawned worker), OR
     2. The current profile has ``kanban`` in its toolsets config
-       (orchestrator profiles like techlead that route work via Kanban).
+       (explicit orchestrator/board-router profiles only; the default
+       Orchestrator profile remains conversation/planning-only unless a later
+       config gate deliberately adds this toolset).
 
     Humans running ``hermes chat`` without the kanban toolset see zero
     kanban tools. Workers spawned by the kanban dispatcher (gateway-

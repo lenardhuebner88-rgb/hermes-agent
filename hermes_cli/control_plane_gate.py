@@ -1,9 +1,20 @@
-"""Target control-plane gate helpers for Hub -> Reviewer -> Coordinator.
+"""Pure control-plane gate helpers for the One-Orchestrator target.
 
-These helpers are intentionally pure and side-effect free. They encode the
-contract Piet wants for the target architecture: Hub owns the execution-ready
-PlanSpec, Reviewer returns a verdict-only gate, and Coordinator may only perform
-mechanical normalization after an APPROVED reviewer verdict.
+These helpers are intentionally side-effect free.  The current target contract is:
+
+* ``default`` is normalized to the canonical operator-facing role
+  ``orchestrator``.
+* Reviewer verdicts are optional for low-risk/docs-only scopes, but useful and
+  gate-enforced for medium/high-risk, code, config, runtime, cron/systemd,
+  credential, database, deployment, or restart scopes unless Piet explicitly
+  overrides in the current thread.
+* Coordinator is not a target-hop requirement.  Any remaining Coordinator
+  runtime ownership is a separately inventoried retirement dependency, not an
+  apply prerequisite encoded here.
+
+The legacy ``coordinator_gate_decision`` remains for older callers that still
+need to prove a mechanical-only Coordinator normalization path, but new routing
+logic should use ``orchestrator_gate_decision``.
 """
 
 from __future__ import annotations
@@ -13,6 +24,31 @@ from typing import Any, Iterable, Mapping
 
 
 VERDICTS = {"APPROVED", "NEEDS_REVISION", "BLOCKED"}
+_REVIEW_REQUIRED_MARKERS = {
+    "medium",
+    "high",
+    "critical",
+    "code",
+    "config",
+    "profile",
+    "runtime",
+    "restart",
+    "reload",
+    "deploy",
+    "build",
+    "cron",
+    "timer",
+    "systemd",
+    "gateway",
+    "secret",
+    "credential",
+    "auth",
+    "database",
+    "db",
+    "kanban-dispatch",
+    "dispatch",
+    "push",
+}
 
 
 @dataclass(frozen=True)
@@ -24,8 +60,7 @@ class GateDecision:
 
 
 class SubstantiveCoordinatorChangeError(ValueError):
-    """Raised when Coordinator changes Hub-owned plan semantics."""
-
+    """Raised when Coordinator changes Orchestrator/Hub-owned plan semantics."""
 
 
 def _truthy(value: Any) -> bool:
@@ -34,9 +69,9 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in {"true", "yes", "1", "ok", "pass", "passed"}
+        normalized = value.strip().lower()
+        return normalized in {"true", "yes", "1", "ok", "pass", "passed", "approved", "go"} or normalized.startswith("go ")
     return bool(value)
-
 
 
 def _int_value(value: Any) -> int | None:
@@ -52,6 +87,52 @@ def _int_value(value: Any) -> int | None:
     return None
 
 
+def _normalize_role(role: Any) -> str | None:
+    if role is None:
+        return None
+    normalized = str(role).strip().lower().replace("-", "_")
+    if normalized in {"default", "hub", "orchestrator"}:
+        return "orchestrator"
+    return normalized or None
+
+
+def _plan_text(plan_spec: Mapping[str, Any]) -> str:
+    values: list[str] = []
+    for key in ("risk_class", "action_class", "scope", "objective", "goal"):
+        value = plan_spec.get(key)
+        if value is not None:
+            values.append(str(value))
+    for key in ("allowed_actions", "forbidden_actions", "changed_paths"):
+        value = plan_spec.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(str(item) for item in value)
+        elif value is not None:
+            values.append(str(value))
+    return " ".join(values).lower()
+
+
+def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
+    """Return whether the plan's risk/scope requires Reviewer or Piet override.
+
+    This is a conservative text/field classifier for control-plane gate helpers;
+    it does not dispatch, inspect files, or infer approval from Discord pointers.
+    Low-risk/docs-only scopes can proceed with explicit Piet approval and no
+    Reviewer verdict.  Risky scopes require either an APPROVED Reviewer verdict
+    or an explicit current-thread Piet override after seeing the risk.
+    """
+    if not isinstance(plan_spec, Mapping):
+        return True
+    text = _plan_text(plan_spec)
+    if any(marker in text for marker in _REVIEW_REQUIRED_MARKERS):
+        # Keep docs-only low-risk work out of mandatory review if the risky words
+        # only appear in anti-scope / forbidden actions.
+        risk = str(plan_spec.get("risk_class") or "").lower()
+        action = str(plan_spec.get("action_class") or "").lower()
+        if "low" in risk and "docs" in text and not action:
+            return False
+        return True
+    return False
+
 
 def validate_reviewer_verdict_metadata(
     metadata: Mapping[str, Any] | None,
@@ -60,10 +141,9 @@ def validate_reviewer_verdict_metadata(
 ) -> list[str]:
     """Return missing/invalid verdict metadata fields.
 
-    The reviewer verdict is the only thing that unlocks Coordinator takeover in
-    the target architecture. Keep this strict and small: enough to prove audit
-    trail, scope attestation, and verdict identity without coupling to any live
-    system.
+    Reviewer verdicts are optional for low-risk/docs-only Orchestrator work, but
+    whenever a Reviewer verdict is supplied or required it must carry enough
+    evidence to be auditable.
     """
     if not isinstance(metadata, Mapping):
         return ["metadata object is required"]
@@ -102,7 +182,6 @@ def validate_reviewer_verdict_metadata(
     return missing
 
 
-
 def _substantive_diffs(
     *,
     hub_plan_spec: Mapping[str, Any],
@@ -134,6 +213,69 @@ def _mechanical_diffs(
     return diffs
 
 
+def _role_mechanical_diff(plan_spec: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    role = plan_spec.get("source_role")
+    normalized = _normalize_role(role)
+    if role is not None and normalized != role:
+        return {"source_role": {"from": role, "to": normalized}}
+    return {}
+
+
+def orchestrator_gate_decision(
+    *,
+    plan_spec: Mapping[str, Any],
+    reviewer_metadata: Mapping[str, Any] | None = None,
+    current_thread_approval: Any = None,
+    piet_override: Any = None,
+) -> GateDecision:
+    """Decide whether an Orchestrator-authored plan may proceed to apply.
+
+    The function encodes the One-Orchestrator target without requiring a
+    Coordinator takeover.  It never treats a Discord pointer as approval; callers
+    must pass explicit current-thread approval evidence.
+    """
+    if not isinstance(plan_spec, Mapping):
+        return GateDecision(False, "plan_spec_invalid", ["plan_spec object is required"])
+
+    findings: list[str] = []
+    if not _truthy(current_thread_approval):
+        findings.append("current_thread_piet_approval_required")
+
+    expected_workflow_id = str(plan_spec.get("workflow_id") or "") or None
+    needs_review = reviewer_gate_required(plan_spec)
+    override = bool(str(piet_override).strip()) if piet_override is not None else False
+
+    if reviewer_metadata is not None:
+        verdict_missing = validate_reviewer_verdict_metadata(
+            reviewer_metadata,
+            expected_workflow_id=expected_workflow_id,
+        )
+        if verdict_missing:
+            findings.extend(f"reviewer metadata invalid: {item}" for item in verdict_missing)
+        else:
+            verdict = reviewer_metadata.get("verdict")
+            if verdict != "APPROVED" and not override:
+                findings.append(f"reviewer verdict is {verdict}")
+    elif needs_review and not override:
+        findings.append("reviewer_or_explicit_piet_override_required")
+
+    if findings:
+        return GateDecision(False, "orchestrator_apply_blocked", findings)
+
+    if needs_review and override and reviewer_metadata is None:
+        reason = "explicit_piet_override_for_review_required_scope"
+    elif reviewer_metadata is not None:
+        reason = "piet_approved_with_reviewer_gate"
+    else:
+        reason = "piet_approved_low_risk_or_docs_only"
+
+    return GateDecision(
+        allowed=True,
+        reason=reason,
+        blocking_findings=[],
+        mechanical_diffs=_role_mechanical_diff(plan_spec),
+    )
+
 
 def coordinator_gate_decision(
     *,
@@ -142,7 +284,11 @@ def coordinator_gate_decision(
     coordinator_plan_spec: Mapping[str, Any],
     mechanical_fields: Iterable[str] = (),
 ) -> GateDecision:
-    """Decide whether Coordinator may take over a Hub-authored PlanSpec."""
+    """Legacy: decide whether Coordinator may do mechanical-only normalization.
+
+    This helper is kept for compatibility with old scoped commit/gate tests.  It
+    must not be interpreted as target architecture requiring Coordinator.
+    """
     expected_workflow_id = str(hub_plan_spec.get("workflow_id") or "") or None
     verdict_missing = validate_reviewer_verdict_metadata(
         reviewer_metadata,
@@ -171,7 +317,7 @@ def coordinator_gate_decision(
     )
     if diffs:
         raise SubstantiveCoordinatorChangeError(
-            "Coordinator changed Hub-owned PlanSpec fields: " + ", ".join(diffs)
+            "Coordinator changed Orchestrator-owned PlanSpec fields: " + ", ".join(diffs)
         )
 
     return GateDecision(
