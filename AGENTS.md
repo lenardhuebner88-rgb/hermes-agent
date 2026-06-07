@@ -4,6 +4,28 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Vault: Collaboration & Provenance (shared memory hub)
+
+This host's Vault (`/home/piet/vault`) is a **shared** work + memory hub for three agents —
+Hermes, Claude Code, Codex. Durable cross-agent facts (topology, ports, paths, roles, gates) live
+**once** in `00-Canon/` (read/maintain there; the sibling `10-KB/` is frozen OpenClaw compiler output
+— not authoritative). Around any **edit-risk** work all three follow one cycle so "who did what when"
+stays visible and no two agents shred the same files:
+
+1. **Check-IN** before the first edit — run
+   `python3 /home/piet/vault/_agents/_shared/scripts/coordination-open-sessions.py` (parses
+   frontmatter only — no `grep`). If an open `touching:` overlaps your planned paths, **stop**
+   (another agent is mid-work). Else drop a session note in `_agents/_coordination/`
+   (`agent / started / ended: null / task / touching:`).
+2. **Work** (re-run the overlap check before each further concrete write).
+3. **Receipt** after the work → `03-Agents/Hermes/receipts/<slug>-receipt.md` (what, task-IDs,
+   evidence, status; filename ends `-receipt.md`/`-report.md` so the Vault pre-commit doesn't lint
+   it as a PlanSpec).
+4. **Check-OUT** — set `ended:` to the finish time in your session note.
+
+Canonical rule: `00-Canon/conventions-gates.md` → *Collaboration & Provenance*.
+Who/what overview: `_agents/_activity.md` (or `_agents/_shared/scripts/activity-overview.py`).
+
 ## Development Environment
 
 ```bash
