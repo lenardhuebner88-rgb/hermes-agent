@@ -5,15 +5,36 @@
  * mit currentColor, recharts-Farben).
  */
 export const tokens = {
-  accent: '#7c3aed',
-  accentText: '#c4b5fd',
-  accentWash: 'rgba(124,58,237,0.15)',
-  accentBorder: 'rgba(124,58,237,0.30)',
-  accentGlow: '0 0 12px rgba(124,58,237,0.45)',
+  // Aurora Violet accent (mirrors --hc-accent* in control-tokens.css).
+  accent: '#8b5cf6',
+  accentStrong: '#a78bfa',
+  accentText: '#ddd6fe',
+  accent2: '#22d3ee',
+  accentWash: 'rgba(139,92,246,0.14)',
+  accentBorder: 'rgba(139,92,246,0.34)',
+  accentGlow: '0 0 20px rgba(139,92,246,0.28)',
+  /** The aurora gradient stops, in order (violet → indigo → cyan). */
+  aurora: ['#8b5cf6', '#6366f1', '#22d3ee'],
 
   bg: '#0d0d0f', rail: '#0f0f0f', panel: '#111111', panel2: '#141414',
   panelCard: '#161b22', border: '#1e1e1e', borderStrong: '#2a2a2a',
   text: '#f0f0f0', textSoft: '#6b7280', textDim: '#374151',
+
+  /** Elevation shadows (mirror --hc-elev-* in control-tokens.css). */
+  elev: {
+    1: '0 1px 0 rgba(255,255,255,.03) inset, 0 4px 18px rgba(0,0,0,.30)',
+    2: '0 1px 0 rgba(255,255,255,.04) inset, 0 12px 40px rgba(0,0,0,.44)',
+  },
+
+  /** Named type scale (mirror .hc-type-* / --hc-type-* in control-tokens.css). */
+  type: {
+    display:  { size: 40, weight: 700, tracking: '-0.03em' },
+    title:    { size: 28, weight: 650, tracking: '-0.02em' },
+    subtitle: { size: 18, weight: 600, tracking: '-0.01em' },
+    body:     { size: 14, weight: 400, tracking: '0' },
+    label:    { size: 12, weight: 500, tracking: '0.01em' },
+    eyebrow:  { size: 10, weight: 600, tracking: '0.18em' },
+  },
 
   status: {
     emerald: '#22c55e', cyan: '#22d3ee', sky: '#38bdf8', indigo: '#818cf8',

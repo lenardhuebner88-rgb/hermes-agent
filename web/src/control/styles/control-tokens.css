@@ -12,10 +12,21 @@
   --hc-text: #f0f0f0;
   --hc-text-soft: #9ca3af;
   --hc-text-dim: #6b7280;
-  --hc-accent: #7c3aed;
-  --hc-accent-text: #c4b5fd;
-  --hc-accent-wash: rgba(124,58,237,.15);
-  --hc-accent-border: rgba(124,58,237,.30);
+  /* ── Aurora Violet accent identity ────────────────────────────────────
+     The brand: a violet → indigo → cyan aurora. Var names that callers
+     already use (--hc-accent / -text / -wash / -border) keep working; the
+     values are upgraded and new ones (-strong, -2, -glow, gradients) are
+     added on top. Violet = accent/interaction only — never a status warn. */
+  --hc-accent:        #8b5cf6;
+  --hc-accent-strong: #a78bfa;
+  --hc-accent-text:   #ddd6fe;
+  --hc-accent-wash:   rgba(139,92,246,.14);
+  --hc-accent-border: rgba(139,92,246,.34);
+  --hc-accent-glow:   0 0 0 1px rgba(139,92,246,.35), 0 0 20px rgba(139,92,246,.28);
+  --hc-accent-2:      #22d3ee;
+  --hc-aurora:      linear-gradient(115deg,#8b5cf6 0%,#6366f1 42%,#22d3ee 100%);
+  --hc-aurora-soft: linear-gradient(115deg,rgba(139,92,246,.20),rgba(99,102,241,.14) 45%,rgba(34,211,238,.12));
+  --hc-page-bloom:  radial-gradient(120% 90% at 0% -10%, rgba(139,92,246,.10) 0%, transparent 55%);
   --hc-emerald: #22c55e;
   --hc-cyan: #22d3ee;
   --hc-amber: #f59e0b;
@@ -30,6 +41,15 @@
   --agent-james: #10b981;
   --hc-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --hc-radius: .5rem;
+  /* Elevation ladder — depth via shadow, consumed by .hc-surface-* below. */
+  --hc-elev-1: 0 1px 0 rgba(255,255,255,.03) inset, 0 4px 18px rgba(0,0,0,.30);
+  --hc-elev-2: 0 1px 0 rgba(255,255,255,.04) inset, 0 12px 40px rgba(0,0,0,.44);
+  /* Named type scale — size / weight / tracking. Utilities: .hc-type-* below. */
+  --hc-type-display:  40px; --hc-type-display-w: 700; --hc-type-display-ls: -.03em;
+  --hc-type-title:    28px; --hc-type-title-w:   650; --hc-type-title-ls:   -.02em;
+  --hc-type-subtitle: 18px; --hc-type-subtitle-w: 600; --hc-type-subtitle-ls: -.01em;
+  --hc-type-body:     14px; --hc-type-body-w:    400;
+  --hc-type-label:    12px; --hc-type-label-w:   500; --hc-type-label-ls:  .01em;
   min-height: calc(100dvh - 5rem);
   color: var(--hc-text);
   font-family: var(--hc-font-sans);
@@ -45,19 +65,79 @@
 .hc-page {
   min-height: calc(100dvh - 7rem);
   margin: -0.5rem -0.75rem 0;
-  background: linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
+  /* Aurora bloom drifting in from the top-left, over the base gradient —
+     gives the cockpit atmosphere without competing with content. */
+  background:
+    var(--hc-page-bloom),
+    linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
 }
 
+/* ── Surface-depth ladder ─────────────────────────────────────────────────
+   Four tiers of elevation mapping onto the existing --hc-panel* layers.
+   Pick the tier by how much the surface should "lift" off the page:
+   panel (flush) · panel2 (a step up) · card (the default content card,
+   floats) · raised (the hero / focal surface).  .hc-card stays as an alias
+   of .hc-surface-card so the 41 existing call-sites keep working untouched. */
+.hc-surface-panel {
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-radius);
+  background: var(--hc-panel);
+}
+.hc-surface-panel2 {
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-radius);
+  background: var(--hc-panel-2);
+}
+.hc-surface-card,
 .hc-card {
   border: 1px solid var(--hc-border);
   border-radius: var(--hc-radius);
   background: color-mix(in srgb, var(--hc-panel-card) 94%, transparent);
-  box-shadow: 0 4px 24px rgba(0,0,0,.28);
+  box-shadow: var(--hc-elev-1);
+}
+.hc-surface-raised {
+  border: 1px solid var(--hc-border-strong);
+  border-radius: calc(var(--hc-radius) * 1.5);
+  background: linear-gradient(180deg, var(--hc-panel-2) 0%, var(--hc-panel) 100%);
+  box-shadow: var(--hc-elev-2);
 }
 
 .hc-soft { color: var(--hc-text-soft); }
 .hc-dim { color: var(--hc-text-dim); }
+
+/* ── Type scale ───────────────────────────────────────────────────────────
+   Six named steps. Components render a step via .hc-type-* (see <Text>),
+   never ad-hoc font-size. ONE breakpoint bumps display+title at ≥1024px —
+   no per-component responsive sizing anywhere downstream. */
+.hc-type-display  { font-size: var(--hc-type-display);  font-weight: var(--hc-type-display-w);  letter-spacing: var(--hc-type-display-ls);  line-height: 1.02; }
+.hc-type-title    { font-size: var(--hc-type-title);    font-weight: var(--hc-type-title-w);    letter-spacing: var(--hc-type-title-ls);    line-height: 1.1; }
+.hc-type-subtitle { font-size: var(--hc-type-subtitle); font-weight: var(--hc-type-subtitle-w); letter-spacing: var(--hc-type-subtitle-ls); line-height: 1.25; }
+.hc-type-body     { font-size: var(--hc-type-body);     font-weight: var(--hc-type-body-w);     line-height: 1.5; }
+.hc-type-label    { font-size: var(--hc-type-label);    font-weight: var(--hc-type-label-w);    letter-spacing: var(--hc-type-label-ls);    line-height: 1.35; }
+/* .hc-eyebrow is the 6th step (kept verbatim). */
 .hc-eyebrow { color: var(--hc-text-dim); font-size: 10px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; }
+
+/* ── Aurora helpers ───────────────────────────────────────────────────────
+   Gradient text-clip + a 2px gradient underline edge. Used for hero numbers
+   and section accents. Fallback color keeps text legible if clip is unset. */
+.hc-aurora-text {
+  background: var(--hc-aurora);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: var(--hc-accent-strong);
+}
+.hc-aurora-edge { position: relative; }
+.hc-aurora-edge::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+  border-radius: 2px;
+  background: var(--hc-aurora);
+}
+
+@media (min-width: 1024px) {
+  .hc-type-display { font-size: 48px; }
+  .hc-type-title   { font-size: 32px; }
+}
 /* Labelled action buttons: the upstream Button sets line-height:0 for single-line
    icon alignment, so a wrapped label collapses its lines on top of each other
    (jumbled text in narrow/compact layouts). Keep these labels on one line. */
@@ -97,7 +177,12 @@
 }
 .hc-hero::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 72%, transparent) 45%, transparent);
+  /* Aurora top-edge by default; a tone-driven hero (--hc-hero-accent set)
+     still overrides to its single-hue spine via the fallback below. */
+  background: var(--hc-aurora);
+}
+.hc-hero[style*="--hc-hero-accent"]::before {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--hc-hero-accent) 72%, transparent) 45%, transparent);
 }
 
 /* The single headline number: oversized, tabular, tone inherited from color. */
@@ -143,3 +228,32 @@
 .hc-badge-amber { background: var(--hc-amber); color: #1a1206; }
 .hc-badge-red   { background: var(--hc-red); }
 .hc-badge-accent{ background: var(--hc-accent); }
+
+/* ── Skeleton loading ─────────────────────────────────────────────────────
+   A flat tinted block by default (reduced-motion / static render). When the
+   user allows motion, a low-contrast aurora sweep travels across it. Pure
+   CSS so it works under renderToStaticMarkup with no JS. */
+.hc-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: calc(var(--hc-radius) * 0.75);
+  background: color-mix(in srgb, var(--hc-panel-active) 70%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hc-skeleton::after {
+    content: ""; position: absolute; inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(139,92,246,.10) 45%,
+      rgba(34,211,238,.08) 55%,
+      transparent 100%
+    );
+    animation: hc-shimmer 1.4s ease-in-out infinite;
+  }
+}
+@keyframes hc-shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}

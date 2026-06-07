@@ -21,13 +21,15 @@ const TONE_CLASS: Record<ToneName, string> = {
   red:     'border-red-500/20 bg-red-500/10 text-red-200',
   zinc:    'border-zinc-600/20 bg-zinc-600/10 text-zinc-200',
   // Violett = Marke. Nur für Akzent/Interaktion, nie als Status-Warnung.
-  violet:  'border-[var(--accent-border)] bg-[var(--accent-wash)] text-[var(--accent-text)]',
+  // Fix: vorher nicht-präfixierte --accent-* Vars (existieren nicht → unsichtbar);
+  // jetzt die kanonischen --hc-accent-* aus control-tokens.css.
+  violet:  'border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]',
 };
 
 /** Roher Hex-Wert eines Tons (für inline-Style, LED-Glow, Border-Akzent). */
 export const TONE_HEX: Record<ToneName, string> = {
   emerald: '#22c55e', cyan: '#22d3ee', sky: '#38bdf8', indigo: '#818cf8',
-  amber: '#f59e0b', rose: '#f43f5e', red: '#ef4444', zinc: '#52525b', violet: '#7c3aed',
+  amber: '#f59e0b', rose: '#f43f5e', red: '#ef4444', zinc: '#52525b', violet: '#8b5cf6',
 };
 
 /** Task-Status → Ton (für Hermes task_status). */

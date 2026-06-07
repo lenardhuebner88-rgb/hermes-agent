@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
-import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
@@ -11,6 +10,7 @@ import type { Density } from "../hooks/useDensity";
 import { WorkerCard } from "../components/WorkerCard";
 import { HermesResultCard } from "../components/HermesResultCard";
 import { ToneCallout } from "../components/atoms";
+import { Panel, Section, SkeletonCard, Stagger, StaggerItem, Stat, Text } from "../components/primitives";
 
 export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
@@ -41,6 +41,9 @@ export function HermesFleet({ density }: { density: Density }) {
     .map((worker) => ({ ...worker, inspect: inspectByRun[worker.run_id] ?? worker.inspect }))
     .sort((a, b) => workerSortRank(b, now) - workerSortRank(a, now));
   const activeIndex = Math.min(selected, Math.max(0, list.length - 1));
+  const workersLoadingFirst = workers.loading && workers.data == null;
+  const resultsList = results.data?.results ?? [];
+  const resultsLoadingFirst = results.loading && results.data == null;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -55,38 +58,83 @@ export function HermesFleet({ density }: { density: Density }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [activeIndex, inspect, list]);
 
+  const gridClass = cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2");
+  const inspectError = list[activeIndex] ? errorByRun[list[activeIndex].run_id] : "";
+
   return (
     <div className="space-y-5">
-      <section className="hc-card flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div><p className="hc-eyebrow">Hermes-Worker</p><h2 className="mt-1 text-xl font-semibold text-white">{workers.data?.count ?? list.length} aktive Läufe</h2></div>
-        {workers.loading ? <span className="flex items-center gap-2 text-sm hc-soft"><Spinner />Wird geladen …</span> : <span className="text-sm hc-soft">Inspect lädt CPU/RAM pro Worker auf Knopfdruck.</span>}
-      </section>
+      <Panel eyebrow="Hermes-Worker" title="Flotte">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <Stat
+            label="Aktive Läufe"
+            value={workersLoadingFirst ? "—" : (workers.data?.count ?? list.length)}
+            hint="Inspect lädt CPU/RAM pro Worker auf Knopfdruck."
+            accent
+            className="min-w-0"
+          />
+        </div>
+      </Panel>
+
       {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
       {actionError ? <ToneCallout tone="red">{actionError}</ToneCallout> : null}
-      {(() => {
-        // Surface Inspect failures (404 / contract) instead of leaving the
-        // button silently clearing its spinner — previously errorByRun was dropped.
-        const inspectError = list[activeIndex] ? errorByRun[list[activeIndex].run_id] : "";
-        return inspectError ? <ToneCallout tone="amber">{de.worker.actionFailed}: {inspectError}</ToneCallout> : null;
-      })()}
-      {list.length === 0 && !workers.loading ? <div className="hc-card flex items-center gap-3 p-4 text-sm hc-soft"><Bot className="h-5 w-5" />Keine aktiven Worker.</div> : null}
-      <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
-        {list.map((worker, index) => <div key={worker.run_id} aria-selected={activeIndex === index} className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}><WorkerCard worker={worker} health={workerHealth(worker, now)} density={density} now={now} inspectLoading={loadingRun === worker.run_id} onInspect={inspect} onAction={onAction} actionBusy={busyRun === worker.run_id} /></div>)}
-      </div>
-      <section className="space-y-3">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="hc-eyebrow">{de.hermes.recentResults}</p>
-            <h2 className="mt-1 text-lg font-semibold text-white">{results.loading && results.data == null ? "…" : (results.data?.count ?? 0)} abgeschlossene Läufe</h2>
-          </div>
-          <span className="text-sm hc-soft">{de.hermes.recentResultsHint}</span>
+      {inspectError ? <ToneCallout tone="amber">{de.worker.actionFailed}: {inspectError}</ToneCallout> : null}
+
+      {workersLoadingFirst ? (
+        <div className={gridClass}>
+          <SkeletonCard rows={4} />
+          <SkeletonCard rows={4} />
         </div>
+      ) : list.length === 0 ? (
+        <div className="hc-surface-card flex items-center gap-3 p-4 text-sm hc-soft">
+          <Bot className="h-5 w-5" />Keine aktiven Worker.
+        </div>
+      ) : (
+        <Stagger className={gridClass}>
+          {list.map((worker, index) => (
+            <StaggerItem
+              key={worker.run_id}
+              className={cn(activeIndex === index && "rounded-xl ring-1 ring-[var(--hc-accent-border)]")}
+            >
+              <div aria-selected={activeIndex === index}>
+                <WorkerCard
+                  worker={worker}
+                  health={workerHealth(worker, now)}
+                  density={density}
+                  now={now}
+                  inspectLoading={loadingRun === worker.run_id}
+                  onInspect={inspect}
+                  onAction={onAction}
+                  actionBusy={busyRun === worker.run_id}
+                />
+              </div>
+            </StaggerItem>
+          ))}
+        </Stagger>
+      )}
+
+      <Section
+        eyebrow={de.hermes.recentResults}
+        title={`${resultsLoadingFirst ? "…" : (results.data?.count ?? 0)} abgeschlossene Läufe`}
+        actions={<Text variant="label" className="hc-soft">{de.hermes.recentResultsHint}</Text>}
+      >
         {results.error ? <ToneCallout tone="red">{de.hermes.resultsError}<br />{results.error}</ToneCallout> : null}
-        {(results.data?.results ?? []).length === 0 && !results.loading && !results.error ? <div className="hc-card p-4 text-sm hc-soft">{de.hermes.emptyResults}</div> : null}
-        <div className={cn("grid gap-4", density === "compact" ? "xl:grid-cols-2" : "lg:grid-cols-2")}>
-          {(results.data?.results ?? []).map((result) => <HermesResultCard key={result.run_id} result={result} now={now} />)}
-        </div>
-      </section>
+        {resultsLoadingFirst ? (
+          <div className={gridClass}>
+            <SkeletonCard rows={3} />
+            <SkeletonCard rows={3} />
+          </div>
+        ) : resultsList.length === 0 && !results.error ? (
+          <div className="hc-surface-card p-4 text-sm hc-soft">{de.hermes.emptyResults}</div>
+        ) : (
+          <Stagger className={gridClass}>
+            {resultsList.map((result) => (
+              <StaggerItem key={result.run_id}>
+                <HermesResultCard result={result} now={now} />
+              </StaggerItem>
+            ))}
+          </Stagger>
+        )}
+      </Section>
     </div>
   );
 }
