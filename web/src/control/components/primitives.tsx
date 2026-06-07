@@ -79,10 +79,16 @@ export type CardProps = {
   interactive?: boolean;
   className?: string;
   onClick?: () => void;
+  /** A11y pass-through so an interactive Card can act as a real button:
+   *  role="button" + tabIndex + onKeyDown keep keyboard activation intact. */
+  role?: string;
+  tabIndex?: number;
+  onKeyDown?: (event: React.KeyboardEvent) => void;
+  ariaLabel?: string;
   children: ReactNode;
 };
 
-export function Card({ tone, surface = "card", interactive, className, onClick, children }: CardProps) {
+export function Card({ tone, surface = "card", interactive, className, onClick, role, tabIndex, onKeyDown, ariaLabel, children }: CardProps) {
   const reduce = useReducedMotion();
   const classes = cn(
     SURFACE_CLASS[surface],
@@ -92,7 +98,7 @@ export function Card({ tone, surface = "card", interactive, className, onClick, 
   );
   if (!interactive) {
     return (
-      <div className={classes} onClick={onClick}>
+      <div className={classes} onClick={onClick} role={role} tabIndex={tabIndex} onKeyDown={onKeyDown} aria-label={ariaLabel}>
         {children}
       </div>
     );
@@ -101,6 +107,10 @@ export function Card({ tone, surface = "card", interactive, className, onClick, 
     <motion.div
       className={classes}
       onClick={onClick}
+      role={role}
+      tabIndex={tabIndex}
+      onKeyDown={onKeyDown}
+      aria-label={ariaLabel}
       whileHover={reduce ? undefined : cardHover}
       whileTap={reduce ? undefined : cardTap}
       transition={chevronTransition}

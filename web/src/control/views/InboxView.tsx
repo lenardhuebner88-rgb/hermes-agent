@@ -10,6 +10,15 @@ import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 import { severitySpine } from "../lib/tones";
 import { StatusPill, ToneCallout } from "../components/atoms";
+import {
+  Card,
+  Skeleton,
+  SkeletonCard,
+  Stagger,
+  StaggerItem,
+  Stat,
+  Text,
+} from "../components/primitives";
 
 const SURFACE_META: Record<InboxSurface, { label: string; tone: ToneName }> = {
   autoresearch: { label: de.inbox.surfaceAutoresearch, tone: "cyan" },
@@ -46,32 +55,37 @@ export function InboxView({ density }: { density: Density }) {
 
   return (
     <div className={cn("space-y-4", density === "compact" && "space-y-3")}>
-      {/* Hero — the spine. The one number, oversized and tone-driven. */}
+      {/* Hero — the spine. The one number, oversized and tone-driven. The Stat
+          `accent` renders the headline count as aurora-gradient display type;
+          the .hc-hero shell carries the tone-driven gradient + edge. */}
       <section
         className="hc-hero p-5 sm:p-6"
         style={{ "--hc-hero-accent": accent } as React.CSSProperties}
       >
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-4 sm:gap-5">
-            <div
-              className="hc-count text-5xl sm:text-6xl"
-              style={{ color: accent }}
-              aria-hidden
-            >
-              {settling ? "·" : summary.total}
-            </div>
-            <div className="min-w-0">
-              <p className="hc-eyebrow">{de.inbox.eyebrow}</p>
-              <h2 className="mt-1 text-xl font-semibold tracking-tight text-white sm:text-2xl">{de.inbox.title}</h2>
-              <p className="mt-1.5 text-sm hc-soft">
-                {settling ? de.inbox.loading : de.inbox.subtitle(summary.total)}
-              </p>
-            </div>
+          {/* Clamp the hero column at 390px so the display number + copy never
+              overflow on phones (display type is large; ellipsis the title). */}
+          <div className="min-w-0 max-w-[390px]">
+            <Stat
+              label={de.inbox.eyebrow}
+              value={
+                settling ? (
+                  <Skeleton className="h-[1em] w-16 rounded-md" />
+                ) : (
+                  summary.total
+                )
+              }
+              hint={settling ? de.inbox.loading : de.inbox.subtitle(summary.total)}
+              accent
+            />
+            <Text as="h2" variant="title" className="mt-2 truncate text-[var(--hc-text)]">
+              {de.inbox.title}
+            </Text>
           </div>
           <StatusPill
             tone={calm ? "emerald" : worstTone === "red" || worstTone === "rose" ? "red" : "amber"}
-            label={calm ? de.inbox.calm : de.inbox.attention}
-            dot={calm ? "live" : worstTone === "red" || worstTone === "rose" ? "error" : "warn"}
+            label={settling ? de.inbox.loading : calm ? de.inbox.calm : de.inbox.attention}
+            dot={settling ? "idle" : calm ? "live" : worstTone === "red" || worstTone === "rose" ? "error" : "warn"}
             size="md"
           />
         </div>
@@ -98,30 +112,53 @@ export function InboxView({ density }: { density: Density }) {
         ))}
       </div>
 
-      {visible.length === 0 ? (
+      {settling ? (
+        // Settling — placeholder cards while the first inbox payload arrives,
+        // instead of flashing the "alles ruhig" empty-state.
+        <div className="space-y-2" aria-busy="true">
+          <SkeletonCard rows={2} />
+          <SkeletonCard rows={2} />
+          <SkeletonCard rows={2} />
+        </div>
+      ) : visible.length === 0 ? (
         <section className="rounded-lg border border-emerald-500/20 bg-emerald-500/[.07] p-6 text-center">
           <p className="text-sm font-medium text-emerald-100">{de.inbox.empty}</p>
           <p className="mt-1 text-xs text-emerald-200/80">{de.inbox.emptyHint}</p>
         </section>
       ) : (
-        <div className="space-y-2">
-          {visible.map((item, idx) => (
-            <InboxRow key={item.key} item={item} index={idx} onOpen={() => navigate(item.target)} />
+        <Stagger className="space-y-2">
+          {visible.map((item) => (
+            <StaggerItem key={item.key}>
+              <InboxRow item={item} onOpen={() => navigate(item.target)} />
+            </StaggerItem>
           ))}
-        </div>
+        </Stagger>
       )}
     </div>
   );
 }
 
-function InboxRow({ item, index, onOpen }: { item: InboxItem; index: number; onOpen: () => void }) {
+function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
   const surface = SURFACE_META[item.surface];
   return (
-    <button
-      type="button"
+    <Card
+      surface="card"
+      interactive
       onClick={onOpen}
-      style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
-      className={cn("hc-decision hc-rise flex w-full items-start justify-between gap-3 px-3.5 py-3 text-left", severitySpine[item.tone])}
+      // The row was a <button>; Card renders a div, so re-add button semantics
+      // + keyboard activation (Enter/Space) to preserve navigation behavior.
+      role="button"
+      tabIndex={0}
+      ariaLabel={`${surface.label}: ${item.title}`}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      // Keep the f5 severity spine — the pre-attentive left bar tells the eye
+      // how serious a decision is before it's read.
+      className={cn("hc-decision flex w-full items-start justify-between gap-3 px-3.5 py-3 text-left", severitySpine[item.tone])}
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
@@ -132,6 +169,6 @@ function InboxRow({ item, index, onOpen }: { item: InboxItem; index: number; onO
         <p className="mt-1 text-xs font-medium text-zinc-200">{de.inbox.do}: {item.nextAction}</p>
       </div>
       <ChevronRight className="mt-1 h-4 w-4 shrink-0 hc-dim" />
-    </button>
+    </Card>
   );
 }
