@@ -1192,3 +1192,42 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+<!-- opensrc:start -->
+
+## Source Code Reference
+
+Source code for dependencies is cached at `~/.opensrc/` for deeper understanding of implementation details.
+
+See `~/.opensrc/sources.json` for the list of available packages and their versions.
+
+Use this source code when you need to understand how a package works internally, not just its types/interface.
+
+### Fetching Source Code
+
+To just cache a package's source without doing anything else, use `opensrc fetch`:
+
+```bash
+opensrc fetch <package>
+opensrc fetch pypi:<package> crates:<package> <owner>/<repo>
+```
+
+### Reading Source Code
+
+Use `opensrc path` inside other commands to search, read, or explore a package's source (fetches on cache miss):
+
+```bash
+rg "pattern" $(opensrc path <package>)
+cat $(opensrc path <package>)/path/to/file
+find $(opensrc path <package>) -name "*.ts"
+```
+
+Works with any registry:
+
+```bash
+rg "pattern" $(opensrc path pypi:<package>)
+rg "pattern" $(opensrc path crates:<package>)
+rg "pattern" $(opensrc path <owner>/<repo>)
+```
+
+<!-- opensrc:end -->
