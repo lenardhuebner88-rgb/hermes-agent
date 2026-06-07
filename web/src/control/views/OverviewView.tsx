@@ -7,10 +7,12 @@ import { useAutoresearchStatus, useDecisionInbox, useHermesWorkers, useMetricsLi
 import { isActionable } from "../lib/autoresearch";
 import { buildOverview, freshness, nowSec, workerHealth } from "../lib/derive";
 import { de } from "../i18n/de";
-import type { Proposal } from "../lib/types";
+import type { ToneName, Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
 import { ProvenanceStrip } from "../components/ProvenanceStrip";
+import { toneClasses } from "../lib/tones";
+import { Card, Disclosure, Eyebrow, Panel, Skeleton, SkeletonCard, Stat, Text } from "../components/primitives";
 
 type Focus = "hermes" | "proposals" | "warnings" | null;
 
@@ -64,6 +66,12 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
   // engt den Union-Typ auf die hermes-Variante ein (mit .worker/.health).
   const hermesWarnings = overview.warnings.flatMap((w) => w.kind === "hermes" ? [w] : []);
 
+  // Initiale Lade-Phase je Quelle: erst füllen, wenn noch keine Daten da sind —
+  // ersetzt das Leer→Voll-Flackern durch ruhige Skeletons (Verhalten unverändert).
+  const healthLoading = health.loading && !health.data;
+  const workersLoading = workers.loading && !workers.data;
+  const proposalsInitialLoading = Boolean(proposalsLoading) && proposals.length === 0 && !proposalsError;
+
   const toggle = (next: Focus) => setFocus((cur) => (cur === next ? null : next));
 
   const copyDiagnostics = async () => {
@@ -85,18 +93,27 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
 
   return (
     <div className="space-y-5">
-      <SystemHealthStrip data={health.data} error={health.error} now={now} metrics={metrics.data} />
+      {healthLoading ? (
+        <SkeletonCard rows={3} />
+      ) : (
+        <SystemHealthStrip data={health.data} error={health.error} now={now} metrics={metrics.data} />
+      )}
       <ProvenanceStrip data={provenance.data} error={provenance.error} />
 
-      <section className="hc-card p-5 sm:p-6">
+      {/* Hero: ein-Satz-Lagebild + Diagnose-Kopie */}
+      <Card surface="raised" className="p-5 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div><p className="hc-eyebrow">System nominal</p><h2 className="mt-2 text-3xl font-semibold tracking-normal text-white">{title}</h2><p className="mt-2 max-w-2xl hc-soft">Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen.</p></div>
+          <div>
+            <Eyebrow>System nominal</Eyebrow>
+            <Text as="h2" variant="title" className="mt-2 text-[var(--hc-text)]">{title}</Text>
+            <Text className="mt-2 max-w-2xl hc-soft">Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen.</Text>
+          </div>
           <div className="flex items-center gap-2">
             <Button outlined size="sm" onClick={copyDiagnostics} className="gap-2">{copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}{copied ? de.overview.copied : de.overview.copyDiagnostics}</Button>
             <StatusPill tone={allCalm ? "emerald" : "amber"} label={allCalm ? "Ruhig" : "Aufmerksamkeit"} dot={allCalm ? "live" : "warn"} size="md" />
           </div>
         </div>
-      </section>
+      </Card>
 
       {inboxCounts.total > 0 ? (
         <button type="button" onClick={() => navigate("/control/inbox")} className="flex w-full items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[.07] px-4 py-3 text-left transition hover:bg-amber-500/[.12]">
@@ -112,71 +129,134 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
       ) : null}
 
       {/* E1: Datenfrische je Quelle */}
-      <section className="hc-card p-4">
-        <p className="hc-eyebrow mb-2">{de.overview.sources}</p>
+      <Panel eyebrow="Datenfrische" title={de.overview.sources}>
         <div className="grid gap-2 sm:grid-cols-2">
-          {sources.map((s) => (
-            <div key={s.label} className={cn("flex items-center justify-between rounded-lg border px-3 py-2 text-sm", s.err || s.fresh.stale ? "border-amber-500/30 bg-amber-500/5" : "border-white/10")}>
-              <span className="hc-soft">{s.label}</span>
-              <span className={cn("hc-mono text-xs", s.err || s.fresh.stale ? "text-amber-200" : "hc-dim")} title={s.err ?? (s.fresh.stale ? de.overview.stalePaused : undefined)}>
-                {s.err ? "Fehler" : s.fresh.stale ? de.overview.staleWarn(s.fresh.label.replace("vor ", "")) : s.fresh.label}
-              </span>
-            </div>
-          ))}
+          {sources.map((s) => {
+            // Conditional tone: Fehler oder stale → amber-Tönung; sonst neutral.
+            // Bedingung unverändert ggü. der alten Inline-Logik, nur auf Stat tone= abgebildet.
+            const toned: ToneName | undefined = s.err || s.fresh.stale ? "amber" : undefined;
+            const hint = s.err ?? (s.fresh.stale ? de.overview.stalePaused : undefined);
+            return (
+              <Stat
+                key={s.label}
+                tone={toned}
+                label={s.label}
+                value={s.err ? "Fehler" : s.fresh.stale ? de.overview.staleWarn(s.fresh.label.replace("vor ", "")) : s.fresh.label}
+                hint={hint}
+              />
+            );
+          })}
         </div>
-      </section>
+      </Panel>
 
       {/* E2: Kacheln sind Drilldown-Toggles (Autoresearch-Kachel navigiert direkt) */}
-      <section className="grid gap-3 md:grid-cols-4">
-        <Tile icon={<Bot />} label="Hermes laufen" value={`${overview.hermesRunning}/${overview.hermesTotal}`} active={focus === "hermes"} onClick={() => toggle("hermes")} />
-        <Tile icon={<Activity />} label="Autoresearch" value={arValue} onClick={() => navigate("/control/autoresearch")} />
-        <Tile icon={<FlaskConical />} label={de.overview.proposals} value={proposalValue} active={focus === "proposals"} onClick={() => toggle("proposals")} />
-        <Tile icon={<AlertTriangle />} label={de.overview.warnings} value={String(hermesWarnings.length)} tone={hermesWarnings.length > 0 ? "amber" : undefined} active={focus === "warnings"} onClick={() => toggle("warnings")} />
-      </section>
+      <Panel eyebrow="Systeme" title="Auf einen Blick">
+        <div className="grid gap-3 md:grid-cols-4">
+          <MetricTile icon={<Bot />} label="Hermes laufen" value={`${overview.hermesRunning}/${overview.hermesTotal}`} active={focus === "hermes"} loading={workersLoading} onClick={() => toggle("hermes")} />
+          <MetricTile icon={<Activity />} label="Autoresearch" value={arValue} onClick={() => navigate("/control/autoresearch")} />
+          <MetricTile icon={<FlaskConical />} label={de.overview.proposals} value={proposalValue} active={focus === "proposals"} loading={proposalsInitialLoading} onClick={() => toggle("proposals")} />
+          <MetricTile icon={<AlertTriangle />} label={de.overview.warnings} value={String(hermesWarnings.length)} tone={hermesWarnings.length > 0 ? "amber" : undefined} active={focus === "warnings"} loading={workersLoading} onClick={() => toggle("warnings")} />
+        </div>
+      </Panel>
 
       {focus === "hermes" ? (
-        <Drilldown title="Hermes-Worker" tab="/control/hermes" navigate={navigate} empty={de.overview.noProblemWorkers} items={hermesWarnings.map((w) => ({ key: w.worker.run_id, label: w.worker.task_title, pill: <StatusPill tone={workerHealth(w.worker, now).tone} label={workerHealth(w.worker, now).label} dot={workerHealth(w.worker, now).dot} /> }))} />
+        <Drilldown
+          id="dd-hermes"
+          title="Hermes-Worker"
+          tab="/control/hermes"
+          navigate={navigate}
+          empty={de.overview.noProblemWorkers}
+          loading={workersLoading}
+          items={hermesWarnings.map((w) => ({ key: w.worker.run_id, label: w.worker.task_title, pill: <StatusPill tone={workerHealth(w.worker, now).tone} label={workerHealth(w.worker, now).label} dot={workerHealth(w.worker, now).dot} /> }))}
+        />
       ) : null}
       {focus === "proposals" ? (
-        <Drilldown title={de.overview.proposals} tab="/control/autoresearch" navigate={navigate} empty={de.overview.noOpenProposals} items={openProposals.map((p) => ({ key: p.id, label: p.title ?? p.target, pill: <StatusPill tone={p.mode === "code" ? "violet" : "cyan"} label={p.mode === "code" ? "Code" : "Skill"} /> }))} />
+        <Drilldown
+          id="dd-proposals"
+          title={de.overview.proposals}
+          tab="/control/autoresearch"
+          navigate={navigate}
+          empty={de.overview.noOpenProposals}
+          loading={proposalsInitialLoading}
+          items={openProposals.map((p) => ({ key: p.id, label: p.title ?? p.target, pill: <StatusPill tone={p.mode === "code" ? "violet" : "cyan"} label={p.mode === "code" ? "Code" : "Skill"} /> }))}
+        />
       ) : null}
 
       {/* Default-Panel: Braucht-Aufmerksamkeit (auch sichtbar bei focus="warnings") */}
       {focus === null || focus === "warnings" ? (
-        <section className="hc-card p-4">
-          <h3 className="mb-3 text-lg font-semibold text-white">{de.overview.needsAttention}</h3>
-          {hermesWarnings.length === 0 ? <p className="text-sm hc-soft">{de.overview.nothingUrgent}</p> : <div className="space-y-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>}
-        </section>
+        <Panel eyebrow={de.overview.warnings} title={de.overview.needsAttention}>
+          {workersLoading ? (
+            <div className="space-y-2"><Skeleton className="h-10 w-full" /><Skeleton className="h-10 w-full" /></div>
+          ) : hermesWarnings.length === 0 ? (
+            <Text className="hc-soft">{de.overview.nothingUrgent}</Text>
+          ) : (
+            <div className="space-y-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>
+          )}
+        </Panel>
       ) : null}
     </div>
   );
 }
 
-function Drilldown({ title, tab, navigate, items, empty }: { title: string; tab: string; navigate: (path: string) => void; items: Array<{ key: string; label: string; pill: React.ReactNode }>; empty: string }) {
+function Drilldown({ id, title, tab, navigate, items, empty, loading }: { id: string; title: string; tab: string; navigate: (path: string) => void; items: Array<{ key: string; label: string; pill: React.ReactNode }>; empty: string; loading?: boolean }) {
+  // Animierter Drilldown: Disclosure (auto↔0 Höhe) statt hartem Conditional —
+  // der Titel ist die Summary, die "Tab öffnen"-Aktion sitzt rechts daneben.
   return (
-    <section className="hc-card p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-white">{title}</h3>
-        <Button ghost size="xs" onClick={() => navigate(tab)}>{de.overview.openTab}</Button>
+    <Card surface="card" className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <Disclosure
+          id={id}
+          defaultOpen
+          className="flex-1"
+          summary={<span className="hc-type-subtitle text-[var(--hc-text)]">{title}</span>}
+        >
+          {loading ? (
+            <div className="space-y-2"><Skeleton className="h-10 w-full" /><Skeleton className="h-10 w-3/4" /></div>
+          ) : items.length === 0 ? (
+            <Text className="hc-soft">{empty}</Text>
+          ) : (
+            <div className="space-y-2">
+              {items.map((it) => (
+                <button key={it.key} type="button" onClick={() => navigate(tab)} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5">
+                  <span className="min-w-0 truncate">{it.label}</span>{it.pill}
+                </button>
+              ))}
+            </div>
+          )}
+        </Disclosure>
+        <Button ghost size="xs" className="shrink-0" onClick={() => navigate(tab)}>{de.overview.openTab}</Button>
       </div>
-      {items.length === 0 ? <p className="text-sm hc-soft">{empty}</p> : (
-        <div className="space-y-2">
-          {items.map((it) => (
-            <button key={it.key} type="button" onClick={() => navigate(tab)} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5">
-              <span className="min-w-0 truncate">{it.label}</span>{it.pill}
-            </button>
-          ))}
-        </div>
-      )}
-    </section>
+    </Card>
   );
 }
 
-function Tile({ icon, label, value, active, tone, onClick }: { icon: React.ReactNode; label: string; value: string; active?: boolean; tone?: "amber" | "red"; onClick: () => void }) {
-  // Conditional tone: a non-zero warnings/problem count turns the tile amber/red
-  // so "good vs bad" is pre-attentive instead of read-and-reason.
-  const toned = tone === "red" ? "border-red-500/40 bg-red-500/[.06]" : tone === "amber" ? "border-amber-500/40 bg-amber-500/[.06]" : "";
+function MetricTile({ icon, label, value, active, tone, loading, onClick }: { icon: React.ReactNode; label: string; value: string; active?: boolean; tone?: ToneName; loading?: boolean; onClick: () => void }) {
+  // Conditional tone: a non-zero warnings/problem count tints the tile amber/red
+  // so "good vs bad" is pre-attentive instead of read-and-reason. The condition
+  // (caller-supplied tone) is unchanged — only the rendering maps it onto the
+  // shared tone wash (toneClasses). Stays a real <button> for keyboard + aria-pressed.
   const iconColor = tone === "red" ? "text-red-300" : tone === "amber" ? "text-amber-300" : "text-[var(--hc-accent-text)]";
   const valueColor = tone === "red" ? "text-red-200" : tone === "amber" ? "text-amber-200" : "text-white";
-  return <Button outlined onClick={onClick} aria-pressed={active} className={cn("hc-card hc-hit flex h-auto items-center justify-start gap-3 p-4 text-left", toned, active && "ring-1 ring-[var(--hc-accent-border)]")}><span className={iconColor}>{icon}</span><span><span className="block text-sm hc-soft">{label}</span><span className={cn("block text-2xl font-semibold", valueColor)}>{value}</span></span></Button>;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "hc-surface-panel2 hc-hit flex items-center justify-start gap-3 p-4 text-left transition",
+        tone ? cn("border", toneClasses(tone)) : "hover:border-white/15",
+        active && "ring-1 ring-[var(--hc-accent-border)]",
+      )}
+    >
+      <span aria-hidden className={iconColor}>{icon}</span>
+      <span className="min-w-0">
+        <span className="block text-sm hc-soft">{label}</span>
+        {loading ? (
+          <Skeleton className="mt-1 h-6 w-16" />
+        ) : (
+          <span className={cn("block text-2xl font-semibold", valueColor)}>{value}</span>
+        )}
+      </span>
+    </button>
+  );
 }
