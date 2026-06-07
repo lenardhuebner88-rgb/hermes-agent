@@ -56,6 +56,7 @@ export function ProposalQueue({
   onToggleSelection,
   onApply,
   onSkip,
+  focusId,
 }: {
   density: Density;
   openCount: number;
@@ -89,9 +90,15 @@ export function ProposalQueue({
   onToggleSelection: (proposalId: string, selected: boolean) => void;
   onApply: (proposal: Proposal) => void;
   onSkip: (proposal: Proposal) => void;
+  focusId?: string | null;
 }) {
   const decisionHeading = openCount === 0 ? "Keine offenen Entscheidungen" : `${relevanceQueue.summary.shown} ${relevanceQueue.summary.shown === 1 ? "wichtige Karte" : "wichtige Karten"} in dieser Ansicht`;
   const selectionBusy = batchBusy || bulkRevertedBusy || !!storeBusy;
+  // Deep-links (Decision Inbox → ?focus=<id>) can target a proposal that lives in the
+  // collapsed backlog. Force that disclosure open so the card is mounted before the
+  // post-commit scrollIntoView runs — else getElementById returns null and the scroll
+  // silently no-ops (the native <details> it replaced kept children mounted).
+  const backlogFocused = !!focusId && relevanceQueue.backlog.some((item) => item.proposal.id === focusId);
 
   return (
     <section id="autoresearch-queue" className="scroll-mt-6 space-y-3">
@@ -149,7 +156,7 @@ export function ProposalQueue({
       </Stagger>
 
       {relevanceQueue.backlog.length > 0 ? (
-        <Disclosure className="hc-card p-4" summary={<span className="text-sm font-medium text-white">Weitere Entscheidungen ({relevanceQueue.summary.remaining}) anzeigen</span>}>
+        <Disclosure open={backlogFocused || undefined} className="hc-card p-4" summary={<span className="text-sm font-medium text-white">Weitere Entscheidungen ({relevanceQueue.summary.remaining}) anzeigen</span>}>
           <div className="grid gap-4">
             {relevanceQueue.backlog.map((item) => (
               <ProposalCard

@@ -503,6 +503,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
 
       <ProposalQueue
         density={density}
+        focusId={focusId}
         openCount={open.length}
         revertedCount={reverted.length}
         filteredOpenCount={filteredOpen.length}

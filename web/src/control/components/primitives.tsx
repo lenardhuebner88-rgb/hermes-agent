@@ -12,7 +12,7 @@
  *    opacity-only / instant when the user prefers reduced motion,
  *  · no ad-hoc font sizes — text renders a named scale step via .hc-type-*.
  */
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ChevronRight } from "lucide-react";
@@ -236,9 +236,12 @@ export function SkeletonCard({ rows = 3, className }: { rows?: number; className
 }
 
 /* ── Disclosure ────────────────────────────────────────────────────────────
-   Animated height auto↔0 + opacity + chevron rotate. Controlled OR
-   uncontrolled. Replaces native <details> in later phases, so the API
-   covers summary / defaultOpen / controlled open+onToggle / id passthrough.
+   Animated height auto↔0 + opacity + chevron rotate. Replaces native
+   <details>, so it mirrors <details open=…> semantics precisely:
+   · open + onToggle  → fully controlled (parent owns the state).
+   · open alone       → sync-hint: seeds + re-syncs internal state on change,
+                        but the user can still toggle in between (like native).
+   · neither          → uncontrolled from defaultOpen.
    aria-expanded + aria-controls keep it accessible. */
 export type DisclosureProps = {
   summary: ReactNode;
@@ -254,9 +257,15 @@ export function Disclosure({ summary, children, defaultOpen = false, open, onTog
   const reduce = useReducedMotion();
   const reactId = useId();
   const panelId = id ? `${id}-panel` : `${reactId}-panel`;
-  const [internalOpen, setInternalOpen] = useState(defaultOpen);
-  const isControlled = open !== undefined;
-  const isOpen = isControlled ? open : internalOpen;
+  // Controlled only when a setter (onToggle) is also provided — React's
+  // value+onChange convention. With `open` alone we mirror native <details
+  // open=…>: it seeds and re-syncs the internal state, but stays toggleable.
+  const isControlled = open !== undefined && onToggle !== undefined;
+  const [internalOpen, setInternalOpen] = useState(open ?? defaultOpen);
+  useEffect(() => {
+    if (!isControlled && open !== undefined) setInternalOpen(open);
+  }, [open, isControlled]);
+  const isOpen = isControlled ? (open as boolean) : internalOpen;
 
   const toggle = () => {
     const next = !isOpen;
