@@ -5,6 +5,7 @@ import { useDensity } from "./hooks/useDensity";
 import { useDecisionInbox, useHermesWorkers, useProposals } from "./hooks/useControlData";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
+import { RouteTransition } from "./components/primitives";
 import { OverviewView } from "./views/OverviewView";
 import { InboxView } from "./views/InboxView";
 import { PulseView } from "./views/PulseView";
@@ -99,19 +100,21 @@ export default function ControlPage() {
         commandButtonRef={commandButtonRef}
         onOpenCommand={() => setPaletteOpen(true)}
       >
-        <Routes>
-          <Route index element={<InboxView density={density.density} />} />
-          <Route path="inbox" element={<InboxView density={density.density} />} />
-          <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
-          <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
-          <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
-          <Route path="hermes" element={<HermesFleet density={density.density} />} />
-          <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
-          <Route path="backlog" element={<BacklogView density={density.density} />} />
-          <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
-          <Route path="crons" element={<CronView density={density.density} />} />
-          <Route path="*" element={<Navigate to="/control" replace />} />
-        </Routes>
+        <RouteTransition pathname={active}>
+          <Routes location={location}>
+            <Route index element={<InboxView density={density.density} />} />
+            <Route path="inbox" element={<InboxView density={density.density} />} />
+            <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
+            <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
+            <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
+            <Route path="hermes" element={<HermesFleet density={density.density} />} />
+            <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
+            <Route path="backlog" element={<BacklogView density={density.density} />} />
+            <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
+            <Route path="crons" element={<CronView density={density.density} />} />
+            <Route path="*" element={<Navigate to="/control" replace />} />
+          </Routes>
+        </RouteTransition>
       </ControlShell>
       <CommandPalette
         open={paletteOpen}
