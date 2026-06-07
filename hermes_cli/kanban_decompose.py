@@ -91,11 +91,16 @@ Rules:
     context — be specific about goal, approach, and acceptance criteria.
   - For worker-lane children assigned to admin, coder, research, reviewer,
     or critic, include a structured YAML scope block in the body with
-    `scope_contract.version: 2`, concrete `allowed_tools`, and
-    `completion_policy.require_scope_attestation: true`. The Python
-    decomposer will deterministically inject and validate this block, so this
-    prompt rule is a secondary defense. Do NOT use broad allowed_tools values
-    like `all`, `any`, `*`, `tools`, `mcp`, or `kanban`.
+    `scope_contract.version: 2`, `allowed_tools`, and
+    `completion_policy.require_scope_attestation: true`. `allowed_tools` is a
+    declarative kanban-lifecycle attestation: set it ONLY to a subset of
+    exactly these four values — `kanban_show`, `kanban_complete`,
+    `kanban_block`, `kanban_comment`. The worker's real work tools (file,
+    terminal, web, etc.) come from its PROFILE config — NEVER list those
+    (e.g. `file_read`, `shell`, `terminal`) in `allowed_tools`. The Python
+    decomposer normalizes and validates this block, so this prompt rule is a
+    secondary defense. Do NOT use broad allowed_tools values like `all`,
+    `any`, `*`, `tools`, `mcp`, or `kanban`.
 
 CRITICAL: Constraint preservation (non-negotiable).
   - Any line in the original task body starting with
@@ -591,6 +596,54 @@ def _render_scope_contract_yaml(contract: dict) -> str:
     return "\n".join(lines)
 
 
+def _normalize_allowed_tools_block(body: str) -> str:
+    """Force the worker scope contract's ``allowed_tools`` to the canonical
+    kanban-lifecycle set.
+
+    ``allowed_tools`` is a declarative attestation field — the worker's real
+    tools come from its profile config, NOT from this list (it is not
+    runtime-enforced). The decomposer LLM frequently lists work tools it thinks
+    the worker needs (``file_read``, ``shell:cat ...``, ``terminal``); those
+    are unknown to :func:`validate_worker_scope_contracts` and abort the whole
+    decomposition silently (logged at debug in the gateway tick). Rewriting the
+    block to the canonical kanban tools keeps auto-decompose from aborting
+    while preserving every other field the model produced. Handles both block
+    (``allowed_tools:`` + ``- item`` lines) and inline (``allowed_tools: [..]``)
+    forms. Only the first occurrence (the scope_contract's) is rewritten.
+    """
+    if "allowed_tools:" not in body:
+        return body
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    replaced = False
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if not replaced and stripped.startswith("allowed_tools:"):
+            base_indent = len(line) - len(line.lstrip())
+            indent = " " * base_indent
+            out.append(f"{indent}allowed_tools:")
+            for tool in _BASE_WORKER_ALLOWED_TOOLS:
+                out.append(f"{indent}  - {tool}")
+            replaced = True
+            i += 1
+            # Drop the model's original block list items (deeper "- " lines).
+            if stripped == "allowed_tools:":
+                while i < n:
+                    item = lines[i]
+                    item_indent = len(item) - len(item.lstrip())
+                    if item.strip().startswith("- ") and item_indent > base_indent:
+                        i += 1
+                        continue
+                    break
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def _ensure_worker_scope_contract(
     child: dict,
     *,
@@ -604,6 +657,11 @@ def _ensure_worker_scope_contract(
     raw_body = child.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     if _body_has_scope_contract(body):
+        normalized = _normalize_allowed_tools_block(body)
+        if normalized != body:
+            enriched = dict(child)
+            enriched["body"] = normalized
+            return enriched
         return child
 
     contract = _default_worker_scope_contract(child, parent_task=parent_task)
