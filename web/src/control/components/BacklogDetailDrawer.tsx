@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ClipboardCopy, ExternalLink, X } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
 import type { ToneName } from "../lib/types";
 import { toneClasses } from "../lib/tones";
 import { tokens } from "../lib/tokens";
+import { DUR, EASE_OUT, EASE_RISE } from "../lib/motion";
 import { StatusPill, ToneCallout } from "./atoms";
 import { Markdown } from "./Markdown";
 import { de } from "../i18n/de";
@@ -46,6 +48,7 @@ export function BacklogDetailDrawer({
   const [copied, setCopied] = useState(false);
   const [briefCopied, setBriefCopied] = useState(false);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const reduce = useReducedMotion();
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -64,6 +67,12 @@ export function BacklogDetailDrawer({
   const visibleSourceRef = sourceRef?.filter((field) => field.value.trim() !== "") ?? [];
   const visibleProofs = proofTimeline?.filter((line) => line.trim() !== "") ?? [];
   const visibleLinks = links?.filter((link) => link.label.trim() !== "" && link.href.trim() !== "") ?? [];
+  const backdrop = reduce
+    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: 0 } }
+    : { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: DUR.med, ease: EASE_OUT } };
+  const drawer = reduce
+    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: 0 } }
+    : { initial: { opacity: 0, x: 32 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: 32 }, transition: { duration: DUR.slow, ease: EASE_RISE } };
 
   const copyCommission = async () => {
     if (!commissionPrompt) return;
@@ -89,13 +98,17 @@ export function BacklogDetailDrawer({
 
   return (
     <div className="fixed inset-0 z-50">
-      <button
+      <motion.button
         type="button"
         className="absolute inset-0 bg-black/60"
         aria-label={de.orchestrator.drawerClose}
         onClick={onClose}
+        initial={backdrop.initial}
+        animate={backdrop.animate}
+        exit={backdrop.exit}
+        transition={backdrop.transition}
       />
-      <aside
+      <motion.aside
         role="dialog"
         aria-modal="true"
         aria-labelledby="backlog-detail-title"
@@ -103,6 +116,10 @@ export function BacklogDetailDrawer({
           "hc-card absolute right-0 top-0 flex h-full w-full max-w-md flex-col rounded-none border-y-0 border-l shadow-2xl",
           "border-[var(--hc-border)]",
         )}
+        initial={drawer.initial}
+        animate={drawer.animate}
+        exit={drawer.exit}
+        transition={drawer.transition}
       >
         <header className="flex items-start justify-between gap-3 border-b border-[var(--hc-border)] p-5 pb-4">
           <div className="min-w-0">
@@ -255,7 +272,7 @@ export function BacklogDetailDrawer({
             </section>
           )}
         </div>
-      </aside>
+      </motion.aside>
     </div>
   );
 }
