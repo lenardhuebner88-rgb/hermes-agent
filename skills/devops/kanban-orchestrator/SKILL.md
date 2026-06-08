@@ -169,6 +169,8 @@ Tell them what you created in plain prose, naming the actual profiles you used:
 
 **Over-linking because of wording.** "Finally check X" may still be parallel with implementation if X is static config, docs, or source discovery. Link it after implementation only when the check depends on the implementation result.
 
+**Blind linear chains.** Do not decompose into `S1 <- S2 <- S3 <- …` where each card's only parent is the previous one. That serializes work that is actually independent and turns one blocked card into a stall of every successor downstream. Chain only on a *real* ordering: a card consumes another's output, or two cards write the same files and would collide if run at once. Genuinely independent, file-disjoint lanes stay parallel (no links). To parallelize code lanes that would otherwise have to share one checkout, give each an isolated `workspace=worktree:<path>` and add a single integration card with `parents=[every lane]` to merge — don't serialize them into one long fragile chain.
+
 **Forgetting dependency links.** If the task graph says `research -> implement -> review`, do not create all tasks as independent ready cards. Use parent links so implement/review cannot run before their inputs exist.
 
 **Reassignment vs. new task.** If a reviewer blocks with "needs changes," create a NEW task linked from the reviewer's task — don't re-run the same task with a stern look. The new task is assigned to the original implementer profile.
