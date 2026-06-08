@@ -407,6 +407,62 @@ def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     )
 
 
+def test_codex_gpt55_autoraise_is_not_replayed_as_gateway_warning():
+    """The Codex gpt-5.5 threshold auto-raise is a startup info line.
+
+    Gateway agents may be constructed per incoming message, so storing this
+    informational notice for first-turn status replay makes Discord/Telegram
+    see it on every message. The threshold override should still apply, but
+    `_compression_warning` must stay reserved for actionable compression
+    feasibility warnings.
+    """
+
+    class _StubCompressor:
+        def __init__(self, *args, **kwargs):
+            self.threshold_percent = kwargs["threshold_percent"]
+            self.context_length = 272_000
+            self.threshold_tokens = int(self.context_length * self.threshold_percent)
+            self.protect_first_n = kwargs.get("protect_first_n", 3)
+            self.protect_last_n = kwargs.get("protect_last_n", 20)
+
+        def get_tool_schemas(self):
+            return []
+
+        def on_session_start(self, *args, **kwargs):
+            return None
+
+    cfg = {
+        "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+        "compression": {
+            "enabled": True,
+            "threshold": 0.60,
+            "target_ratio": 0.20,
+            "codex_gpt55_autoraise": True,
+        },
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+        patch("agent.agent_init.ContextCompressor", new=_StubCompressor),
+    ):
+        agent = AIAgent(
+            model="gpt-5.5",
+            provider="openai-codex",
+            api_key="test-key-1234567890",
+            base_url="https://chatgpt.com/backend-api/codex",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert agent.context_compressor.threshold_percent == 0.85
+    assert agent._compression_threshold_autoraised == {"from": 0.60, "to": 0.85}
+    assert agent._compression_warning is None
+
+
 @patch("agent.model_metadata.get_model_context_length", return_value=200_000)
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_no_replay_when_no_warning(mock_get_client, mock_ctx_len):

@@ -1685,16 +1685,14 @@ def init_agent(
         if _autoraise and compression_enabled:
             print(_build_codex_gpt55_autoraise_notice(_autoraise))
 
-    # Check immediately so CLI users see the warning at startup.
-    # Gateway status_callback is not yet wired, so any warning is stored
-    # in _compression_warning and replayed in the first run_conversation().
+    # Gateway status_callback is not yet wired during construction. Actionable
+    # compression feasibility warnings are stored later by
+    # check_compression_model_feasibility() and replayed once on the next turn.
+    # Do not store the Codex gpt-5.5 autoraise notice here: gateways may create
+    # a fresh AIAgent per incoming message, which would spam this informational
+    # startup line on every Discord/Telegram turn. CLI users still see the
+    # startup print above; the threshold override itself remains active.
     agent._compression_warning = None
-    # Gateway parity for the Codex gpt-5.5 autoraise notice: the startup print
-    # above only reaches the CLI, so stash the same text here to be replayed
-    # through status_callback on the first turn (Telegram/Discord/Slack/etc.).
-    _autoraise = getattr(agent, "_compression_threshold_autoraised", None)
-    if _autoraise and compression_enabled:
-        agent._compression_warning = _build_codex_gpt55_autoraise_notice(_autoraise)
     # Lazy feasibility check: deferred to the first turn that approaches the
     # compression threshold. Running it eagerly here costs ~400ms cold (network
     # probe of the auxiliary provider chain + /models lookup) on every agent

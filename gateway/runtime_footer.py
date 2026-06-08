@@ -25,6 +25,7 @@ piecemeal, the footer is sent as a separate trailing message via
 
 from __future__ import annotations
 
+from decimal import Decimal, ROUND_HALF_UP
 import os
 from typing import Any, Iterable, Optional
 
@@ -32,11 +33,47 @@ _DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
 _SEP = " · "
 
 
-def _format_token_count(tokens: int) -> str:
-    """Render token counts compactly for footer use."""
-    if tokens >= 1000:
-        return f"{tokens / 1000:.1f}k"
-    return str(tokens)
+def _safe_nonnegative_int(value: Any) -> int:
+    """Return *value* as a non-negative int, or 0 when missing/invalid."""
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _format_token_count(value: int | None) -> str:
+    """Compact token counts for footer display (1200 → 1.2k)."""
+    if value is None:
+        return ""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if count < 0:
+        return ""
+    if count < 1_000:
+        return str(count)
+
+    def _compact(divisor: int, suffix: str) -> str:
+        scaled = Decimal(count) / Decimal(divisor)
+        if scaled >= Decimal("100") or scaled == scaled.to_integral_value():
+            text = str(scaled.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        else:
+            text = str(scaled.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+            text = text.rstrip("0").rstrip(".")
+        return f"{text}{suffix}"
+
+    if count < 999_500:
+        return _compact(1_000, "k")
+    return _compact(1_000_000, "M")
+
+
+def _context_percent(context_tokens: int, context_length: Optional[int]) -> Optional[int]:
+    """Return clamped context-window percentage, or None for invalid input."""
+    if not context_length or context_length <= 0 or context_tokens < 0:
+        return None
+    return max(0, min(100, round((context_tokens / context_length) * 100)))
 
 
 def _home_relative_cwd(cwd: str) -> str:
@@ -102,6 +139,11 @@ def format_runtime_footer(
     context_length: Optional[int],
     cwd: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
+    input_tokens: int | None = 0,
+    output_tokens: int | None = 0,
+    cache_read_tokens: int | None = 0,
+    cache_write_tokens: int | None = 0,
+    reasoning_tokens: int | None = 0,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
 
@@ -115,15 +157,39 @@ def format_runtime_footer(
             if m:
                 parts.append(m)
         elif field == "context_pct":
-            if context_length and context_length > 0 and context_tokens >= 0:
-                pct = max(0, min(100, round((context_tokens / context_length) * 100)))
+            pct = _context_percent(context_tokens, context_length)
+            if pct is not None:
                 parts.append(f"{pct}%")
+        elif field == "context_detail":
+            pct = _context_percent(context_tokens, context_length)
+            if pct is not None:
+                ctx = _format_token_count(context_tokens)
+                window = _format_token_count(context_length)
+                if ctx and window:
+                    parts.append(f"ctx {pct}% ({ctx}/{window})")
+                else:
+                    parts.append(f"ctx {pct}%")
         elif field == "token_detail":
-            if context_length and context_length > 0 and context_tokens >= 0:
-                pct = max(0, min(100, round((context_tokens / context_length) * 100)))
-                used = _format_token_count(context_tokens)
-                total = _format_token_count(context_length)
-                parts.append(f"{used}/{total} tok ({pct}%)")
+            in_toks = _safe_nonnegative_int(input_tokens)
+            out_toks = _safe_nonnegative_int(output_tokens)
+            cache_read = _safe_nonnegative_int(cache_read_tokens)
+            cache_write = _safe_nonnegative_int(cache_write_tokens)
+            reasoning = _safe_nonnegative_int(reasoning_tokens)
+
+            token_parts: list[str] = []
+            if in_toks or cache_read or cache_write:
+                input_piece = f"in {_format_token_count(in_toks)}"
+                if cache_read:
+                    input_piece += f" + cache {_format_token_count(cache_read)}"
+                if cache_write:
+                    input_piece += f" + write {_format_token_count(cache_write)}"
+                token_parts.append(input_piece)
+            if out_toks:
+                token_parts.append(f"out {_format_token_count(out_toks)}")
+            if reasoning:
+                token_parts.append(f"reason {_format_token_count(reasoning)}")
+            if token_parts:
+                parts.append(_SEP.join(token_parts))
         elif field == "cwd":
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
@@ -143,6 +209,11 @@ def build_footer_line(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    input_tokens: int | None = 0,
+    output_tokens: int | None = 0,
+    cache_read_tokens: int | None = 0,
+    cache_write_tokens: int | None = 0,
+    reasoning_tokens: int | None = 0,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -159,4 +230,9 @@ def build_footer_line(
         context_length=context_length,
         cwd=cwd,
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        reasoning_tokens=reasoning_tokens,
     )

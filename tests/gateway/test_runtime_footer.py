@@ -8,6 +8,7 @@ import os
 import pytest
 
 from gateway.runtime_footer import (
+    _format_token_count,
     _home_relative_cwd,
     _model_short,
     build_footer_line,
@@ -53,6 +54,25 @@ def test_home_relative_cwd_empty_returns_empty():
 
 
 # ---------------------------------------------------------------------------
+# _format_token_count
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (0, "0"),
+        (999, "999"),
+        (1_200, "1.2k"),
+        (88_000, "88k"),
+        (999_500, "1M"),
+        (1_250_000, "1.3M"),
+        (None, ""),
+    ],
+)
+def test_format_token_count_compacts_values(value, expected):
+    assert _format_token_count(value) == expected
+
+# ---------------------------------------------------------------------------
 # format_runtime_footer
 # ---------------------------------------------------------------------------
 
@@ -93,17 +113,6 @@ def test_format_footer_context_pct_clamped_to_100():
         fields=("context_pct",),
     )
     assert out == "100%"
-
-
-def test_format_footer_token_detail_shows_context_tokens_and_pct():
-    out = format_runtime_footer(
-        model="m",
-        context_tokens=12_345,
-        context_length=32_768,
-        cwd="",
-        fields=("token_detail",),
-    )
-    assert out == "12.3k/32.8k tok (38%)"
 
 
 def test_format_footer_context_pct_never_negative():
@@ -151,12 +160,89 @@ def test_format_footer_custom_field_order():
 def test_format_footer_unknown_field_silently_ignored():
     out = format_runtime_footer(
         model="openai/gpt-5.4",
-        context_tokens=50, context_length=100,
+        context_tokens=50,
+        context_length=100,
         cwd="/x",
         fields=("model", "bogus", "context_pct"),
     )
     assert out == "gpt-5.4 · 50%"
 
+
+def test_format_footer_context_detail_labels_percent_and_window():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="",
+        fields=("context_detail",),
+    )
+    assert out == "ctx 44% (88k/200k)"
+
+
+def test_format_footer_context_detail_skips_invalid_context():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=-1,
+        context_length=200_000,
+        cwd="",
+        fields=("context_detail",),
+    )
+    assert out == ""
+
+
+def test_format_footer_token_detail_with_cache_and_output():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="",
+        fields=("token_detail",),
+        input_tokens=18_000,
+        output_tokens=2_000,
+        cache_read_tokens=70_000,
+    )
+    assert out == "in 18k + cache 70k · out 2k"
+
+
+def test_format_footer_token_detail_with_cache_write_and_reasoning():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="",
+        fields=("token_detail",),
+        input_tokens=18_000,
+        output_tokens=2_000,
+        cache_read_tokens=70_000,
+        cache_write_tokens=3_000,
+        reasoning_tokens=900,
+    )
+    assert out == "in 18k + cache 70k + write 3k · out 2k · reason 900"
+
+
+def test_format_footer_token_detail_empty_when_all_buckets_missing():
+    out = format_runtime_footer(
+        model="openai/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="",
+        fields=("token_detail",),
+    )
+    assert out == ""
+
+
+def test_format_footer_optimal_line():
+    out = format_runtime_footer(
+        model="openai-codex/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="/home/piet",
+        fields=("model", "context_detail", "token_detail"),
+        input_tokens=18_000,
+        output_tokens=2_000,
+        cache_read_tokens=70_000,
+    )
+    assert out == "gpt-5.5 · ctx 44% (88k/200k) · in 18k + cache 70k · out 2k"
 
 # ---------------------------------------------------------------------------
 # resolve_footer_config
@@ -240,6 +326,28 @@ def test_build_footer_returns_rendered_when_enabled(monkeypatch, tmp_path):
     (tmp_path / "proj").mkdir(exist_ok=True)
     assert "gpt-5.4" in out
     assert "25%" in out
+
+
+def test_build_footer_optimal_fields_with_token_buckets():
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["model", "context_detail", "token_detail"],
+                }
+            }
+        },
+        platform_key="discord",
+        model="openai-codex/gpt-5.5",
+        context_tokens=88_000,
+        context_length=200_000,
+        cwd="/home/piet",
+        input_tokens=18_000,
+        output_tokens=2_000,
+        cache_read_tokens=70_000,
+    )
+    assert out == "gpt-5.5 · ctx 44% (88k/200k) · in 18k + cache 70k · out 2k"
 
 
 def test_build_footer_per_platform_off_suppresses():
