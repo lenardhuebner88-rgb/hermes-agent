@@ -1040,13 +1040,24 @@ while the agent is blocked (e.g. approval prompts) MUST bypass BOTH
 guards and be dispatched inline, not via `_process_message_background()`
 (which races session lifecycle).
 
+### ⛔ NEVER `git reset --hard origin/main` on this fork — it rewinds ALL fork work
+On this checkout `origin` is the **NousResearch UPSTREAM** and `main` tracks
+**`piet-fork/main`** (Piet's fork), which carries fork-local work that is *not*
+upstream (the Control dashboard, the dashboard Host/DNS-rebinding guard fix,
+etc.). `git reset --hard origin/main` silently discards all of it.
+This bit us on **2026-06-08**: an agent ran it on the main checkout, rewound
+**235 commits**, and broke the Tailscale dashboard (`{"detail":"Invalid Host
+header…"}`). To sync upstream use **`git merge origin/main`** (see the
+`hermes-fork-sync` skill), never a hard reset. Recovery, if it happens again:
+`git reset --hard piet-fork/main` (or any `backup/before-*` branch).
+
 ### Squash merges from stale branches silently revert recent fixes
 Before squash-merging a PR, ensure the branch is up to date with `main`
-(`git fetch origin main && git reset --hard origin/main` in the worktree,
-then re-apply the PR's commits). A stale branch's version of an unrelated
-file will silently overwrite recent fixes on main when squashed. Verify
-with `git diff HEAD~1..HEAD` after merging — unexpected deletions are a
-red flag.
+(in the PR worktree: `git merge main` — or rebase onto it — then keep the PR's
+commits; **do not** `git reset --hard origin/main`, see the fork-safety rule
+above). A stale branch's version of an unrelated file will silently overwrite
+recent fixes on main when squashed. Verify with `git diff HEAD~1..HEAD` after
+merging — unexpected deletions are a red flag.
 
 ### Don't wire in dead code without E2E validation
 Unused code that was never shipped was dead for a reason. Before wiring an
