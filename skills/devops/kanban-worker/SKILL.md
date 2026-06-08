@@ -69,28 +69,26 @@ kanban_complete(
 )
 ```
 
-**Coding task that needs human review (review-required):**
+**Coding task that needs review (the verifier gate):**
 
-For most code-changing tasks, the work isn't truly *done* until a human reviewer has eyes on it. Block instead of complete, with `reason` prefixed `review-required: ` so the dashboard surfaces the row as needing review. Drop the structured metadata (changed files, test counts, diff/PR url) into a comment first, since `kanban_block` only carries the human-readable reason — comments are the durable annotation channel. Reviewer either approves and runs `hermes kanban unblock <id>` (which re-spawns you with the comment thread for any follow-ups) or asks for changes via another comment.
+Code changes DO get reviewed — but you request that review by **completing**, not blocking. When your code task is done and your gates pass, call `kanban_complete` with the structured handoff. If you're a code role (e.g. `coder`, `premium`), the **review gate** automatically parks your completion in `review` and hands it to an independent `verifier` profile, which re-runs the real gates (tests/build/lint) on your actual changes and renders the verdict: APPROVED → the task moves to `done`; REQUEST_CHANGES → it's blocked for a follow-up fix with the failing command output attached. **That verifier IS the review** — so completing is how you ask for it.
+
+Put the handoff in `kanban_complete` itself — its `summary` / `metadata` / `artifacts` carry everything the verifier and the dashboard read, so you don't need a separate comment + block:
 
 ```python
-import json
-
-kanban_comment(
-    body="review-required handoff:\n" + json.dumps({
+kanban_complete(
+    summary="shipped rate limiter — token bucket, keys on user_id with IP fallback, 14/14 tests pass",
+    metadata={
         "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
         "tests_run": 14,
         "tests_passed": 14,
-        "diff_path": "/path/to/worktree",  # or PR url if pushed
         "decisions": ["user_id primary, IP fallback for unauthenticated requests"],
-    }, indent=2),
-)
-kanban_block(
-    reason="review-required: rate limiter shipped, 14/14 tests pass — needs eyes on the user_id/IP fallback choice before merging",
+    },
+    artifacts=["/abs/path/to/RESULT.md"],  # optional; preserved past the scratch wipe
 )
 ```
 
-Use `kanban_complete` only when the task is genuinely terminal — e.g. a one-line typo fix, a docs change with no functional consequences, or a research task where the artifact IS the writeup itself.
+Do **not** end a finished, gates-green code task with `kanban_block(reason="review-required: ...")`. `blocked` is a sticky, human-gated dead end that no reviewer loop consumes — it bypasses the verifier and stalls every task that depends on yours. Reserve `kanban_block` for a genuine blocker: a decision only a human can make, a missing credential, a contradiction in the task (see "Block reasons that get answered fast" below).
 
 **Research task:**
 ```python
