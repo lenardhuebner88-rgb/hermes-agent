@@ -13,6 +13,7 @@ import {
   MetricsLiteResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
+  BlockedCompletionsResponseSchema,
   RunInspectSchema,
   SystemHealthResponseSchema,
   WorkersResponseSchema,
@@ -25,7 +26,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -526,6 +527,18 @@ export function useHermesRecentResults() {
       RecentResultsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/recent-results?limit=12&since_hours=48&outcome=completed"),
       "runs/recent-results",
+    ),
+    20000,
+  );
+}
+
+export function useHermesBlockedCompletions() {
+  return usePolling<BlockedCompletionsResponse>(
+    "runs/blocked-completions",
+    async () => parseOrThrow(
+      BlockedCompletionsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/blocked-completions?since_hours=48"),
+      "runs/blocked-completions",
     ),
     20000,
   );

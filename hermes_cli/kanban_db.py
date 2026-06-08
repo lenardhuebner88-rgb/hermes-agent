@@ -4474,9 +4474,23 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # and silently delete the user's source data.
             if _is_managed_scratch_path(wp):
                 # Persist declared artifacts BEFORE rmtree.
-                _preserve_scratch_artifacts(conn, task_id, wp)
+                preserved = _preserve_scratch_artifacts(conn, task_id, wp)
                 shutil.rmtree(wp, ignore_errors=True)
                 _log.debug("Removed scratch workspace: %s", wp)
+                if preserved:
+                    # Record where the deliverables landed — the scratch
+                    # workspace is gone now, so without this the operator /
+                    # dashboard can't find the preserved copies. Own txn
+                    # (the completion txn already committed); best-effort.
+                    try:
+                        _dest = kanban_home() / "reports" / "by-task" / task_id
+                        with write_txn(conn):
+                            _append_event(
+                                conn, task_id, "deliverables_preserved",
+                                {"dir": str(_dest), "files": preserved},
+                            )
+                    except Exception:
+                        pass
             else:
                 _log.warning(
                     "Refusing to remove out-of-scratch workspace for task %s: %s "
@@ -7851,6 +7865,38 @@ def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
     return False
 
 
+def _skill_available_for_home(skill_name: str, hermes_home: Optional[str]) -> bool:
+    """True if ``skill_name`` resolves for the home the spawned worker runs under.
+
+    A per-task ``--skill`` that does NOT resolve for the worker's profile-scoped
+    skills dir is FATAL at CLI startup (``ValueError: Unknown skill(s)``),
+    aborting the worker before the agent loop — which the dispatcher then retries
+    into a crash loop (observed 7x on a single card). The dispatcher gates every
+    per-task ``--skills`` flag on this so a bad/absent skill name is skipped with
+    a warning instead of force-loaded into a crash. Mirrors the bundled
+    ``_kanban_worker_skill_available`` resolution, generalised to any name.
+    """
+    from pathlib import Path as _Path
+
+    if not skill_name:
+        return False
+    base = _Path(hermes_home) if hermes_home else (_Path.home() / ".hermes")
+    skills_root = base / "skills"
+    if not skills_root.is_dir():
+        return False
+    # Flat canonical location first (cheap), then a bounded scan for skills
+    # nested under a category dir (e.g. devops/<name>/SKILL.md).
+    if (skills_root / skill_name / "SKILL.md").is_file():
+        return True
+    try:
+        for skill_md in skills_root.rglob(f"{skill_name}/SKILL.md"):
+            if skill_md.is_file():
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _worker_terminal_timeout_env(
     max_runtime_seconds: Optional[int],
     current_timeout: Optional[str],
@@ -8022,7 +8068,20 @@ def _default_spawn(
     if task.skills:
         for sk in task.skills:
             if sk and sk != "kanban-worker":
-                cmd.extend(["--skills", sk])
+                # Only force-load a skill that actually resolves for the
+                # worker's home. A missing skill name is fatal at CLI startup
+                # (Unknown skill(s)) and the dispatcher would retry it into a
+                # crash loop — skip + warn instead so the task still runs.
+                if _skill_available_for_home(sk, env.get("HERMES_HOME")):
+                    cmd.extend(["--skills", sk])
+                else:
+                    _log.warning(
+                        "kanban dispatch: task %s requests skill %r which does "
+                        "not resolve under the worker home (%s) — skipping it to "
+                        "avoid a startup crash loop. Fix the skill name or install "
+                        "it for the assignee profile.",
+                        task.id, sk, env.get("HERMES_HOME") or "~/.hermes",
+                    )
     if task.model_override:
         cmd.extend(["-m", task.model_override])
     cmd.append("chat")

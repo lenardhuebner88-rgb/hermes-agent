@@ -444,6 +444,19 @@ _BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (
     "kanban_complete",
     "kanban_block",
     "kanban_comment",
+    "kanban_heartbeat",
+    "kanban_create",
+    # Workspace tools every worker lane needs to actually DO the task. Without
+    # these a disciplined worker that reads allowed_tools as a binding allowlist
+    # self-blocks on any artifact-producing task (it has file/terminal from its
+    # profile, but the contract didn't list them). allowed_tools is advisory
+    # attestation, not runtime enforcement — but workers honour it literally, so
+    # the canonical set must include the tools their profile already grants.
+    "read_file",
+    "write_file",
+    "patch",
+    "search_files",
+    "terminal",
 )
 
 _BROAD_ALLOWED_TOOL_MARKERS: frozenset[str] = frozenset({

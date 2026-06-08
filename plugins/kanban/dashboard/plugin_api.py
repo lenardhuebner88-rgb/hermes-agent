@@ -349,6 +349,37 @@ def _recent_result_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _blocked_completion_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """Serialise a hallucination-warning ``task_events`` row (joined with
+    its task) for the dashboard's blocked-completions panel.
+
+    The event payload is parsed defensively: a malformed/absent JSON blob
+    must not 500 the endpoint. ``phantom`` unifies the two event shapes —
+    ``phantom_cards`` (blocked completions) and ``phantom_refs`` (the
+    advisory prose scan) — into a single chip list for the UI.
+    """
+    raw = row["payload"]
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    phantom = payload.get("phantom_cards") or payload.get("phantom_refs") or []
+    summary_preview = payload.get("summary_preview")
+    return {
+        "event_id": row["event_id"],
+        "task_id": row["task_id"],
+        "task_title": row["task_title"],
+        "task_status": row["task_status"],
+        "assignee": row["assignee"],
+        "kind": row["kind"],
+        "created_at": int(row["created_at"] or 0),
+        "summary_preview": summary_preview if isinstance(summary_preview, str) else None,
+        "phantom": _coerce_str_list(phantom),
+    }
+
+
 # Hallucination-warning event kinds — see complete_task() in kanban_db.py.
 # completion_blocked_hallucination: kernel rejected created_cards with
 #   phantom ids; task stays in prior state.
@@ -1607,6 +1638,55 @@ def list_recent_results(
             "limit": capped_limit,
             "since_hours": int(since_hours),
             "outcome": outcome,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/runs/blocked-completions")
+def list_blocked_completions(
+    since_hours: int = Query(48, ge=1, le=24 * 30, description="Lookback window in hours"),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return recent hallucination-blocked / advisory completion events.
+
+    Sibling of ``/runs/recent-results``: where that endpoint shows
+    successful worker handoffs, this surfaces completions the
+    anti-hallucination gate *refused* (``completion_blocked_hallucination``)
+    plus the advisory prose-scan warnings (``suspected_hallucinated_references``)
+    so the operator sees them without querying the DB.
+    """
+    board = _resolve_board(board)
+    cutoff = int(time.time()) - int(since_hours) * 3600
+    conn = _conn(board=board)
+    try:
+        placeholders = ", ".join("?" for _ in _WARNING_EVENT_KINDS)
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.id AS event_id,
+                e.task_id,
+                t.title AS task_title,
+                t.status AS task_status,
+                t.assignee,
+                e.kind,
+                e.payload,
+                e.created_at
+            FROM task_events e
+            JOIN tasks t ON t.id = e.task_id
+            WHERE e.kind IN ({placeholders})
+              AND e.created_at >= ?
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT 50
+            """,
+            (*_WARNING_EVENT_KINDS, cutoff),
+        ).fetchall()
+        blocked = [_blocked_completion_dict(row) for row in rows]
+        return {
+            "blocked": blocked,
+            "count": len(blocked),
+            "checked_at": int(time.time()),
+            "since_hours": int(since_hours),
         }
     finally:
         conn.close()

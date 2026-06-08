@@ -3271,6 +3271,15 @@ class HermesCLI(CLICommandsMixin):
         self.enabled_toolsets = toolsets
         self.disabled_toolsets = CLI_CONFIG["agent"].get("disabled_toolsets") or []
 
+        # Dispatched kanban workers run headless: there is no live user to
+        # answer a `clarify` prompt. Leaving it enabled lets a worker burn
+        # ~120s on a clarify timeout before falling back to a guessed answer.
+        # Disable it for any dispatched worker (HERMES_KANBAN_TASK is set only
+        # by the dispatcher's _default_spawn — no interactive/gateway caller
+        # sets it). Workers reach the operator via kanban_block instead.
+        if os.environ.get("HERMES_KANBAN_TASK") and "clarify" not in self.disabled_toolsets:
+            self.disabled_toolsets = [*self.disabled_toolsets, "clarify"]
+
         if toolsets and "all" not in toolsets and "*" not in toolsets:
             # Validate each toolset — MCP server names are resolved via
             # live registry aliases (registered during discover_mcp_tools),
@@ -13665,6 +13674,71 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     )
 
 
+def _run_kanban_finalize_nudge_q(cli: "HermesCLI", first_response: str) -> None:
+    """One-shot finalize nudge for a dispatched (non-goal_mode) worker.
+
+    The single most common dispatch failure is a worker that ends its turn with
+    prose (rc=0) WITHOUT calling ``kanban_complete``/``kanban_block`` — the
+    dispatcher then classifies the clean exit as a protocol violation and
+    auto-blocks the task. When the dispatcher spawned us (``HERMES_KANBAN_TASK``
+    set) but goal_mode is OFF, and the task is still ``running`` after the first
+    turn, give the worker exactly ONE re-prompt to finalize. Unlike the goal
+    loop this does NO auxiliary judge call, so the cost is at most one extra
+    worker turn and only for workers that actually forgot. All errors are
+    swallowed by the caller — a broken nudge must never wedge a worker; the
+    dispatcher's crash/stale detection is the backstop.
+    """
+    import os as _os
+
+    task_id = (_os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return
+
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli.goals import KANBAN_GOAL_FINALIZE_TEMPLATE as _FINALIZE
+
+    def _status() -> "str | None":
+        c = _kb.connect()
+        try:
+            t = _kb.get_task(c, task_id)
+            return t.status if t is not None else None
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    # Only nudge if the worker left the task open. If it already
+    # completed/blocked (or the row is gone), there is nothing to finalize.
+    if _status() != "running":
+        return
+
+    prompt = _FINALIZE.format(
+        reason=(
+            "your run ended without calling a terminal kanban tool, so the task "
+            "is still 'running' and the dispatcher will auto-block it as a "
+            "protocol violation"
+        )
+    )
+    result = cli.agent.run_conversation(
+        user_message=prompt,
+        conversation_history=cli.conversation_history,
+    )
+    if (
+        getattr(cli.agent, "session_id", None)
+        and cli.agent.session_id != cli.session_id
+    ):
+        cli.session_id = cli.agent.session_id
+    resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
+    if resp:
+        print(resp)
+    # Single nudge only — log the outcome for observability, never loop.
+    try:
+        logger.info("kanban finalize nudge: task %s now %s", task_id, _status())
+    except Exception:
+        pass
+
+
 def main(
     query: str = None,
     q: str = None,
@@ -14081,6 +14155,17 @@ def main(
                             _run_kanban_goal_loop_q(cli, response)
                         except Exception as _goal_exc:
                             logger.debug("kanban goal loop failed: %s", _goal_exc)
+                    elif os.environ.get("HERMES_KANBAN_TASK"):
+                        # One-shot finalize nudge: a dispatched single-shot
+                        # worker that ended with prose and no terminal kanban
+                        # call leaves the task 'running' → auto-blocked as a
+                        # protocol violation (the #1 dispatch failure mode).
+                        # Give it exactly ONE re-prompt to finalize. No judge
+                        # call, so at most one extra turn, only when it forgot.
+                        try:
+                            _run_kanban_finalize_nudge_q(cli, response)
+                        except Exception as _nudge_exc:
+                            logger.debug("kanban finalize nudge failed: %s", _nudge_exc)
 
                     # Session ID goes to stderr so piped stdout is clean.
                     print(f"\nsession_id: {cli.session_id}", file=sys.stderr)

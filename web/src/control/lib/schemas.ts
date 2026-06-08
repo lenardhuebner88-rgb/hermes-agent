@@ -84,6 +84,25 @@ export const RecentResultsResponseSchema = z.object({
   outcome: z.string().catch("completed"),
 });
 
+export const BlockedCompletionSchema = z.object({
+  event_id: z.coerce.number().catch(0),
+  task_id: z.string().catch(""),
+  task_title: z.string().catch("Ohne Titel"),
+  task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("blocked"),
+  assignee: z.string().catch("hermes"),
+  kind: z.enum(["completion_blocked_hallucination", "suspected_hallucinated_references"]).catch("completion_blocked_hallucination"),
+  created_at: z.coerce.number().catch(0),
+  summary_preview: z.string().nullable().catch(null),
+  phantom: z.array(z.string()).catch([]),
+});
+
+export const BlockedCompletionsResponseSchema = z.object({
+  blocked: z.array(BlockedCompletionSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  since_hours: z.coerce.number().catch(48),
+});
+
 const HealthStatusSchema = z.enum(["healthy", "degraded", "offline"]);
 const SubsystemHealthSchema = z.object({
   status: HealthStatusSchema.catch("offline"),

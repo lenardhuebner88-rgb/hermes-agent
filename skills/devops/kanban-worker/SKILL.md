@@ -20,7 +20,7 @@ Your workspace kind determines how you should behave inside `$HERMES_KANBAN_WORK
 
 | Kind | What it is | How to work |
 |---|---|---|
-| `scratch` | Fresh tmp dir, yours alone | Read/write freely; it gets GC'd when the task is archived. |
+| `scratch` | Fresh tmp dir, yours alone | Read/write freely. **It is DELETED the moment you `kanban_complete`** (not when archived) — to keep any deliverable, pass its absolute path in `kanban_complete(artifacts=[...])` (see "Preserving deliverables" below). |
 | `dir:<path>` | Shared persistent directory | Other runs will read what you write. Treat it like long-lived state. Path is guaranteed absolute (the kernel rejects relative paths). |
 | `worktree` | Git worktree at the resolved path | If `.git` doesn't exist, run `git worktree add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo first, then cd and work normally. Commit work here. |
 
@@ -30,6 +30,27 @@ If `$HERMES_TENANT` is set, the task belongs to a tenant namespace. When reading
 
 - Good: `business-a: Acme is our biggest customer`
 - Bad (leaks): `Acme is our biggest customer`
+
+## Preserving deliverables
+
+A `scratch` workspace is wiped as soon as you `kanban_complete` — only the run's `summary`/`metadata` strings survive in the DB. If your task produced a real file the operator should be able to open later (a `RESULT.md`, a generated report, a build artifact), pass its **absolute** path in the `artifacts` list:
+
+```python
+kanban_complete(
+    summary="generated the weekly digest",
+    artifacts=["/abs/path/in/workspace/digest.md"],  # copied out BEFORE the wipe
+)
+```
+
+Each listed artifact that resolves *inside* your scratch workspace is copied to `~/.hermes/reports/by-task/<your-task-id>/<basename>` before deletion, and a `deliverables_preserved` event records where they landed. Pass absolute paths (workspace-relative paths are skipped). Anything you don't list is gone.
+
+## Don't end your turn without completing
+
+The dispatcher treats a clean exit while the task is still `running` as a **protocol violation**: it counts a failed run and auto-blocks the task. Your run is only over once you call `kanban_complete` or `kanban_block`. Never answer in prose and stop.
+
+## Scope contract is advisory
+
+If the task body carries a `scope_contract.allowed_tools` list, treat it as an attestation of intent — **not** a runtime allowlist. Your actual tools come from your profile. If you need a tool your profile grants (e.g. `write_file`, `terminal`) that the contract didn't enumerate, use it; do not block solely because it's absent from the list.
 
 ## Good summary + metadata shapes
 

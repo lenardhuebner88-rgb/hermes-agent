@@ -2489,3 +2489,84 @@ def test_recent_results_caps_limit_filters_since_and_truncates_summary(client):
     assert len(result["summary"]) == 8192
     assert len(result["summary_preview"]) == 160
     assert result["followups"] == ["check", "fix"]
+
+
+# ---------------------------------------------------------------------------
+# GET /runs/blocked-completions - hallucination-refusal visibility
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_completions_surfaces_refused_and_advisory_events(client):
+    """The endpoint returns both blocked-completion and advisory
+    hallucination events (newest first), unifying ``phantom_cards`` /
+    ``phantom_refs`` into a single ``phantom`` list and surfacing the
+    payload ``summary_preview``."""
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="Phantom claimer", assignee="critic")
+        real = kb.create_task(conn, title="real", assignee="x", created_by="critic")
+
+        # Real complete_task path emits completion_blocked_hallucination with
+        # phantom_cards + summary_preview, then raises.
+        with pytest.raises(kb.HallucinatedCardsError):
+            kb.complete_task(
+                conn, parent,
+                summary="Erstellte Karte t_deadbeefcafe wie gewuenscht",
+                created_cards=[real, "t_deadbeefcafe"],
+            )
+
+        # Advisory prose-scan event (completion succeeded, advisory only).
+        advisory_task = kb.create_task(conn, title="Advisory prose", assignee="research")
+        kb._append_event(
+            conn, advisory_task, "suspected_hallucinated_references",
+            {"phantom_refs": ["t_cafef00dbabe"], "source": "summary"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/blocked-completions")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 2
+    assert data["since_hours"] == 48
+    kinds = [row["kind"] for row in data["blocked"]]
+    assert "completion_blocked_hallucination" in kinds
+    assert "suspected_hallucinated_references" in kinds
+
+    blocked_row = next(b for b in data["blocked"] if b["kind"] == "completion_blocked_hallucination")
+    assert blocked_row["task_title"] == "Phantom claimer"
+    assert blocked_row["assignee"] == "critic"
+    assert "t_deadbeefcafe" in blocked_row["phantom"]
+    assert blocked_row["summary_preview"] == "Erstellte Karte t_deadbeefcafe wie gewuenscht"
+    assert "event_id" in blocked_row
+
+    advisory_row = next(b for b in data["blocked"] if b["kind"] == "suspected_hallucinated_references")
+    assert advisory_row["phantom"] == ["t_cafef00dbabe"]
+    assert advisory_row["summary_preview"] is None
+
+
+def test_blocked_completions_filters_by_since_hours(client):
+    """Events older than the since_hours window are excluded."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        old_task = kb.create_task(conn, title="old block", assignee="critic")
+        kb._append_event(
+            conn, old_task, "completion_blocked_hallucination",
+            {"phantom_cards": ["t_oldphantom00"], "summary_preview": "old"},
+        )
+        # Backdate the event past the window.
+        conn.execute(
+            "UPDATE task_events SET created_at=? WHERE task_id=? AND kind='completion_blocked_hallucination'",
+            (now - 200000, old_task),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/blocked-completions?since_hours=1")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 0
+    assert data["since_hours"] == 1

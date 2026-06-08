@@ -2987,6 +2987,9 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     """Dispatcher argv must carry one `--skills X` pair per task skill,
     in addition to the built-in kanban-worker."""
     monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: True)
+    # Per-task skills are gated on resolvability too (skip-missing-not-crash);
+    # pretend these resolve in the empty isolated home.
+    monkeypatch.setattr(kb, "_skill_available_for_home", lambda _n, _h: True)
     captured = {}
 
     class FakeProc:
@@ -3037,6 +3040,7 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
 def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monkeypatch):
     """If a task explicitly lists 'kanban-worker', we don't double-pass it."""
     monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: True)
+    monkeypatch.setattr(kb, "_skill_available_for_home", lambda _n, _h: True)
     captured = {}
 
     class FakeProc:

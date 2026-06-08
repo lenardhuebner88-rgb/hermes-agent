@@ -79,6 +79,27 @@ export interface RecentResultsResponse {
   outcome: string;
 }
 
+export type BlockedCompletionKind = "completion_blocked_hallucination" | "suspected_hallucinated_references";
+
+export interface BlockedCompletion {
+  event_id: number;
+  task_id: string;
+  task_title: string;
+  task_status: TaskStatus;
+  assignee: string;
+  kind: BlockedCompletionKind;
+  created_at: number;
+  summary_preview: string | null;
+  phantom: string[];
+}
+
+export interface BlockedCompletionsResponse {
+  blocked: BlockedCompletion[];
+  count: number;
+  checked_at: number;
+  since_hours: number;
+}
+
 export type HealthStatus = "healthy" | "degraded" | "offline";
 
 export interface SubsystemHealth {

@@ -3,18 +3,20 @@ import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
-import { useHermesRecentResults, useHermesWorkers, useRunInspect } from "../hooks/useControlData";
+import { useHermesBlockedCompletions, useHermesRecentResults, useHermesWorkers, useRunInspect } from "../hooks/useControlData";
 import { nowSec, workerHealth, workerSortRank } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { WorkerCard } from "../components/WorkerCard";
 import { HermesResultCard } from "../components/HermesResultCard";
+import { HermesBlockedCard } from "../components/HermesBlockedCard";
 import { ToneCallout } from "../components/atoms";
 import { Panel, Section, SkeletonCard, Stagger, StaggerItem, Stat, Text } from "../components/primitives";
 
 export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const results = useHermesRecentResults();
+  const blocked = useHermesBlockedCompletions();
   const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
   const now = nowSec();
   const [selected, setSelected] = useState(0);
@@ -44,6 +46,8 @@ export function HermesFleet({ density }: { density: Density }) {
   const workersLoadingFirst = workers.loading && workers.data == null;
   const resultsList = results.data?.results ?? [];
   const resultsLoadingFirst = results.loading && results.data == null;
+  const blockedList = blocked.data?.blocked ?? [];
+  const blockedLoadingFirst = blocked.loading && blocked.data == null;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -130,6 +134,30 @@ export function HermesFleet({ density }: { density: Density }) {
             {resultsList.map((result) => (
               <StaggerItem key={result.run_id}>
                 <HermesResultCard result={result} now={now} />
+              </StaggerItem>
+            ))}
+          </Stagger>
+        )}
+      </Section>
+
+      <Section
+        eyebrow={de.hermes.blockedCompletions}
+        title={`${blockedLoadingFirst ? "…" : (blocked.data?.count ?? 0)} blockierte Abschluesse`}
+        actions={<Text variant="label" className="hc-soft">{de.hermes.blockedHint}</Text>}
+      >
+        {blocked.error ? <ToneCallout tone="red">{de.hermes.blockedError}<br />{blocked.error}</ToneCallout> : null}
+        {blockedLoadingFirst ? (
+          <div className={gridClass}>
+            <SkeletonCard rows={3} />
+            <SkeletonCard rows={3} />
+          </div>
+        ) : blockedList.length === 0 && !blocked.error ? (
+          <div className="hc-surface-card p-4 text-sm hc-soft">{de.hermes.emptyBlocked}</div>
+        ) : (
+          <Stagger className={gridClass}>
+            {blockedList.map((item) => (
+              <StaggerItem key={item.event_id}>
+                <HermesBlockedCard blocked={item} now={now} />
               </StaggerItem>
             ))}
           </Stagger>
