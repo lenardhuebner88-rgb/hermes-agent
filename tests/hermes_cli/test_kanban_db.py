@@ -3341,6 +3341,8 @@ def test_dispatch_review_spawns_as_verifier_profile(
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
         # DB assignee is unchanged (override is in-memory, for the spawn only).
         assert kb.get_task(conn, t).assignee == "alice"
+        run = kb.list_runs(conn, t)[0]
+        assert run.profile == "verifier"
     assert len(res.spawned) == 1
     assert len(spawned_tasks) == 1
     assert spawned_tasks[0].assignee == "verifier"

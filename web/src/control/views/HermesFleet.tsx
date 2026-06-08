@@ -3,19 +3,23 @@ import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
-import { useHermesBlockedCompletions, useHermesRecentResults, useHermesWorkers, useRunInspect } from "../hooks/useControlData";
+import { useHermesBlockedCompletions, useHermesRecentResults, useHermesReviewVerdicts, useHermesTodayDigest, useHermesWorkers, useRunInspect } from "../hooks/useControlData";
 import { nowSec, workerHealth, workerSortRank } from "../lib/derive";
 import { KEYMAP } from "../lib/keymap";
 import type { Density } from "../hooks/useDensity";
 import { WorkerCard } from "../components/WorkerCard";
 import { HermesResultCard } from "../components/HermesResultCard";
+import { HermesTodayDigestCard } from "../components/HermesTodayDigestCard";
 import { HermesBlockedCard } from "../components/HermesBlockedCard";
+import { HermesReviewCard } from "../components/HermesReviewCard";
 import { ToneCallout } from "../components/atoms";
 import { Panel, Section, SkeletonCard, Stagger, StaggerItem, Stat, Text } from "../components/primitives";
 
 export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const results = useHermesRecentResults();
+  const digest = useHermesTodayDigest();
+  const reviews = useHermesReviewVerdicts();
   const blocked = useHermesBlockedCompletions();
   const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
   const now = nowSec();
@@ -46,7 +50,13 @@ export function HermesFleet({ density }: { density: Density }) {
   const workersLoadingFirst = workers.loading && workers.data == null;
   const resultsList = results.data?.results ?? [];
   const resultsLoadingFirst = results.loading && results.data == null;
+  const digestList = digest.data?.items ?? [];
+  const digestLoadingFirst = digest.loading && digest.data == null;
+  const reviewList = reviews.data?.reviews ?? [];
+  const reviewsLoadingFirst = reviews.loading && reviews.data == null;
   const blockedList = blocked.data?.blocked ?? [];
+  const verifierRejectedList = blockedList.filter((item) => item.kind === "verifier_request_changes");
+  const blockedWarningList = blockedList.filter((item) => item.kind !== "verifier_request_changes");
   const blockedLoadingFirst = blocked.loading && blocked.data == null;
 
   useEffect(() => {
@@ -117,6 +127,54 @@ export function HermesFleet({ density }: { density: Density }) {
       )}
 
       <Section
+        eyebrow="Review-Verdicts"
+        title={`${reviewsLoadingFirst ? "…" : (reviews.data?.count ?? 0)} Tasks im Review`}
+        actions={<Text variant="label" className="hc-soft">Verifier-Verdict und zitierte Command-Ausgabe, sobald vorhanden.</Text>}
+      >
+        {reviews.error ? <ToneCallout tone="red">Review-Verdicts konnten nicht geladen werden.<br />{reviews.error}</ToneCallout> : null}
+        {reviewsLoadingFirst ? (
+          <div className={gridClass}>
+            <SkeletonCard rows={3} />
+            <SkeletonCard rows={3} />
+          </div>
+        ) : reviewList.length === 0 && !reviews.error ? (
+          <div className="hc-surface-card p-4 text-sm hc-soft">Keine Tasks im Review.</div>
+        ) : (
+          <Stagger className={gridClass}>
+            {reviewList.map((review) => (
+              <StaggerItem key={review.task_id}>
+                <HermesReviewCard review={review} now={now} />
+              </StaggerItem>
+            ))}
+          </Stagger>
+        )}
+      </Section>
+
+      <Section
+        eyebrow={de.hermes.todayDigest}
+        title={`${digestLoadingFirst ? "…" : (digest.data?.count ?? 0)} Ergebnisse heute`}
+        actions={<Text variant="label" className="hc-soft">{de.hermes.todayDigestHint}</Text>}
+      >
+        {digest.error ? <ToneCallout tone="red">{de.hermes.todayDigestError}<br />{digest.error}</ToneCallout> : null}
+        {digestLoadingFirst ? (
+          <div className={gridClass}>
+            <SkeletonCard rows={3} />
+            <SkeletonCard rows={3} />
+          </div>
+        ) : digestList.length === 0 && !digest.error ? (
+          <div className="hc-surface-card p-4 text-sm hc-soft">{de.hermes.emptyTodayDigest}</div>
+        ) : (
+          <Stagger className={gridClass}>
+            {digestList.map((item) => (
+              <StaggerItem key={item.run_id}>
+                <HermesTodayDigestCard item={item} now={now} />
+              </StaggerItem>
+            ))}
+          </Stagger>
+        )}
+      </Section>
+
+      <Section
         eyebrow={de.hermes.recentResults}
         title={`${resultsLoadingFirst ? "…" : (results.data?.count ?? 0)} abgeschlossene Läufe`}
         actions={<Text variant="label" className="hc-soft">{de.hermes.recentResultsHint}</Text>}
@@ -141,8 +199,32 @@ export function HermesFleet({ density }: { density: Density }) {
       </Section>
 
       <Section
+        eyebrow={de.hermes.verifierRejected}
+        title={`${blockedLoadingFirst ? "…" : verifierRejectedList.length} Verifier-Ablehnungen`}
+        actions={<Text variant="label" className="hc-soft">{de.hermes.verifierRejectedHint}</Text>}
+      >
+        {blocked.error ? <ToneCallout tone="red">{de.hermes.blockedError}<br />{blocked.error}</ToneCallout> : null}
+        {blockedLoadingFirst ? (
+          <div className={gridClass}>
+            <SkeletonCard rows={3} />
+            <SkeletonCard rows={3} />
+          </div>
+        ) : verifierRejectedList.length === 0 && !blocked.error ? (
+          <div className="hc-surface-card p-4 text-sm hc-soft">{de.hermes.verifierRejectedEmpty}</div>
+        ) : (
+          <Stagger className={gridClass}>
+            {verifierRejectedList.map((item) => (
+              <StaggerItem key={`verifier-${item.run_id ?? item.event_id}`}>
+                <HermesBlockedCard blocked={item} now={now} />
+              </StaggerItem>
+            ))}
+          </Stagger>
+        )}
+      </Section>
+
+      <Section
         eyebrow={de.hermes.blockedCompletions}
-        title={`${blockedLoadingFirst ? "…" : (blocked.data?.count ?? 0)} blockierte Abschluesse`}
+        title={`${blockedLoadingFirst ? "…" : blockedWarningList.length} blockierte Abschluesse`}
         actions={<Text variant="label" className="hc-soft">{de.hermes.blockedHint}</Text>}
       >
         {blocked.error ? <ToneCallout tone="red">{de.hermes.blockedError}<br />{blocked.error}</ToneCallout> : null}
@@ -151,11 +233,11 @@ export function HermesFleet({ density }: { density: Density }) {
             <SkeletonCard rows={3} />
             <SkeletonCard rows={3} />
           </div>
-        ) : blockedList.length === 0 && !blocked.error ? (
+        ) : blockedWarningList.length === 0 && !blocked.error ? (
           <div className="hc-surface-card p-4 text-sm hc-soft">{de.hermes.emptyBlocked}</div>
         ) : (
           <Stagger className={gridClass}>
-            {blockedList.map((item) => (
+            {blockedWarningList.map((item) => (
               <StaggerItem key={item.event_id}>
                 <HermesBlockedCard blocked={item} now={now} />
               </StaggerItem>

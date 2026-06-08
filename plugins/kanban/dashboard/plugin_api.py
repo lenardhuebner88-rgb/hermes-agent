@@ -38,11 +38,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
+import re
 import sqlite3
 import time
 from dataclasses import asdict, is_dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
@@ -250,9 +253,9 @@ def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
     }
 
 
-def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
+def _run_dict(conn: sqlite3.Connection, r: kanban_db.Run) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
-    return {
+    d = {
         "id": r.id,
         "task_id": r.task_id,
         "profile": r.profile,
@@ -270,11 +273,15 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
         "metadata": r.metadata,
         "error": r.error,
     }
+    d.update(_run_lineage_fields(conn, r.task_id, r.id))
+    return d
 
 
 _RESULT_SUMMARY_LIMIT = 8 * 1024
 _RESULT_METADATA_LIMIT = 16 * 1024
 _RESULT_PREVIEW_LIMIT = 160
+_DELIVERABLES_MAX_FILES = 50
+_DELIVERABLE_EXCERPT_LIMIT = 600
 
 
 def _coerce_str_list(value: Any) -> list[str]:
@@ -314,7 +321,240 @@ def _summary_preview(summary: str) -> str:
     return source[:_RESULT_PREVIEW_LIMIT]
 
 
-def _recent_result_dict(row: sqlite3.Row) -> dict[str, Any]:
+_VERDICT_TOKENS = {
+    "APPROVED": "APPROVED",
+    "REQUEST_CHANGES": "REQUEST_CHANGES",
+    "REQUEST-CHANGES": "REQUEST_CHANGES",
+    "REQUEST CHANGES": "REQUEST_CHANGES",
+    "NEEDS_REVISION": "REQUEST_CHANGES",
+    "NEEDS-REVISION": "REQUEST_CHANGES",
+    "NEEDS REVISION": "REQUEST_CHANGES",
+}
+
+_VERIFIER_EVIDENCE_KEYS = (
+    "gate_output_excerpt",
+    "command_output_excerpt",
+    "verification_evidence",
+    "evidence_audited",
+    "evidence_used",
+    "commands_evidence",
+    "tests_run",
+    "tests_passed",
+)
+
+
+def _normalize_verifier_verdict(summary: str, metadata: dict[str, Any]) -> Optional[str]:
+    raw = metadata.get("verdict")
+    if not isinstance(raw, str) or not raw.strip():
+        first = next((line.strip() for line in summary.splitlines() if line.strip()), "")
+        raw = first.split("—", 1)[0].split(":", 1)[0].strip() if first else ""
+    token = str(raw or "").strip().upper().replace(" ", "_").replace("-", "_")
+    return _VERDICT_TOKENS.get(token)
+
+
+def _verification_state(verdict: Optional[str], *, default: str) -> str:
+    if verdict == "APPROVED":
+        return "approved"
+    if verdict == "REQUEST_CHANGES":
+        return "request_changes"
+    return default
+
+
+def _result_quality_badge(verification_state: str, *, profile: Optional[str]) -> dict[str, str]:
+    """Return a compact done-result gate-quality taxonomy for /control cards."""
+    if verification_state == "approved":
+        return {
+            "state": "verifier_approved",
+            "label": "Verifier-approved",
+            "tone": "emerald",
+            "description": "Independent verifier gate passed.",
+        }
+    if verification_state == "request_changes":
+        return {
+            "state": "rejected_needs_work",
+            "label": "Rejected / needs work",
+            "tone": "red",
+            "description": "Verifier gate requested changes before this should count as done.",
+        }
+    if not profile:
+        return {
+            "state": "unknown_legacy",
+            "label": "Unknown legacy",
+            "tone": "zinc",
+            "description": "Legacy run has no verifier metadata or profile lineage.",
+        }
+    return {
+        "state": "ungated",
+        "label": "Ungated",
+        "tone": "amber",
+        "description": "Completed without an independent verifier gate.",
+    }
+
+
+def _claimed_event_payload(conn: sqlite3.Connection, task_id: str, run_id: Any) -> Optional[dict[str, Any]]:
+    try:
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, int(run_id)),
+        ).fetchone()
+    except (TypeError, ValueError, sqlite3.Error):
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _run_lineage_fields(conn: sqlite3.Connection, task_id: str, run_id: Any) -> dict[str, str]:
+    """Return explicit human-facing lineage labels for a task_runs row.
+
+    The durable discriminator for review/verifier attempts is the claimed
+    event written by claim_review_task with source_status='review'.
+    Old/synthetic rows may lack any claimed event; surface them as legacy
+    unknown instead of inferring coder from task.assignee/profile fallbacks.
+    """
+    payload = _claimed_event_payload(conn, task_id, run_id)
+    if payload is None:
+        return {
+            "run_role": "legacy_unknown",
+            "run_role_label": "Unknown / legacy run",
+            "run_role_source": "missing_claim_event",
+        }
+    if str(payload.get("source_status") or "").strip().lower() == "review":
+        return {
+            "run_role": "verification",
+            "run_role_label": "Verifier / review run",
+            "run_role_source": "claimed_event",
+        }
+    return {
+        "run_role": "implementation",
+        "run_role_label": "Implementation / coder run",
+        "run_role_source": "claimed_event",
+    }
+
+
+def _verifier_evidence(metadata: dict[str, Any]) -> list[str]:
+    evidence: list[str] = []
+    for key in _VERIFIER_EVIDENCE_KEYS:
+        _append_unique(evidence, _coerce_str_list(metadata.get(key)))
+    return [item[:500] for item in evidence[:6]]
+
+
+def _safe_deliverables_root(task_id: str) -> tuple[Path, Path]:
+    """Return the task deliverables dir and resolved dir, or 404 on escape.
+
+    Deliverables are only served from ``<kanban_home>/reports/by-task/<task_id>``.
+    We intentionally do not trust path segments from the URL: malformed task IDs
+    such as ``../x`` resolve outside ``by-task`` and are rejected before any file
+    enumeration or download attempt.
+    """
+    reports_root = kanban_db.kanban_home() / "reports" / "by-task"
+    root = reports_root / task_id
+    reports_resolved = reports_root.resolve(strict=False)
+    root_resolved = root.resolve(strict=False)
+    try:
+        inside = root_resolved.is_relative_to(reports_resolved)
+    except ValueError:
+        inside = False
+    if not inside:
+        raise HTTPException(status_code=404, detail="deliverable not found")
+    return root, root_resolved
+
+
+def _deliverable_content_type(path: Path) -> str:
+    if path.suffix.lower() in {".md", ".markdown"}:
+        return "text/markdown"
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
+
+
+def _deliverable_url(task_id: str, relative_path: str) -> str:
+    task_part = quote(task_id, safe="")
+    rel_part = quote(relative_path, safe="/-._~")
+    return f"/api/plugins/kanban/tasks/{task_part}/deliverables/{rel_part}"
+
+
+def _deliverable_dict(path: Path, root: Path, root_resolved: Path, task_id: str) -> Optional[dict[str, Any]]:
+    try:
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(root_resolved) or not path.is_file():
+            return None
+        rel = path.relative_to(root).as_posix()
+        st = path.stat()
+    except (OSError, ValueError):
+        return None
+    return {
+        "filename": path.name,
+        "relative_path": rel,
+        "size": int(st.st_size),
+        "mtime": int(st.st_mtime),
+        "content_type": _deliverable_content_type(path),
+        "url": _deliverable_url(task_id, rel),
+    }
+
+
+def _list_task_deliverables(task_id: str) -> list[dict[str, Any]]:
+    root, root_resolved = _safe_deliverables_root(task_id)
+    if not root.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    try:
+        candidates = root.rglob("*")
+    except OSError:
+        return []
+    for candidate in candidates:
+        item = _deliverable_dict(candidate, root, root_resolved, task_id)
+        if item is not None:
+            items.append(item)
+    items.sort(key=lambda item: (0 if item["relative_path"] == "RESULT.md" else 1, item["relative_path"].lower()))
+    return items[:_DELIVERABLES_MAX_FILES]
+
+
+def _deliverable_excerpt(task_id: str, deliverable: Optional[dict[str, Any]]) -> Optional[str]:
+    if not deliverable:
+        return None
+    content_type = str(deliverable.get("content_type") or "")
+    relative_path = str(deliverable.get("relative_path") or "")
+    textish = (
+        content_type.startswith("text/")
+        or relative_path.endswith((".md", ".markdown", ".txt", ".json", ".yaml", ".yml"))
+    )
+    if not textish:
+        return None
+    try:
+        path = _resolve_deliverable_file(task_id, relative_path)
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, HTTPException):
+        return None
+    excerpt = " ".join(raw.split())
+    if not excerpt:
+        return None
+    if len(excerpt) > _DELIVERABLE_EXCERPT_LIMIT:
+        return excerpt[: _DELIVERABLE_EXCERPT_LIMIT - 1].rstrip() + "…"
+    return excerpt
+
+
+def _resolve_deliverable_file(task_id: str, relative_path: str) -> Path:
+    requested = PurePosixPath(relative_path)
+    if requested.is_absolute() or not requested.parts or any(part in {"", ".", ".."} for part in requested.parts):
+        raise HTTPException(status_code=404, detail="deliverable not found")
+    root, root_resolved = _safe_deliverables_root(task_id)
+    candidate = root.joinpath(*requested.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(root_resolved) or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="deliverable not found")
+    except OSError:
+        raise HTTPException(status_code=404, detail="deliverable not found")
+    return candidate
+
+
+def _recent_result_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     summary = (row["summary"] or "")[:_RESULT_SUMMARY_LIMIT]
     metadata = _load_result_metadata(row["metadata"])
     followups: list[str] = []
@@ -326,15 +566,17 @@ def _recent_result_dict(row: sqlite3.Row) -> dict[str, Any]:
         _append_unique(artifacts, _coerce_str_list(metadata.get(key)))
     for key in ("verification_evidence", "tests_run", "tests_passed", "changed_files"):
         _append_unique(verification, _coerce_str_list(metadata.get(key)))
+    verdict = _normalize_verifier_verdict(summary, metadata)
+    verification_state = _verification_state(verdict, default="ungated")
     ended_at = int(row["ended_at"] or 0)
     started_at = int(row["started_at"] or 0)
-    return {
+    d = {
         "run_id": row["run_id"],
         "task_id": row["task_id"],
         "task_title": row["task_title"],
         "task_status": row["task_status"],
         "task_assignee": row["task_assignee"],
-        "profile": row["profile"] or row["task_assignee"] or "default",
+        "profile": row["profile"],
         "status": row["run_status"],
         "outcome": row["run_outcome"],
         "started_at": started_at,
@@ -345,7 +587,76 @@ def _recent_result_dict(row: sqlite3.Row) -> dict[str, Any]:
         "followups": followups,
         "artifacts": artifacts,
         "verification": verification,
+        "verification_state": verification_state,
+        "verifier_verdict": verdict,
+        "verifier_evidence": _verifier_evidence(metadata) if verdict else [],
+        "result_quality": _result_quality_badge(verification_state, profile=row["profile"]),
+        "deliverables": _list_task_deliverables(row["task_id"]),
         "residual_risk": metadata.get("residual_risk") if isinstance(metadata.get("residual_risk"), str) else None,
+    }
+    d.update(_run_lineage_fields(conn, row["task_id"], row["run_id"]))
+    return d
+
+
+def _local_day_start(ts: Optional[int] = None) -> int:
+    now = int(time.time()) if ts is None else int(ts)
+    local = time.localtime(now)
+    return int(time.mktime(local[:3] + (0, 0, 0) + local[6:]))
+
+
+def _verdict_label(verification_state: str, verdict: Optional[str]) -> str:
+    if verification_state == "approved" and verdict:
+        return f"Verified: {verdict}"
+    if verification_state == "request_changes" and verdict:
+        return f"Verifier requested changes: {verdict}"
+    if verification_state == "pending":
+        return "Verification pending"
+    return "Not independently verified"
+
+
+def _today_digest_item(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    result = _recent_result_dict(conn, row)
+    deliverables = result.get("deliverables") if isinstance(result.get("deliverables"), list) else []
+    primary_deliverable = deliverables[0] if deliverables else None
+    verification_state = str(result.get("verification_state") or "ungated")
+    verifier_verdict = result.get("verifier_verdict") if isinstance(result.get("verifier_verdict"), str) else None
+    return {
+        "run_id": result["run_id"],
+        "task_id": result["task_id"],
+        "task_title": result["task_title"],
+        "task_summary": result.get("summary_preview") or result.get("summary") or "",
+        "ended_at": result["ended_at"],
+        "profile": result["profile"],
+        "run_role": result["run_role"],
+        "run_role_label": result["run_role_label"],
+        "verification_state": verification_state,
+        "verifier_verdict": verifier_verdict,
+        "verdict_label": _verdict_label(verification_state, verifier_verdict),
+        "result_quality": result.get("result_quality") or _result_quality_badge(verification_state, profile=result.get("profile")),
+        "gate_evidence": result.get("verifier_evidence") or result.get("verification") or [],
+        "deliverable": primary_deliverable,
+        "deliverable_excerpt": _deliverable_excerpt(result["task_id"], primary_deliverable),
+        "residual_risk": result.get("residual_risk"),
+    }
+
+
+def _review_verdict_dict(task_row: sqlite3.Row, run_row: Optional[sqlite3.Row]) -> dict[str, Any]:
+    summary = (run_row["summary"] or "")[:_RESULT_SUMMARY_LIMIT] if run_row else ""
+    metadata = _load_result_metadata(run_row["metadata"] if run_row else None)
+    verdict = _normalize_verifier_verdict(summary, metadata)
+    return {
+        "task_id": task_row["id"],
+        "task_title": task_row["title"],
+        "task_status": task_row["status"],
+        "task_assignee": task_row["assignee"],
+        "created_at": int(task_row["created_at"] or 0),
+        "submitted_at": int(run_row["ended_at"] or 0) if run_row else None,
+        "run_id": run_row["run_id"] if run_row else None,
+        "reviewer_profile": (run_row["profile"] if run_row else None),
+        "summary_preview": _summary_preview(summary) if summary else "",
+        "verification_state": _verification_state(verdict, default="pending"),
+        "verifier_verdict": verdict,
+        "verifier_evidence": _verifier_evidence(metadata) if verdict else [],
     }
 
 
@@ -389,6 +700,74 @@ _WARNING_EVENT_KINDS = (
     "completion_blocked_hallucination",
     "suspected_hallucinated_references",
 )
+
+_VERIFIER_REJECTION_KIND = "verifier_request_changes"
+_FIX_SUMMARY_KEYS = (
+    "fix_summary",
+    "actionable_fix_summary",
+    "what_to_fix",
+    "required_fix",
+    "next_fix",
+)
+_FIX_LIST_KEYS = (
+    "blocking_findings",
+    "suggested_fixes",
+    "required_verification",
+)
+
+
+def _fix_summary(metadata: dict[str, Any], summary: str) -> Optional[str]:
+    """Return a short operator-facing fix target for rejected verifier runs."""
+    for key in _FIX_SUMMARY_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:_RESULT_PREVIEW_LIMIT]
+    for key in _FIX_LIST_KEYS:
+        items = _coerce_str_list(metadata.get(key))
+        if items:
+            return "; ".join(items)[:_RESULT_PREVIEW_LIMIT]
+    text = " ".join(line.strip() for line in str(summary or "").splitlines() if line.strip())
+    if not text:
+        return None
+    # Common verifier prose: "... Fix X" / "... fix it to ...".
+    match = re.search(r"\b(fix(?:e[sn]?|ing)?\b.*)$", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()[:_RESULT_PREVIEW_LIMIT]
+    return None
+
+
+def _is_verifier_rejection_run(conn: sqlite3.Connection, row: sqlite3.Row, verdict: Optional[str]) -> bool:
+    if verdict != "REQUEST_CHANGES":
+        return False
+    if str(row["profile"] or "").strip() == "verifier":
+        return True
+    lineage = _run_lineage_fields(conn, row["task_id"], row["run_id"])
+    return lineage.get("run_role") == "verification"
+
+
+def _verifier_rejection_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    summary = (row["summary"] or "")[:_RESULT_SUMMARY_LIMIT]
+    metadata = _load_result_metadata(row["metadata"])
+    evidence = _verifier_evidence(metadata)
+    if not evidence and summary:
+        evidence = [_summary_preview(summary)]
+    run_id = int(row["run_id"] or 0)
+    return {
+        "event_id": -run_id,
+        "run_id": run_id,
+        "task_id": row["task_id"],
+        "task_title": row["task_title"],
+        "task_status": row["task_status"],
+        "assignee": row["assignee"],
+        "kind": _VERIFIER_REJECTION_KIND,
+        "created_at": int(row["ended_at"] or row["started_at"] or 0),
+        "summary_preview": _summary_preview(summary) if summary else None,
+        "phantom": [],
+        "reviewer_profile": row["profile"],
+        "verifier_verdict": "REQUEST_CHANGES",
+        "failure_output": evidence,
+        "fix_summary": _fix_summary(metadata, summary),
+    }
 
 
 def _compute_task_diagnostics(
@@ -657,6 +1036,65 @@ def get_board(
 
 
 # ---------------------------------------------------------------------------
+# GET /tasks/review-verdicts
+# ---------------------------------------------------------------------------
+
+@router.get("/tasks/review-verdicts")
+def list_review_verdicts(
+    limit: int = Query(12, ge=1, description="Maximum review tasks to return (capped at 50)"),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return tasks currently parked in review plus the latest verifier signal.
+
+    The Hermes /control view uses this read-only shape to show why a review
+    task is approved/request-changes/pending without requiring the operator to
+    open the full Kanban drawer.  Done-task markers are carried by
+    /runs/recent-results; this endpoint is intentionally review-column only.
+    """
+    board = _resolve_board(board)
+    capped_limit = max(1, min(int(limit), 50))
+    conn = _conn(board=board)
+    try:
+        tasks = conn.execute(
+            """
+            SELECT id, title, status, assignee, created_at
+            FROM tasks
+            WHERE status = 'review'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+        reviews: list[dict[str, Any]] = []
+        for task in tasks:
+            run = conn.execute(
+                """
+                SELECT
+                    id AS run_id,
+                    profile,
+                    ended_at,
+                    summary,
+                    metadata
+                FROM task_runs
+                WHERE task_id = ?
+                  AND ended_at IS NOT NULL
+                ORDER BY ended_at DESC, id DESC
+                LIMIT 1
+                """,
+                (task["id"],),
+            ).fetchone()
+            reviews.append(_review_verdict_dict(task, run))
+        return {
+            "reviews": reviews,
+            "count": len(reviews),
+            "checked_at": int(time.time()),
+            "limit": capped_limit,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # GET /tasks/:id
 # ---------------------------------------------------------------------------
 
@@ -704,9 +1142,10 @@ def get_task(
             "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
             "events": [_event_dict(e) for e in kanban_db.list_events(conn, task_id)],
             "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
+            "deliverables": _list_task_deliverables(task_id),
             "links": _links_for(conn, task_id),
             "runs": [
-                _run_dict(r)
+                _run_dict(conn, r)
                 for r in kanban_db.list_runs(
                     conn,
                     task_id,
@@ -717,6 +1156,34 @@ def get_task(
         }
     finally:
         conn.close()
+
+
+@router.get("/tasks/{task_id}/deliverables")
+def list_task_deliverables(task_id: str):
+    """List preserved worker deliverables for a task.
+
+    Files are enumerated from ``<kanban_home>/reports/by-task/<task_id>`` only.
+    ``RESULT.md`` sorts first because it is the conventional human-readable
+    handoff; all other nearby artifacts follow alphabetically by relative path.
+    """
+    deliverables = _list_task_deliverables(task_id)
+    return {
+        "task_id": task_id,
+        "deliverables": deliverables,
+        "count": len(deliverables),
+    }
+
+
+@router.get("/tasks/{task_id}/deliverables/{relative_path:path}")
+def download_task_deliverable(task_id: str, relative_path: str):
+    """Serve one preserved deliverable through the dashboard auth boundary."""
+    path = _resolve_deliverable_file(task_id, relative_path)
+    return FileResponse(
+        path,
+        media_type=_deliverable_content_type(path),
+        filename=path.name,
+        content_disposition_type="inline",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1630,7 +2097,7 @@ def list_recent_results(
             """,
             (cutoff, outcome, capped_limit),
         ).fetchall()
-        results = [_recent_result_dict(row) for row in rows]
+        results = [_recent_result_dict(conn, row) for row in rows]
         return {
             "results": results,
             "count": len(results),
@@ -1638,6 +2105,61 @@ def list_recent_results(
             "limit": capped_limit,
             "since_hours": int(since_hours),
             "outcome": outcome,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/runs/today-digest")
+def list_today_digest(
+    limit: int = Query(12, ge=1, description="Maximum digest items to return (capped at 50)"),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return today's human-readable outcome digest for /control.
+
+    The digest is a scanner-friendly projection of completed task_runs since
+    local midnight: summary, primary preserved deliverable + safe text excerpt,
+    and the verifier/gate state in one row.
+    """
+    board = _resolve_board(board)
+    capped_limit = max(1, min(int(limit), 50))
+    day_start = _local_day_start()
+    conn = _conn(board=board)
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                r.id AS run_id,
+                r.task_id,
+                t.title AS task_title,
+                t.status AS task_status,
+                t.assignee AS task_assignee,
+                r.profile,
+                r.status AS run_status,
+                r.outcome AS run_outcome,
+                r.started_at,
+                r.ended_at,
+                r.summary,
+                r.metadata
+            FROM task_runs r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE r.ended_at IS NOT NULL
+              AND r.ended_at >= ?
+              AND r.outcome = 'completed'
+            ORDER BY r.ended_at DESC, r.id DESC
+            LIMIT ?
+            """,
+            (day_start, capped_limit),
+        ).fetchall()
+        items = [_today_digest_item(conn, row) for row in rows]
+        return {
+            "schema": "kanban-today-digest-v1",
+            "items": items,
+            "count": len(items),
+            "checked_at": int(time.time()),
+            "day_start": day_start,
+            "timezone": "local",
+            "limit": capped_limit,
         }
     finally:
         conn.close()
@@ -1682,6 +2204,42 @@ def list_blocked_completions(
             (*_WARNING_EVENT_KINDS, cutoff),
         ).fetchall()
         blocked = [_blocked_completion_dict(row) for row in rows]
+
+        rejection_rows = conn.execute(
+            """
+            SELECT
+                r.id AS run_id,
+                r.task_id,
+                t.title AS task_title,
+                t.status AS task_status,
+                t.assignee,
+                r.profile,
+                r.started_at,
+                r.ended_at,
+                r.summary,
+                r.metadata
+            FROM task_runs r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE r.ended_at IS NOT NULL
+              AND r.ended_at >= ?
+              AND (
+                    r.profile = 'verifier'
+                 OR UPPER(COALESCE(r.summary, '')) LIKE '%REQUEST_CHANGES%'
+                 OR UPPER(COALESCE(r.summary, '')) LIKE '%NEEDS_REVISION%'
+                 OR UPPER(COALESCE(r.metadata, '')) LIKE '%REQUEST_CHANGES%'
+                 OR UPPER(COALESCE(r.metadata, '')) LIKE '%NEEDS_REVISION%'
+              )
+            ORDER BY r.ended_at DESC, r.id DESC
+            LIMIT 50
+            """,
+            (cutoff,),
+        ).fetchall()
+        for row in rejection_rows:
+            metadata = _load_result_metadata(row["metadata"])
+            verdict = _normalize_verifier_verdict(row["summary"] or "", metadata)
+            if _is_verifier_rejection_run(conn, row, verdict):
+                blocked.append(_verifier_rejection_dict(conn, row))
+        blocked = sorted(blocked, key=lambda item: int(item.get("created_at") or 0), reverse=True)[:50]
         return {
             "blocked": blocked,
             "count": len(blocked),

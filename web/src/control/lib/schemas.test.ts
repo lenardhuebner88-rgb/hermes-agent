@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("BacklogResponseSchema (Family Organizer contract health)", () => {
   it("preserves unknown status/risk values and parses contract-health drift", () => {
@@ -145,6 +145,49 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers[0].run_status).toBe("blocked");
   });
 });
+
+describe("TodayDigestResponseSchema", () => {
+  it("parses human-readable digest items with deliverable pointers and gate state", () => {
+    const parsed = parseOrThrow(TodayDigestResponseSchema, {
+      schema: "kanban-today-digest-v1",
+      checked_at: 1780000000,
+      day_start: 1779990000,
+      timezone: "local",
+      count: 1,
+      items: [{
+        run_id: 42,
+        task_id: "t_digest",
+        task_title: "Useful slice",
+        task_summary: "Delivered a useful RESULT.md",
+        ended_at: 1780000000,
+        profile: "coder",
+        run_role: "implementation",
+        run_role_label: "Implementation / coder run",
+        verification_state: "approved",
+        verifier_verdict: "APPROVED",
+        verdict_label: "Verified: APPROVED",
+        result_quality: {
+          state: "verifier_approved",
+          label: "Verifier-approved",
+          tone: "emerald",
+          description: "Independent verifier gate passed.",
+        },
+        gate_evidence: ["vitest -> 1 passed"],
+        deliverable: { filename: "RESULT.md", relative_path: "RESULT.md", size: 123, mtime: 1780000000, content_type: "text/markdown", url: "/api/plugins/kanban/tasks/t_digest/deliverables/RESULT.md" },
+        deliverable_excerpt: "Human readable output",
+        residual_risk: null,
+      }],
+    }, "today-digest");
+
+    expect(parsed.items[0].run_id).toBe("42");
+    expect(parsed.items[0].deliverable?.relative_path).toBe("RESULT.md");
+    expect(parsed.items[0].deliverable_excerpt).toContain("Human readable");
+    expect(parsed.items[0].verdict_label).toBe("Verified: APPROVED");
+    expect(parsed.items[0].result_quality.state).toBe("verifier_approved");
+    expect(parsed.items[0].result_quality.label).toBe("Verifier-approved");
+  });
+});
+
 
 describe("OrchestrationBacklogResponseSchema", () => {
   it("preserves unknown live statuses and exposes contract health", () => {
@@ -298,6 +341,38 @@ describe("ProposalsResponseSchema (Sprint A last_outcome counts)", () => {
 });
 
 
+describe("BlockedCompletionsResponseSchema", () => {
+  it("parses verifier rejection fields for the dedicated fix panel", () => {
+    const parsed = parseOrThrow(BlockedCompletionsResponseSchema, {
+      blocked: [{
+        event_id: -501,
+        run_id: 501,
+        task_id: "t_rejected",
+        task_title: "Rejected by verifier",
+        task_status: "blocked",
+        assignee: "coder",
+        kind: "verifier_request_changes",
+        created_at: "100",
+        summary_preview: "REQUEST_CHANGES — pytest failed",
+        phantom: [],
+        reviewer_profile: "verifier",
+        verifier_verdict: "REQUEST_CHANGES",
+        failure_output: ["pytest -> FAILED"],
+        fix_summary: "Fix add(a, b).",
+      }],
+      count: "1",
+      checked_at: "120",
+      since_hours: "48",
+    }, "blocked-completions");
+
+    expect(parsed.blocked[0].kind).toBe("verifier_request_changes");
+    expect(parsed.blocked[0].run_id).toBe("501");
+    expect(parsed.blocked[0].failure_output).toEqual(["pytest -> FAILED"]);
+    expect(parsed.blocked[0].fix_summary).toBe("Fix add(a, b).");
+  });
+});
+
+
 describe("RecentResultsResponseSchema", () => {
   it("coerces numeric run ids and counters without dropping real results", () => {
     const parsed = parseOrThrow(RecentResultsResponseSchema, {
@@ -308,7 +383,10 @@ describe("RecentResultsResponseSchema", () => {
         task_id: "t_1",
         task_title: "Visible result",
         task_assignee: "coder",
-        profile: "coder",
+        profile: "verifier",
+        run_role: "verification",
+        run_role_label: "Verifier / review run",
+        run_role_source: "claimed_event",
         status: "done",
         outcome: "completed",
         started_at: "10",
@@ -319,11 +397,22 @@ describe("RecentResultsResponseSchema", () => {
         followups: ["check artifact"],
         artifacts: ["/tmp/receipt.md"],
         verification: ["pytest"],
+        result_quality: {
+          state: "unknown_legacy",
+          label: "Unknown legacy",
+          tone: "zinc",
+          description: "Legacy run has no verifier metadata or profile lineage.",
+        },
       }],
     }, "recent-results");
     expect(parsed.count).toBe(1);
     expect(parsed.results[0].run_id).toBe("408");
+    expect(parsed.results[0].profile).toBe("verifier");
+    expect(parsed.results[0].run_role).toBe("verification");
+    expect(parsed.results[0].run_role_label).toBe("Verifier / review run");
     expect(parsed.results[0].duration_seconds).toBe(15);
+    expect(parsed.results[0].result_quality.state).toBe("unknown_legacy");
+    expect(parsed.results[0].result_quality.tone).toBe("zinc");
   });
 });
 

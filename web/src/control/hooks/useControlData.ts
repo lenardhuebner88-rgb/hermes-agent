@@ -13,6 +13,8 @@ import {
   MetricsLiteResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
+  ReviewVerdictsResponseSchema,
+  TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   RunInspectSchema,
   SystemHealthResponseSchema,
@@ -26,7 +28,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, RunInspect, SystemHealthResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -527,6 +529,30 @@ export function useHermesRecentResults() {
       RecentResultsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/recent-results?limit=12&since_hours=48&outcome=completed"),
       "runs/recent-results",
+    ),
+    20000,
+  );
+}
+
+export function useHermesTodayDigest() {
+  return usePolling<TodayDigestResponse>(
+    "runs/today-digest",
+    async () => parseOrThrow(
+      TodayDigestResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/today-digest?limit=12"),
+      "runs/today-digest",
+    ),
+    20000,
+  );
+}
+
+export function useHermesReviewVerdicts() {
+  return usePolling<ReviewVerdictsResponse>(
+    "tasks/review-verdicts",
+    async () => parseOrThrow(
+      ReviewVerdictsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/tasks/review-verdicts?limit=12"),
+      "tasks/review-verdicts",
     ),
     20000,
   );

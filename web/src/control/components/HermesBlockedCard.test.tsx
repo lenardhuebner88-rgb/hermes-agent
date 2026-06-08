@@ -14,6 +14,7 @@ const blockedBase: BlockedCompletion = {
   created_at: 100,
   summary_preview: "Hat zwei Karten erfunden",
   phantom: ["t_deadbeefcafe", "t_0000ffff1111"],
+  failure_output: [],
 };
 
 describe("HermesBlockedCard", () => {
@@ -43,5 +44,28 @@ describe("HermesBlockedCard", () => {
     expect(html).toContain(de.hermes.blockedAdvisoryHint);
     expect(html).toContain("t_abcabcabcabc");
     expect(html).toContain("amber");
+  });
+
+  it("renders verifier rejections with quoted failure output and concrete fix target", () => {
+    const rejection: BlockedCompletion = {
+      ...blockedBase,
+      event_id: -501,
+      run_id: "501",
+      reviewer_profile: "verifier",
+      verifier_verdict: "REQUEST_CHANGES",
+      kind: "verifier_request_changes",
+      summary_preview: "REQUEST_CHANGES — pytest failed",
+      phantom: [],
+      failure_output: ["pytest tests/test_calc.py -\u003e stdout: FAILED test_add"],
+      fix_summary: "Fix add(a, b) to return a + b before resubmitting.",
+    };
+    const html = renderToStaticMarkup(<HermesBlockedCard blocked={rejection} now={200} />);
+
+    expect(html).toContain(de.hermes.verifierRejectedKind);
+    expect(html).toContain(de.hermes.verifierRejectedFixLabel);
+    expect(html).toContain("pytest tests/test_calc.py -&gt; stdout: FAILED test_add");
+    expect(html).toContain("Fix add(a, b) to return a + b before resubmitting.");
+    expect(html).toContain("verifier");
+    expect(html).toContain("Run 501");
   });
 });

@@ -42,7 +42,7 @@ export const taskStatusLabel: Record<string, string> = {
 export const profileLabel: Record<string, string> = {
   default: 'Standard', admin: 'Admin', coder: 'Coder', devpower: 'DevPower',
   dispatcher: 'Dispatcher', kanbanops: 'Kanban-Ops', planner: 'Planer',
-  research: 'Research', critic: 'Kritiker',
+  research: 'Research', critic: 'Kritiker', verifier: 'Verifier',
 };
 
 export const priorityLabel: Record<Priority, string> = { high: 'Hoch', med: 'Mittel', low: 'Niedrig' };

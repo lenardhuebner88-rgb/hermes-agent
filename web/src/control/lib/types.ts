@@ -1,6 +1,6 @@
 export type WorkerProfile =
   | "default" | "admin" | "coder" | "devpower" | "dispatcher"
-  | "kanbanops" | "planner" | "research" | "critic";
+  | "kanbanops" | "planner" | "research" | "critic" | "verifier";
 
 export type TaskStatus =
   | "triage" | "todo" | "scheduled" | "ready" | "running"
@@ -56,7 +56,10 @@ export interface KanbanResult {
   task_title: string;
   task_status: TaskStatus;
   task_assignee: string;
-  profile: WorkerProfile;
+  profile: string | null;
+  run_role: RunRole;
+  run_role_label: string;
+  run_role_source: RunRoleSource;
   status: RunStatus;
   outcome: RunOutcome | null;
   started_at: number;
@@ -67,7 +70,48 @@ export interface KanbanResult {
   followups: string[];
   artifacts: string[];
   verification: string[];
+  verification_state?: VerificationState;
+  verifier_verdict?: VerifierVerdict | null;
+  verifier_evidence?: string[];
+  result_quality: ResultQualityBadge;
+  deliverables?: TaskDeliverable[];
   residual_risk?: string | null;
+}
+
+export interface TaskDeliverable {
+  filename: string;
+  relative_path: string;
+  size: number;
+  mtime: number;
+  content_type: string;
+  url: string;
+}
+
+export type VerifierVerdict = "APPROVED" | "REQUEST_CHANGES";
+export type VerificationState = "approved" | "request_changes" | "pending" | "ungated";
+export type ResultQualityState = "verifier_approved" | "ungated" | "rejected_needs_work" | "unknown_legacy";
+export interface ResultQualityBadge {
+  state: ResultQualityState;
+  label: string;
+  tone: ToneName;
+  description: string;
+}
+export type RunRole = "implementation" | "verification" | "legacy_unknown";
+export type RunRoleSource = "claimed_event" | "missing_claim_event";
+
+export interface KanbanReview {
+  task_id: string;
+  task_title: string;
+  task_status: TaskStatus;
+  task_assignee: string;
+  created_at: number;
+  submitted_at: number | null;
+  run_id: string | null;
+  reviewer_profile: string | null;
+  summary_preview: string;
+  verification_state: VerificationState;
+  verifier_verdict: VerifierVerdict | null;
+  verifier_evidence: string[];
 }
 
 export interface RecentResultsResponse {
@@ -79,10 +123,47 @@ export interface RecentResultsResponse {
   outcome: string;
 }
 
-export type BlockedCompletionKind = "completion_blocked_hallucination" | "suspected_hallucinated_references";
+export interface TodayDigestItem {
+  run_id: string;
+  task_id: string;
+  task_title: string;
+  task_summary: string;
+  ended_at: number;
+  profile: string | null;
+  run_role: RunRole;
+  run_role_label: string;
+  verification_state: VerificationState;
+  verifier_verdict: VerifierVerdict | null;
+  verdict_label: string;
+  result_quality: ResultQualityBadge;
+  gate_evidence: string[];
+  deliverable: TaskDeliverable | null;
+  deliverable_excerpt: string | null;
+  residual_risk?: string | null;
+}
+
+export interface TodayDigestResponse {
+  schema: string;
+  items: TodayDigestItem[];
+  count: number;
+  checked_at: number;
+  day_start: number;
+  timezone: string;
+  limit: number;
+}
+
+export interface ReviewVerdictsResponse {
+  reviews: KanbanReview[];
+  count: number;
+  checked_at: number;
+  limit: number;
+}
+
+export type BlockedCompletionKind = "completion_blocked_hallucination" | "suspected_hallucinated_references" | "verifier_request_changes";
 
 export interface BlockedCompletion {
   event_id: number;
+  run_id?: string | null;
   task_id: string;
   task_title: string;
   task_status: TaskStatus;
@@ -91,6 +172,10 @@ export interface BlockedCompletion {
   created_at: number;
   summary_preview: string | null;
   phantom: string[];
+  reviewer_profile?: string | null;
+  verifier_verdict?: VerifierVerdict | null;
+  failure_output: string[];
+  fix_summary?: string | null;
 }
 
 export interface BlockedCompletionsResponse {

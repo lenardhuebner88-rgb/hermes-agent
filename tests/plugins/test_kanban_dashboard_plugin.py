@@ -1274,6 +1274,143 @@ def test_task_detail_runs_empty_before_claim(client):
     assert d["runs"] == []
 
 
+def test_task_deliverables_lists_result_md_first_and_downloads_safe_file(client, kanban_home):
+    task = client.post("/api/plugins/kanban/tasks", json={"title": "deliverable"}).json()["task"]
+    root = kanban_home / "reports" / "by-task" / task["id"]
+    nested = root / "artifacts"
+    nested.mkdir(parents=True)
+    (root / "RESULT.md").write_text("# Result\nreal worker output\n", encoding="utf-8")
+    (nested / "notes.txt").write_text("supporting artifact", encoding="utf-8")
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 2
+    assert [item["relative_path"] for item in data["deliverables"]] == [
+        "RESULT.md",
+        "artifacts/notes.txt",
+    ]
+    result_md = data["deliverables"][0]
+    assert result_md["filename"] == "RESULT.md"
+    assert result_md["content_type"] == "text/markdown"
+    assert result_md["url"].endswith(f"/tasks/{task['id']}/deliverables/RESULT.md")
+
+    download = client.get(result_md["url"])
+    assert download.text == "# Result\nreal worker output\n"
+    assert download.headers["content-disposition"].startswith("inline")
+
+
+def test_task_deliverables_rejects_traversal_and_skips_symlinks_outside(client, kanban_home):
+    task = client.post("/api/plugins/kanban/tasks", json={"title": "safe deliverables"}).json()["task"]
+    root = kanban_home / "reports" / "by-task" / task["id"]
+    root.mkdir(parents=True)
+    outside = kanban_home / "reports" / "by-task" / "outside-secret.txt"
+    outside.write_text("do not serve", encoding="utf-8")
+    (root / "RESULT.md").write_text("ok", encoding="utf-8")
+    try:
+        (root / "leak.txt").symlink_to(outside)
+    except OSError:
+        pass
+
+    listed = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables").json()["deliverables"]
+    assert [item["relative_path"] for item in listed] == ["RESULT.md"]
+
+    escaped = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables/%2e%2e/outside-secret.txt")
+    assert escaped.status_code == 404
+    assert "do not serve" not in escaped.text
+
+
+def test_recent_results_includes_preserved_deliverables(client, kanban_home):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="has preserved files", assignee="coder")
+        _insert_completed_run(
+            conn,
+            task_id=task_id,
+            title="has preserved files",
+            started_at=now - 20,
+            ended_at=now - 10,
+            summary="completed with RESULT.md",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    root = kanban_home / "reports" / "by-task" / task_id
+    root.mkdir(parents=True)
+    (root / "artifact.json").write_text("{}", encoding="utf-8")
+    (root / "RESULT.md").write_text("# Done", encoding="utf-8")
+
+    r = client.get("/api/plugins/kanban/runs/recent-results")
+    assert r.status_code == 200, r.text
+    result = r.json()["results"][0]
+    assert result["task_id"] == task_id
+    assert [item["relative_path"] for item in result["deliverables"]] == ["RESULT.md", "artifact.json"]
+    assert result["deliverables"][0]["url"].endswith(f"/tasks/{task_id}/deliverables/RESULT.md")
+
+
+def test_today_digest_summarizes_today_with_deliverable_excerpt_and_gate_state(client, kanban_home):
+    now = int(time.time())
+    today = time.localtime(now)
+    day_start = int(time.mktime(today[:3] + (0, 0, 0) + today[6:]))
+    today_end = max(day_start + 1, now - 60)
+    conn = kb.connect()
+    try:
+        useful_task = kb.create_task(conn, title="Ship useful dashboard slice", assignee="coder")
+        old_task = kb.create_task(conn, title="Yesterday result", assignee="coder")
+        run_id = _insert_completed_run(
+            conn,
+            task_id=useful_task,
+            title="Ship useful dashboard slice",
+            started_at=today_end - 120,
+            ended_at=today_end,
+            summary="S4 complete — digest now answers what arrived today",
+            metadata={
+                "verdict": "APPROVED",
+                "gate_output_excerpt": "web vitest -> 12 passed",
+                "receipt_path": "/home/piet/vault/03-Agents/Hermes/receipts/s4.md",
+            },
+        )
+        _append_claimed_event(conn, task_id=useful_task, run_id=run_id)
+        _insert_completed_run(
+            conn,
+            task_id=old_task,
+            title="Yesterday result",
+            started_at=day_start - 120,
+            ended_at=day_start - 60,
+            summary="old result should not be in today's digest",
+            metadata={},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    root = kanban_home / "reports" / "by-task" / useful_task
+    root.mkdir(parents=True)
+    (root / "RESULT.md").write_text(
+        "# Human result\n\nOperator-facing deliverable text for today's useful outcome.\nSecond paragraph.",
+        encoding="utf-8",
+    )
+
+    r = client.get("/api/plugins/kanban/runs/today-digest")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["schema"] == "kanban-today-digest-v1"
+    assert data["count"] == 1
+    assert data["day_start"] <= today_end
+    item = data["items"][0]
+    assert item["task_id"] == useful_task
+    assert item["run_id"] == run_id
+    assert item["task_summary"] == "S4 complete — digest now answers what arrived today"
+    assert item["deliverable"]["relative_path"] == "RESULT.md"
+    assert item["deliverable"]["url"].endswith(f"/tasks/{useful_task}/deliverables/RESULT.md")
+    assert "Operator-facing deliverable text" in item["deliverable_excerpt"]
+    assert item["verification_state"] == "approved"
+    assert item["verdict_label"] == "Verified: APPROVED"
+    assert item["gate_evidence"] == ["web vitest -> 12 passed"]
+
+
 def test_patch_status_done_with_summary_and_metadata(client):
     """PATCH /tasks/:id with status=done + summary + metadata must
     reach complete_task, so the dashboard has CLI parity."""
@@ -2379,7 +2516,7 @@ def test_create_task_no_home_channels_is_noop(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _insert_completed_run(conn, *, task_id, title, started_at, ended_at, outcome="completed", summary="", metadata=None, profile="coder"):
+def _insert_completed_run(conn, *, task_id, title, started_at, ended_at, outcome="completed", summary="", metadata=None, profile: str | None = "coder"):
     conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, summary, metadata) "
@@ -2387,6 +2524,13 @@ def _insert_completed_run(conn, *, task_id, title, started_at, ended_at, outcome
         (task_id, profile, outcome, started_at, ended_at, summary, json.dumps(metadata or {})),
     )
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _append_claimed_event(conn, *, task_id, run_id, payload=None):
+    conn.execute(
+        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, ?)",
+        (task_id, run_id, json.dumps(payload or {"run_id": run_id}), int(time.time())),
+    )
 
 
 def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metadata(client):
@@ -2450,6 +2594,269 @@ def test_recent_results_defaults_to_completed_newest_first_and_normalizes_metada
     assert second["followups"] == ["needs operator review"]
     assert second["artifacts"] == ["/tmp/a.txt"]
     assert second["verification"] == ["pytest x"]
+
+
+def test_recent_results_surfaces_verifier_verdict_evidence_and_ungated_state(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        approved_task = kb.create_task(conn, title="approved", assignee="coder")
+        ungated_task = kb.create_task(conn, title="ungated", assignee="research")
+        rejected_task = kb.create_task(conn, title="rejected", assignee="coder")
+        legacy_task = kb.create_task(conn, title="legacy", assignee="legacy")
+        _insert_completed_run(
+            conn,
+            task_id=approved_task,
+            title="Verifier approved task",
+            started_at=now - 120,
+            ended_at=now - 60,
+            summary="APPROVED — checked real output",
+            metadata={
+                "verdict": "APPROVED",
+                "gate_output_excerpt": "python3 check.py -> stdout: CHECK OK",
+                "verification_evidence": ["pytest tests/foo.py -> 1 passed"],
+            },
+            profile="verifier",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=ungated_task,
+            title="Direct ungated task",
+            started_at=now - 50,
+            ended_at=now - 20,
+            summary="completed without reviewer",
+            metadata={"changed_files": ["notes.md"]},
+            profile="research",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=rejected_task,
+            title="Verifier rejected task",
+            started_at=now - 80,
+            ended_at=now - 30,
+            summary="REQUEST_CHANGES — tests failed",
+            metadata={"verdict": "REQUEST_CHANGES", "gate_output_excerpt": "pytest -> failed"},
+            profile="verifier",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=legacy_task,
+            title="Legacy unknown task",
+            started_at=now - 70,
+            ended_at=now - 10,
+            summary="old completion without profile or verifier metadata",
+            metadata={},
+            profile=None,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/recent-results")
+    assert r.status_code == 200, r.text
+    rows = {row["task_title"]: row for row in r.json()["results"]}
+    approved = rows["Verifier approved task"]
+    assert approved["verification_state"] == "approved"
+    assert approved["verifier_verdict"] == "APPROVED"
+    assert approved["verifier_evidence"] == [
+        "python3 check.py -> stdout: CHECK OK",
+        "pytest tests/foo.py -> 1 passed",
+    ]
+    assert approved["result_quality"] == {
+        "state": "verifier_approved",
+        "label": "Verifier-approved",
+        "tone": "emerald",
+        "description": "Independent verifier gate passed.",
+    }
+    ungated = rows["Direct ungated task"]
+    assert ungated["verification_state"] == "ungated"
+    assert ungated["verifier_verdict"] is None
+    assert ungated["verifier_evidence"] == []
+    assert ungated["result_quality"]["state"] == "ungated"
+    assert ungated["result_quality"]["label"] == "Ungated"
+    rejected = rows["Verifier rejected task"]
+    assert rejected["verification_state"] == "request_changes"
+    assert rejected["result_quality"]["state"] == "rejected_needs_work"
+    assert rejected["result_quality"]["label"] == "Rejected / needs work"
+    legacy = rows["Legacy unknown task"]
+    assert legacy["verification_state"] == "ungated"
+    assert legacy["result_quality"] == {
+        "state": "unknown_legacy",
+        "label": "Unknown legacy",
+        "tone": "zinc",
+        "description": "Legacy run has no verifier metadata or profile lineage.",
+    }
+
+
+def test_recent_results_exposes_run_lineage_without_profile_fallbacks(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        coder_task = kb.create_task(conn, title="coder", assignee="coder")
+        verifier_task = kb.create_task(conn, title="verifier", assignee="coder")
+        legacy_task = kb.create_task(conn, title="legacy", assignee="coder")
+        coder_run = _insert_completed_run(
+            conn,
+            task_id=coder_task,
+            title="Implementation run",
+            started_at=now - 300,
+            ended_at=now - 240,
+            summary="implementation done",
+            metadata={},
+            profile="coder",
+        )
+        _append_claimed_event(conn, task_id=coder_task, run_id=coder_run, payload={"run_id": coder_run})
+        verifier_run = _insert_completed_run(
+            conn,
+            task_id=verifier_task,
+            title="Verifier run",
+            started_at=now - 200,
+            ended_at=now - 140,
+            summary="APPROVED — tests passed",
+            metadata={"verdict": "APPROVED"},
+            # Historical review rows were persisted with the task assignee
+            # even though the dispatcher spawned the verifier profile.
+            profile="coder",
+        )
+        _append_claimed_event(
+            conn,
+            task_id=verifier_task,
+            run_id=verifier_run,
+            payload={"run_id": verifier_run, "source_status": "review"},
+        )
+        _insert_completed_run(
+            conn,
+            task_id=legacy_task,
+            title="Legacy run",
+            started_at=now - 100,
+            ended_at=now - 40,
+            summary="old row without claimed event",
+            metadata={},
+            profile=None,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/recent-results?limit=10")
+    assert r.status_code == 200, r.text
+    rows = {row["task_title"]: row for row in r.json()["results"]}
+    assert rows["Implementation run"]["run_role"] == "implementation"
+    assert rows["Implementation run"]["run_role_label"] == "Implementation / coder run"
+    assert rows["Implementation run"]["run_role_source"] == "claimed_event"
+
+    assert rows["Verifier run"]["profile"] == "coder"
+    assert rows["Verifier run"]["run_role"] == "verification"
+    assert rows["Verifier run"]["run_role_label"] == "Verifier / review run"
+    assert rows["Verifier run"]["run_role_source"] == "claimed_event"
+
+    assert rows["Legacy run"]["profile"] is None
+    assert rows["Legacy run"]["run_role"] == "legacy_unknown"
+    assert rows["Legacy run"]["run_role_label"] == "Unknown / legacy run"
+    assert rows["Legacy run"]["run_role_source"] == "missing_claim_event"
+
+
+def test_task_detail_runs_include_lineage_for_coder_verifier_and_legacy(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="mixed lineage", assignee="coder")
+        coder_run = _insert_completed_run(
+            conn,
+            task_id=task_id,
+            title="mixed lineage",
+            started_at=now - 300,
+            ended_at=now - 240,
+            summary="coder summary",
+            metadata={},
+            profile="coder",
+        )
+        verifier_run = _insert_completed_run(
+            conn,
+            task_id=task_id,
+            title="mixed lineage",
+            started_at=now - 200,
+            ended_at=now - 140,
+            summary="verifier summary",
+            metadata={},
+            profile="coder",
+        )
+        legacy_run = _insert_completed_run(
+            conn,
+            task_id=task_id,
+            title="mixed lineage",
+            started_at=now - 100,
+            ended_at=now - 40,
+            summary="legacy summary",
+            metadata={},
+            profile="coder",
+        )
+        _append_claimed_event(conn, task_id=task_id, run_id=coder_run, payload={"run_id": coder_run})
+        _append_claimed_event(
+            conn,
+            task_id=task_id,
+            run_id=verifier_run,
+            payload={"run_id": verifier_run, "source_status": "review"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200, r.text
+    runs = {row["id"]: row for row in r.json()["runs"]}
+    assert runs[coder_run]["run_role"] == "implementation"
+    assert runs[verifier_run]["run_role"] == "verification"
+    assert runs[legacy_run]["run_role"] == "legacy_unknown"
+
+
+def test_review_verdicts_surfaces_review_tasks_with_request_changes_evidence(client):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        review_task = kb.create_task(conn, title="Review me", assignee="coder")
+        done_task = kb.create_task(conn, title="Done ignored", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_task,))
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (done_task,))
+        _insert_completed_run(
+            conn,
+            task_id=review_task,
+            title="Review me",
+            started_at=now - 90,
+            ended_at=now - 30,
+            summary="REQUEST_CHANGES — pytest failed",
+            metadata={
+                "verdict": "REQUEST_CHANGES",
+                "verification_evidence": ["pytest tests/foo.py -> stdout: FAILED test_add"],
+            },
+            profile="verifier",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=done_task,
+            title="Done ignored",
+            started_at=now - 80,
+            ended_at=now - 20,
+            summary="APPROVED",
+            metadata={"verdict": "APPROVED"},
+            profile="verifier",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/tasks/review-verdicts")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 1
+    row = data["reviews"][0]
+    assert row["task_title"] == "Review me"
+    assert row["task_status"] == "review"
+    assert row["reviewer_profile"] == "verifier"
+    assert row["verifier_verdict"] == "REQUEST_CHANGES"
+    assert row["verification_state"] == "request_changes"
+    assert row["verifier_evidence"] == ["pytest tests/foo.py -> stdout: FAILED test_add"]
 
 
 def test_recent_results_caps_limit_filters_since_and_truncates_summary(client):
@@ -2544,6 +2951,75 @@ def test_blocked_completions_surfaces_refused_and_advisory_events(client):
     advisory_row = next(b for b in data["blocked"] if b["kind"] == "suspected_hallucinated_references")
     assert advisory_row["phantom"] == ["t_cafef00dbabe"]
     assert advisory_row["summary_preview"] is None
+
+
+def test_blocked_completions_surfaces_verifier_request_changes_with_fix_summary(client):
+    """Verifier REQUEST_CHANGES runs are shown beside blocked completions
+    with quoted failure output and the concrete fix target."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        rejected_task = kb.create_task(conn, title="Rejected by verifier", assignee="coder")
+        approved_task = kb.create_task(conn, title="Approved ignored", assignee="coder")
+        non_verifier_task = kb.create_task(conn, title="Critic ignored", assignee="critic")
+
+        rejected_run = _insert_completed_run(
+            conn,
+            task_id=rejected_task,
+            title="Rejected by verifier",
+            started_at=now - 120,
+            ended_at=now - 60,
+            outcome="blocked",
+            summary="REQUEST_CHANGES — pytest failed; fix add(a, b) to return the sum.",
+            metadata={
+                "verdict": "REQUEST_CHANGES",
+                "gate_output_excerpt": "pytest tests/test_calc.py -> stdout: FAILED test_add",
+                "fix_summary": "Fix add(a, b) to return a + b before resubmitting.",
+            },
+            profile="verifier",
+        )
+        _append_claimed_event(
+            conn,
+            task_id=rejected_task,
+            run_id=rejected_run,
+            payload={"run_id": rejected_run, "source_status": "review"},
+        )
+        _insert_completed_run(
+            conn,
+            task_id=approved_task,
+            title="Approved ignored",
+            started_at=now - 100,
+            ended_at=now - 50,
+            summary="APPROVED — tests passed",
+            metadata={"verdict": "APPROVED"},
+            profile="verifier",
+        )
+        _insert_completed_run(
+            conn,
+            task_id=non_verifier_task,
+            title="Critic ignored",
+            started_at=now - 90,
+            ended_at=now - 40,
+            summary="REQUEST_CHANGES: not a verifier run",
+            metadata={"verdict": "REQUEST_CHANGES"},
+            profile="critic",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/runs/blocked-completions")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    row = next(b for b in data["blocked"] if b["kind"] == "verifier_request_changes")
+    assert row["task_title"] == "Rejected by verifier"
+    assert row["run_id"] == rejected_run
+    assert row["reviewer_profile"] == "verifier"
+    assert row["verifier_verdict"] == "REQUEST_CHANGES"
+    assert row["failure_output"] == ["pytest tests/test_calc.py -> stdout: FAILED test_add"]
+    assert row["fix_summary"] == "Fix add(a, b) to return a + b before resubmitting."
+    assert all(b["task_title"] != "Approved ignored" for b in data["blocked"])
+    assert all(b["task_title"] != "Critic ignored" for b in data["blocked"])
 
 
 def test_blocked_completions_filters_by_since_hours(client):

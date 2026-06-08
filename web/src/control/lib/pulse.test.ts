@@ -6,12 +6,16 @@ const NOW = Math.floor(Date.parse("2026-06-06T12:00:00Z") / 1000);
 const HOUR = 3600;
 
 function result(over: Partial<KanbanResult> & { run_id: string; ended_at: number }): KanbanResult {
+  const { run_role, run_role_label, run_role_source, ...rest } = over;
   return {
     task_id: `t-${over.run_id}`,
     task_title: `Task ${over.run_id}`,
     task_status: "done",
     task_assignee: "claude",
     profile: "coder",
+    run_role: run_role ?? "implementation",
+    run_role_label: run_role_label ?? "Implementation / coder run",
+    run_role_source: run_role_source ?? "claimed_event",
     status: "done",
     outcome: "completed",
     started_at: over.ended_at - 60,
@@ -21,7 +25,13 @@ function result(over: Partial<KanbanResult> & { run_id: string; ended_at: number
     followups: [],
     artifacts: [],
     verification: [],
-    ...over,
+    result_quality: {
+      state: "ungated",
+      label: "Ungated",
+      tone: "amber",
+      description: "Completed without an independent verifier gate.",
+    },
+    ...rest,
   };
 }
 

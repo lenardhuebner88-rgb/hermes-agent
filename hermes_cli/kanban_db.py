@@ -3590,6 +3590,7 @@ def claim_review_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    reviewer_profile: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomically transition ``review -> running``.
 
@@ -3627,6 +3628,8 @@ def claim_review_task(
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
+        cfg = _review_gate_config()
+        run_profile = reviewer_profile or cfg.get("verifier_profile") or (trow["assignee"] if trow else None)
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
@@ -3637,7 +3640,7 @@ def claim_review_task(
             """,
             (
                 task_id,
-                trow["assignee"] if trow else None,
+                run_profile,
                 trow["current_step_key"] if trow else None,
                 lock,
                 expires,
@@ -7858,7 +7861,28 @@ def dispatch_once(
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
-        claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        # Phase 2: run the review agent as the independent ``verifier`` profile
+        # (terminal-enabled, file-disabled → runs tests/build/lint but cannot
+        # edit), NOT the task's own code-writing assignee. The override is
+        # in-memory only — the DB ``assignee`` stays the original coder, so a
+        # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
+        # coder for a follow-up fix. Falls back to the original assignee if the
+        # verifier profile is missing (degenerate self-review, never a stall).
+        # The historical ``sdlc-review`` skill does not exist in this tree; the
+        # verifier's review logic lives in its profile SOUL.md, so we don't
+        # force a phantom skill (it would be silently skipped anyway).
+        _rg_cfg = _review_gate_config()
+        _verifier_profile = _rg_cfg["verifier_profile"]
+        try:
+            from hermes_cli.profiles import profile_exists as _pexists
+        except Exception:
+            _pexists = None
+        _spawn_profile = row["assignee"]
+        if _verifier_profile and (_pexists is None or _pexists(_verifier_profile)):
+            _spawn_profile = _verifier_profile
+        claimed = claim_review_task(
+            conn, row["id"], ttl_seconds=ttl_seconds, reviewer_profile=_spawn_profile,
+        )
         if claimed is None:
             continue
         try:
@@ -7877,24 +7901,7 @@ def dispatch_once(
         # inspect the real changes.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Phase 2: run the review agent as the independent ``verifier`` profile
-        # (terminal-enabled, file-disabled → runs tests/build/lint but cannot
-        # edit), NOT the task's own code-writing assignee. The override is
-        # in-memory only — the DB ``assignee`` stays the original coder, so a
-        # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
-        # coder for a follow-up fix. Falls back to the original assignee if the
-        # verifier profile is missing (degenerate self-review, never a stall).
-        # The historical ``sdlc-review`` skill does not exist in this tree; the
-        # verifier's review logic lives in its profile SOUL.md, so we don't
-        # force a phantom skill (it would be silently skipped anyway).
-        _rg_cfg = _review_gate_config()
-        _verifier_profile = _rg_cfg["verifier_profile"]
-        try:
-            from hermes_cli.profiles import profile_exists as _pexists
-        except Exception:
-            _pexists = None
-        if _verifier_profile and (_pexists is None or _pexists(_verifier_profile)):
-            claimed.assignee = _verifier_profile
+        claimed.assignee = _spawn_profile
         claimed.skills = []
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:

@@ -3,6 +3,21 @@ import { z } from "zod";
 const nullableNumber = z.number().nullable().catch(null);
 const nullableString = z.string().nullable().catch(null);
 const LastOutcomeSchema = z.enum(["applied", "reverted_no_improvement"]).nullable().catch(null);
+const VerifierVerdictSchema = z.enum(["APPROVED", "REQUEST_CHANGES"]);
+const VerificationStateSchema = z.enum(["approved", "request_changes", "pending", "ungated"]);
+const ResultQualityBadgeSchema = z.object({
+  state: z.enum(["verifier_approved", "ungated", "rejected_needs_work", "unknown_legacy"]).catch("unknown_legacy"),
+  label: z.string().catch("Unknown legacy"),
+  tone: z.enum(["emerald", "cyan", "sky", "indigo", "amber", "rose", "red", "zinc", "violet"]).catch("zinc"),
+  description: z.string().catch("Legacy run has no verifier metadata or profile lineage."),
+}).catch({
+  state: "unknown_legacy",
+  label: "Unknown legacy",
+  tone: "zinc",
+  description: "Legacy run has no verifier metadata or profile lineage.",
+});
+const RunRoleSchema = z.enum(["implementation", "verification", "legacy_unknown"]);
+const RunRoleSourceSchema = z.enum(["claimed_event", "missing_claim_event"]);
 
 export const RunInspectSchema = z.object({
   cpu_percent: z.coerce.number().catch(0),
@@ -35,7 +50,7 @@ export const WorkerSchema = z.object({
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("running"),
   task_assignee: z.string().catch("hermes"),
-  profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic"]).catch("default"),
+  profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic", "verifier"]).catch("default"),
   worker_pid: z.coerce.number().catch(0),
   started_at: z.coerce.number().catch(0),
   claim_lock: z.string().catch(""),
@@ -55,13 +70,25 @@ export const WorkersResponseSchema = z.object({
 });
 
 
+const TaskDeliverableSchema = z.object({
+  filename: z.string().catch(""),
+  relative_path: z.string().catch(""),
+  size: z.coerce.number().catch(0),
+  mtime: z.coerce.number().catch(0),
+  content_type: z.string().catch("application/octet-stream"),
+  url: z.string().catch(""),
+});
+
 export const KanbanResultSchema = z.object({
   run_id: z.coerce.string(),
   task_id: z.string().catch(""),
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("done"),
   task_assignee: z.string().catch("hermes"),
-  profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic"]).catch("default"),
+  profile: z.string().nullable().catch(null),
+  run_role: RunRoleSchema.catch("legacy_unknown"),
+  run_role_label: z.string().catch("Unknown / legacy run"),
+  run_role_source: RunRoleSourceSchema.catch("missing_claim_event"),
   status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("done"),
   outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch("completed"),
   started_at: z.coerce.number().catch(0),
@@ -72,7 +99,56 @@ export const KanbanResultSchema = z.object({
   followups: z.array(z.string()).catch([]),
   artifacts: z.array(z.string()).catch([]),
   verification: z.array(z.string()).catch([]),
+  verification_state: VerificationStateSchema.catch("ungated"),
+  verifier_verdict: VerifierVerdictSchema.nullable().catch(null),
+  verifier_evidence: z.array(z.string()).catch([]),
+  result_quality: ResultQualityBadgeSchema,
+  deliverables: z.array(TaskDeliverableSchema).catch([]),
   residual_risk: z.string().nullable().optional(),
+});
+
+export const TodayDigestItemSchema = z.object({
+  run_id: z.coerce.string(),
+  task_id: z.string().catch(""),
+  task_title: z.string().catch("Ohne Titel"),
+  task_summary: z.string().catch(""),
+  ended_at: z.coerce.number().catch(0),
+  profile: z.string().nullable().catch(null),
+  run_role: RunRoleSchema.catch("legacy_unknown"),
+  run_role_label: z.string().catch("Unknown / legacy run"),
+  verification_state: VerificationStateSchema.catch("ungated"),
+  verifier_verdict: VerifierVerdictSchema.nullable().catch(null),
+  verdict_label: z.string().catch("Not independently verified"),
+  result_quality: ResultQualityBadgeSchema,
+  gate_evidence: z.array(z.string()).catch([]),
+  deliverable: TaskDeliverableSchema.nullable().catch(null),
+  deliverable_excerpt: z.string().nullable().catch(null),
+  residual_risk: z.string().nullable().optional(),
+});
+
+export const TodayDigestResponseSchema = z.object({
+  schema: z.string().catch("kanban-today-digest-v1"),
+  items: z.array(TodayDigestItemSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  day_start: z.coerce.number().catch(0),
+  timezone: z.string().catch("local"),
+  limit: z.coerce.number().catch(12),
+});
+
+export const KanbanReviewSchema = z.object({
+  task_id: z.string().catch(""),
+  task_title: z.string().catch("Ohne Titel"),
+  task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("review"),
+  task_assignee: z.string().catch("hermes"),
+  created_at: z.coerce.number().catch(0),
+  submitted_at: z.coerce.number().nullable().catch(null),
+  run_id: z.coerce.string().nullable().catch(null),
+  reviewer_profile: z.string().nullable().catch(null),
+  summary_preview: z.string().catch(""),
+  verification_state: VerificationStateSchema.catch("pending"),
+  verifier_verdict: VerifierVerdictSchema.nullable().catch(null),
+  verifier_evidence: z.array(z.string()).catch([]),
 });
 
 export const RecentResultsResponseSchema = z.object({
@@ -84,16 +160,28 @@ export const RecentResultsResponseSchema = z.object({
   outcome: z.string().catch("completed"),
 });
 
+export const ReviewVerdictsResponseSchema = z.object({
+  reviews: z.array(KanbanReviewSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  limit: z.coerce.number().catch(12),
+});
+
 export const BlockedCompletionSchema = z.object({
   event_id: z.coerce.number().catch(0),
+  run_id: z.coerce.string().nullable().catch(null).optional(),
   task_id: z.string().catch(""),
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("blocked"),
   assignee: z.string().catch("hermes"),
-  kind: z.enum(["completion_blocked_hallucination", "suspected_hallucinated_references"]).catch("completion_blocked_hallucination"),
+  kind: z.enum(["completion_blocked_hallucination", "suspected_hallucinated_references", "verifier_request_changes"]).catch("completion_blocked_hallucination"),
   created_at: z.coerce.number().catch(0),
   summary_preview: z.string().nullable().catch(null),
   phantom: z.array(z.string()).catch([]),
+  reviewer_profile: z.string().nullable().catch(null).optional(),
+  verifier_verdict: VerifierVerdictSchema.nullable().catch(null).optional(),
+  failure_output: z.array(z.string()).catch([]),
+  fix_summary: z.string().nullable().catch(null).optional(),
 });
 
 export const BlockedCompletionsResponseSchema = z.object({
