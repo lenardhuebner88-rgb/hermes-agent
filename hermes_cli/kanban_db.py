@@ -4060,6 +4060,245 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+# ---------------------------------------------------------------------------
+# Review gate (Phase 2: independent verification before 'done')
+# ---------------------------------------------------------------------------
+#
+# When enabled, a code-writing worker calling ``kanban_complete`` does not move
+# its task straight to ``done``: the task is parked in ``review`` for an
+# independent ``verifier`` profile (terminal-enabled, file-disabled) that runs
+# the real tests/build/lint and renders a verdict via the existing tool surface
+# — APPROVED → ``kanban_complete`` (→ terminal ``done``), REQUEST_CHANGES →
+# ``kanban_block`` (→ sticky ``blocked``, human-gated). The dormant review-
+# dispatch loop in ``dispatch_once`` is the consumer; this is the producer.
+#
+# Design invariants (see plan: "Phase 2 — VERIFIZIERTE DELTAS"):
+#   * Opt-in only: ``review_gate`` defaults False, so every non-worker caller of
+#     ``complete_task`` (swarm root, sprint bulk-close, OpenClaw MC poll, manual
+#     CLI, dashboard) keeps the direct ``done`` path unchanged by construction.
+#   * Anti-loop: the verifier's OWN completion runs on a review-originated run
+#     (``claim_review_task`` is the sole writer of ``source_status='review'``),
+#     so it is always sent terminal — never re-parked in review.
+#   * Children gate on the parent's verified ``done`` (recompute_ready is left
+#     unchanged): they must not build on unverified work.
+_DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = ("coder", "premium")
+_DEFAULT_VERIFIER_PROFILE = "verifier"
+
+
+def _review_gate_config() -> dict:
+    """Resolve the ``kanban.review_gate`` policy from the ROOT config.
+
+    The review gate is a board-level policy, but the decision is evaluated in
+    the *worker* process — which runs under ``HERMES_HOME=<root>/profiles/
+    <name>``. A plain ``load_config()`` there would read the worker profile's
+    config, not the board's, so the gate would silently never fire. We read the
+    root ``config.yaml`` explicitly (the same home that owns the shared kanban
+    DB, via :func:`get_default_hermes_root`) so every worker, the dispatcher,
+    and the CLI agree on one source of truth.
+
+    Conservative defaults: disabled, ``{coder, premium}`` as the code-bearing
+    roles, ``verifier`` as the verifying profile. The live root ``config.yaml``
+    opts in with ``kanban.review_gate.enabled: true``.
+    """
+    rg: dict = {}
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            candidate = ((root_cfg.get("kanban") or {}).get("review_gate") or {})
+            if isinstance(candidate, dict):
+                rg = candidate
+    except Exception:
+        rg = {}
+    roles = rg.get("code_roles")
+    if isinstance(roles, (list, tuple)) and roles:
+        code_roles = frozenset(
+            str(r).strip().lower() for r in roles if str(r).strip()
+        )
+    else:
+        code_roles = frozenset(_DEFAULT_REVIEW_CODE_ROLES)
+    vp = rg.get("verifier_profile")
+    verifier_profile = (
+        str(vp).strip().lower()
+        if vp and str(vp).strip()
+        else _DEFAULT_VERIFIER_PROFILE
+    )
+    return {
+        "enabled": bool(rg.get("enabled", False)),
+        "code_roles": code_roles,
+        "verifier_profile": verifier_profile,
+    }
+
+
+def _run_originated_from_review(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int]
+) -> bool:
+    """True iff *run_id* was claimed via :func:`claim_review_task`.
+
+    The anti-loop discriminator: a coder's run is claimed via ``claim_task``
+    (no ``source_status`` in the ``claimed`` event), whereas the verifier's run
+    is claimed via ``claim_review_task`` (``source_status='review'``). Used so
+    the verifier's own ``kanban_complete`` goes terminal instead of re-entering
+    the review column.
+    """
+    if run_id is None:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+            "  AND json_extract(payload, '$.source_status') = 'review' "
+            "LIMIT 1",
+            (task_id, int(run_id)),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _review_gate_should_apply(
+    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int]
+) -> bool:
+    """Decide whether this completion should be parked in ``review``.
+
+    All of: gate enabled, verifier profile exists (else routing would strand
+    the task — fail safe to the direct ``done`` path), this run did NOT
+    originate from review (anti-loop), and the task's assignee is a
+    code-bearing role.
+    """
+    cfg = _review_gate_config()
+    if not cfg["enabled"]:
+        return False
+    try:
+        from hermes_cli.profiles import profile_exists
+
+        if not profile_exists(cfg["verifier_profile"]):
+            return False
+    except Exception:
+        return False
+    run_id = expected_run_id
+    if run_id is None:
+        run_id = _current_run_id(conn, task_id)
+    if _run_originated_from_review(conn, task_id, run_id):
+        return False
+    row = conn.execute(
+        "SELECT assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not row:
+        return False
+    assignee = (row["assignee"] or "").strip().lower()
+    return assignee in cfg["code_roles"]
+
+
+def _submit_for_review(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+    verified_cards: list,
+    expected_run_id: Optional[int],
+) -> bool:
+    """Park a code-bearing completion in ``review`` instead of ``done``.
+
+    Mirrors :func:`complete_task`'s run-closing + event payload (so the
+    handoff summary/artifacts surface to the verifier and the dashboard), but
+    deliberately does NOT unblock children (they gate on verified ``done``)
+    and does NOT clean up the scratch workspace (the verifier inspects it; a
+    REQUEST_CHANGES keeps it for the follow-up fix).
+    """
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       result       = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                """,
+                (result, task_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       result       = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                   AND current_run_id = ?
+                """,
+                (result, task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        # Close the worker's run as a normal success — the coder DID finish
+        # its turn; the task (not the run) is what waits for verification.
+        run_id = _end_run(
+            conn, task_id,
+            outcome="completed", status="review",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+        if run_id is None and (summary or metadata or result):
+            run_id = _synthesize_ended_run(
+                conn, task_id,
+                outcome="completed",
+                summary=summary if summary is not None else result,
+                metadata=metadata,
+            )
+        ev_summary = (summary if summary is not None else result) or ""
+        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+        payload: dict = {
+            "result_len": len(result) if result else 0,
+            "summary": ev_summary or None,
+        }
+        if verified_cards:
+            payload["verified_cards"] = verified_cards
+        if isinstance(metadata, dict):
+            md_artifacts = metadata.get("artifacts")
+            if isinstance(md_artifacts, (list, tuple)):
+                cleaned_artifacts = [
+                    str(p).strip() for p in md_artifacts
+                    if isinstance(p, str) and str(p).strip()
+                ]
+                if cleaned_artifacts:
+                    payload["artifacts"] = cleaned_artifacts
+        _append_event(
+            conn, task_id, "submitted_for_review", payload, run_id=run_id,
+        )
+    # Advisory phantom-ref scan, same as the done path (own txn, never blocks).
+    scan_text = " ".join(filter(None, [summary, result]))
+    if scan_text:
+        phantom_refs = _scan_prose_for_phantom_ids(conn, scan_text)
+        phantom_refs = [
+            p for p in phantom_refs if p not in set(verified_cards or [])
+        ]
+        if phantom_refs:
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "suspected_hallucinated_references",
+                    {
+                        "phantom_refs": phantom_refs,
+                        "source": "completion_summary",
+                    },
+                    run_id=run_id,
+                )
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4069,8 +4308,15 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    review_gate: bool = False,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
+
+    When ``review_gate`` is True (the ``kanban_complete`` worker tool opts in)
+    and the task is a code-bearing one owned by a code role, the completion is
+    routed to ``review`` for independent verification instead of ``done`` — see
+    :func:`_submit_for_review` and the review-gate helpers above. All other
+    callers keep ``review_gate=False`` and the direct ``done`` path below.
 
     Accepts a task that is merely ``ready`` too, so a manual CLI
     completion (``hermes kanban complete <id>``) works without requiring
@@ -4126,6 +4372,17 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # Phase 2 review gate: park code-bearing worker completions in 'review'
+    # for an independent verifier instead of moving straight to 'done'.
+    # Opt-in (review_gate) + enabled + verifier-exists + not-a-review-run
+    # (anti-loop) + code-bearing assignee — otherwise fall through.
+    if review_gate and _review_gate_should_apply(conn, task_id, expected_run_id):
+        return _submit_for_review(
+            conn, task_id,
+            result=result, summary=summary, metadata=metadata,
+            verified_cards=verified_cards, expected_run_id=expected_run_id,
+        )
 
     with write_txn(conn):
         if expected_run_id is None:
@@ -7599,14 +7856,30 @@ def dispatch_once(
                 result.auto_blocked.append(claimed.id)
             continue
         # Persist the resolved workspace path so the worker can cd there.
+        # NOTE: resolve_workspace() above is task-keyed (not assignee-keyed),
+        # so the verifier inherits the coder's preserved workspace and can
+        # inspect the real changes.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Force-load sdlc-review skill for review agents.  The
-        # _default_spawn function already auto-loads kanban-worker, and
-        # appends task.skills via --skills.  Setting task.skills here
-        # means the review agent gets both kanban-worker (lifecycle)
-        # and sdlc-review (review logic: AC verification, merge, etc.).
-        claimed.skills = ["sdlc-review"]
+        # Phase 2: run the review agent as the independent ``verifier`` profile
+        # (terminal-enabled, file-disabled → runs tests/build/lint but cannot
+        # edit), NOT the task's own code-writing assignee. The override is
+        # in-memory only — the DB ``assignee`` stays the original coder, so a
+        # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
+        # coder for a follow-up fix. Falls back to the original assignee if the
+        # verifier profile is missing (degenerate self-review, never a stall).
+        # The historical ``sdlc-review`` skill does not exist in this tree; the
+        # verifier's review logic lives in its profile SOUL.md, so we don't
+        # force a phantom skill (it would be silently skipped anyway).
+        _rg_cfg = _review_gate_config()
+        _verifier_profile = _rg_cfg["verifier_profile"]
+        try:
+            from hermes_cli.profiles import profile_exists as _pexists
+        except Exception:
+            _pexists = None
+        if _verifier_profile and (_pexists is None or _pexists(_verifier_profile)):
+            claimed.assignee = _verifier_profile
+        claimed.skills = []
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect

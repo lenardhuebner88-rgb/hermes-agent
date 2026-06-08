@@ -562,6 +562,12 @@ def _handle_complete(args: dict, **kw) -> str:
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
                     expected_run_id=_worker_run_id(tid),
+                    # Opt in to the Phase 2 review gate: code-bearing
+                    # completions get parked in 'review' for an independent
+                    # verifier. complete_task() decides per-task (gate enabled,
+                    # code role, not already a verifier/review run); a verifier
+                    # approving its own review run still goes terminal 'done'.
+                    review_gate=True,
                 )
             except kb.HallucinatedCardsError as hall_err:
                 # Structured rejection — surface the phantom ids so the

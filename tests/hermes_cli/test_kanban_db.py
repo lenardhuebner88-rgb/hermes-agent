@@ -3321,10 +3321,14 @@ def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
         assert kb.get_task(conn, t).status == "review"
 
 
-def test_dispatch_review_spawns_with_correct_skills(
+def test_dispatch_review_spawns_as_verifier_profile(
     kanban_home, all_assignees_spawnable,
 ):
-    """Review tasks get sdlc-review skill set before spawning."""
+    """Review tasks spawn as the independent ``verifier`` profile — not the
+    task's own (code-writing) assignee — and without forcing the historical
+    ``sdlc-review`` skill (which does not exist in this tree). The DB
+    ``assignee`` is left unchanged so a REQUEST_CHANGES keeps the task owned
+    by the original coder for the follow-up fix."""
     spawned_tasks = []
 
     def capture_spawn(task, workspace, board=None):
@@ -3335,9 +3339,37 @@ def test_dispatch_review_spawns_with_correct_skills(
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
+        # DB assignee is unchanged (override is in-memory, for the spawn only).
+        assert kb.get_task(conn, t).assignee == "alice"
     assert len(res.spawned) == 1
     assert len(spawned_tasks) == 1
-    assert spawned_tasks[0].skills == ["sdlc-review"]
+    assert spawned_tasks[0].assignee == "verifier"
+    assert spawned_tasks[0].skills == []
+
+
+def test_dispatch_review_falls_back_when_verifier_missing(
+    kanban_home, monkeypatch,
+):
+    """If the verifier profile doesn't exist, the review agent spawns as the
+    task's own assignee (degenerate self-review) rather than stalling."""
+    from hermes_cli import profiles
+    # The task's assignee resolves, but 'verifier' does not.
+    monkeypatch.setattr(
+        profiles, "profile_exists", lambda name: name != "verifier"
+    )
+    spawned_tasks = []
+
+    def capture_spawn(task, workspace, board=None):
+        spawned_tasks.append(task)
+        return 42  # fake PID
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="alice")
+        _set_task_status(conn, t, "review")
+        kb.dispatch_once(conn, spawn_fn=capture_spawn)
+    assert len(spawned_tasks) == 1
+    assert spawned_tasks[0].assignee == "alice"
+    assert spawned_tasks[0].skills == []
 
 
 def test_dispatch_review_skips_unassigned(kanban_home):
