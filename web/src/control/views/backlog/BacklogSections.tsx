@@ -12,6 +12,7 @@ import {
 } from "../../lib/foBacklog";
 import type { FoOwnerLoad, FoQuickView, FoRankedCandidate } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
+import type { CommissionState } from "../../hooks/useControlData";
 import { CopyButton } from "./CopyButton";
 import { FoBacklogQueueTable, FoBacklogQueueSkeleton } from "./FoBacklogQueueTable";
 import { ReasonChips } from "./ReasonChips";
@@ -266,6 +267,8 @@ export function QueueSurface({
   activeId,
   detailById,
   onOpen,
+  onCommission,
+  commissionState,
 }: {
   loading: boolean;
   filteredActive: BacklogItem[];
@@ -274,10 +277,12 @@ export function QueueSurface({
   activeId: string | null;
   detailById: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
+  onCommission?: (item: BacklogItem) => void;
+  commissionState?: Record<string, CommissionState>;
 }) {
   if (loading) return <FoBacklogQueueSkeleton />;
   return filteredActive.length ? (
-    <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} activeId={activeId} detailById={detailById} onOpen={onOpen} />
+    <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} activeId={activeId} detailById={detailById} onOpen={onOpen} onCommission={onCommission} commissionState={commissionState} />
   ) : (
     <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
   );

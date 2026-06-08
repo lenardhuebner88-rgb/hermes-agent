@@ -9,6 +9,7 @@ import { de } from "../../i18n/de";
 import { deriveQueueSignals, isKnownStatus } from "../../lib/orchestration";
 import type { OrchestrationBacklogResponse, OrchestrationItem } from "../../lib/schemas";
 import type { ToneName } from "../../lib/types";
+import type { CommissionState } from "../../hooks/useControlData";
 import { OrchestratorQueueSkeleton, OrchestratorQueueTable } from "./OrchestratorQueueTable";
 import { ACTIVE_COLUMNS, clockLabel } from "./shared";
 
@@ -135,6 +136,8 @@ export function QueueSurface({
   nowSec,
   nextTaskId,
   onOpen,
+  onCommission,
+  commissionState,
 }: {
   loading: boolean;
   filteredActive: ReadonlyArray<OrchestrationItem>;
@@ -142,6 +145,8 @@ export function QueueSurface({
   nowSec: number;
   nextTaskId: string | null;
   onOpen: (id: string) => void;
+  onCommission?: (item: OrchestrationItem) => void;
+  commissionState?: Record<string, CommissionState>;
 }) {
   if (loading) return <OrchestratorQueueSkeleton />;
   return (
@@ -151,6 +156,8 @@ export function QueueSurface({
       nowSec={nowSec}
       nextTaskId={nextTaskId}
       onOpen={onOpen}
+      onCommission={onCommission}
+      commissionState={commissionState}
     />
   );
 }

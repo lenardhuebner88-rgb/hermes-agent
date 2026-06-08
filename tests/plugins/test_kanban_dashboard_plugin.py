@@ -130,6 +130,72 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_create_task_park_lands_in_scheduled(client):
+    # The dashboard "copy to Fleet" action sends triage=True + park=True so the
+    # new task is parked in `scheduled` (Plan stage) instead of being
+    # auto-specified/decomposed (triage) or auto-dispatched (ready). The
+    # operator clicks Dispatch in the Fleet to launch it.
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "[FO] Essensplan-Zutaten",
+            "assignee": "coder",
+            "tenant": "family-organizer",
+            "triage": True,
+            "park": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    task = r.json()["task"]
+    assert task["status"] == "scheduled", task
+    assert task["assignee"] == "coder"
+    task_id = task["id"]
+
+    # Board lists it under `scheduled`, not triage/ready.
+    data = client.get("/api/plugins/kanban/board").json()
+    scheduled = next(c for c in data["columns"] if c["name"] == "scheduled")
+    assert any(t["id"] == task_id for t in scheduled["tasks"]), data
+    for col_name in ("triage", "ready", "running"):
+        col = next(c for c in data["columns"] if c["name"] == col_name)
+        assert all(t["id"] != task_id for t in col["tasks"])
+
+
+def test_commission_idempotency_returns_existing_card(client):
+    # Backlog -> Kanban: a second click with the same idempotency_key must
+    # return the EXISTING card, not create a duplicate (FO/Orchestrator
+    # "create real Kanban card" dedup).
+    payload = {
+        "title": "[FO] Essensplan-Zutaten",
+        "assignee": "coder",
+        "tenant": "family-organizer",
+        "triage": True,
+        "park": True,
+        "idempotency_key": "fo-backlog:0126",
+    }
+    first = client.post("/api/plugins/kanban/tasks", json=payload)
+    assert first.status_code == 200, first.text
+    first_id = first.json()["task"]["id"]
+
+    second = client.post("/api/plugins/kanban/tasks", json=payload)
+    assert second.status_code == 200, second.text
+    assert second.json()["task"]["id"] == first_id  # same card, no duplicate
+
+    # Board has exactly one task for this idempotency key.
+    data = client.get("/api/plugins/kanban/board").json()
+    all_ids = [t["id"] for col in data["columns"] for t in col["tasks"]]
+    assert all_ids.count(first_id) == 1
+
+
+def test_create_task_without_park_keeps_triage(client):
+    # Sanity: without park, triage=True still lands in triage (unchanged path).
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "raw", "assignee": "coder", "triage": True},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["task"]["status"] == "triage"
+
+
 def test_create_task_title_over_cap_returns_422(client):
     r = client.post("/api/plugins/kanban/tasks", json={"title": "x" * 513})
     assert r.status_code == 422

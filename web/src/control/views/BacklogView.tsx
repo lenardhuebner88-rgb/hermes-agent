@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { AnimatePresence } from "motion/react";
 
 import { de } from "../i18n/de";
-import { useBacklog, useBacklogDetail } from "../hooks/useControlData";
+import { useBacklog, useBacklogDetail, useCommissionToFleet, type CommissionPayload } from "../hooks/useControlData";
 import { ToneCallout } from "../components/atoms";
 import {
   buildFoAuditPrompt,
@@ -19,7 +19,7 @@ import {
 } from "../lib/foBacklog";
 import type { FoQuickView, FoSortKey } from "../lib/foBacklog";
 import type { Density } from "../hooks/useDensity";
-import type { BacklogItem } from "../lib/schemas";
+import type { BacklogItem, BacklogDetail } from "../lib/schemas";
 import {
   BacklogBoard,
   BacklogHeroPanel,
@@ -41,6 +41,30 @@ export { FoHealthStrip } from "./backlog/FoHealthStrip";
 export { ReasonChips } from "./backlog/ReasonChips";
 
 const EMPTY_ITEMS: BacklogItem[] = [];
+
+// Map an FO risk level onto a kanban priority int (board sorts priority DESC).
+function riskToPriority(risk?: string): number {
+  return ({ high: 2, medium: 1, low: 0 } as Record<string, number>)[(risk ?? "").toLowerCase()] ?? 0;
+}
+
+// Build the Kanban task payload from an FO backlog item (+ its detail when the
+// drawer has fetched it). The body carries the spec + acceptance criteria + a
+// provenance line back to the backlog source so the run is traceable.
+function buildCommissionPayload(item: BacklogItem, detail?: BacklogDetail): CommissionPayload {
+  const lines: string[] = [];
+  const bodyText = (detail?.body || item.excerpt || "").trim();
+  if (bodyText) lines.push(bodyText);
+  const criteria = (detail?.acceptance_criteria ?? []).filter((c) => c.trim() !== "");
+  if (criteria.length) {
+    lines.push("", "Akzeptanzkriterien:");
+    for (const c of criteria) lines.push(`- ${c}`);
+  }
+  const next = (detail?.next_action || "").trim();
+  if (next) lines.push("", `Next action: ${next}`);
+  const src = detail?.source_path || item.source_path || item.id;
+  lines.push("", `— Aus dem Family-Organizer-Backlog in die Fleet kopiert. Quelle: ${src} (${item.id}).`);
+  return { title: `[FO] ${item.title}`, body: lines.join("\n"), priority: riskToPriority(item.risk) };
+}
 
 type PersistedView = {
   viewMode?: ViewMode;
@@ -64,6 +88,15 @@ function loadPersistedView(): PersistedView {
 export function BacklogView({ density }: { density: Density }) {
   const backlog = useBacklog();
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
+  const fleet = useCommissionToFleet();
+  const commissionItem = useCallback(
+    (item: BacklogItem, detail?: BacklogDetail) =>
+      void fleet.commission(item.id, buildCommissionPayload(item, detail), {
+        tenant: "family-organizer",
+        idempotencyKey: `fo-backlog:${item.id}`,
+      }),
+    [fleet],
+  );
   const [persisted] = useState(loadPersistedView);
   const [showAllDone, setShowAllDone] = useState(false);
   // Deep-link from the Decision Inbox: /control/backlog?focus=<id> seeds the open
@@ -299,6 +332,8 @@ export function BacklogView({ density }: { density: Density }) {
             activeId={activeId}
             detailById={detailById}
             onOpen={setOpenId}
+            onCommission={(item) => commissionItem(item, detailById[item.id])}
+            commissionState={fleet.stateById}
           />
         </div>
       ) : (
@@ -323,6 +358,9 @@ export function BacklogView({ density }: { density: Density }) {
             loading={loadingId === selectedItem.id}
             error={errorById[selectedItem.id] || detail?.error}
             commissionPrompt={commissionPrompt}
+            onCommission={() => commissionItem(selectedItem, detail)}
+            commissionState={fleet.stateById[selectedItem.id]}
+            commissionError={fleet.errorById[selectedItem.id]}
             onClose={() => setOpenId(null)}
           />
         ) : null}

@@ -1,12 +1,11 @@
-import { Activity, Bot, Clock, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
-import { Button } from "@nous-research/ui/ui/components/button";
+import { Activity, Bot, Clock, Columns3, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "hermes" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "hermes" | "flow" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
 // Inbox is the landing (the decision spine) and sits first; Übersicht is the
 // secondary telemetry surface behind it.
@@ -16,6 +15,7 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   { id: "pulse", label: de.tabs.pulse, mobileLabel: "Puls", path: "/control/pulse", icon: Activity },
   { id: "workstreams", label: de.tabs.workstreams, mobileLabel: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
   { id: "hermes", label: de.tabs.hermes, mobileLabel: "Hermes", path: "/control/hermes", icon: Bot },
+  { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
   { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
   { id: "backlog", label: de.tabs.backlog, mobileLabel: "Family", path: "/control/backlog", icon: KanbanSquare },
   { id: "orchestrator", label: de.tabs.orchestrator, mobileLabel: "Orch.", path: "/control/orchestrator", icon: Workflow },
@@ -35,7 +35,6 @@ const secondaryNav = [
 interface Props {
   active: ControlTab;
   density: Density;
-  pinned: boolean;
   openProposals: number;
   /** Total deduped decision-inbox count — badged on the Postfach tab from anywhere. */
   inboxTotal: number;
@@ -45,8 +44,6 @@ interface Props {
   onOpenCommand: () => void;
   children: React.ReactNode;
   onNavigate: (tab: ControlTab) => void;
-  setDensity: (density: Density) => void;
-  resetToAuto: () => void;
 }
 
 interface BadgeInfo { count: number; cls: string }
@@ -68,22 +65,12 @@ export function ControlShell(props: Props) {
   return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
 }
 
-function DensityControls({ density, pinned, setDensity, resetToAuto }: Pick<Props, "density" | "pinned" | "setDensity" | "resetToAuto">) {
-  return (
-    <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/20 p-1 text-xs">
-      <Button size="xs" ghost={!pinned} onClick={resetToAuto}>{de.shell.auto}</Button>
-      <Button size="xs" ghost={density !== "airy"} onClick={() => setDensity("airy")}>{de.shell.airy}</Button>
-      <Button size="xs" ghost={density !== "compact"} onClick={() => setDensity("compact")}>{de.shell.compact}</Button>
-    </div>
-  );
-}
-
-function ShellAiry({ active, children, density, pinned, openProposals, inboxTotal, inboxTone, onNavigate, setDensity, resetToAuto, commandButtonRef, onOpenCommand }: Props) {
+function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, onNavigate, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
-        <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots /><DensityControls density={density} pinned={pinned} setDensity={setDensity} resetToAuto={resetToAuto} /></div></div>
+        <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots /></div></div>
         <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} onNavigate={onNavigate} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
@@ -96,7 +83,7 @@ function ShellAiry({ active, children, density, pinned, openProposals, inboxTota
   );
 }
 
-function ShellCompact({ active, children, density, pinned, openProposals, inboxTotal, inboxTone, onNavigate, setDensity, resetToAuto, commandButtonRef, onOpenCommand }: Props) {
+function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, onNavigate, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0">
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
@@ -111,7 +98,7 @@ function ShellCompact({ active, children, density, pinned, openProposals, inboxT
       <div className="min-w-0 px-6 py-5">
         <header className="mb-5 flex items-center justify-between gap-3">
           <div><p className="hc-eyebrow">Hermes Control</p><h1 className="mt-1 text-xl font-semibold text-white">{tabs.find((t) => t.id === active)?.label}</h1></div>
-          <div className="flex flex-wrap items-center justify-end gap-2"><StatusDots /><DensityControls density={density} pinned={pinned} setDensity={setDensity} resetToAuto={resetToAuto} /></div>
+          <div className="flex flex-wrap items-center justify-end gap-2"><StatusDots /></div>
         </header>
         <main>{children}</main>
       </div>

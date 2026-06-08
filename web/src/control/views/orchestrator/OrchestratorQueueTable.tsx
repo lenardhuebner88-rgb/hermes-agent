@@ -1,9 +1,11 @@
 import { cn } from "@/lib/utils";
 import { StatusPill } from "../../components/atoms";
+import { CommissionButton } from "../../components/fleet/CommissionButton";
 import { Skeleton, SkeletonRow } from "../../components/primitives";
 import { de } from "../../i18n/de";
 import { ageLabel, nextActionForItem } from "../../lib/orchestration";
 import type { OrchestrationItem } from "../../lib/schemas";
+import type { CommissionState } from "../../hooks/useControlData";
 import { ownerLabel, priorityTone, proofLabel, sourceLabel, statusTone } from "./shared";
 
 export function OrchestratorQueueTable({
@@ -12,12 +14,16 @@ export function OrchestratorQueueTable({
   nowSec,
   nextTaskId,
   onOpen,
+  onCommission,
+  commissionState = {},
 }: {
   items: ReadonlyArray<OrchestrationItem>;
   allItems: ReadonlyArray<OrchestrationItem>;
   nowSec: number;
   nextTaskId: string | null;
   onOpen: (id: string) => void;
+  onCommission?: (item: OrchestrationItem) => void;
+  commissionState?: Record<string, CommissionState>;
 }) {
   if (items.length === 0) {
     return <p className="py-4 text-center text-sm hc-dim">{de.orchestrator.empty}</p>;
@@ -43,12 +49,14 @@ export function OrchestratorQueueTable({
           const nextAction = nextActionForItem(item, allItems);
           const isNext = item.id === nextTaskId;
           return (
-            <button
+            <div
               key={item.id}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => onOpen(item.id)}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(item.id); } }}
               className={cn(
-                "grid w-full grid-cols-1 gap-2 px-3 py-3 text-left transition hover:bg-white/[.035] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-400/60 md:grid-cols-[minmax(220px,2fr)_96px_112px_112px_84px_140px_150px_minmax(160px,1.2fr)] md:items-center md:gap-3",
+                "grid w-full cursor-pointer grid-cols-1 gap-2 px-3 py-3 text-left transition hover:bg-white/[.035] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-400/60 md:grid-cols-[minmax(220px,2fr)_96px_112px_112px_84px_140px_150px_minmax(160px,1.2fr)] md:items-center md:gap-3",
                 isNext && "bg-cyan-500/5",
               )}
             >
@@ -88,8 +96,13 @@ export function OrchestratorQueueTable({
               <div className="min-w-0 text-sm text-white">
                 <span className="mb-1 block text-[10px] uppercase hc-dim md:hidden">{de.orchestrator.colNextAction}</span>
                 <span className="line-clamp-2">{nextAction}</span>
+                {onCommission ? (
+                  <div className="mt-2">
+                    <CommissionButton state={commissionState[item.id]} onClick={(event) => { event.stopPropagation(); onCommission(item); }} />
+                  </div>
+                ) : null}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>

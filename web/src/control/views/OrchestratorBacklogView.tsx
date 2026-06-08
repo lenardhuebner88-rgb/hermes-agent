@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 
 import { de } from "../i18n/de";
-import { useOrchestrationBacklog, useOrchestrationBacklogDetail } from "../hooks/useControlData";
+import { useOrchestrationBacklog, useOrchestrationBacklogDetail, useCommissionToFleet, type CommissionPayload } from "../hooks/useControlData";
 import { BacklogDetailDrawer } from "../components/BacklogDetailDrawer";
 import { ToneCallout } from "../components/atoms";
 import {
@@ -18,7 +18,7 @@ import {
 } from "../lib/orchestration";
 import type { SortKey } from "../lib/orchestration";
 import type { Density } from "../hooks/useDensity";
-import type { OrchestrationItem } from "../lib/schemas";
+import type { OrchestrationItem, OrchestrationDetail } from "../lib/schemas";
 import { ControlsBar } from "./orchestrator/ControlsBar";
 import {
   CommissionBanner,
@@ -42,9 +42,43 @@ export { OrchestratorQueueTable } from "./orchestrator/OrchestratorQueueTable";
 
 const EMPTY_ITEMS: OrchestrationItem[] = [];
 
+function priorityToInt(priority?: string): number {
+  return ({ urgent: 3, high: 2, medium: 1, low: 0 } as Record<string, number>)[(priority ?? "").toLowerCase()] ?? 1;
+}
+
+// Build the Kanban task payload from an orchestrator backlog item (+ detail).
+function buildOrchCommissionPayload(item: OrchestrationItem, detail?: OrchestrationDetail): CommissionPayload {
+  const lines: string[] = [];
+  const bodyText = (detail?.body || item.excerpt || "").trim();
+  if (bodyText) lines.push(bodyText);
+  const proofs = (detail?.proofs ?? []).filter((p) => p.trim() !== "");
+  if (proofs.length) {
+    lines.push("", "Letzte Belege:");
+    for (const p of proofs) lines.push(`- ${p}`);
+  }
+  const meta = [
+    item.owner ? `Owner: ${item.owner}` : "",
+    item.priority ? `Priorität: ${item.priority}` : "",
+    item.planGate ? "Plan-Gate: offen" : "",
+  ].filter(Boolean).join(" · ");
+  if (meta) lines.push("", meta);
+  const src = detail?.source || item.source || detail?.root || item.root || item.id;
+  lines.push("", `— Aus dem Orchestrator-Backlog in die Fleet kopiert. Quelle: ${src} (${item.id}).`);
+  return { title: `[Orch] ${item.title}`, body: lines.join("\n"), priority: priorityToInt(item.priority) };
+}
+
 export function OrchestratorBacklogView({ density }: { density: Density }) {
   const backlog = useOrchestrationBacklog();
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useOrchestrationBacklogDetail();
+  const fleet = useCommissionToFleet();
+  const commissionItem = useCallback(
+    (item: OrchestrationItem, detail?: OrchestrationDetail) =>
+      void fleet.commission(item.id, buildOrchCommissionPayload(item, detail), {
+        tenant: "orchestrator",
+        idempotencyKey: `orch-backlog:${item.id}`,
+      }),
+    [fleet],
+  );
   const [showAllDone, setShowAllDone] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("queue");
@@ -206,6 +240,8 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
         nowSec={nowSec}
         nextTaskId={nextTaskId}
         onOpen={setOpenId}
+        onCommission={(item) => commissionItem(item, detailById[item.id])}
+        commissionState={fleet.stateById}
       />
 
       {viewMode === "board" ? (
@@ -248,6 +284,9 @@ export function OrchestratorBacklogView({ density }: { density: Density }) {
             error={errorById[openId] || detail?.error}
             commissionPrompt={commissionPromptForDrawer}
             operatorBrief={operatorBriefForDrawer}
+            onCommission={selectedItem && selectedItem.status !== "done" ? () => commissionItem(selectedItem, detail) : undefined}
+            commissionState={openId ? fleet.stateById[openId] : undefined}
+            commissionError={openId ? fleet.errorById[openId] : undefined}
             onClose={() => setOpenId(null)}
           />
         ) : null}

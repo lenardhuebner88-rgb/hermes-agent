@@ -1,13 +1,15 @@
 import { useMemo } from "react";
-import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward, Activity } from "lucide-react";
+import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useCronObservability, useHermesRecentResults } from "../hooks/useControlData";
 import { buildPulse, groupPulseByDay, summarizePulse, type PulseEvent, type PulseKind } from "../lib/pulse";
 import { fmtAge, fmtClockTime, freshness, nowSec } from "../lib/derive";
 import { TONE_HEX } from "../lib/tones";
+import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
+import { SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
-import type { Proposal, ToneName } from "../lib/types";
+import type { Proposal } from "../lib/types";
 
 interface Props {
   proposals: Proposal[];
@@ -58,49 +60,47 @@ export function PulseView({ proposals, proposalsLastUpdated }: Props) {
 
   return (
     <div className="space-y-5">
-      <section className="hc-card p-5 sm:p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="hc-eyebrow">{de.pulse.eyebrow}</p>
-            <h2 className="mt-2 text-2xl font-semibold tracking-normal text-white sm:text-3xl">{de.pulse.title}</h2>
-            <p className="mt-2 max-w-2xl hc-soft">{de.pulse.subtitle(WINDOW_HOURS)}</p>
-          </div>
-          <span className={cn("hc-mono shrink-0 text-xs", fresh.stale ? "text-amber-200" : "hc-dim")} title={fresh.stale ? de.pulse.stalePaused : undefined}>
+      <FleetPanel
+        eyebrow={de.pulse.eyebrow}
+        meta={
+          <span className={cn(fresh.stale ? "text-amber-200" : undefined)} title={fresh.stale ? de.pulse.stalePaused : undefined}>
             {error ? de.pulse.sourceError : fresh.stale ? de.pulse.staleWarn(fresh.label.replace("vor ", "")) : fresh.label}
           </span>
+        }
+      >
+        <div>
+          <h2 className="text-2xl font-semibold tracking-normal text-white sm:text-3xl">{de.pulse.title}</h2>
+          <p className="mt-2 max-w-2xl hc-soft">{de.pulse.subtitle(WINDOW_HOURS)}</p>
         </div>
 
         {/* Tally: eine ehrliche Zeile darüber, was die Maschine geleistet hat. */}
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Stat tone="emerald" value={summary.runs} label={de.pulse.statRuns} />
-          <Stat tone="emerald" value={summary.applied} label={de.pulse.statApplied} />
-          {summary.reverted > 0 ? <Stat tone="zinc" value={summary.reverted} label={de.pulse.statReverted} /> : null}
-          <Stat tone={summary.cronErrors > 0 ? "amber" : "sky"} value={summary.crons} label={de.pulse.statCrons} sub={summary.cronErrors > 0 ? de.pulse.cronErrorSuffix(summary.cronErrors) : undefined} />
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <FleetPod label={de.pulse.statRuns} value={summary.runs} dot={summary.runs > 0 ? "live" : "idle"} />
+          <FleetPod label={de.pulse.statApplied} value={summary.applied} dot={summary.applied > 0 ? "ready" : "idle"} />
+          {summary.reverted > 0 ? <FleetPod label={de.pulse.statReverted} value={summary.reverted} dot="warn" /> : null}
+          <FleetPod
+            label={de.pulse.statCrons}
+            value={summary.crons}
+            suffix={summary.cronErrors > 0 ? de.pulse.cronErrorSuffix(summary.cronErrors) : undefined}
+            dot={summary.cronErrors > 0 ? "error" : "live"}
+          />
         </div>
-      </section>
+      </FleetPanel>
 
       {loading ? (
-        <section className="hc-card p-8 text-center text-sm hc-soft">{de.pulse.loading}</section>
+        <SkeletonCard rows={4} />
       ) : events.length === 0 ? (
-        <section className="hc-card flex flex-col items-center gap-2 p-10 text-center">
-          <Activity className="h-7 w-7 text-[var(--hc-accent-text)]" />
-          <p className="text-sm font-medium text-white">{de.pulse.empty}</p>
-          <p className="max-w-sm text-xs hc-soft">{de.pulse.emptyHint(WINDOW_HOURS)}</p>
-        </section>
+        <FleetEmptyState ok title={de.pulse.empty} desc={de.pulse.emptyHint(WINDOW_HOURS)} />
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-5">
           {days.map((day) => (
-            <section key={day.key}>
-              <div className="mb-2 flex items-baseline justify-between px-1">
-                <h3 className="text-sm font-semibold text-white">{dayLabel(day.daysAgo, day.events[0].at)}</h3>
-                <span className="hc-mono text-xs hc-dim">{de.pulse.dayCount(day.events.length)}</span>
-              </div>
-              <ol className="hc-card divide-y divide-white/5 overflow-hidden p-0">
+            <FleetPanel key={day.key} eyebrow={dayLabel(day.daysAgo, day.events[0].at)} meta={de.pulse.dayCount(day.events.length)}>
+              <ol className="space-y-2">
                 {day.events.map((event) => (
                   <EventRow key={event.id} event={event} now={now} onOpen={() => navigate(event.tab)} />
                 ))}
               </ol>
-            </section>
+            </FleetPanel>
           ))}
         </div>
       )}
@@ -120,7 +120,7 @@ function EventRow({ event, now, onOpen }: { event: PulseEvent; now: number; onOp
   const hex = TONE_HEX[event.tone];
   return (
     <li>
-      <button type="button" onClick={onOpen} className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-white/[.035]">
+      <button type="button" onClick={onOpen} className="hc-surface-card flex min-h-11 w-full items-start gap-3 px-3 py-2.5 text-left transition hover:bg-white/[.035]">
         <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full border" style={{ borderColor: `${hex}40`, background: `${hex}1a`, color: hex }}>
           <Icon className="h-4 w-4" />
         </span>
@@ -137,16 +137,5 @@ function EventRow({ event, now, onOpen }: { event: PulseEvent; now: number; onOp
         </span>
       </button>
     </li>
-  );
-}
-
-function Stat({ tone, value, label, sub }: { tone: ToneName; value: number; label: string; sub?: string }) {
-  const hex = TONE_HEX[tone];
-  return (
-    <span className="inline-flex items-baseline gap-1.5 rounded-lg border px-3 py-1.5" style={{ borderColor: `${hex}33`, background: `${hex}12` }}>
-      <span className="text-lg font-semibold" style={{ color: hex }}>{value}</span>
-      <span className="text-xs hc-soft">{label}</span>
-      {sub ? <span className="text-[10px] text-amber-200">{sub}</span> : null}
-    </span>
   );
 }

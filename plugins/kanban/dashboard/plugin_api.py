@@ -1200,6 +1200,12 @@ class CreateTaskBody(BaseModel):
     workspace_path: Optional[ShortText] = None
     parents: list[ShortText] = Field(default_factory=list, max_length=_LIST_MAX_LENGTH)
     triage: bool = False
+    # Park the freshly-created task in ``scheduled`` (atomically, in this same
+    # handler) so the autonomous orchestrator/dispatcher do NOT auto-launch it.
+    # Used by the dashboard's "copy to Fleet" action: the operator explicitly
+    # clicks Dispatch in the Fleet to start it, instead of a one-click transfer
+    # silently kicking off a worker (or an epic decompose).
+    park: bool = False
     idempotency_key: Optional[ShortText] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[ShortText]] = Field(default=None, max_length=_LIST_MAX_LENGTH)
@@ -1235,6 +1241,22 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
         )
+        # Park: move the brand-new task into ``scheduled`` so the autonomous
+        # orchestrator (triage -> auto-specify/decompose) and the dispatcher
+        # (ready -> run) leave it alone until the operator clicks Dispatch in
+        # the Fleet. triage -> todo (direct) then todo -> scheduled
+        # (schedule_task), both inside this handler's write connection so no
+        # 60s gateway tick can interleave. Idempotent re-create of an existing
+        # task is a no-op here (already past triage / not freshly parked).
+        if payload.park:
+            fresh = kanban_db.get_task(conn, task_id)
+            if fresh is not None and fresh.status not in ("done", "archived", "scheduled", "running"):
+                if fresh.status == "triage":
+                    _set_status_direct(conn, task_id, "todo")
+                kanban_db.schedule_task(
+                    conn, task_id,
+                    reason="Aus dem Backlog in die Fleet kopiert — wartet auf Dispatch.",
+                )
         # Subscribe-on-create: route terminal-state notifications for this task
         # to every configured home channel (same target as the subscribe_home
         # endpoint). Without this, dashboard-created roots stay unsubscribed and

@@ -257,3 +257,61 @@
   from { transform: translateX(-100%); }
   to   { transform: translateX(100%); }
 }
+
+/* ── Fleet · operator pipeline surfaces ───────────────────────────────────
+   The Fleet/Hermes tab reproduces the Claude-design "command" look on top of
+   the existing --hc-* tokens: flat KPI pods, quiet dashed empty states, a
+   coloured run-role badge, and a thin stage rail. All additive, control-scoped,
+   no new theme — the aurora-violet identity and every other tab are untouched. */
+
+/* KPI pod — a flat, quiet metric tile. Bigger/calmer than hc-surface-card. */
+.hc-fleet-pod {
+  border: 1px solid var(--hc-border);
+  border-radius: calc(var(--hc-radius) * 1.4);
+  background: var(--hc-panel);
+  padding: 0.85rem 1rem;
+}
+.hc-fleet-pod-value {
+  font-family: var(--hc-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 1.65rem;
+  line-height: 1;
+  color: var(--hc-text);
+}
+.hc-fleet-pod-value small { font-size: 0.8rem; color: var(--hc-text-dim); font-weight: 500; }
+
+/* Quiet empty state — dashed hairline box, calm copy. `.ok` greens the title. */
+.hc-fleet-empty {
+  display: flex; flex-direction: column; gap: 0.4rem;
+  padding: 1.1rem 1.15rem;
+  border: 1px dashed var(--hc-border-strong);
+  border-radius: var(--hc-radius);
+  background: color-mix(in srgb, var(--hc-panel-2) 55%, transparent);
+}
+.hc-fleet-empty-title { font-size: 0.82rem; font-weight: 600; color: var(--hc-text); }
+.hc-fleet-empty.ok .hc-fleet-empty-title { color: var(--hc-emerald); }
+.hc-fleet-empty-desc { font-size: 0.72rem; line-height: 1.5; color: var(--hc-text-dim); }
+
+/* Run-role badge — the coloured square with the role initial (V/C/R …). The
+   --hc-role colour is supplied inline per role (see lib/fleet roleChip). */
+.hc-role-badge {
+  display: inline-grid; place-items: center;
+  height: 1.15rem; min-width: 1.15rem; padding: 0 0.18rem;
+  border-radius: 0.28rem;
+  font-family: var(--hc-font-mono); font-size: 0.66rem; font-weight: 700;
+  color: #0b0b0d;
+  background: var(--hc-role, var(--hc-zinc));
+}
+.hc-role-chip {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.1rem 0.5rem 0.1rem 0.18rem;
+  border: 1px solid color-mix(in srgb, var(--hc-role, var(--hc-zinc)) 34%, transparent);
+  border-radius: 999px;
+  font-size: 0.72rem; font-weight: 500;
+  color: color-mix(in srgb, var(--hc-role, var(--hc-text-soft)) 80%, white 20%);
+}
+
+/* Thin stage progress rail under a stage pod. */
+.hc-stage-rail { height: 2px; border-radius: 2px; background: var(--hc-border); overflow: hidden; }
+.hc-stage-rail > i { display: block; height: 100%; border-radius: 2px; background: var(--hc-role, var(--hc-accent)); }

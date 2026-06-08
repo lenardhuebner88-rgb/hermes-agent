@@ -7,8 +7,10 @@ import { toneClasses } from "../lib/tones";
 import { tokens } from "../lib/tokens";
 import { DUR, EASE_OUT, EASE_RISE } from "../lib/motion";
 import { StatusPill, ToneCallout } from "./atoms";
+import { CommissionButton } from "./fleet/CommissionButton";
 import { Markdown } from "./Markdown";
 import { de } from "../i18n/de";
+import type { CommissionState } from "../hooks/useControlData";
 
 interface BacklogDetailDrawerProps {
   title: string;
@@ -24,6 +26,10 @@ interface BacklogDetailDrawerProps {
   error?: string;
   commissionPrompt?: string;
   operatorBrief?: string;
+  /** When set, renders the "create real Kanban card" button (Backlog→Kanban). */
+  onCommission?: () => void;
+  commissionState?: CommissionState;
+  commissionError?: string;
   onClose: () => void;
 }
 
@@ -43,6 +49,9 @@ export function BacklogDetailDrawer({
   error,
   commissionPrompt,
   operatorBrief,
+  onCommission,
+  commissionState,
+  commissionError,
   onClose,
 }: BacklogDetailDrawerProps) {
   const [copied, setCopied] = useState(false);
@@ -223,6 +232,19 @@ export function BacklogDetailDrawer({
                 </div>
               ))}
             </dl>
+          ) : null}
+
+          {onCommission ? (
+            <section className="rounded-lg border border-[var(--hc-border)] bg-white/[.02] px-3 py-3">
+              <CommissionButton variant="full" state={commissionState} onClick={() => onCommission()} />
+              {commissionState === "done" ? (
+                <p className="mt-2 text-xs text-emerald-300">In der Fleet geparkt (Stufe Plan) — im Hermes-Tab mit Dispatch starten.</p>
+              ) : commissionState === "error" && commissionError ? (
+                <p className="mt-2 text-xs text-red-300">{de.fleet.commissionFailed}: {commissionError}</p>
+              ) : (
+                <p className="mt-2 text-xs hc-dim">{de.fleet.commissionTitle}</p>
+              )}
+            </section>
           ) : null}
 
           {operatorBrief ? (

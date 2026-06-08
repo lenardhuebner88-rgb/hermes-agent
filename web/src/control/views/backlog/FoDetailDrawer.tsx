@@ -4,10 +4,12 @@ import { motion, useReducedMotion } from "motion/react";
 
 import { de } from "../../i18n/de";
 import { ToneCallout } from "../../components/atoms";
+import { CommissionButton } from "../../components/fleet/CommissionButton";
 import { Stat } from "../../components/primitives";
 import { DUR, EASE_OUT, EASE_RISE } from "../../lib/motion";
 import { nextActionForFoItem } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
+import type { CommissionState } from "../../hooks/useControlData";
 import { CopyButton } from "./CopyButton";
 import { operatorBrief, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 
@@ -35,6 +37,9 @@ export function FoDetailDrawer({
   loading,
   error,
   commissionPrompt,
+  onCommission,
+  commissionState,
+  commissionError,
   onClose,
 }: {
   item: BacklogItem;
@@ -42,6 +47,9 @@ export function FoDetailDrawer({
   loading: boolean;
   error?: string;
   commissionPrompt?: string;
+  onCommission?: () => void;
+  commissionState?: CommissionState;
+  commissionError?: string;
   onClose: () => void;
 }) {
   const reduce = useReducedMotion();
@@ -121,6 +129,19 @@ export function FoDetailDrawer({
               <div><dt className="text-[10px] uppercase text-zinc-500">Ref</dt><dd className="break-words hc-mono text-zinc-100">{detail?.source_ref || "git:origin/main"}</dd></div>
             </dl>
           </section>
+
+          {onCommission ? (
+            <section className="border-t border-[var(--hc-border)] pt-3">
+              <CommissionButton variant="full" state={commissionState} onClick={() => onCommission()} />
+              {commissionState === "done" ? (
+                <p className="mt-2 text-xs text-emerald-300">In der Fleet geparkt (Stufe Plan) — im Hermes-Tab mit Dispatch starten, dann Verify / Ship.</p>
+              ) : commissionState === "error" && commissionError ? (
+                <p className="mt-2 text-xs text-red-300">{de.fleet.commissionFailed}: {commissionError}</p>
+              ) : (
+                <p className="mt-2 text-xs hc-dim">{de.fleet.commissionTitle}</p>
+              )}
+            </section>
+          ) : null}
 
           <div className="grid gap-2 sm:grid-cols-2">
             <CopyButton text={brief} label="Copy operator brief" copiedLabel="Brief kopiert" />

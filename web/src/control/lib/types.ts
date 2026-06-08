@@ -185,6 +185,36 @@ export interface BlockedCompletionsResponse {
   since_hours: number;
 }
 
+export interface BoardTask {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  assignee: string | null;
+  priority: number;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  branch_name: string | null;
+  latest_summary: string | null;
+  link_counts: { parents: number; children: number };
+  comment_count: number;
+  progress: { done: number; total: number } | null;
+  age: { created_age_seconds: number | null; started_age_seconds: number | null; time_to_complete_seconds: number | null } | null;
+}
+
+export interface BoardColumn {
+  name: string;
+  tasks: BoardTask[];
+}
+
+export interface BoardResponse {
+  columns: BoardColumn[];
+  tenants: string[];
+  assignees: string[];
+  latest_event_id: number;
+  now: number;
+}
+
 export type HealthStatus = "healthy" | "degraded" | "offline";
 
 export interface SubsystemHealth {

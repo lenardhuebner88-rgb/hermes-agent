@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import { StatusPill } from "../../components/atoms";
+import { CommissionButton } from "../../components/fleet/CommissionButton";
 import { Skeleton, SkeletonRow } from "../../components/primitives";
 import {
   nextActionForFoItem,
@@ -8,6 +9,7 @@ import {
   staleSignalForFoItem,
 } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
+import type { CommissionState } from "../../hooks/useControlData";
 import { OWNER_TONE, relLabel, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 
 export function FoBacklogQueueTable({
@@ -17,6 +19,8 @@ export function FoBacklogQueueTable({
   activeId = null,
   detailById = {},
   onOpen,
+  onCommission,
+  commissionState = {},
 }: {
   items: BacklogItem[];
   nowSec: number;
@@ -24,6 +28,8 @@ export function FoBacklogQueueTable({
   activeId?: string | null;
   detailById?: Record<string, BacklogDetail | undefined>;
   onOpen: (id: string) => void;
+  onCommission?: (item: BacklogItem) => void;
+  commissionState?: Record<string, CommissionState>;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border border-[var(--hc-border)] bg-white/[.015]">
@@ -87,7 +93,14 @@ export function FoBacklogQueueTable({
                 <td className="hidden px-3 py-2 md:table-cell"><span className="hc-mono text-xs hc-soft">{relLabel(item.updated, nowSec)}</span></td>
                 <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("text-xs", stale.state === "stale" ? "text-red-200" : stale.state === "missing_update" ? "text-amber-200" : "hc-soft")}>{stale.label}</span></td>
                 <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate hc-mono text-[11px] text-zinc-400">{sourceRef(item)}</span><span className="hc-mono text-[11px] text-zinc-500">{item.id}</span></td>
-                <td className="px-3 py-2"><p className="line-clamp-3 text-sm text-zinc-100">{nextActionForFoItem(item, detail)}</p></td>
+                <td className="px-3 py-2">
+                  <p className="line-clamp-3 text-sm text-zinc-100">{nextActionForFoItem(item, detail)}</p>
+                  {onCommission ? (
+                    <div className="mt-2">
+                      <CommissionButton state={commissionState[item.id]} onClick={(event) => { event.stopPropagation(); onCommission(item); }} />
+                    </div>
+                  ) : null}
+                </td>
               </tr>
             );
           })}

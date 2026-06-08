@@ -11,6 +11,7 @@ import type { ToneName, Proposal } from "../lib/types";
 import { StatusPill } from "../components/atoms";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
 import { ProvenanceStrip } from "../components/ProvenanceStrip";
+import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { toneClasses } from "../lib/tones";
 import { Card, Disclosure, Eyebrow, Panel, Skeleton, SkeletonCard, Stat, Text } from "../components/primitives";
 
@@ -186,11 +187,11 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
       {focus === null || focus === "warnings" ? (
         <Panel eyebrow={de.overview.warnings} title={de.overview.needsAttention}>
           {workersLoading ? (
-            <div className="space-y-2"><Skeleton className="h-10 w-full" /><Skeleton className="h-10 w-full" /></div>
+            <div className="grid gap-3 lg:grid-cols-2"><Skeleton className="h-11 w-full" /><Skeleton className="h-11 w-full" /></div>
           ) : hermesWarnings.length === 0 ? (
-            <Text className="hc-soft">{de.overview.nothingUrgent}</Text>
+            <FleetEmptyState ok title={de.overview.nothingUrgent} desc="Keine Hermes-Worker brauchen gerade Aufmerksamkeit." />
           ) : (
-            <div className="space-y-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="flex w-full items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-left text-sm hover:bg-white/5"><span>{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>
+            <div className="grid gap-3 lg:grid-cols-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="hc-surface-card hc-hit flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:border-white/15"><span className="min-w-0 truncate">{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>
           )}
         </Panel>
       ) : null}
@@ -233,30 +234,36 @@ function Drilldown({ id, title, tab, navigate, items, empty, loading }: { id: st
 function MetricTile({ icon, label, value, active, tone, loading, onClick }: { icon: React.ReactNode; label: string; value: string; active?: boolean; tone?: ToneName; loading?: boolean; onClick: () => void }) {
   // Conditional tone: a non-zero warnings/problem count tints the tile amber/red
   // so "good vs bad" is pre-attentive instead of read-and-reason. The condition
-  // (caller-supplied tone) is unchanged — only the rendering maps it onto the
-  // shared tone wash (toneClasses). Stays a real <button> for keyboard + aria-pressed.
+  // (caller-supplied tone) is unchanged — only the rendering now wraps a FleetPod
+  // (bigger, calmer KPI) and maps the tone onto the shared wash (toneClasses) + the
+  // pod's status dot. Stays a real <button> for keyboard + aria-pressed.
   const iconColor = tone === "red" ? "text-red-300" : tone === "amber" ? "text-amber-300" : "text-[var(--hc-accent-text)]";
-  const valueColor = tone === "red" ? "text-red-200" : tone === "amber" ? "text-amber-200" : "text-white";
+  const dot = tone === "red" ? "error" : tone === "amber" ? "warn" : undefined;
+  const podLabel = (
+    <span className="flex items-center gap-1.5">
+      <span aria-hidden className={iconColor}>{icon}</span>
+      {label}
+    </span>
+  );
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "hc-surface-panel2 hc-hit flex items-center justify-start gap-3 p-4 text-left transition",
-        tone ? cn("border", toneClasses(tone)) : "hover:border-white/15",
-        active && "ring-1 ring-[var(--hc-accent-border)]",
+        "hc-hit text-left transition",
+        tone ? cn("rounded-xl border", toneClasses(tone)) : "",
+        active && "rounded-xl ring-1 ring-[var(--hc-accent-border)]",
       )}
     >
-      <span aria-hidden className={iconColor}>{icon}</span>
-      <span className="min-w-0">
-        <span className="block text-sm hc-soft">{label}</span>
-        {loading ? (
-          <Skeleton className="mt-1 h-6 w-16" />
-        ) : (
-          <span className={cn("block text-2xl font-semibold", valueColor)}>{value}</span>
-        )}
-      </span>
+      {loading ? (
+        <div className="hc-fleet-pod">
+          <span className="block text-sm hc-soft">{podLabel}</span>
+          <Skeleton className="mt-2 h-7 w-16" />
+        </div>
+      ) : (
+        <FleetPod label={podLabel} value={value} dot={dot} />
+      )}
     </button>
   );
 }

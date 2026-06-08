@@ -1,13 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle,
-  Bot,
   Check,
   ClipboardCopy,
-  GitBranch,
-  ShieldCheck,
   Workflow,
-  Zap,
 } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
@@ -35,6 +30,8 @@ import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 import { buildCommissionPrompt } from "../lib/orchestration";
 import type { KanbanResult, ToneName } from "../lib/types";
 import { StatusPill, ToneCallout } from "../components/atoms";
+import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
+import { Stat } from "../components/primitives";
 import { SystemHealthStrip } from "../components/SystemHealthStrip";
 
 function toneBorder(tone: ToneName): string {
@@ -61,34 +58,9 @@ function clockLabel(epochSec: number): string {
   return new Date(epochSec * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
-function Tile({ icon, label, value, tone = "cyan", sub }: { icon: React.ReactNode; label: string; value: string; tone?: ToneName; sub?: string }) {
-  return (
-    <div className={cn("min-w-0 rounded-lg border px-3 py-3", toneBorder(tone))}>
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-zinc-200">{icon}</span>
-        <span className="hc-mono text-lg font-semibold text-white">{value}</span>
-      </div>
-      <p className="mt-2 truncate text-xs font-medium uppercase tracking-normal hc-dim">{label}</p>
-      {sub ? <p className="mt-1 truncate text-xs hc-soft">{sub}</p> : null}
-    </div>
-  );
-}
-
 function readinessTone(ok: boolean, warn: boolean): ToneName {
   if (ok) return "emerald";
   return warn ? "amber" : "red";
-}
-
-function SignalRow({ label, value, tone, detail }: { label: string; value: string; tone: ToneName; detail: string }) {
-  return (
-    <div className={cn("rounded-lg border px-3 py-2", toneBorder(tone))}>
-      <div className="flex items-center justify-between gap-3">
-        <span className="truncate text-sm font-medium text-white">{label}</span>
-        <span className="hc-mono text-sm text-zinc-100">{value}</span>
-      </div>
-      <p className="mt-1 line-clamp-2 text-xs hc-soft">{detail}</p>
-    </div>
-  );
 }
 
 function CopyButton({ text, label, copiedLabel = "Kopiert" }: { text: string; label: string; copiedLabel?: string }) {
@@ -268,11 +240,11 @@ export function AgentOpsView({ density }: { density: Density }) {
         <ToneCallout tone="amber">{sourceErrors.join(" · ")}</ToneCallout>
       ) : null}
 
-      <section className={cn("grid gap-3 sm:grid-cols-2", gridCols)}>
-        <Tile icon={<Bot className="h-5 w-5" />} label="Worker gesund" value={`${snapshot.healthyWorkers}/${snapshot.activeWorkers}`} tone={snapshot.healthyWorkers === snapshot.activeWorkers ? "emerald" : "amber"} sub={`${snapshot.parallelSlotsFree}/${snapshot.parallelTarget} Slots frei`} />
-        <Tile icon={<Zap className="h-5 w-5" />} label="Start jetzt" value={String(snapshot.recommendedLaunches)} tone={snapshot.recommendedLaunches ? "emerald" : "zinc"} sub={`${snapshot.dispatchReady} ready | ${snapshot.planGates} Gates`} />
-        <Tile icon={<AlertTriangle className="h-5 w-5" />} label="Blocker/Drift" value={`${snapshot.blockedItems}/${snapshot.contractDrift}`} tone={snapshot.blockedItems || snapshot.contractDrift ? "amber" : "emerald"} sub={`${snapshot.staleProofItems} stale proof`} />
-        <Tile icon={<ShieldCheck className="h-5 w-5" />} label="Proof Gate" value={`${Math.round(snapshot.gatePassRate * 100)}%`} tone={snapshot.gatePassRate < 0.8 || snapshot.gateFailed ? "amber" : "emerald"} sub={`${snapshot.verifiedResults}/${snapshot.completedRuns} Receipts`} />
+      <section className={cn("grid gap-3 grid-cols-2 sm:grid-cols-4", gridCols)}>
+        <FleetPod label="Worker gesund" value={`${snapshot.healthyWorkers}/${snapshot.activeWorkers}`} suffix={`${snapshot.parallelSlotsFree}/${snapshot.parallelTarget} Slots frei`} dot={snapshot.healthyWorkers === snapshot.activeWorkers ? "ready" : "warn"} />
+        <FleetPod label="Start jetzt" value={String(snapshot.recommendedLaunches)} suffix={`${snapshot.dispatchReady} ready · ${snapshot.planGates} Gates`} dot={snapshot.recommendedLaunches ? "ready" : "idle"} />
+        <FleetPod label="Blocker/Drift" value={`${snapshot.blockedItems}/${snapshot.contractDrift}`} suffix={`${snapshot.staleProofItems} stale proof`} dot={snapshot.blockedItems || snapshot.contractDrift ? "warn" : "ready"} />
+        <FleetPod label="Proof Gate" value={`${Math.round(snapshot.gatePassRate * 100)}%`} suffix={`${snapshot.verifiedResults}/${snapshot.completedRuns} Receipts`} dot={snapshot.gatePassRate < 0.8 || snapshot.gateFailed ? "warn" : "ready"} />
       </section>
 
       <section className={cn("rounded-lg border p-4", toneBorder(snapshot.operatorDecision.tone))}>
@@ -289,54 +261,51 @@ export function AgentOpsView({ density }: { density: Density }) {
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,.9fr)_minmax(0,1.1fr)]">
-        <div className="hc-card p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="hc-eyebrow">Parallel Session Safety</p>
-              <h3 className="mt-1 text-lg font-semibold text-white">{parallelReady ? "Gruen fuer kontrollierten Fan-out" : "Erst Leitplanken klaeren"}</h3>
-            </div>
+      <section className="grid gap-3 xl:grid-cols-[minmax(0,.9fr)_minmax(0,1.1fr)]">
+        <FleetPanel
+          eyebrow="Parallel Session Safety"
+          meta={parallelReady ? "Gruen fuer kontrollierten Fan-out" : "Erst Leitplanken klaeren"}
+        >
+          <div className="mb-3 flex justify-end">
             <StatusPill tone={parallelReady ? "emerald" : "amber"} label={parallelReady ? "ready" : "inspect"} dot={parallelReady ? "ready" : "warn"} />
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <SignalRow label="Isolation" value={snapshot.parallelSlotsFree > 0 ? "Kapazitaet" : "voll"} tone={readinessTone(snapshot.parallelSlotsFree > 0, snapshot.activeWorkers < snapshot.parallelTarget + 2)} detail="Neue Workstreams nur mit eigenem Branch/Worktree oder sauber bestaetigtem exklusivem Root starten." />
-            <SignalRow label="Locks" value={snapshot.healthyWorkers === snapshot.activeWorkers ? "stabil" : "prüfen"} tone={snapshot.healthyWorkers === snapshot.activeWorkers ? "emerald" : "amber"} detail="Worker mit altem Heartbeat, ablaufender Lease oder fremder Dirty-Arbeit zuerst untersuchen." />
-            <SignalRow label="Backlog" value={`${snapshot.dispatchReady} ready`} tone={snapshot.dispatchReady ? "emerald" : "zinc"} detail="Dispatch nur fuer ready Tasks ohne offene Dependencies; Plan-Gates bleiben Entscheidungsarbeit." />
-            <SignalRow label="Risk" value={`${snapshot.highRiskItems} high`} tone={snapshot.highRiskItems > 3 || snapshot.blockedItems ? "amber" : "emerald"} detail="Viele High-Risk- oder blockierte Tasks senken die sinnvolle Parallelitaet trotz freier Slots." />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Stat label="Isolation" value={snapshot.parallelSlotsFree > 0 ? "Kapazitaet" : "voll"} tone={readinessTone(snapshot.parallelSlotsFree > 0, snapshot.activeWorkers < snapshot.parallelTarget + 2)} hint="Neue Workstreams nur mit eigenem Branch/Worktree oder sauber bestaetigtem exklusivem Root starten." />
+            <Stat label="Locks" value={snapshot.healthyWorkers === snapshot.activeWorkers ? "stabil" : "prüfen"} tone={snapshot.healthyWorkers === snapshot.activeWorkers ? "emerald" : "amber"} hint="Worker mit altem Heartbeat, ablaufender Lease oder fremder Dirty-Arbeit zuerst untersuchen." />
+            <Stat label="Backlog" value={`${snapshot.dispatchReady} ready`} tone={snapshot.dispatchReady ? "emerald" : "zinc"} hint="Dispatch nur fuer ready Tasks ohne offene Dependencies; Plan-Gates bleiben Entscheidungsarbeit." />
+            <Stat label="Risk" value={`${snapshot.highRiskItems} high`} tone={snapshot.highRiskItems > 3 || snapshot.blockedItems ? "amber" : "emerald"} hint="Viele High-Risk- oder blockierte Tasks senken die sinnvolle Parallelitaet trotz freier Slots." />
           </div>
-        </div>
+        </FleetPanel>
 
-        <div className="hc-card p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="hc-eyebrow">Harness & Proof</p>
-              <h3 className="mt-1 text-lg font-semibold text-white">Evidenz vor Merge/Restart</h3>
-            </div>
+        <FleetPanel
+          eyebrow="Harness & Proof"
+          meta={`Evidenz vor Merge/Restart · ${Math.round(proofRate * 100)}% receipts`}
+        >
+          <div className="mb-3 flex justify-end">
             <StatusPill tone={proofRate >= 0.8 && snapshot.gateFailed === 0 ? "emerald" : "amber"} label={`${Math.round(proofRate * 100)}% receipts`} />
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <SignalRow label="Receipts" value={`${snapshot.verifiedResults}/${snapshot.completedRuns}`} tone={proofRate >= 0.8 ? "emerald" : "amber"} detail="Letzte Ergebnisse mit expliziter Verifikation; Done ohne Proof bleibt Review-Arbeit." />
-            <SignalRow label="Proposal Gates" value={`${snapshot.gatePassed}/${gateTotal || 0}`} tone={snapshot.gateFailed ? "red" : snapshot.gateRunning ? "cyan" : "emerald"} detail={`${snapshot.gateRunning} laufend, ${snapshot.gateFailed} fehlgeschlagen; Autoresearch-Code nur nach gruenem Gate anwenden.`} />
-            <SignalRow label="API Budget" value={`${(snapshot.errorRate * 100).toFixed(1)}%`} tone={snapshot.errorRate > 0.05 ? "red" : snapshot.worstP95Ms > 1000 ? "amber" : "emerald"} detail={`p95 ${Math.round(snapshot.worstP95Ms)}ms; bei Druck keine zusaetzlichen Agentenwellen starten.`} />
-            <SignalRow label="Operator Load" value={`${snapshot.openProposals} offen`} tone={snapshot.openProposals > 6 || snapshot.unownedItems > 0 ? "amber" : "emerald"} detail={`${snapshot.unownedItems} unowned Tasks; erst Queue klaeren, dann Fan-out erhoehen.`} />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Stat label="Receipts" value={`${snapshot.verifiedResults}/${snapshot.completedRuns}`} tone={proofRate >= 0.8 ? "emerald" : "amber"} hint="Letzte Ergebnisse mit expliziter Verifikation; Done ohne Proof bleibt Review-Arbeit." />
+            <Stat label="Proposal Gates" value={`${snapshot.gatePassed}/${gateTotal || 0}`} tone={snapshot.gateFailed ? "red" : snapshot.gateRunning ? "cyan" : "emerald"} hint={`${snapshot.gateRunning} laufend, ${snapshot.gateFailed} fehlgeschlagen; Autoresearch-Code nur nach gruenem Gate anwenden.`} />
+            <Stat label="API Budget" value={`${(snapshot.errorRate * 100).toFixed(1)}%`} tone={snapshot.errorRate > 0.05 ? "red" : snapshot.worstP95Ms > 1000 ? "amber" : "emerald"} hint={`p95 ${Math.round(snapshot.worstP95Ms)}ms; bei Druck keine zusaetzlichen Agentenwellen starten.`} />
+            <Stat label="Operator Load" value={`${snapshot.openProposals} offen`} tone={snapshot.openProposals > 6 || snapshot.unownedItems > 0 ? "amber" : "emerald"} hint={`${snapshot.unownedItems} unowned Tasks; erst Queue klaeren, dann Fan-out erhoehen.`} />
           </div>
-        </div>
+        </FleetPanel>
       </section>
 
-      <section className="hc-card p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p className="hc-eyebrow">Readiness-Luecken</p>
-            <h3 className="mt-1 text-lg font-semibold text-white">Was parallele Arbeit gerade begrenzt</h3>
-          </div>
+      <FleetPanel
+        eyebrow="Readiness-Luecken"
+        meta="Was parallele Arbeit gerade begrenzt"
+      >
+        <div className="mb-3 flex justify-end">
           <CopyButton text={startBrief} label="Startbrief" />
         </div>
         {snapshot.readinessGaps.length === 0 ? (
-          <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-100">Keine begrenzenden Signale.</div>
+          <FleetEmptyState ok title="Keine begrenzenden Signale." desc="Parallele Arbeit ist gerade unblockiert." />
         ) : (
-          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
             {snapshot.readinessGaps.map((gap) => (
-              <a key={gap.id} href={gap.target} className={cn("rounded-lg border px-3 py-2 hover:bg-white/[.04]", toneBorder(gap.tone))}>
+              <a key={gap.id} href={gap.target} className={cn("flex min-h-11 flex-col justify-center rounded-lg border px-3 py-2 hover:bg-white/[.04]", toneBorder(gap.tone))}>
                 <div className="flex items-center justify-between gap-3">
                   <span className="truncate text-sm font-medium text-white">{gap.label}</span>
                   <span className="hc-mono text-sm text-zinc-100">{gap.count}</span>
@@ -346,19 +315,18 @@ export function AgentOpsView({ density }: { density: Density }) {
             ))}
           </div>
         )}
-      </section>
+      </FleetPanel>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,.8fr)]">
-        <div className="space-y-3">
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <p className="hc-eyebrow">Parallel Dispatch</p>
-              <h3 className="mt-1 text-lg font-semibold text-white">Naechste 4 Arbeitsstroeme</h3>
-            </div>
-            <a href="/control/orchestrator" className="rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Orchestrator</a>
+      <section className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,.8fr)]">
+        <FleetPanel
+          eyebrow="Parallel Dispatch"
+          meta="Naechste 4 Arbeitsstroeme"
+        >
+          <div className="mb-3 flex justify-end">
+            <a href="/control/orchestrator" className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Orchestrator</a>
           </div>
           {snapshot.dispatchCandidates.length === 0 ? (
-            <div className="rounded-lg border border-[var(--hc-border)] bg-white/[.025] p-4 text-sm hc-soft">Keine beauftragbaren Kandidaten.</div>
+            <FleetEmptyState ok title="Keine beauftragbaren Kandidaten." desc="Kein ready Task wartet auf Dispatch." />
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
               {snapshot.dispatchCandidates.map((candidate) => {
@@ -368,19 +336,18 @@ export function AgentOpsView({ density }: { density: Density }) {
               })}
             </div>
           )}
-        </div>
+        </FleetPanel>
 
-        <div className="space-y-3">
-          <div>
-            <p className="hc-eyebrow">Interventionen</p>
-            <h3 className="mt-1 text-lg font-semibold text-white">Operator Queue</h3>
-          </div>
+        <FleetPanel
+          eyebrow="Interventionen"
+          meta="Operator Queue"
+        >
           {snapshot.interventions.length === 0 ? (
-            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">Keine Eingriffe offen.</div>
+            <FleetEmptyState ok title="Keine Eingriffe offen." desc="Keine Tasks brauchen gerade einen Operator-Schritt." />
           ) : (
             <div className="space-y-2">
               {snapshot.interventions.map((item) => (
-                <a key={item.id} href={item.target} className={cn("flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm", toneBorder(item.tone))}>
+                <a key={item.id} href={item.target} className={cn("flex min-h-11 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm", toneBorder(item.tone))}>
                   <span className="min-w-0">
                     <span className="block truncate font-medium text-white">{item.title}</span>
                     <span className="block truncate text-xs hc-soft">{item.detail}</span>
@@ -390,18 +357,14 @@ export function AgentOpsView({ density }: { density: Density }) {
               ))}
             </div>
           )}
-        </div>
+        </FleetPanel>
       </section>
 
-      <section className="hc-card overflow-hidden">
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--hc-border)] px-3 py-2">
-          <div>
-            <p className="hc-eyebrow">Projekt-Lanes</p>
-            <h3 className="mt-1 text-sm font-semibold text-white">Kapazitaet, Risiko, naechster Schritt</h3>
-          </div>
-          <GitBranch className="h-4 w-4 hc-dim" />
-        </div>
-        <div className="overflow-x-auto">
+      <FleetPanel
+        eyebrow="Projekt-Lanes"
+        meta="Kapazitaet, Risiko, naechster Schritt"
+      >
+        <div className="-mx-1 overflow-x-auto">
           <table className="w-full table-fixed text-left">
             <thead className="bg-white/[.025] text-[10px] uppercase tracking-wide hc-dim">
               <tr>
@@ -423,24 +386,23 @@ export function AgentOpsView({ density }: { density: Density }) {
             </tbody>
           </table>
         </div>
-      </section>
+      </FleetPanel>
 
-      <section className="space-y-3">
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <p className="hc-eyebrow">Receipts</p>
-            <h3 className="mt-1 text-lg font-semibold text-white">Letzte Ergebnisse</h3>
-          </div>
-          <a href="/control/hermes" className="rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Hermes</a>
+      <FleetPanel
+        eyebrow="Receipts"
+        meta="Letzte Ergebnisse"
+      >
+        <div className="mb-3 flex justify-end">
+          <a href="/control/hermes" className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Hermes</a>
         </div>
         {(results.data?.results ?? []).length === 0 ? (
-          <div className="rounded-lg border border-[var(--hc-border)] bg-white/[.025] p-4 text-sm hc-soft">Keine Ergebnisse im Zeitraum.</div>
+          <FleetEmptyState title="Keine Ergebnisse im Zeitraum." desc="Noch keine abgeschlossenen Runs zu zeigen." />
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {(results.data?.results ?? []).slice(0, 6).map((result) => <RecentResultRow key={result.run_id} result={result} now={now} />)}
           </div>
         )}
-      </section>
+      </FleetPanel>
     </div>
   );
 }

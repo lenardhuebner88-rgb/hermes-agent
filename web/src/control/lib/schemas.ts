@@ -69,6 +69,42 @@ export const WorkersResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+const TaskStatusSchema = z
+  .enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"])
+  .catch("todo");
+
+export const BoardTaskSchema = z.object({
+  id: z.coerce.string(),
+  title: z.string().catch("Ohne Titel"),
+  status: TaskStatusSchema,
+  assignee: z.string().nullable().catch(null),
+  priority: z.coerce.number().catch(0),
+  created_at: z.coerce.number().catch(0),
+  started_at: z.coerce.number().nullable().catch(null),
+  completed_at: z.coerce.number().nullable().catch(null),
+  branch_name: z.string().nullable().catch(null),
+  latest_summary: z.string().nullable().catch(null),
+  link_counts: z.object({ parents: z.coerce.number().catch(0), children: z.coerce.number().catch(0) }).catch({ parents: 0, children: 0 }),
+  comment_count: z.coerce.number().catch(0),
+  progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
+  age: z
+    .object({
+      created_age_seconds: z.coerce.number().nullable().catch(null),
+      started_age_seconds: z.coerce.number().nullable().catch(null),
+      time_to_complete_seconds: z.coerce.number().nullable().catch(null),
+    })
+    .nullable()
+    .catch(null),
+});
+
+export const BoardResponseSchema = z.object({
+  columns: z.array(z.object({ name: z.string(), tasks: z.array(BoardTaskSchema).catch([]) })).catch([]),
+  tenants: z.array(z.string()).catch([]),
+  assignees: z.array(z.string()).catch([]),
+  latest_event_id: z.coerce.number().catch(0),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+});
+
 
 const TaskDeliverableSchema = z.object({
   filename: z.string().catch(""),
@@ -579,6 +615,44 @@ export const OrchestrationBacklogResponseSchema = z.object({
 export type OrchestrationItem = z.infer<typeof OrchestrationItemSchema>;
 export type OrchestrationDetail = z.infer<typeof OrchestrationDetailSchema>;
 export type OrchestrationBacklogResponse = z.infer<typeof OrchestrationBacklogResponseSchema>;
+
+// GET /tasks/{id} — the live receipt rail for the Flow board: the task's runs
+// (the receipt chain), events (the live feed) and deliverables. Declared here,
+// after TaskDeliverableSchema, which it reuses.
+const TaskRunSchema = z.object({
+  id: z.coerce.string(),
+  profile: z.string().nullable().catch(null),
+  status: z.string().catch(""),
+  outcome: z.string().nullable().catch(null),
+  summary: z.string().nullable().catch(null),
+  error: z.string().nullable().catch(null),
+  started_at: z.coerce.number().nullable().catch(null),
+  ended_at: z.coerce.number().nullable().catch(null),
+  run_role: z.string().nullable().catch(null),
+  run_role_label: z.string().nullable().catch(null),
+});
+const TaskEventSchema = z.object({
+  id: z.coerce.number().catch(0),
+  kind: z.string().catch(""),
+  created_at: z.coerce.number().catch(0),
+  run_id: z.coerce.string().nullable().catch(null),
+});
+const TaskDetailTaskSchema = z.object({
+  id: z.coerce.string().catch(""),
+  title: z.string().catch(""),
+  status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("todo"),
+  assignee: z.string().nullable().catch(null),
+  latest_summary: z.string().nullable().catch(null),
+}).partial().catch({});
+export const TaskDetailResponseSchema = z.object({
+  task: TaskDetailTaskSchema.nullable().catch(null),
+  runs: z.array(TaskRunSchema).catch([]),
+  events: z.array(TaskEventSchema).catch([]),
+  deliverables: z.array(TaskDeliverableSchema).catch([]),
+});
+export type TaskRun = z.infer<typeof TaskRunSchema>;
+export type TaskEvent = z.infer<typeof TaskEventSchema>;
+export type TaskDetailResponse = z.infer<typeof TaskDetailResponseSchema>;
 
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);

@@ -11,6 +11,7 @@ import { InboxView } from "./views/InboxView";
 import { PulseView } from "./views/PulseView";
 import { AgentOpsView } from "./views/AgentOpsView";
 import { HermesFleet } from "./views/HermesFleet";
+import { FlowView } from "./views/FlowView";
 import { AutoresearchView } from "./views/AutoresearchView";
 import { BacklogView } from "./views/BacklogView";
 import { OrchestratorBacklogView } from "./views/OrchestratorBacklogView";
@@ -21,6 +22,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
   if (pathname.includes("/control/hermes")) return "hermes";
+  if (pathname.includes("/control/flow")) return "flow";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
@@ -35,6 +37,7 @@ const tabPath: Record<ControlTab, string> = {
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
   hermes: "/control/hermes",
+  flow: "/control/flow",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
@@ -90,13 +93,10 @@ export default function ControlPage() {
       <ControlShell
         active={active}
         density={density.density}
-        pinned={density.pinned}
         openProposals={proposals.openSkillProposals.length}
         inboxTotal={inbox.summary.total}
         inboxTone={inbox.worstTone}
         onNavigate={(tab) => navigate(tabPath[tab])}
-        setDensity={density.setDensity}
-        resetToAuto={density.resetToAuto}
         commandButtonRef={commandButtonRef}
         onOpenCommand={() => setPaletteOpen(true)}
       >
@@ -108,6 +108,7 @@ export default function ControlPage() {
             <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             <Route path="hermes" element={<HermesFleet density={density.density} />} />
+            <Route path="flow" element={<FlowView />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />

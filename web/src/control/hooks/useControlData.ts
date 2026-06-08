@@ -16,19 +16,21 @@ import {
   ReviewVerdictsResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
+  BoardResponseSchema,
+  TaskDetailResponseSchema,
   RunInspectSchema,
   SystemHealthResponseSchema,
   WorkersResponseSchema,
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, TaskDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -521,6 +523,178 @@ export function useHermesWorkers() {
   );
 }
 
+
+// Full kanban board grouped by status column — the Fleet pipeline (stage
+// counts + actionable rows) reads this. 8s keeps the operator's stage view
+// fresh without churning the DB; usePolling pauses it when the tab is hidden.
+export function useBoard() {
+  return usePolling<BoardResponse>(
+    "kanban/board",
+    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board"), "kanban/board"),
+    8000,
+  );
+}
+
+// Roster size — how many profiles are installed (the "/ N" denominator on the
+// Worker pod). Tolerant + slow (60s): the roster changes rarely and a failure
+// here must never blank the Fleet, so it degrades to null (pod shows just the
+// active count).
+export function useRosterCount() {
+  return usePolling<number | null>(
+    "kanban/profiles-count",
+    async () => {
+      const data = await fetchJSON<{ profiles?: unknown[] }>("/api/plugins/kanban/profiles");
+      return Array.isArray(data.profiles) ? data.profiles.length : null;
+    },
+    60000,
+  );
+}
+
+// Operator stage transitions. Wraps PATCH /tasks/{id} (the same endpoint the
+// kanban drawer uses) so a Fleet stage button has a REAL effect: Plan
+// (triage→todo), Dispatch (todo→ready, auto-dispatches), Ship (review→done),
+// Rework (review→blocked), Reopen (blocked→ready). The 409 "blocked by
+// parent(s)" detail is surfaced verbatim so the guard is honest, not silent.
+export interface TaskActionExtra {
+  block_reason?: string;
+  summary?: string;
+}
+export function useTaskAction(onDone?: () => void | Promise<void>) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (taskId: string, status: TaskStatus, extra?: TaskActionExtra) => {
+    setBusyId(taskId);
+    setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    try {
+      const res = await fetchJSON<{ task?: unknown }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
+        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...extra }) },
+      );
+      await onDone?.();
+      return { ok: true as const, res };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, [onDone]);
+  const clearError = useCallback((taskId: string) => setErrorById((prev) => ({ ...prev, [taskId]: "" })), []);
+  return { busyId, errorById, run, clearError };
+}
+
+// fetchJSON throws `Error("409: {\"detail\":\"…\"}")` — pull out the human detail.
+function extractDetail(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const m = msg.match(/^\d+:\s*(.*)$/s);
+  const body = m ? m[1] : msg;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.detail === "string") return parsed.detail;
+  } catch {
+    /* not JSON — use the raw text */
+  }
+  return body || msg;
+}
+
+// One-click "copy this Family-Organizer backlog item into the Fleet": creates a
+// real Kanban task (POST /tasks) parked in triage (Capture stage) so it shows up
+// in the Fleet pipeline where Plan/Execute/Verify/Ship drive it. Idempotent via
+// idempotency_key=fo-backlog:<id> — re-clicking the same item returns the
+// existing task instead of duplicating it. tenant=family-organizer namespaces them.
+export type CommissionState = "busy" | "done" | "error";
+export interface CommissionPayload {
+  title: string;
+  body: string;
+  priority: number;
+  assignee?: string;
+}
+export interface CommissionMeta {
+  /** Namespaces the kanban task by origin: "family-organizer" | "orchestrator". */
+  tenant: string;
+  /** Stable dedup key, e.g. `fo-backlog:<id>` / `orch-backlog:<id>` — a second
+   *  click returns the existing card instead of creating a duplicate. */
+  idempotencyKey: string;
+}
+export interface CommissionResult {
+  ok: boolean;
+  taskId?: string;
+  taskStatus?: string;
+  detail?: string;
+}
+export function useCommissionToFleet() {
+  const [stateById, setStateById] = useState<Record<string, CommissionState>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const [taskIdById, setTaskIdById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const commission = useCallback(async (id: string, payload: CommissionPayload, meta: CommissionMeta): Promise<CommissionResult> => {
+    setStateById((prev) => ({ ...prev, [id]: "busy" }));
+    setErrorById((prev) => ({ ...prev, [id]: "" }));
+    try {
+      const res = await fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: payload.title,
+          body: payload.body,
+          assignee: payload.assignee ?? "coder",
+          tenant: meta.tenant,
+          priority: payload.priority,
+          triage: true,
+          // Park it in the Fleet (status `scheduled`) so a one-click transfer
+          // never auto-launches a worker — the operator clicks Dispatch in the
+          // Fleet pipeline when they want it to run.
+          park: true,
+          idempotency_key: meta.idempotencyKey,
+          notify_home: false,
+        }),
+      });
+      if (aliveRef.current) {
+        setStateById((prev) => ({ ...prev, [id]: "done" }));
+        if (res.task?.id) setTaskIdById((prev) => ({ ...prev, [id]: res.task!.id! }));
+      }
+      return { ok: true, taskId: res.task?.id, taskStatus: res.task?.status };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) {
+        setStateById((prev) => ({ ...prev, [id]: "error" }));
+        setErrorById((prev) => ({ ...prev, [id]: detail }));
+      }
+      return { ok: false, detail };
+    }
+  }, []);
+  return { stateById, errorById, taskIdById, commission };
+}
+
+// On-demand task detail (runs + events + deliverables) for the Flow board's live
+// receipt rail. Keyed by task id, fetched when a card is selected (like
+// useRunInspect / useBacklogDetail) so the board poll stays lean.
+export function useTaskDetail() {
+  const [detailById, setDetailById] = useState<Record<string, TaskDetailResponse>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const fetch = useCallback(async (taskId: string) => {
+    setLoadingId(taskId);
+    try {
+      const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
+      const data = parseOrThrow(TaskDetailResponseSchema, raw, "tasks/detail");
+      if (!aliveRef.current) return;
+      setDetailById((prev) => ({ ...prev, [taskId]: data }));
+      setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    } catch (err) {
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      if (aliveRef.current) setLoadingId(null);
+    }
+  }, []);
+  return { detailById, errorById, loadingId, fetch };
+}
 
 export function useHermesRecentResults() {
   return usePolling<RecentResultsResponse>(

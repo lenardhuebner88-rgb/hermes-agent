@@ -1,0 +1,110 @@
+/**
+ * FleetResultCard — the verdichtete "Letzte Ergebnisse" card from the
+ * screenshot: a Completed badge, a coloured run-role chip, a Details toggle,
+ * the task title, and a "Dauer · vor X · receipt + test log" meta line. The
+ * Details toggle reveals the real summary, evidence, deliverables and verifier
+ * quotes inline — compact face, full proof on demand. Real data only.
+ */
+import { useState } from "react";
+import { ChevronRight, ExternalLink, FileText, Quote } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { fmtAge, fmtDur } from "../../lib/derive";
+import { roleChip } from "../../lib/fleet";
+import { de } from "../../i18n/de";
+import type { KanbanResult } from "../../lib/types";
+import { StatusPill, ToneCallout } from "../atoms";
+import { RoleChip } from "./atoms";
+
+function receiptLabel(result: KanbanResult): string {
+  const hasReceipt = (result.artifacts ?? []).some((a) => a.toLowerCase().includes("receipt")) || (result.deliverables ?? []).length > 0;
+  const hasTest = (result.verification ?? []).length > 0 || (result.verifier_evidence ?? []).length > 0;
+  if (hasReceipt && hasTest) return de.fleet.receiptTestLog;
+  if (hasReceipt) return de.fleet.receiptOnly;
+  if (hasTest) return "test log";
+  return "kein Beleg";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+export function FleetResultCard({ result, now }: { result: KanbanResult; now: number }) {
+  const [open, setOpen] = useState(false);
+  const role = roleChip(result.profile, result.run_role);
+  const verifierEvidence = result.verifier_evidence ?? [];
+  const deliverables = result.deliverables ?? [];
+
+  return (
+    <article className="hc-surface-card p-3.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill tone="emerald" label="Completed" dot="ready" />
+        <RoleChip role={role} />
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="ml-auto inline-flex min-h-8 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft transition hover:bg-white/5"
+        >
+          {de.fleet.details}
+          <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
+        </button>
+      </div>
+
+      <h3 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{result.task_title}</h3>
+      <p className="mt-1.5 hc-mono text-[0.7rem] hc-dim">
+        ⏱ {fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)} · {receiptLabel(result)}
+      </p>
+
+      {open ? (
+        <div className="mt-3 space-y-3 border-t border-[var(--hc-border)] pt-3">
+          <p className="hc-mono text-[0.7rem] hc-dim">{result.task_id} · Run {result.run_id} · {result.run_role_label}</p>
+          {result.summary ? (
+            <div className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/20 p-3 text-sm leading-6 text-zinc-100">{result.summary}</div>
+          ) : null}
+          {result.verification.length ? (
+            <div className="flex flex-wrap gap-1.5">
+              {result.verification.map((item) => (
+                <span key={item} className="inline-flex max-w-full items-center gap-1 rounded-full border border-white/10 bg-white/[.04] px-2.5 py-1 text-xs text-zinc-200">
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{item}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {deliverables.length ? (
+            <ul className="space-y-1.5">
+              {deliverables.map((item) => (
+                <li key={item.relative_path} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-3 py-1.5">
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-white">{item.relative_path}</span>
+                    <span className="hc-mono text-[0.7rem] hc-dim">{item.content_type} · {formatBytes(item.size)}</span>
+                  </span>
+                  <a className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-400/30 px-2 py-1 text-xs text-emerald-100 hover:bg-emerald-500/10" href={item.url} target="_blank" rel="noreferrer">
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Öffnen
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {verifierEvidence.length ? (
+            <div className="space-y-1.5">
+              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-cyan-200"><Quote className="h-3.5 w-3.5" />Verifier evidence</p>
+              {verifierEvidence.map((line) => (
+                <blockquote key={line} className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-sm leading-6 text-cyan-50">{line}</blockquote>
+              ))}
+            </div>
+          ) : null}
+          {result.followups.length ? (
+            <ul className="space-y-1 text-sm text-zinc-200">
+              {result.followups.map((item) => <li key={item} className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-300" /><span>{item}</span></li>)}
+            </ul>
+          ) : null}
+          {result.residual_risk ? <ToneCallout tone="amber"><span className="font-medium">{de.hermes.residualRisk}:</span> {result.residual_risk}</ToneCallout> : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
