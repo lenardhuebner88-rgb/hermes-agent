@@ -175,6 +175,8 @@ Tell them what you created in plain prose, naming the actual profiles you used:
 
 **Reassignment vs. new task.** If a reviewer blocks with "needs changes," create a NEW task linked from the reviewer's task — don't re-run the same task with a stern look. The new task is assigned to the original implementer profile.
 
+**Spawning your own dispatcher or poll loop.** The Gateway already runs the dispatcher on a timer (config `kanban.dispatch_interval_seconds`, ~60s) and spawns the workers, so you never run `hermes kanban dispatch` yourself, and you must never launch a detached or background process (`cmd &`, `nohup`, a `while … sleep` poller, a Python loop left running in the terminal) to "safety-dispatch" or to watch for completion. Such a process outlives your turn as an unmanaged orphan (one once ran for 6 hours), duplicates the Gateway's dispatcher, and produces races and inconsistent run records. Check state on demand with `kanban_list`/`kanban_show` inside your turn; for completion, rely on the Gateway's notifications and the mother-receipt cron that posts when the whole subtree settles.
+
 **Argument order for links.** `kanban_link(parent_id=..., child_id=...)` — parent first. Mixing them up demotes the wrong task to `todo`.
 
 **Don't pre-create the whole graph if the shape depends on intermediate findings.** If T3's structure depends on what T1 and T2 find, let T3 exist as a "synthesize findings" task whose own first step is to read parent handoffs and plan the rest. Orchestrators can spawn orchestrators.
