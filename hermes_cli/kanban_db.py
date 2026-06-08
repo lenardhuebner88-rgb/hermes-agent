@@ -4606,11 +4606,27 @@ def _preserve_scratch_artifacts(
         return []
     if not runs:
         return []
-    last = runs[-1]
-    if not isinstance(last.metadata, dict):
-        return []
-    raw = last.metadata.get("artifacts")
-    if not isinstance(raw, list) or not raw:
+    # Collect declared artifacts across ALL runs, not just the last. With the
+    # Phase 2 review gate the terminal 'done' is the verifier's run (whose
+    # metadata carries the verdict, not deliverables), while the implementing
+    # worker's ``artifacts=[...]`` rode an earlier ``submitted_for_review``
+    # run. Reading only ``runs[-1]`` would silently drop the coder's
+    # deliverables once the workspace is rmtree'd. Union + dedup, first-seen
+    # order. Pre-gate single-run tasks are unaffected (one run = old behaviour).
+    raw: list = []
+    seen: set = set()
+    for run in runs:
+        md = run.metadata
+        if not isinstance(md, dict):
+            continue
+        entries = md.get("artifacts")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, str) and entry and entry not in seen:
+                seen.add(entry)
+                raw.append(entry)
+    if not raw:
         return []
 
     try:

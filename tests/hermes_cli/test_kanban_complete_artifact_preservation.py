@@ -262,3 +262,49 @@ def test_preservation_function_returns_basenames(kanban_home):
         conn.commit()
         preserved = kb._preserve_scratch_artifacts(conn, tid, wp)
     assert sorted(preserved) == ["a.md", "b.md"]
+
+
+def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
+    """Phase 2 regression guard: with the review gate, the terminal 'done' is
+    the verifier's run (no artifacts), while the coder's artifacts=[...] rode
+    the earlier submit_for_review run. Preservation must union across runs so
+    the coder's deliverable still lands in reports/by-task/."""
+    import hermes_cli.profiles as profiles_mod
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="gate preserve", assignee="coder")
+        wp = _scratch_dir_for(kanban_home, tid)
+        _bind_scratch_workspace(conn, tid, wp)
+    artifact = wp / "RESULT.md"
+    artifact.write_text("# coder deliverable\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, tid)
+        # Coder submits WITH artifacts -> parks in review (workspace preserved).
+        assert kb.complete_task(
+            conn, tid, summary="impl done",
+            metadata={"artifacts": [str(artifact)]}, review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "review"
+        assert wp.exists()  # not cleaned on the review hop
+        # Verifier claims + approves WITHOUT artifacts -> terminal done.
+        kb.claim_review_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, summary="APPROVED — tests pass", review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "done"
+
+    # Workspace cleaned, but the coder's deliverable survived via union.
+    assert not wp.exists()
+    dest = kanban_home / "reports" / "by-task" / tid / "RESULT.md"
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == "# coder deliverable\n"
