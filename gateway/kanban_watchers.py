@@ -22,15 +22,260 @@ from typing import Any, Optional
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
 
+_COMPLETED_HANDOFF_LIMIT = 1600
+
+_REPORTING_ROUTE_KINDS = {
+    "received", "completed", "blocked", "gave_up",
+}
+_NORMAL_REPORT_KINDS = {"received", "completed"}
+
+
+def _clean_completed_handoff(text: str, *, limit: int = _COMPLETED_HANDOFF_LIMIT) -> str:
+    """Return a Discord-sized, result-focused completion handoff body."""
+    lines = [line.rstrip() for line in str(text or "").strip().splitlines()]
+    cleaned: list[str] = []
+    previous_blank = False
+    for line in lines:
+        blank = not line.strip()
+        if blank and previous_blank:
+            continue
+        cleaned.append(line)
+        previous_blank = blank
+    handoff = "\n".join(cleaned).strip()
+    if len(handoff) <= limit:
+        return handoff
+    return handoff[: max(0, limit - 12)].rstrip() + " … [gekürzt]"
+
+
+def _completed_handoff_text(event: Any, task: Any, run: Any = None) -> str:
+    """Prefer the full run summary, falling back to legacy compact fields."""
+    if run is not None and getattr(run, "summary", None):
+        return _clean_completed_handoff(str(run.summary))
+    if getattr(event, "payload", None) and event.payload.get("summary"):
+        return _clean_completed_handoff(str(event.payload["summary"]))
+    if task and getattr(task, "result", None):
+        return _clean_completed_handoff(str(task.result))
+    return ""
+
+
+def _first_nonempty_line(text: str, *, limit: int = 180) -> str:
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return ""
+
+
+def _completed_kurzfazit(text: str) -> str:
+    short = _first_nonempty_line(text) or "abgeschlossen"
+    if short.lower().startswith("kurzfazit:"):
+        short = short.split(":", 1)[1].strip() or "abgeschlossen"
+    return short
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _format_duration_seconds(started_at: Any, ended_at: Any) -> str:
+    try:
+        if started_at is None or ended_at is None:
+            return ""
+        seconds = int(ended_at) - int(started_at)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec}s" if sec else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
+def _run_metadata(run: Any) -> dict[str, Any]:
+    metadata = getattr(run, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _format_completed_report(event: Any, task: Any, run: Any, *, board: Optional[str] = None) -> str:
+    task_id = getattr(event, "task_id", None) or getattr(task, "id", "") or "<unknown>"
+    title = (getattr(task, "title", None) or task_id)[:160]
+    status = getattr(task, "status", None) or "done"
+    profile = getattr(task, "assignee", None) or getattr(run, "profile", None) or "unbekannt"
+    handoff = _completed_handoff_text(event, task, run)
+    short = _completed_kurzfazit(handoff)
+    metadata = _run_metadata(run)
+
+    highlights: list[str] = []
+    for label, key in (
+        ("Geänderte Dateien", "changed_files"),
+        ("Tests", "tests_run"),
+        ("Entscheidungen", "decisions"),
+        ("Findings", "findings"),
+        ("Kernergebnisse", "key_findings"),
+    ):
+        value = metadata.get(key)
+        if key == "tests_run" and value not in (None, "", []):
+            highlights.append(f"- {label}: {value}")
+            continue
+        values = _as_list(value)
+        if values:
+            highlights.append(f"- {label}: {', '.join(values[:4])}")
+    if not highlights:
+        highlights.append("- siehe Ergebnis")
+
+    artifacts = _as_list(metadata.get("artifacts"))
+    if not artifacts and isinstance(getattr(event, "payload", None), dict):
+        artifacts = _as_list(event.payload.get("artifacts"))
+    artifact_lines = [f"- {item}" for item in artifacts[:6]] or ["- keine"]
+
+    open_points = (
+        _as_list(metadata.get("open_points"))
+        or _as_list(metadata.get("open_issues"))
+        or _as_list(metadata.get("blockers"))
+    )
+    open_line = ", ".join(open_points[:4]) if open_points else "keine"
+
+    lines = [
+        "✅ Hermes Report — Task abgeschlossen",
+        f"Kurzfazit: {short}",
+        f"Task: {task_id} — {title}",
+        f"Status: {status} | Profil: {profile}",
+    ]
+    if board:
+        lines[-1] += f" | Board: {board}"
+    lines.extend([
+        "Ergebnis:",
+        handoff or "kein Ergebnistext hinterlegt",
+        "Wichtigste Ergebnisse/Änderungen:",
+        *highlights,
+        "Artefakte/Links:",
+        *artifact_lines,
+        f"Offene Punkte/Blocker: {open_line}",
+    ])
+    duration = _format_duration_seconds(
+        getattr(run, "started_at", None), getattr(run, "ended_at", None),
+    )
+    if duration:
+        lines.append(f"Laufzeit: {duration}")
+    return _clean_completed_handoff("\n".join(lines), limit=1900)
+
+
+def _format_received_report(event: Any, task: Any, *, board: Optional[str] = None) -> str:
+    task_id = getattr(event, "task_id", None) or getattr(task, "id", "") or "<unknown>"
+    title = (getattr(task, "title", None) or task_id)[:160]
+    profile = getattr(task, "assignee", None) or "unbekannt"
+    raw_payload = getattr(event, "payload", None)
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    summary = str(payload.get("summary") or payload.get("message") or "eingegangen").strip()
+    source = str(payload.get("source") or "").strip()
+    lines = [
+        "📥 Hermes Report — Task eingegangen",
+        "Kurzfazit: Neuer Auftrag eingegangen.",
+        f"Task: {task_id} — {title}",
+        f"Status: eingegangen | Profil: {profile}",
+        f"Eingang: {summary[:500]}",
+        "Nächster Schritt: Dispatcher/Assignee übernimmt den Auftrag.",
+    ]
+    if source:
+        lines.append(f"Quelle: {source[:120]}")
+    if board:
+        lines.append(f"Board: {board}")
+    return "\n".join(lines)
+
+
+def _string_config_value(config: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = config.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _resolve_report_delivery_target(
+    *,
+    sub: dict,
+    kind: str,
+    kanban_cfg: dict[str, Any],
+) -> Optional[tuple[str, str]]:
+    """Return chat/thread target for a report event, or None to fail closed.
+
+    Discord kanban reports can be centrally routed to ``kanban.reporting_channel_id``
+    so originating operator/orchestrator channels stop receiving normal task reports.
+    Planned-retry crash/timeout events are intentionally not in the reporting
+    route set; the final attention event for repeated failures is ``gave_up``.
+    If the only known target is explicitly configured as the orchestrator channel and
+    no reporting channel is configured, normal result reports fail closed instead of
+    silently falling back to the orchestrator.
+    """
+    chat_id = str(sub.get("chat_id") or "")
+    thread_id = str(sub.get("thread_id") or "")
+    platform = str(sub.get("platform") or "").lower()
+    if platform != "discord" or kind not in _REPORTING_ROUTE_KINDS:
+        return chat_id, thread_id
+
+    reporting_channel_id = _string_config_value(
+        kanban_cfg,
+        "reporting_channel_id",
+        "reporting_discord_channel_id",
+        "reporting_channel",
+    )
+    reporting_thread_id = _string_config_value(
+        kanban_cfg,
+        "reporting_thread_id",
+        "reporting_discord_thread_id",
+    )
+    if reporting_channel_id:
+        return reporting_channel_id, reporting_thread_id or thread_id
+
+    orchestrator_channel_id = _string_config_value(
+        kanban_cfg,
+        "orchestrator_channel_id",
+        "orchestrator_discord_channel_id",
+    )
+    if kind in _NORMAL_REPORT_KINDS and orchestrator_channel_id and chat_id == orchestrator_channel_id:
+        return None
+    return chat_id, thread_id
+
+
+def _gave_up_message(task_id: str, tag: str, payload: Optional[dict]) -> str:
+    trigger = str((payload or {}).get("trigger_outcome") or "").strip().lower()
+    if trigger == "timed_out":
+        reason = "after repeated worker timed out outcomes"
+    elif trigger in {"iteration_budget_exhausted", "budget_exhausted"}:
+        reason = "after repeated iteration-budget exhaustion"
+    elif trigger in {"spawn_failed", "spawn_failure"}:
+        reason = "after repeated spawn failures"
+    elif trigger:
+        reason = f"after repeated {trigger.replace('_', ' ')} failures"
+    else:
+        reason = "after repeated worker failures"
+    err = ""
+    if payload and payload.get("error"):
+        err = f"\n{str(payload['error'])[:200]}"
+    return f"✖ {tag}Kanban {task_id} gave up {reason}{err}"
+
 
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
-        """Poll ``kanban_notify_subs`` and deliver terminal events to users.
+        """Poll ``kanban_notify_subs`` and deliver report events to users.
 
         For each subscription row, fetches ``task_events`` newer than the
-        stored cursor with kind in the terminal set (``completed``,
+        stored cursor with kind in the report set (``received``, ``completed``,
         ``blocked``, ``gave_up``, ``crashed``, ``timed_out``). Sends one
         message per new event to ``(platform, chat_id, thread_id)``,
         then advances the cursor. When a task reaches a terminal state
@@ -76,7 +321,7 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
             return
 
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        REPORT_KINDS = ("received", "completed", "blocked", "gave_up", "crashed", "timed_out")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -184,11 +429,21 @@ class GatewayKanbanWatchersMixin:
                                     platform=sub["platform"],
                                     chat_id=sub["chat_id"],
                                     thread_id=sub.get("thread_id") or "",
-                                    kinds=TERMINAL_KINDS,
+                                    kinds=REPORT_KINDS,
                                 )
                                 if not events:
                                     continue
                                 task = _kb.get_task(conn, sub["task_id"])
+                                runs_by_event_id: dict[int, Any] = {}
+                                for ev in events:
+                                    if ev.kind != "completed" or ev.run_id is None:
+                                        continue
+                                    try:
+                                        run = _kb.get_run(conn, ev.run_id)
+                                    except Exception:
+                                        run = None
+                                    if run is not None:
+                                        runs_by_event_id[int(ev.id)] = run
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                                     len(events), sub["task_id"], slug, old_cursor, cursor,
@@ -199,6 +454,7 @@ class GatewayKanbanWatchersMixin:
                                     "cursor": cursor,
                                     "events": events,
                                     "task": task,
+                                    "runs_by_event_id": runs_by_event_id,
                                     "board": slug,
                                 })
                         finally:
@@ -206,6 +462,7 @@ class GatewayKanbanWatchersMixin:
                     return deliveries
 
                 deliveries = await asyncio.to_thread(_collect)
+                attempted_event_targets: set[tuple[str, str, int, str, str, str]] = set()
                 for d in deliveries:
                     sub = d["sub"]
                     task = d["task"]
@@ -234,7 +491,7 @@ class GatewayKanbanWatchersMixin:
                             board_slug,
                         )
                         continue
-                    title = (task.title if task else sub["task_id"])[:120]
+                    runs_by_event_id = d.get("runs_by_event_id") or {}
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -243,69 +500,92 @@ class GatewayKanbanWatchersMixin:
                         who = (task.assignee if task and task.assignee else None)
                         tag = f"@{who} " if who else ""
                         if kind == "completed":
-                            # Prefer the run's summary (the worker's
-                            # intentional human-facing handoff, carried
-                            # in the event payload), then fall back to
-                            # task.result for legacy rows written before
-                            # runs shipped.
-                            handoff = ""
-                            payload_summary = None
-                            if ev.payload and ev.payload.get("summary"):
-                                payload_summary = str(ev.payload["summary"])
-                            if payload_summary:
-                                lines = payload_summary.strip().splitlines()
-                                h = lines[0][:200] if lines else payload_summary[:200]
-                                handoff = f"\n{h}"
-                            elif task and task.result:
-                                lines = task.result.strip().splitlines()
-                                r = lines[0][:160] if lines else task.result[:160]
-                                handoff = f"\n{r}"
-                            msg = (
-                                f"✔ {tag}Kanban {sub['task_id']} done"
-                                f" — {title}{handoff}"
+                            # Prefer a structured, human-readable result report
+                            # over the legacy one-line done ping.
+                            msg = _format_completed_report(
+                                ev,
+                                task,
+                                runs_by_event_id.get(int(ev.id)),
+                                board=board_slug,
                             )
+                        elif kind == "received":
+                            msg = _format_received_report(ev, task, board=board_slug)
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
                                 reason = f": {str(ev.payload['reason'])[:160]}"
                             msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
-                            err = ""
-                            if ev.payload and ev.payload.get("error"):
-                                err = f"\n{str(ev.payload['error'])[:200]}"
-                            msg = (
-                                f"✖ {tag}Kanban {sub['task_id']} gave up "
-                                f"after repeated spawn failures{err}"
-                            )
+                            msg = _gave_up_message(sub["task_id"], tag, ev.payload)
                         elif kind == "crashed":
                             msg = (
                                 f"✖ {tag}Kanban {sub['task_id']} worker crashed "
                                 f"(pid gone); dispatcher will retry"
                             )
                         elif kind == "timed_out":
-                            limit = 0
+                            limit = None
                             if ev.payload and ev.payload.get("limit_seconds"):
-                                limit = int(ev.payload["limit_seconds"])
-                            msg = (
-                                f"⏱ {tag}Kanban {sub['task_id']} timed out "
-                                f"(max_runtime={limit}s); will retry"
-                            )
+                                try:
+                                    limit = int(ev.payload["limit_seconds"])
+                                except (TypeError, ValueError):
+                                    limit = None
+                            if limit and limit > 0:
+                                msg = (
+                                    f"⏱ {tag}Kanban {sub['task_id']} timed out "
+                                    f"(max_runtime={limit}s); will retry"
+                                )
+                            else:
+                                msg = f"⏱ {tag}Kanban {sub['task_id']} timed out; will retry"
                         else:
                             continue
+                        target = _resolve_report_delivery_target(
+                            sub=sub,
+                            kind=kind,
+                            kanban_cfg=kanban_cfg,
+                        )
+                        if target is None:
+                            logger.warning(
+                                "kanban notifier: normal %s report for %s not sent to orchestrator channel %s because kanban.reporting_channel_id is missing",
+                                kind,
+                                sub["task_id"],
+                                sub.get("chat_id"),
+                            )
+                            continue
+                        target_chat_id, target_thread_id = target
                         metadata: dict[str, Any] = {}
-                        if sub.get("thread_id"):
-                            metadata["thread_id"] = sub["thread_id"]
+                        if target_thread_id:
+                            metadata["thread_id"] = target_thread_id
+                        event_target_key = (
+                            str(board_slug or ""),
+                            kind,
+                            int(ev.id),
+                            platform_str,
+                            str(target_chat_id or ""),
+                            str(target_thread_id or ""),
+                        )
+                        if event_target_key in attempted_event_targets:
+                            logger.debug(
+                                "kanban notifier: skipped duplicate %s event %s for %s to %s/%s on board %s",
+                                kind,
+                                ev.id,
+                                sub["task_id"],
+                                target_chat_id,
+                                target_thread_id or "",
+                                board_slug,
+                            )
+                            continue
+                        attempted_event_targets.add(event_target_key)
                         sub_key = (
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
                             await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
+                                target_chat_id, msg, metadata=metadata,
                             )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                kind, sub["task_id"], platform_str, target_chat_id, board_slug,
                             )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
@@ -320,7 +600,7 @@ class GatewayKanbanWatchersMixin:
                                 try:
                                     await self._deliver_kanban_artifacts(
                                         adapter=adapter,
-                                        chat_id=sub["chat_id"],
+                                        chat_id=target_chat_id,
                                         metadata=metadata,
                                         event_payload=getattr(ev, "payload", None),
                                         task=task,
@@ -373,7 +653,7 @@ class GatewayKanbanWatchersMixin:
                         # gave_up / crashed / timed_out the subscription is
                         # kept alive so the user gets notified again if the
                         # dispatcher respawns the task and it cycles into the
-                        # same state. See the longer comment on TERMINAL_KINDS
+                        # same state. See the longer comment near REPORT_KINDS
                         # above for the failure mode this prevents.
                         task_terminal = task and task.status in {"done", "archived"}
                         if task_terminal:

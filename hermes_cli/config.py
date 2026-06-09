@@ -2035,6 +2035,19 @@ DEFAULT_CONFIG = {
         # only if you run the dispatcher as a separate systemd unit or
         # don't want the gateway to spawn workers.
         "dispatch_in_gateway": True,
+        # Optional Discord channel used for kanban reporting notifications
+        # (completed/received and other report-worthy events). When set, the
+        # gateway notifier sends normal Discord reports here instead of the
+        # originating operator/orchestrator channel. Leave empty to preserve
+        # legacy per-subscription delivery, unless orchestrator_channel_id below
+        # is set; in that case normal result reports fail closed rather than
+        # silently falling back to the orchestrator channel.
+        "reporting_channel_id": "",
+        "reporting_thread_id": "",
+        # Optional Discord orchestrator/operator channel id. Used only as a
+        # safety rail so normal result reports are not delivered there when a
+        # reporting channel has not been configured.
+        "orchestrator_channel_id": "",
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,

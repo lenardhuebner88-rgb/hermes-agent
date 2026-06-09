@@ -36,23 +36,51 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
-def _make_runner(adapter):
+def _make_runner(adapter, platform=Platform.TELEGRAM):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
 
 
-def _create_completed_subscription(summary="done once"):
+def _create_completed_subscription(
+    summary="done once",
+    platform="telegram",
+    chat_id="chat-1",
+    *,
+    title="notify once",
+    metadata=None,
+):
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title="notify once", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
-        kb.complete_task(conn, tid, summary=summary)
+        tid = kb.create_task(conn, title=title, assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform=platform, chat_id=chat_id)
+        kb.complete_task(conn, tid, summary=summary, metadata=metadata)
         return tid
     finally:
         conn.close()
+
+
+def _patch_kanban_reporting_config(
+    monkeypatch,
+    *,
+    reporting_channel_id="1495737862522405088",
+    orchestrator_channel_id="1500203113867378789",
+):
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "reporting_channel_id": reporting_channel_id,
+                "orchestrator_channel_id": orchestrator_channel_id,
+            }
+        },
+    )
 
 
 def _unseen_terminal_events(tid):
@@ -85,7 +113,7 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1
-    assert "Kanban" in adapter.sent[0]["text"]
+    assert "Task:" in adapter.sent[0]["text"]
     assert tid in adapter.sent[0]["text"]
 
 
@@ -95,7 +123,6 @@ def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatc
     kb.init_db()
 
     tid = _create_completed_subscription()
-
     adapter1 = RecordingAdapter()
     adapter2 = RecordingAdapter()
 
@@ -104,6 +131,264 @@ def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatc
 
     assert len(adapter1.sent) == 1
     assert adapter2.sent == []
+
+
+def test_discord_completed_notification_includes_result_summary_body(tmp_path, monkeypatch):
+    """Discord Kanban done pings must surface research results, not only a one-line activity note."""
+    db_path = tmp_path / "discord-result-summary.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    summary = """Ich habe drei Inferenz-Frameworks verglichen.
+
+Ergebnisse:
+- vLLM gewinnt beim Gesamtdurchsatz: 1.000 tok/s im Testfenster.
+- SGLang ist nur bei Kurzprompts vorne: 85 ms median latency.
+- Empfehlung: vLLM einsetzen; SGLang nur für Low-Latency-Sonderfälle prüfen.
+"""
+    tid = _create_completed_subscription(summary=summary, platform="discord")
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    text = adapter.sent[0]["text"]
+    assert tid in text
+    assert "Ergebnisse:" in text
+    assert "vLLM gewinnt beim Gesamtdurchsatz" in text
+    assert "Empfehlung: vLLM einsetzen" in text
+
+
+def test_discord_completed_report_routes_to_reporting_channel_with_human_template(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-reporting-channel.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(monkeypatch)
+
+    tid = _create_completed_subscription(
+        summary="Kurzfazit: Reporting wurde vereinheitlicht.\nDetails: Tests decken Routing und Format ab.",
+        platform="discord",
+        chat_id="1500203113867378789",
+        title="einheitliches Reporting",
+        metadata={
+            "artifacts": ["/tmp/reporting-result.md"],
+            "changed_files": ["gateway/kanban_watchers.py"],
+            "open_points": ["Gateway nach Deployment neu starten"],
+        },
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    sent = adapter.sent[0]
+    assert sent["chat_id"] == "1495737862522405088"
+    assert sent["chat_id"] != "1500203113867378789"
+    text = sent["text"]
+    lines = text.splitlines()
+    assert lines[0] == "✅ Hermes Report — Task abgeschlossen"
+    assert lines[1] == "Kurzfazit: Reporting wurde vereinheitlicht."
+    assert f"Task: {tid} — einheitliches Reporting" in text
+    assert "Status: done | Profil: worker" in text
+    assert "Ergebnis:" in text
+    assert "Details: Tests decken Routing und Format ab." in text
+    assert "Wichtigste Ergebnisse/Änderungen:" in text
+    assert "gateway/kanban_watchers.py" in text
+    assert "Artefakte/Links:" in text
+    assert "/tmp/reporting-result.md" in text
+    assert "Offene Punkte/Blocker:" in text
+    assert "Gateway nach Deployment neu starten" in text
+    assert "Laufzeit: 0s" not in text
+
+
+def test_discord_completed_reporting_channel_dedupes_multiple_subscriptions_to_same_target(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "discord-reporting-channel-dedup.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(monkeypatch)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="single report", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="1500203113867378789",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="1495737862522405088",
+        )
+        kb.complete_task(conn, tid, summary="Abschluss erledigt.")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["chat_id"] == "1495737862522405088"
+    assert adapter.sent[0]["text"].startswith("✅ Hermes Report — Task abgeschlossen")
+
+
+def test_discord_received_event_routes_to_reporting_channel(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-received-report.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(monkeypatch)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="neuer Auftrag", assignee="default")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="1500203113867378789",
+        )
+        kb._append_event(
+            conn,
+            tid,
+            kind="received",
+            payload={"summary": "Auftrag via Dashboard eingegangen", "source": "dashboard"},
+        )
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    sent = adapter.sent[0]
+    assert sent["chat_id"] == "1495737862522405088"
+    text = sent["text"]
+    assert text.startswith("📥 Hermes Report")
+    assert "Kurzfazit" in text
+    assert f"Task: {tid} — neuer Auftrag" in text
+    assert "Status: eingegangen" in text
+    assert "Status: done" not in text
+    assert "Auftrag via Dashboard eingegangen" in text
+    assert "Nächster Schritt" in text
+
+
+def test_discord_planned_retry_events_do_not_route_to_reporting_channel(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-planned-retry-routing.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(monkeypatch)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="retry workflow", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="1500203113867378789",
+        )
+        kb._append_event(conn, tid, kind="timed_out", payload={"limit_seconds": 60})
+        kb._append_event(conn, tid, kind="crashed", payload={"pid": 1234})
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 2
+    assert {sent["chat_id"] for sent in adapter.sent} == {"1500203113867378789"}
+    assert "1495737862522405088" not in {sent["chat_id"] for sent in adapter.sent}
+    assert "timed out" in adapter.sent[0]["text"].lower()
+    assert "crashed" in adapter.sent[1]["text"].lower()
+
+
+def test_discord_gave_up_failure_routes_to_reporting_channel(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-gave-up-routing.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(monkeypatch)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="final failure", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="1500203113867378789",
+        )
+        kb._append_event(conn, tid, kind="gave_up", payload={"trigger_outcome": "timed_out"})
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["chat_id"] == "1495737862522405088"
+    assert "gave up" in adapter.sent[0]["text"]
+
+
+def test_discord_reporting_config_missing_does_not_fall_back_to_orchestrator(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-missing-reporting-channel.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    _patch_kanban_reporting_config(
+        monkeypatch,
+        reporting_channel_id="",
+        orchestrator_channel_id="1500203113867378789",
+    )
+
+    _create_completed_subscription(
+        summary="done",
+        platform="discord",
+        chat_id="1500203113867378789",
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, platform=Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == []
+
+
+def test_kanban_notifier_failure_text_uses_event_specific_fallbacks(tmp_path, monkeypatch):
+    db_path = tmp_path / "event-specific-failures.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="retry me", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb._append_event(conn, tid, kind="timed_out", payload={})
+        kb._append_event(conn, tid, kind="gave_up", payload={"trigger_outcome": "timed_out"})
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 2
+    timed_out_text = adapter.sent[0]["text"]
+    gave_up_text = adapter.sent[1]["text"]
+    assert "max_runtime=0s" not in timed_out_text
+    assert "timed out" in timed_out_text.lower()
+    assert "repeated spawn failures" not in gave_up_text
+    assert "timed out" in gave_up_text.lower()
 
 
 def test_kanban_notifier_rewinds_claim_if_adapter_disconnects(tmp_path, monkeypatch):
