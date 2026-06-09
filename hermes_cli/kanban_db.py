@@ -8936,6 +8936,140 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
+def _claude_worker_bin() -> str:
+    """Resolve the ``claude`` CLI binary used for claude-CLI worker spawns.
+
+    Order: ``$HERMES_CLAUDE_BIN`` (explicit operator override) → the known
+    install path ``/home/piet/.local/bin/claude`` if it exists → bare
+    ``"claude"`` (PATH fallback).
+    """
+    env_bin = os.environ.get("HERMES_CLAUDE_BIN")
+    if env_bin:
+        return env_bin
+    default_path = "/home/piet/.local/bin/claude"
+    if os.path.exists(default_path):
+        return default_path
+    return "claude"
+
+
+def _is_claude_cli_profile(profile_arg: str, hermes_home: Optional[str]) -> bool:
+    """True if ``profile_arg`` should be dispatched via the ``claude`` CLI.
+
+    Fail-soft: returns False on ANY error so a broken profile config can never
+    divert the default (hermes) spawn path.
+
+    Two seams, checked in order:
+
+    1. Env allowlist (primary for tests/ops): ``HERMES_CLAUDE_CLI_PROFILES`` is
+       a comma-separated list of profile names; an exact (case-sensitive) match
+       after stripping whitespace returns True.
+    2. Profile config flag (production): the profile-scoped
+       ``<hermes_home>/config.yaml`` top-level key ``worker_runtime`` equal to
+       the string ``"claude-cli"`` returns True.
+    """
+    try:
+        allow = os.environ.get("HERMES_CLAUDE_CLI_PROFILES", "")
+        for name in allow.split(","):
+            if name.strip() == profile_arg:
+                return True
+        if hermes_home:
+            try:
+                import yaml
+            except Exception:
+                return False
+            cfg_path = os.path.join(hermes_home, "config.yaml")
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+                if isinstance(cfg, dict) and cfg.get("worker_runtime") == "claude-cli":
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _spawn_claude_worker(
+    task: Task,
+    workspace: str,
+    *,
+    env: dict,
+    board: Optional[str] = None,
+) -> Optional[int]:
+    """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
+
+    Reuses the fully-built ``env`` from ``_default_spawn`` AS-IS (it already
+    carries the HERMES_KANBAN_TASK / _DB / _BOARD / _WORKSPACE / _RUN_ID /
+    HERMES_HOME / HERMES_PROFILE contract). The headless ``claude`` worker
+    drives the task to a terminal state by running ``hermes kanban complete``
+    / ``block`` from inside its session — completion is authorized by the
+    ``HERMES_KANBAN_TASK`` env var + the DB path.
+
+    Mirrors ``_default_spawn``'s per-task log + Popen tail exactly so crash
+    detection and log rotation behave identically across both runtimes.
+    """
+    import shutil
+    import subprocess
+
+    # The worker shells out to `hermes kanban complete/block`, so `hermes`
+    # must be on the child's PATH. Prepend the hermes binary's directory.
+    hermes_dir = os.path.dirname(shutil.which("hermes") or "/home/piet/.local/bin/hermes")
+    env["PATH"] = hermes_dir + os.pathsep + env.get("PATH", "")
+
+    body = task.body or ""
+    title = task.title or ""
+    prompt = (
+        "You are an autonomous Hermes kanban worker running headless. "
+        "Your task id is in $HERMES_KANBAN_TASK.\n\n"
+        f"Task title: {title}\n"
+        f"Task body:\n{body}\n\n"
+        "Work in the current directory.\n\n"
+        "MANDATORY: your turn is not over until you report back. On success "
+        'run via the Bash tool: hermes kanban complete "$HERMES_KANBAN_TASK" '
+        '--summary "<one line>". If you cannot finish, run: hermes kanban '
+        'block "$HERMES_KANBAN_TASK" "<reason>". The hermes binary is on '
+        "PATH. Do not ask for confirmation."
+    )
+
+    cmd = [
+        _claude_worker_bin(),
+        "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--output-format", "json",
+    ]
+    if task.model_override:
+        cmd.extend(["--model", task.model_override])
+
+    # Per-task log under <board-root>/logs/ — mirror the hermes path so
+    # `hermes kanban log` reads the same file and rotation is identical.
+    log_dir = worker_logs_dir(board=board)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{task.id}.log"
+    rotate_bytes, backup_count = worker_log_rotation_config()
+    _rotate_worker_log(log_path, rotate_bytes, backup_count)
+
+    log_f = open(log_path, "ab")
+    try:
+        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
+            cmd,
+            cwd=workspace if os.path.isdir(workspace) else None,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+        )
+    except FileNotFoundError:
+        log_f.close()
+        raise RuntimeError(
+            "`claude` executable not found on PATH. "
+            "Install the Claude CLI or set HERMES_CLAUDE_BIN before running the kanban dispatcher."
+        )
+    # NOTE: we intentionally do NOT close log_f here — same as the hermes path
+    # (the child keeps writing after this function returns).
+    return proc.pid
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -9041,6 +9175,13 @@ def _default_spawn(
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
+
+    # Early branch for claude-CLI worker profiles: launch the `claude` CLI
+    # instead of `hermes -p <profile> chat`. Fail-soft — a broken profile
+    # config can never divert the default path (see _is_claude_cli_profile).
+    # The hermes path below stays byte-identical.
+    if _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME")):
+        return _spawn_claude_worker(task, workspace, env=env, board=board)
 
     cmd = [
         *_resolve_hermes_argv(),

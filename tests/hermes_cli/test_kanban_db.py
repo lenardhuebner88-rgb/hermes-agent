@@ -2880,6 +2880,178 @@ class TestSharedBoardPaths:
 
 
 # ---------------------------------------------------------------------------
+# K13 — claude-CLI worker spawn (claude -p) early branch in _default_spawn
+# ---------------------------------------------------------------------------
+
+class TestClaudeCliWorkerSpawn:
+    """`_is_claude_cli_profile` / `_spawn_claude_worker` divert flagged
+    profiles to the `claude` CLI while leaving the default hermes spawn
+    path byte-identical."""
+
+    def _set_home(self, monkeypatch, tmp_path, hermes_home):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+
+    def _make_task(self, tmp_path, *, assignee="coder", model_override=None):
+        return kb.Task(
+            id="t_claude_cli",
+            title="ship the widget",
+            body="implement the widget and run the tests",
+            assignee=assignee,
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "ws"),
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+            branch_name="wt/t_claude_cli",
+            model_override=model_override,
+        )
+
+    # --- _is_claude_cli_profile -------------------------------------------
+
+    def test_is_claude_cli_profile_true_via_env_allowlist(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+        assert kb._is_claude_cli_profile("coder-claude", None) is True
+
+    def test_is_claude_cli_profile_true_via_config_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            "worker_runtime: claude-cli\n", encoding="utf-8"
+        )
+        assert kb._is_claude_cli_profile("coder", str(home)) is True
+
+    def test_is_claude_cli_profile_false_for_normal_profile(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "config.yaml").write_text("worker_runtime: hermes\n", encoding="utf-8")
+        assert kb._is_claude_cli_profile("coder", str(home)) is False
+
+    def test_is_claude_cli_profile_false_no_flag_no_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        # No config.yaml at all.
+        assert kb._is_claude_cli_profile("coder", str(home)) is False
+
+    def test_is_claude_cli_profile_false_missing_home(self, monkeypatch):
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        assert kb._is_claude_cli_profile("coder", None) is False
+
+    def test_is_claude_cli_profile_false_on_malformed_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        # Unparseable YAML — fail-soft to False, never raise.
+        (home / "config.yaml").write_text("worker_runtime: [unclosed\n", encoding="utf-8")
+        assert kb._is_claude_cli_profile("coder", str(home)) is False
+
+    # --- claude branch of _default_spawn ----------------------------------
+
+    def test_default_spawn_routes_to_claude_cli(self, tmp_path, monkeypatch):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        self._set_home(monkeypatch, tmp_path, default_home)
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["env"] = kwargs.get("env", {})
+                captured["cwd"] = kwargs.get("cwd")
+                self.pid = 7777
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        # Make claude-bin resolution deterministic regardless of host.
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+
+        task = self._make_task(tmp_path, assignee="coder")
+        # Flag the task's assignee profile as a claude-CLI worker.
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder")
+
+        pid = kb._default_spawn(task, str(tmp_path / "ws"))
+        assert pid == 7777
+
+        cmd = captured["cmd"]
+        assert cmd[0] == "/usr/local/bin/claude-test"
+        assert "-p" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        # The output-format pair is present and adjacent.
+        of_idx = cmd.index("--output-format")
+        assert cmd[of_idx + 1] == "json"
+        # Prompt arg carries the task id contract.
+        prompt = cmd[cmd.index("-p") + 1]
+        assert task.id in prompt or "$HERMES_KANBAN_TASK" in prompt
+        # This is NOT the hermes path.
+        assert "chat" not in cmd
+        # Env carries the kanban contract.
+        assert captured["env"]["HERMES_KANBAN_TASK"] == task.id
+
+    def test_default_spawn_claude_appends_model_override(self, tmp_path, monkeypatch):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        self._set_home(monkeypatch, tmp_path, default_home)
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                self.pid = 8888
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder")
+
+        task = self._make_task(tmp_path, assignee="coder", model_override="claude-opus-4-8")
+        kb._default_spawn(task, str(tmp_path / "ws"))
+
+        cmd = captured["cmd"]
+        m_idx = cmd.index("--model")
+        assert cmd[m_idx + 1] == "claude-opus-4-8"
+
+    # --- default (hermes) path stays byte-identical -----------------------
+
+    def test_default_spawn_no_flag_uses_hermes_path(self, tmp_path, monkeypatch):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        self._set_home(monkeypatch, tmp_path, default_home)
+        # Explicitly NO claude-cli flag set.
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                self.pid = 9999
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+        task = self._make_task(tmp_path, assignee="coder")
+        kb._default_spawn(task, str(tmp_path / "ws"))
+
+        cmd = captured["cmd"]
+        # Hermes path: contains -p, the profile, and the chat subcommand.
+        assert "-p" in cmd
+        assert "coder" in cmd
+        assert "chat" in cmd
+        # And it is NOT the claude bin.
+        assert cmd[0] != "/usr/local/bin/claude-test"
+
+
+# ---------------------------------------------------------------------------
 # latest_summary / latest_summaries — surface task_runs.summary handoffs
 # ---------------------------------------------------------------------------
 
