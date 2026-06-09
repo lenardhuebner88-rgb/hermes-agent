@@ -662,6 +662,29 @@ export type TaskRun = z.infer<typeof TaskRunSchema>;
 export type TaskEvent = z.infer<typeof TaskEventSchema>;
 export type TaskDetailResponse = z.infer<typeof TaskDetailResponseSchema>;
 
+// K7: root-grouped run summary (throughput / cost / cycle-time + recent roots).
+const RunSummaryRootSchema = z.object({
+  id: z.coerce.string().catch(""),
+  title: z.string().nullable().catch(null),
+  status: z.string().nullable().catch(null),
+  assignee: z.string().nullable().catch(null),
+  completed_at: nullableNumber,
+  cost_usd: nullableNumber,
+  cycle_time_seconds: nullableNumber,
+  subtask_count: z.coerce.number().catch(0),
+});
+export const RunSummaryResponseSchema = z.object({
+  since_hours: z.coerce.number().catch(24),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  completed_roots: z.coerce.number().catch(0),
+  total_cost_usd: nullableNumber,
+  cycle_time_p50_seconds: nullableNumber,
+  cycle_time_p90_seconds: nullableNumber,
+  roots: z.array(RunSummaryRootSchema).catch([]),
+});
+export type RunSummaryRoot = z.infer<typeof RunSummaryRootSchema>;
+export type RunSummaryResponse = z.infer<typeof RunSummaryResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

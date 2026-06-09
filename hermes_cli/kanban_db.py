@@ -9197,6 +9197,99 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+def _root_tree_member_ids(conn: sqlite3.Connection, root_id: str) -> list[str]:
+    """A tree-sink root + all its transitive parents (the work tasks). The
+    K2/F1 link convention: a child waits for its parent, the orchestration
+    sink/root is the child of every leaf, so its tree is reached by walking
+    ``parent_ids`` upward. Cycle-safe."""
+    seen = {root_id}
+    members = [root_id]
+    stack = list(parent_ids(conn, root_id))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        members.append(pid)
+        stack.extend(parent_ids(conn, pid))
+    return members
+
+
+def runs_summary(
+    conn: sqlite3.Connection, *, since_hours: int = 24, max_roots: int = 20,
+) -> dict:
+    """K7: root-grouped run summary over the last ``since_hours``.
+
+    A ROOT is a task nobody depends on — a tree sink (has parents, no
+    children) or a standalone task. Interior work nodes roll up into their
+    root (same de-flood model as K2's consolidated report), so each completed
+    unit of work is counted once. For every root completed in the window we
+    sum its tree's run cost, derive its cycle-time, and count its subtasks.
+
+    Returns aggregate throughput / cost / cycle-time plus the most recent
+    roots (newest first). Cost is ``None`` when no run in the tree recorded a
+    cost (pre-K5a / unattributed), never a crash.
+    """
+    now = int(time.time())
+    since_hours = max(1, int(since_hours))
+    window_start = now - since_hours * 3600
+
+    # Tasks that ARE a parent (something depends on them) → interior nodes.
+    interior = {
+        r["parent_id"]
+        for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
+    }
+
+    completed = conn.execute(
+        "SELECT id, title, status, assignee, created_at, completed_at "
+        "FROM tasks WHERE completed_at IS NOT NULL AND completed_at >= ? "
+        "ORDER BY completed_at DESC",
+        (window_start,),
+    ).fetchall()
+
+    roots: list[dict[str, Any]] = []
+    cycle_times: list[int] = []
+    total_cost: Optional[float] = None
+    for row in completed:
+        if row["id"] in interior:
+            continue  # rolled into its own root
+        member_ids = _root_tree_member_ids(conn, row["id"])
+        cost: Optional[float] = None
+        for mid in member_ids:
+            c = task_runs_cost_usd_sum(conn, task_id=mid)
+            if c is not None:
+                cost = (cost or 0.0) + c
+        if cost is not None:
+            total_cost = (total_cost or 0.0) + cost
+        cycle_time = None
+        if row["created_at"] is not None:
+            delta = int(row["completed_at"]) - int(row["created_at"])
+            if delta >= 0:
+                cycle_time = delta
+                cycle_times.append(delta)
+        roots.append({
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+            "completed_at": int(row["completed_at"]),
+            "cost_usd": cost,
+            "cycle_time_seconds": cycle_time,
+            "subtask_count": max(0, len(member_ids) - 1),
+        })
+
+    cycle_times.sort()
+    return {
+        "since_hours": since_hours,
+        "now": now,
+        "completed_roots": len(roots),
+        "total_cost_usd": total_cost,
+        "cycle_time_p50_seconds": _nearest_rank_percentile(cycle_times, 50),
+        "cycle_time_p90_seconds": _nearest_rank_percentile(cycle_times, 90),
+        "roots": roots[: max(0, int(max_roots))],
+    }
+
+
 def _to_epoch(val) -> Optional[int]:
     """Normalise a timestamp to unix epoch seconds.
 

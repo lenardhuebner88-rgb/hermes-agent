@@ -402,6 +402,51 @@ def test_stats_includes_k6_throughput_and_cost_keys(client):
     assert stats["total_cost_usd_24h"] is None  # pre-K5a
 
 
+def test_runs_summary_groups_completed_tree_by_root(client, kanban_home):
+    """K7: a decomposed tree is summarised once at its root; interior work
+    nodes are not listed as separate roots."""
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship feature", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "build A", "assignee": "coder", "parents": []},
+                {"title": "build B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        a, b = child_ids
+        kb.complete_task(conn, a, summary="A done")
+        kb.complete_task(conn, b, summary="B done")
+        kb.complete_task(conn, root, summary="all merged")
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/summary?since_hours=24").json()
+    assert data["since_hours"] == 24
+    assert data["completed_roots"] == 1
+    assert len(data["roots"]) == 1
+    only = data["roots"][0]
+    assert only["id"] == root
+    assert only["subtask_count"] == 2
+    assert a not in [r["id"] for r in data["roots"]]
+    # cycle-time present (non-negative); cost None pre-cost-data.
+    assert only["cycle_time_seconds"] is not None and only["cycle_time_seconds"] >= 0
+    assert "total_cost_usd" in data
+
+
+def test_runs_summary_empty_window(client):
+    """K7: with nothing completed, the summary is well-formed and empty."""
+    data = client.get("/api/plugins/kanban/runs/summary?since_hours=1").json()
+    assert data["completed_roots"] == 0
+    assert data["roots"] == []
+    assert data["total_cost_usd"] is None
+    assert data["cycle_time_p50_seconds"] is None
+
+
 # ---------------------------------------------------------------------------
 # PATCH /tasks/:id — status transitions
 # ---------------------------------------------------------------------------

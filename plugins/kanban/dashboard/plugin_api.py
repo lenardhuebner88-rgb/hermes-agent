@@ -2083,6 +2083,25 @@ def list_active_workers(
 
 
 
+@router.get("/runs/summary")
+def get_runs_summary(
+    since_hours: int = Query(24, ge=1, le=720),
+    board: Optional[str] = Query(None),
+):
+    """K7: root-grouped run summary (throughput / cost / cycle-time + recent
+    roots) over the last ``since_hours``. Powers the RunSummaryTile.
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal ``summary`` segment
+    isn't captured as a run id by the path-param route.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_summary(conn, since_hours=since_hours)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),

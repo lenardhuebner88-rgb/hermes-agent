@@ -1,6 +1,18 @@
 export const de = {
   app: { name: "Hermes Control", operator: "pieter_pan" },
   tabs: { overview: "Übersicht", inbox: "Postfach", pulse: "Puls", workstreams: "Ströme", hermes: "Hermes", flow: "Flow", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
+  runSummary: {
+    eyebrow: "Lauf-Bilanz · Wurzeln",
+    meta: (hours: number) => `letzte ${hours}h`,
+    podCompleted: "Abgeschlossen",
+    podCost: "Kosten",
+    podP50: "Zykluszeit p50",
+    podP90: "Zykluszeit p90",
+    emptyTitle: "Noch keine abgeschlossenen Aufträge",
+    emptyDesc: "Sobald ein Auftrag (Wurzel eines Teilaufgaben-Baums) im Fenster fertig wird, erscheint er hier mit Zykluszeit und Kosten.",
+    error: "Lauf-Bilanz konnte nicht geladen werden — ruhiger Leerzustand statt Fehler.",
+    subtasks: (n: number) => `${n} ${n === 1 ? "Teilaufgabe" : "Teilaufgaben"}`,
+  },
   fleet: {
     title: "Hermes · Flotte",
     subtitle: "Hermes :9119 · Dashboard",

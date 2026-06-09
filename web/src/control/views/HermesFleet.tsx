@@ -7,6 +7,7 @@ import {
   useHermesBlockedCompletions,
   useHermesRecentResults,
   useHermesReviewVerdicts,
+  useHermesRunSummary,
   useHermesTodayDigest,
   useHermesWorkers,
   useRosterCount,
@@ -18,6 +19,7 @@ import type { Density } from "../hooks/useDensity";
 import type { BoardTask } from "../lib/types";
 import { WorkerCard } from "../components/WorkerCard";
 import { HermesTodayDigestCard } from "../components/HermesTodayDigestCard";
+import { RunSummaryTile } from "../components/RunSummaryTile";
 import { HermesBlockedCard } from "../components/HermesBlockedCard";
 import { HermesReviewCard } from "../components/HermesReviewCard";
 import { ToneCallout } from "../components/atoms";
@@ -34,6 +36,7 @@ export function HermesFleet({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const results = useHermesRecentResults();
   const digest = useHermesTodayDigest();
+  const runSummary = useHermesRunSummary();
   const reviews = useHermesReviewVerdicts();
   const blocked = useHermesBlockedCompletions();
   const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
@@ -119,6 +122,14 @@ export function HermesFleet({ density }: { density: Density }) {
       {/* Pipeline — real stage mechanics (Ziel 2) */}
       {board.error ? <ToneCallout tone="red">Board konnte nicht geladen werden.<br />{board.error}</ToneCallout> : null}
       <FleetPipeline tasks={boardTasks} reload={board.reload} />
+
+      {/* K7: root-grouped run summary — throughput / cost / cycle-time */}
+      <RunSummaryTile
+        data={runSummary.data ?? null}
+        now={now}
+        error={runSummary.error}
+        loading={runSummary.loading}
+      />
 
       {/* Worker fleet panel */}
       <FleetPanel eyebrow={de.fleet.workerEyebrow} meta={de.fleet.workerHint}>

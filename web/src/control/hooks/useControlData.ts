@@ -14,6 +14,7 @@ import {
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   ReviewVerdictsResponseSchema,
+  RunSummaryResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
@@ -24,7 +25,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, TaskDetailResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, TaskDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -817,6 +818,18 @@ export function useHermesTodayDigest() {
       TodayDigestResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/today-digest?limit=12"),
       "runs/today-digest",
+    ),
+    20000,
+  );
+}
+
+export function useHermesRunSummary() {
+  return usePolling<RunSummaryResponse>(
+    "runs/summary",
+    async () => parseOrThrow(
+      RunSummaryResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/summary?since_hours=24"),
+      "runs/summary",
     ),
     20000,
   );
