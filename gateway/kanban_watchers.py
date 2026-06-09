@@ -106,61 +106,92 @@ def _run_metadata(run: Any) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
-def _format_completed_report(event: Any, task: Any, run: Any, *, board: Optional[str] = None) -> str:
+_COMPLETED_VERDICT_TOKENS = {
+    "APPROVED": "APPROVED",
+    "REQUEST_CHANGES": "REQUEST_CHANGES",
+    "NEEDS_REVISION": "REQUEST_CHANGES",
+}
+
+
+def _completed_verdict_line(run: Any) -> str:
+    """Compact 'Verdict + Verifikation' line, or '' when there is no verifier signal.
+
+    Mirrors the dashboard's verdict normalisation (plugins/kanban/dashboard/
+    plugin_api.py ``_normalize_verifier_verdict``): prefer ``metadata['verdict']``,
+    else parse the leading token of the run summary. Only emits a line for a
+    recognised verifier verdict so non-gated tasks stay quiet.
+    """
+    metadata = _run_metadata(run)
+    raw = metadata.get("verdict")
+    if not isinstance(raw, str) or not raw.strip():
+        summary = str(getattr(run, "summary", "") or "")
+        first = next((line.strip() for line in summary.splitlines() if line.strip()), "")
+        raw = first.split("—", 1)[0].split(":", 1)[0].strip() if first else ""
+    token = str(raw or "").strip().upper().replace(" ", "_").replace("-", "_")
+    verdict = _COMPLETED_VERDICT_TOKENS.get(token)
+    if not verdict:
+        return ""
+    state = "Verifier-approved" if verdict == "APPROVED" else "Änderungen angefordert"
+    return f"Verdict: {verdict} | Verifikation: {state}"
+
+
+def _dashboard_link(kanban_cfg: Optional[dict], task_id: str) -> str:
+    """Build a clickable /control deep-link to the task, config-driven.
+
+    Uses ``kanban.dashboard_url`` (e.g. the tailnet ``https://…:9443/control``)
+    when set so Discord links are externally reachable; falls back to the local
+    loopback dashboard otherwise. ``?focus=`` is honoured by the Backlog view.
+    """
+    base = ""
+    if isinstance(kanban_cfg, dict):
+        base = _string_config_value(kanban_cfg, "dashboard_url", "dashboard_base_url")
+    base = (base or "http://127.0.0.1:9119/control").rstrip("/")
+    if task_id and task_id != "<unknown>":
+        return f"{base}/backlog?focus={task_id}"
+    return base
+
+
+def _format_completed_report(
+    event: Any,
+    task: Any,
+    run: Any,
+    *,
+    board: Optional[str] = None,
+    kanban_cfg: Optional[dict] = None,
+) -> str:
+    """Compact completion report (K1 de-flood).
+
+    Replaces the prior multi-section template (highlights / artifacts /
+    open-points lists) that made completed reports *grow* — audit finding D4.
+    The result body still surfaces in full; artifact paths are delivered as
+    native uploads separately, so dropping the list sections loses no signal.
+    Shape: ✅-header / Kurzfazit / Task id+title / Status (+Verdict) / Ergebnis
+    body / Dashboard link.
+    """
     task_id = getattr(event, "task_id", None) or getattr(task, "id", "") or "<unknown>"
     title = (getattr(task, "title", None) or task_id)[:160]
     status = getattr(task, "status", None) or "done"
     profile = getattr(task, "assignee", None) or getattr(run, "profile", None) or "unbekannt"
     handoff = _completed_handoff_text(event, task, run)
     short = _completed_kurzfazit(handoff)
-    metadata = _run_metadata(run)
 
-    highlights: list[str] = []
-    for label, key in (
-        ("Geänderte Dateien", "changed_files"),
-        ("Tests", "tests_run"),
-        ("Entscheidungen", "decisions"),
-        ("Findings", "findings"),
-        ("Kernergebnisse", "key_findings"),
-    ):
-        value = metadata.get(key)
-        if key == "tests_run" and value not in (None, "", []):
-            highlights.append(f"- {label}: {value}")
-            continue
-        values = _as_list(value)
-        if values:
-            highlights.append(f"- {label}: {', '.join(values[:4])}")
-    if not highlights:
-        highlights.append("- siehe Ergebnis")
-
-    artifacts = _as_list(metadata.get("artifacts"))
-    if not artifacts and isinstance(getattr(event, "payload", None), dict):
-        artifacts = _as_list(event.payload.get("artifacts"))
-    artifact_lines = [f"- {item}" for item in artifacts[:6]] or ["- keine"]
-
-    open_points = (
-        _as_list(metadata.get("open_points"))
-        or _as_list(metadata.get("open_issues"))
-        or _as_list(metadata.get("blockers"))
-    )
-    open_line = ", ".join(open_points[:4]) if open_points else "keine"
+    status_line = f"Status: {status} | Profil: {profile}"
+    if board:
+        status_line += f" | Board: {board}"
 
     lines = [
         "✅ Hermes Report — Task abgeschlossen",
         f"Kurzfazit: {short}",
         f"Task: {task_id} — {title}",
-        f"Status: {status} | Profil: {profile}",
+        status_line,
     ]
-    if board:
-        lines[-1] += f" | Board: {board}"
+    verdict_line = _completed_verdict_line(run)
+    if verdict_line:
+        lines.append(verdict_line)
     lines.extend([
         "Ergebnis:",
         handoff or "kein Ergebnistext hinterlegt",
-        "Wichtigste Ergebnisse/Änderungen:",
-        *highlights,
-        "Artefakte/Links:",
-        *artifact_lines,
-        f"Offene Punkte/Blocker: {open_line}",
+        f"Dashboard: {_dashboard_link(kanban_cfg, task_id)}",
     ])
     duration = _format_duration_seconds(
         getattr(run, "started_at", None), getattr(run, "ended_at", None),
@@ -507,6 +538,7 @@ class GatewayKanbanWatchersMixin:
                                 task,
                                 runs_by_event_id.get(int(ev.id)),
                                 board=board_slug,
+                                kanban_cfg=kanban_cfg,
                             )
                         elif kind == "received":
                             msg = _format_received_report(ev, task, board=board_slug)

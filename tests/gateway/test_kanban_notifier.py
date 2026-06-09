@@ -188,19 +188,24 @@ def test_discord_completed_report_routes_to_reporting_channel_with_human_templat
     assert sent["chat_id"] != "1500203113867378789"
     text = sent["text"]
     lines = text.splitlines()
+    # Compact K1 format: header / Kurzfazit / Task / Status / Ergebnis body / Dashboard link.
     assert lines[0] == "✅ Hermes Report — Task abgeschlossen"
     assert lines[1] == "Kurzfazit: Reporting wurde vereinheitlicht."
     assert f"Task: {tid} — einheitliches Reporting" in text
     assert "Status: done | Profil: worker" in text
     assert "Ergebnis:" in text
+    # The result body must still surface in full.
     assert "Details: Tests decken Routing und Format ab." in text
-    assert "Wichtigste Ergebnisse/Änderungen:" in text
-    assert "gateway/kanban_watchers.py" in text
-    assert "Artefakte/Links:" in text
-    assert "/tmp/reporting-result.md" in text
-    assert "Offene Punkte/Blocker:" in text
-    assert "Gateway nach Deployment neu starten" in text
+    # A clickable dashboard deep-link replaces the legacy link section.
+    assert f"Dashboard: http://127.0.0.1:9119/control/backlog?focus={tid}" in text
     assert "Laufzeit: 0s" not in text
+    # K1 de-flood regression guard: the old multi-section bloat is gone. The
+    # report must NOT grow per-metadata-list again (audit finding D4).
+    assert "Wichtigste Ergebnisse/Änderungen:" not in text
+    assert "Artefakte/Links:" not in text
+    assert "Offene Punkte/Blocker:" not in text
+    # Artifact paths are delivered as native uploads, not inlined as text.
+    assert "/tmp/reporting-result.md" not in text
 
 
 def test_discord_completed_reporting_channel_dedupes_multiple_subscriptions_to_same_target(
