@@ -1,5 +1,6 @@
 """Tests for hermes_cli.web_server and related config utilities."""
 
+import copy
 import os
 import json
 import shutil
@@ -1705,23 +1706,36 @@ class TestWebServerEndpoints:
         assert model_cfg["default"] == "mimo-v2.5"
         assert model_cfg["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
 
-    def test_set_model_main_reports_stale_auxiliary_pins(self):
+    def test_set_model_main_reports_stale_auxiliary_pins(self, monkeypatch):
         """Switching the main provider must report auxiliary slots still pinned
         to a *different* provider so the UI can warn the user their helper tasks
-        aren't following the switch (the silent credit-burn path)."""
-        from hermes_cli.config import load_config, save_config
+        aren't following the switch (the silent credit-burn path).
 
-        cfg = load_config()
-        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
-        cfg["auxiliary"] = {
-            # Pinned to nous — same as the OLD main, becomes stale after switch.
-            "compression": {"provider": "nous", "model": "anthropic/claude-sonnet-4.6"},
-            # Auto — follows main, never stale.
-            "vision": {"provider": "auto", "model": ""},
-            # Pinned to a third provider — also stale vs the new main.
-            "curator": {"provider": "deepseek", "model": "deepseek-chat"},
+        The handler resolves its config via the module-level ``load_config()``;
+        we pin that to a fixed in-memory config so the assertion is deterministic
+        and never depends on the live ``~/.hermes/config.yaml`` auxiliary roster.
+        That roster carries real pins (e.g. code_audit/test_hardening) which leak
+        into the handler under full-suite ordering and made this test flaky."""
+        import hermes_cli.web_server as ws
+
+        store = {
+            "model": {"provider": "nous", "default": "hermes-4"},
+            "auxiliary": {
+                # Pinned to nous — same as the OLD main, becomes stale after switch.
+                "compression": {"provider": "nous", "model": "anthropic/claude-sonnet-4.6"},
+                # Auto — follows main, never stale.
+                "vision": {"provider": "auto", "model": ""},
+                # Pinned to a third provider — also stale vs the new main.
+                "curator": {"provider": "deepseek", "model": "deepseek-chat"},
+            },
         }
-        save_config(cfg)
+        monkeypatch.setattr(ws, "load_config", lambda: copy.deepcopy(store))
+
+        def _save(cfg):
+            store.clear()
+            store.update(copy.deepcopy(cfg))
+
+        monkeypatch.setattr(ws, "save_config", _save)
 
         resp = self.client.post(
             "/api/model/set",
@@ -1738,17 +1752,27 @@ class TestWebServerEndpoints:
         assert comp["provider"] == "nous"
         assert comp["model"] == "anthropic/claude-sonnet-4.6"
 
-    def test_set_model_main_no_stale_when_aux_matches_new_provider(self):
-        """Aux slots pinned to the SAME provider as the new main are not stale."""
-        from hermes_cli.config import load_config, save_config
+    def test_set_model_main_no_stale_when_aux_matches_new_provider(self, monkeypatch):
+        """Aux slots pinned to the SAME provider as the new main are not stale.
 
-        cfg = load_config()
-        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
-        cfg["auxiliary"] = {
-            "compression": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
-            "vision": {"provider": "auto", "model": ""},
+        Pin ``load_config``/``save_config`` to a fixed in-memory config so the
+        result is independent of the live ``~/.hermes/config.yaml`` roster."""
+        import hermes_cli.web_server as ws
+
+        store = {
+            "model": {"provider": "nous", "default": "hermes-4"},
+            "auxiliary": {
+                "compression": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+                "vision": {"provider": "auto", "model": ""},
+            },
         }
-        save_config(cfg)
+        monkeypatch.setattr(ws, "load_config", lambda: copy.deepcopy(store))
+
+        def _save(cfg):
+            store.clear()
+            store.update(copy.deepcopy(cfg))
+
+        monkeypatch.setattr(ws, "save_config", _save)
 
         resp = self.client.post(
             "/api/model/set",
@@ -1757,7 +1781,8 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["stale_aux"] == []
 
-        model_cfg = load_config().get("model")
+        # The save persisted the new main into the same store the handler reads.
+        model_cfg = store.get("model")
         assert model_cfg["provider"] == "openrouter"
         assert model_cfg.get("base_url", "") == ""
 

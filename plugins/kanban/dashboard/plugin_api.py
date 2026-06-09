@@ -2289,7 +2289,7 @@ def get_run_endpoint(
         r = kanban_db.get_run(conn, run_id)
         if r is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        return {"run": _run_dict(r)}
+        return {"run": _run_dict(conn, r)}
     finally:
         conn.close()
 
