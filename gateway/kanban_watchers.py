@@ -201,6 +201,111 @@ def _format_completed_report(
     return _clean_completed_handoff("\n".join(lines), limit=1900)
 
 
+# ── K2: per-tree completed-report aggregation ───────────────────────────────
+# In a decomposed graph, ``task_links(parent_id, child_id)`` means "child waits
+# for parent". The orchestrator ROOT is linked as the child of every leaf, so
+# it is the *sink* that completes LAST, after all its transitive parents (the
+# work tasks) are terminal. We therefore: suppress the per-child completed
+# report of every interior work node (it has children depending on it) and emit
+# ONE consolidated report when the sink/root completes. Standalone tasks (no
+# links) are untouched. Failure kinds (blocked/gave_up/crashed/timed_out) keep
+# their per-task pings — only the ``completed`` success path is rolled up.
+_MAX_TREE_SUBTASKS_SHOWN = 15
+
+
+def _collect_tree_members(conn: Any, root_id: str, _kb: Any) -> list[str]:
+    """Return all transitive parents (work tasks) of a sink/root, cycle-safe."""
+    seen: set[str] = set()
+    members: list[str] = []
+    stack = list(_kb.parent_ids(conn, root_id))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        members.append(pid)
+        stack.extend(_kb.parent_ids(conn, pid))
+    return members
+
+
+def _tree_member_detail(conn: Any, member_id: str, _kb: Any) -> Optional[dict[str, Any]]:
+    task = _kb.get_task(conn, member_id)
+    if task is None:
+        return None
+    title = (getattr(task, "title", None) or member_id)[:80]
+    status = getattr(task, "status", None) or "?"
+    summary = ""
+    try:
+        for run in reversed(_kb.list_runs(conn, member_id)):
+            if getattr(run, "summary", None):
+                summary = str(run.summary)
+                break
+    except Exception:
+        summary = ""
+    if not summary:
+        summary = str(getattr(task, "result", "") or "")
+    return {
+        "id": member_id,
+        "title": title,
+        "status": status,
+        "kurz": _completed_kurzfazit(summary) if summary.strip() else "",
+        "created_at": getattr(task, "created_at", 0) or 0,
+    }
+
+
+def _format_tree_completed_report(
+    task: Any,
+    run: Any,
+    event: Any,
+    members: list[dict[str, Any]],
+    *,
+    board: Optional[str] = None,
+    kanban_cfg: Optional[dict] = None,
+) -> str:
+    """One consolidated completion report for a whole decomposed tree (K2)."""
+    root_id = getattr(task, "id", None) or getattr(event, "task_id", None) or "<unknown>"
+    root_title = (getattr(task, "title", None) or root_id)[:160]
+    root_status = getattr(task, "status", None) or "done"
+    profile = getattr(task, "assignee", None) or getattr(run, "profile", None) or "unbekannt"
+    handoff = _completed_handoff_text(event, task, run)
+    short = _completed_kurzfazit(handoff)
+
+    total = len(members)
+    done = sum(1 for m in members if m["status"] in {"done", "archived"})
+    status_line = f"Status: {root_status} | Profil: {profile}"
+    if board:
+        status_line += f" | Board: {board}"
+
+    lines = [
+        f"✅ Hermes Report — Auftrag abgeschlossen ({total} Teilaufgaben)",
+        f"Kurzfazit: {short}",
+        f"Auftrag: {root_id} — {root_title}",
+        status_line,
+    ]
+    verdict_line = _completed_verdict_line(run)
+    if verdict_line:
+        lines.append(verdict_line)
+    if members:
+        lines.append(f"Teilaufgaben ({done}/{total} erledigt):")
+        for m in members[:_MAX_TREE_SUBTASKS_SHOWN]:
+            if m["status"] in {"done", "archived"}:
+                mark = "✅"
+            elif m["status"] == "blocked":
+                mark = "⏸"
+            else:
+                mark = "•"
+            suffix = f": {m['kurz']}" if m["kurz"] else ""
+            lines.append(f"- {mark} {m['id']} {m['title']}{suffix}")
+        if total > _MAX_TREE_SUBTASKS_SHOWN:
+            lines.append(f"- … +{total - _MAX_TREE_SUBTASKS_SHOWN} weitere")
+    lines.extend([
+        "Ergebnis:",
+        handoff or "kein Ergebnistext hinterlegt",
+        f"Dashboard: {_dashboard_link(kanban_cfg, root_id)}",
+    ])
+    return _clean_completed_handoff("\n".join(lines), limit=1900)
+
+
 def _format_received_report(event: Any, task: Any, *, board: Optional[str] = None) -> str:
     task_id = getattr(event, "task_id", None) or getattr(task, "id", "") or "<unknown>"
     title = (getattr(task, "title", None) or task_id)[:160]
@@ -531,15 +636,38 @@ class GatewayKanbanWatchersMixin:
                         who = (task.assignee if task and task.assignee else None)
                         tag = f"@{who} " if who else ""
                         if kind == "completed":
-                            # Prefer a structured, human-readable result report
-                            # over the legacy one-line done ping.
-                            msg = _format_completed_report(
-                                ev,
-                                task,
-                                runs_by_event_id.get(int(ev.id)),
-                                board=board_slug,
-                                kanban_cfg=kanban_cfg,
+                            # K2: per-tree aggregation. An interior work node's
+                            # completion is rolled up into its root's single
+                            # consolidated report; the sink/root emits that one
+                            # report; standalone tasks fall through to the
+                            # normal per-task report.
+                            _root_run = runs_by_event_id.get(int(ev.id))
+                            tree_decision = await asyncio.to_thread(
+                                self._kanban_tree_completion,
+                                task, _root_run, ev, board_slug, kanban_cfg,
                             )
+                            if tree_decision == "suppress":
+                                # Don't send per-child. The cursor still
+                                # advances (and the sub unsubs if terminal) via
+                                # the for-else below — the event is consumed.
+                                logger.debug(
+                                    "kanban notifier: suppressing per-child "
+                                    "completed for %s (rolled into tree root)",
+                                    sub["task_id"],
+                                )
+                                continue
+                            if isinstance(tree_decision, str):
+                                msg = tree_decision  # consolidated root report
+                            else:
+                                # Prefer a structured, human-readable result
+                                # report over the legacy one-line done ping.
+                                msg = _format_completed_report(
+                                    ev,
+                                    task,
+                                    _root_run,
+                                    board=board_slug,
+                                    kanban_cfg=kanban_cfg,
+                                )
                         elif kind == "received":
                             msg = _format_received_report(ev, task, board=board_slug)
                         elif kind == "blocked":
@@ -699,6 +827,59 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _kanban_tree_completion(
+        self, task: Any, run: Any, event: Any,
+        board: Optional[str], kanban_cfg: Optional[dict],
+    ) -> Optional[str]:
+        """Classify a completed task's role in a decomposed tree (K2).
+
+        Runs in ``to_thread`` (opens its own board-scoped connection).
+
+        Returns:
+          ``None``        — standalone task (no ``task_links``); the caller
+                            sends the normal single completed report.
+          ``"suppress"``  — interior work node (something depends on it); its
+                            completion rolls up into the root, send nothing.
+          ``str``         — this is the tree's sink/root (waits on everything);
+                            the returned text is the ONE consolidated report.
+
+        Fail-soft: any error returns ``None`` so a tree-classification hiccup
+        degrades to the existing per-task report rather than dropping it.
+        """
+        task_id = getattr(task, "id", None)
+        if not task_id:
+            return None
+        from hermes_cli import kanban_db as _kb
+        try:
+            conn = _kb.connect(board=board)
+        except Exception:
+            return None
+        try:
+            parents = _kb.parent_ids(conn, task_id)
+            children = _kb.child_ids(conn, task_id)
+            if not parents and not children:
+                return None  # standalone — normal single report
+            if children:
+                return "suppress"  # interior work node — rolled into the root
+            # Sink/root: aggregate itself + all transitive parents (work tasks).
+            details: list[dict[str, Any]] = []
+            for mid in _collect_tree_members(conn, task_id, _kb):
+                detail = _tree_member_detail(conn, mid, _kb)
+                if detail is not None:
+                    details.append(detail)
+            details.sort(key=lambda m: (m["created_at"], m["id"]))
+            return _format_tree_completed_report(
+                task, run, event, details, board=board, kanban_cfg=kanban_cfg,
+            )
+        except Exception:
+            logger.debug(
+                "kanban notifier: tree-completion classify failed for %s",
+                task_id, exc_info=True,
+            )
+            return None
+        finally:
+            conn.close()
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,

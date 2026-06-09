@@ -633,3 +633,109 @@ def test_decompose_child_inherited_sub_respects_notifier_profile_ownership(
         assert sent["chat_id"] == "chat-1"
         assert child in sent["text"]
         assert "blocked" in sent["text"].lower()
+
+
+# ---------------------------------------------------------------------------
+# K2 — per-tree completed-report aggregation
+# ---------------------------------------------------------------------------
+
+
+def test_tree_root_completion_emits_one_consolidated_report(tmp_path, monkeypatch):
+    """A decomposed tree emits ONE consolidated completed report at the root
+    (sink) and suppresses the per-child completed pings (K2 de-flood)."""
+    db_path = tmp_path / "tree-consolidated.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship the feature", triage=True)
+        # Sub on the root BEFORE decompose so children inherit it (_inherit_notify_subs).
+        kb.add_notify_sub(conn, task_id=root, platform="telegram", chat_id="chat-1")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "build module A", "assignee": "coder", "parents": []},
+                {"title": "build module B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None and len(child_ids) == 2
+        a, b = child_ids
+        # Work children complete first; the root (sink) completes last.
+        kb.complete_task(conn, a, summary="Modul A gebaut.")
+        kb.complete_task(conn, b, summary="Modul B gebaut.")
+        kb.complete_task(conn, root, summary="Auftrag fertig: alles zusammengeführt.")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    # The two interior work tasks are suppressed; ONLY the root's consolidated
+    # report goes out — one delivery, not three.
+    assert len(adapter.sent) == 1
+    text = adapter.sent[0]["text"]
+    assert "Teilaufgaben" in text
+    assert root in text
+    assert a in text and b in text
+    assert "Auftrag fertig" in text  # root result body still surfaces
+    # De-flood guard: exactly one report header, no per-child completed posts.
+    assert text.count("Hermes Report") == 1
+
+
+def test_tree_interior_completion_is_suppressed(tmp_path, monkeypatch):
+    """An interior work node's completed report is suppressed (rolled into the
+    root). With only the interior task subscribed, nothing is sent."""
+    db_path = tmp_path / "tree-interior.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root orchestration", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "interior work", "assignee": "coder", "parents": []}],
+            author="decomposer",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+        a = child_ids[0]
+        # No root sub was added, so the child inherited nothing. Subscribe ONLY
+        # the interior work task to isolate the suppression behaviour.
+        kb.add_notify_sub(conn, task_id=a, platform="telegram", chat_id="chat-1")
+        kb.complete_task(conn, a, summary="interior done")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    # Interior completion rolls into the (here unsubscribed) root → nothing sent.
+    assert adapter.sent == []
+
+
+def test_standalone_completion_still_sends_single_report(tmp_path, monkeypatch):
+    """A task with no task_links is untouched by K2 — it still gets the normal
+    per-task completed report."""
+    db_path = tmp_path / "standalone-report.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    tid = _create_completed_subscription(summary="Solo erledigt.")
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    text = adapter.sent[0]["text"]
+    assert text.startswith("✅ Hermes Report — Task abgeschlossen")
+    assert "Teilaufgaben" not in text
+    assert tid in text
