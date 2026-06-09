@@ -5858,6 +5858,15 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    held_role_mismatch: list[tuple[str, str]] = field(default_factory=list)
+    """Reviewer tasks HELD at dispatch time (not spawned) because the
+    reviewer/execution role-fit preflight (K3) flagged them as asking the
+    verdict-only reviewer lane to run repo gates, as ``(task_id, reason)``
+    pairs. The task is left in ``ready`` (re-evaluated each tick), NOT
+    blocked — the signal is advisory: re-shape it as a coder/verifier
+    evidence task. A verdict-only reviewer task is exempt and dispatches
+    normally. Separate bucket so telemetry distinguishes "held for role
+    mis-fit" from "genuinely stuck"."""
     openclaw_dispatched: list[tuple[str, str]] = field(default_factory=list)
     """Tasks routed to OpenClaw (Mission-Control) instead of a local spawn,
     as ``(task_id, operation)`` pairs. The task stays ``running`` while MC
@@ -7532,6 +7541,53 @@ def poll_openclaw_results(conn: sqlite3.Connection, board: Optional[str] = None)
             continue
 
 
+def reviewer_role_fit_hold_reason(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[str]:
+    """Return a hold reason if a ready reviewer task is an execution mis-fit.
+
+    K3 dispatch-time preflight: reuses the advisory diagnostics rule
+    ``kanban_diagnostics._rule_reviewer_role_tool_mismatch`` so a task assigned
+    to the verdict-only ``reviewer`` lane whose title/body asks it to run repo
+    gates is HELD (not spawned) — spawning it would burn a run that the
+    reviewer cannot satisfy. A verdict-only / evidence-only reviewer task hits
+    the rule's exemptions and returns ``None`` (dispatches normally).
+
+    Fail-soft: any error (import, missing column, rule change) returns ``None``
+    so the dispatcher never regresses to *not* dispatching on a diagnostics
+    hiccup. Only call this for ``assignee == "reviewer"`` rows.
+    """
+    try:
+        from hermes_cli import kanban_diagnostics as _diag
+    except Exception:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT id, title, body, assignee, status FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        diags = _diag._rule_reviewer_role_tool_mismatch(
+            row, [], [], int(time.time()), {},
+        )
+    except Exception:
+        _log.debug(
+            "kanban dispatch: role-fit preflight failed for %s",
+            task_id, exc_info=True,
+        )
+        return None
+    for d in diags:
+        if getattr(d, "kind", "") == "reviewer_role_tool_mismatch":
+            matched = []
+            data = getattr(d, "data", None)
+            if isinstance(data, dict):
+                matched = data.get("matched_imperatives") or []
+            hint = f" (matched: {', '.join(str(m) for m in matched[:3])})" if matched else ""
+            return f"reviewer assigned an execution/terminal task{hint}"
+    return None
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -7815,6 +7871,25 @@ def dispatch_once(
                         {"reason": guard_reason},
                     )
             continue
+        # K3 role-fit preflight: hold a reviewer task that asks the
+        # verdict-only reviewer lane to run repo gates instead of spawning a
+        # run the reviewer cannot satisfy. Scoped to ``assignee == "reviewer"``
+        # (the review-gate verifier lane is a different path and never reaches
+        # here). The task is left in ``ready`` (advisory, re-evaluated each
+        # tick), NOT blocked. Verdict-only reviewers fall through and dispatch.
+        if row_assignee == "reviewer":
+            hold_reason = reviewer_role_fit_hold_reason(conn, row["id"])
+            if hold_reason is not None:
+                result.held_role_mismatch.append((row["id"], hold_reason))
+                # Emit an event so operators see why it was held (and don't
+                # mistake the steadily-ready reviewer task for "stuck").
+                if not dry_run:
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "role_fit_held",
+                            {"reason": hold_reason},
+                        )
+                continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
             # Increment per-profile counter even in dry_run so the cap

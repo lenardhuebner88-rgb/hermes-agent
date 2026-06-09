@@ -1559,6 +1559,63 @@ def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawna
         assert kb.get_task(conn, t).claim_lock is None
 
 
+def test_dispatch_holds_reviewer_role_execution_mismatch(
+    kanban_home, all_assignees_spawnable
+):
+    """K3: a reviewer task that asks the verdict-only lane to run repo gates is
+    HELD at dispatch (not spawned) and left in ``ready`` for re-shaping."""
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append((task.id, task.assignee))
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="Review the gate output",
+            assignee="reviewer",
+            body="Bitte führe reale gates aus und run pytest im Repo.",
+        )
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        # Not spawned; stays ready (advisory hold, NOT blocked).
+        assert spawns == []
+        assert all(s[0] != t for s in res.spawned)
+        held_ids = [tid for tid, _ in res.held_role_mismatch]
+        assert t in held_ids
+        assert kb.get_task(conn, t).status == "ready"
+        # Operator-visible diagnosis event was emitted.
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+        assert "role_fit_held" in kinds
+
+
+def test_dispatch_spawns_verdict_only_reviewer(
+    kanban_home, all_assignees_spawnable
+):
+    """K3: a verdict-only reviewer task is exempt from the role-fit hold and
+    dispatches normally even though it mentions gates."""
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append((task.id, task.assignee))
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="Verdict over parent evidence",
+            assignee="reviewer",
+            body=(
+                "Verdict-only: prüfe die Parent-Belege und gib ein Verdict ab. "
+                "Do not run tests selbst."
+            ),
+        )
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        assert (t, "reviewer") in spawns
+        assert res.held_role_mismatch == []
+        assert kb.get_task(conn, t).status == "running"
+
+
 def test_dispatch_max_spawn_counts_existing_running_tasks(
     kanban_home, all_assignees_spawnable
 ):
