@@ -304,6 +304,228 @@ def test_stuck_in_blocked_silent_when_not_blocked():
     assert kd.compute_task_diagnostics(task, events, [], now=9999999) == []
 
 
+def test_reviewer_role_tool_mismatch_fires_on_imperative_gate_request():
+    task = _task(
+        id="t_rolefit001",
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Reviewer: führe reale Gates aus: scripts/run_tests.sh, "
+            "ruff, git diff --check."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    rolefit = [d for d in diags if d.kind == "reviewer_role_tool_mismatch"]
+    assert len(rolefit) == 1
+    d = rolefit[0]
+    assert d.severity == "warning"
+    assert d.data["assignee"] == "reviewer"
+    assert "führe reale gates aus" in d.data["matched_imperatives"]
+    assert d.data["recommended_shape"] == (
+        "coder_or_verifier_evidence_then_reviewer_verdict"
+    )
+
+
+def test_reviewer_role_tool_mismatch_fires_on_recovered_reale_gates_wording():
+    task = _task(
+        id="t_9cbfcbe7",
+        assignee="reviewer",
+        status="blocked",
+        title="Reviewer: recovered gate evidence",
+        body=(
+            "Reale Gates laufen mindestens: scripts/run_tests.sh --focused, "
+            "py_compile, ruff, git diff --check."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    rolefit = [d for d in diags if d.kind == "reviewer_role_tool_mismatch"]
+    assert len(rolefit) == 1
+    assert rolefit[0].severity == "warning"
+    assert "reale gates laufen" in rolefit[0].data["matched_imperatives"]
+
+
+def test_reviewer_role_tool_mismatch_prefers_direct_imperative_over_weak_evidence():
+    task = _task(
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Parent evidence is attached for context. "
+            "Reale Gates laufen mindestens: scripts/run_tests.sh, py_compile, "
+            "ruff, git diff --check."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    rolefit = [d for d in diags if d.kind == "reviewer_role_tool_mismatch"]
+    assert len(rolefit) == 1
+    assert "reale gates laufen" in rolefit[0].data["matched_imperatives"]
+
+
+def test_reviewer_role_tool_mismatch_prefers_direct_run_pytest_over_weak_evidence():
+    task = _task(
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Parent evidence is attached for context. "
+            "Reviewer: run pytest and git diff --check in the repo."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    rolefit = [d for d in diags if d.kind == "reviewer_role_tool_mismatch"]
+    assert len(rolefit) == 1
+    assert "run pytest" in rolefit[0].data["matched_imperatives"]
+
+
+def test_reviewer_role_tool_mismatch_ignores_evidence_references():
+    task = _task(
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Parent evidence says run tests passed, scripts/run_tests.sh passed, "
+            "and ruff passed. Confirm the evidence supports a verdict."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    assert [d for d in diags if d.kind == "reviewer_role_tool_mismatch"] == []
+
+
+def test_reviewer_role_tool_mismatch_ignores_passed_parent_test_results():
+    task = _task(
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Parent handoff says test results passed: run pytest "
+            "tests/hermes_cli/test_kanban_diagnostics.py -q passed, "
+            "ruff passed, and git diff --check passed. Decide whether this "
+            "evidence supports approval."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    assert [d for d in diags if d.kind == "reviewer_role_tool_mismatch"] == []
+
+
+def test_reviewer_role_tool_mismatch_ignores_verdict_only_cards():
+    task = _task(
+        assignee="reviewer",
+        status="ready",
+        title="Reviewer verdict",
+        body=(
+            "Verdict-only: read parent evidence only. Do not run tests; "
+            "only assess the reported pytest and ruff output."
+        ),
+    )
+
+    diags = kd.compute_task_diagnostics(task, [], [], now=1_000)
+
+    assert [d for d in diags if d.kind == "reviewer_role_tool_mismatch"] == []
+
+
+def test_reviewer_role_tool_mismatch_works_on_real_db_row(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="Reviewer must run gates",
+            body="Reviewer: run pytest and git diff --check in the repo.",
+            assignee="reviewer",
+        )
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        diags = kd.compute_task_diagnostics(row, [], [], now=1_000)
+        assert [d.kind for d in diags] == ["reviewer_role_tool_mismatch"]
+    finally:
+        conn.close()
+
+
+def test_superseded_blocked_review_artifact_fires_from_event_marker():
+    task = _task(
+        status="blocked",
+        assignee="verifier",
+        title="Verifier review artifact",
+    )
+    events = [
+        _event("blocked", ts=100, reason="superseded; audit-only artifact"),
+    ]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=200)
+
+    artifact = [d for d in diags if d.kind == "superseded_blocked_review_artifact"]
+    assert len(artifact) == 1
+    d = artifact[0]
+    assert d.severity == "warning"
+    assert "graph state was not checked" in d.detail
+    assert d.data["audit_only_marker_present"] is True
+    assert d.data["graph_state_checked"] is False
+    assert {"superseded", "audit-only"}.issubset(set(d.data["matched_terms"]))
+
+
+def test_superseded_blocked_review_artifact_silent_without_marker():
+    task = _task(status="blocked", assignee="verifier", title="Verifier review")
+    events = [_event("blocked", ts=100, reason="needs human decision")]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=200)
+
+    assert [d for d in diags if d.kind == "superseded_blocked_review_artifact"] == []
+
+
+def test_stale_review_block_needs_classification_fires_after_threshold():
+    now = 20_000
+    task = _task(status="blocked", assignee="reviewer", title="Reviewer verdict")
+    events = [_event("blocked", ts=now - 3 * 3600, reason="needs review")]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+
+    stale = [d for d in diags if d.kind == "stale_review_block_needs_classification"]
+    assert len(stale) == 1
+    d = stale[0]
+    assert d.severity == "warning"
+    assert "graph state was not checked" in d.detail
+    assert d.data["blocked_age_seconds"] == 3 * 3600
+    assert d.data["review_like"] is True
+    assert d.data["graph_state_checked"] is False
+    assert d.data["requires_operator_classification"] is True
+
+
+def test_stale_review_block_suppressed_by_supersede_marker():
+    now = 10_000
+    task = _task(status="blocked", assignee="reviewer", title="Reviewer verdict")
+    events = [_event("blocked", ts=now - 3 * 3600, reason="superseded audit-only")]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+
+    assert [d for d in diags if d.kind == "superseded_blocked_review_artifact"]
+    assert [d for d in diags if d.kind == "stale_review_block_needs_classification"] == []
+
+
+def test_stale_review_block_escalates_after_error_threshold():
+    now = 100_000
+    task = _task(status="blocked", assignee="reviewer", title="Reviewer verdict")
+    events = [_event("blocked", ts=now - 25 * 3600, reason="needs review")]
+
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+
+    stale = [d for d in diags if d.kind == "stale_review_block_needs_classification"]
+    assert len(stale) == 1
+    assert stale[0].severity == "error"
+
+
 def test_repeated_crashes_surfaces_actual_error_in_title():
     """The title should lead with the actual error text so operators
     see WHAT broke (e.g. rate-limit, auth, OOM) without opening logs.

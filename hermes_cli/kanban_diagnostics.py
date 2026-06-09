@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import json
+import re
 import time
 
 
@@ -169,6 +170,76 @@ def _event_ts(ev) -> int:
     return int(t or 0)
 
 
+def _normalise_text(value: Any) -> str:
+    return str(value or "").casefold()
+
+
+def _text_contains_any(text: str, terms: Iterable[str]) -> list[str]:
+    """Return configured terms that appear in ``text`` (case-insensitive)."""
+    haystack = _normalise_text(text)
+    return [term for term in terms if term in haystack]
+
+
+def _stringify_payload(value: Any) -> str:
+    """Best-effort text extraction for diagnostic marker scans.
+
+    Event payloads are JSON-ish and not schema-stable across all callers.
+    Keep this read-only and conservative: recursively include scalar values
+    without assuming a dedicated reason/comment field exists.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, dict):
+        return " ".join(
+            _stringify_payload(part)
+            for item in value.items()
+            for part in item
+        )
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_stringify_payload(item) for item in value)
+    return str(value)
+
+
+def _task_text(task: Any) -> str:
+    return "\n".join(
+        str(_task_field(task, field_name, "") or "")
+        for field_name in ("title", "body")
+    )
+
+
+def _event_text(ev: Any) -> str:
+    payload = _parse_payload(ev)
+    raw_payload = _task_field(ev, "payload", "")
+    return "\n".join(
+        part for part in (
+            _event_kind(ev),
+            _stringify_payload(payload),
+            raw_payload if isinstance(raw_payload, str) else "",
+        ) if part
+    )
+
+
+def _run_text(run: Any) -> str:
+    return "\n".join(
+        str(_task_field(run, field_name, "") or "")
+        for field_name in ("summary", "error", "result")
+    )
+
+
+def _combined_text(task: Any, events: Iterable[Any], runs: Iterable[Any]) -> str:
+    return "\n".join(
+        [
+            _task_text(task),
+            *(_event_text(ev) for ev in events),
+            *(_run_text(run) for run in runs),
+        ]
+    )
+
+
 def _active_hallucination_events(
     events: Iterable[Any],
     kind: str,
@@ -220,6 +291,132 @@ def _generic_recovery_actions(task: Any, *, running: bool) -> list[DiagnosticAct
 # shape — for test convenience).
 
 RuleFn = Callable[[Any, list[Any], list[Any], int, dict], list[Diagnostic]]
+
+
+_REVIEWER_EXECUTION_TERMS = (
+    "führe reale gates aus",
+    "fuehre reale gates aus",
+    "reale gates laufen",
+    "reale gates laufen mindestens",
+    "run tests",
+    "run pytest",
+    "execute scripts/run_tests.sh",
+    "run scripts/run_tests.sh",
+    "execute run_tests",
+    "run build",
+    "run lint",
+    "run ruff",
+    "run git diff --check",
+    "execute git diff --check",
+    "prüfe im repo",
+    "pruefe im repo",
+    "terminal-gates laufen",
+    "terminal gates laufen",
+)
+
+# Hard exemptions explicitly scope the reviewer to a verdict/evidence-only
+# lane or negate execution. They suppress even when a generic phrase like
+# "run tests" appears inside the negation.
+_REVIEWER_VERDICT_ONLY_EXEMPT_TERMS = (
+    "verdict-only",
+    "verdict only",
+    "read parent evidence",
+    "do not run tests",
+    "don't run tests",
+    "do not execute tests",
+    "not run tests",
+    "only assess",
+    "nur verdict",
+    "evidence-only",
+)
+
+# Weak evidence mentions are enough to suppress evidence-only cards that quote
+# passed gates, but not direct gate imperatives such as "Reale Gates laufen".
+_REVIEWER_WEAK_EVIDENCE_EXEMPT_TERMS = (
+    "parent evidence",
+    "parent handoff",
+    "evidence says",
+    "evidence shows",
+    "test results passed",
+    "tests passed",
+    "confirm the evidence",
+)
+
+_REVIEWER_DIRECT_EXECUTION_TERMS = tuple(
+    term for term in _REVIEWER_EXECUTION_TERMS if term not in {"run tests", "run pytest"}
+)
+
+_REVIEWER_PASSED_GATE_EVIDENCE_RE = re.compile(
+    r"\b(?:run pytest|run tests|scripts/run_tests\.sh|py_compile|ruff|git diff --check)\b"
+    r".{0,160}\bpassed\b",
+    re.IGNORECASE,
+)
+_REVIEWER_DIRECT_RUN_TESTS_RE = re.compile(
+    r"(?:\b(?:reviewer|verifier)\s*:\s*|\b(?:must|please|needs? to)\s+)"
+    r"run\s+(?:pytest|tests?)\b"
+    r"|\brun\s+(?:pytest|tests?)\b.{0,120}\bin the repo\b"
+    r"|\brun\s+(?:pytest|tests?)\b(?!.{0,160}\bpassed\b)",
+    re.IGNORECASE,
+)
+
+
+def _reviewer_text_has_direct_execution_request(text: str) -> bool:
+    """Return True for direct reviewer gate-execution imperatives.
+
+    Evidence-only handoffs often quote commands (``run pytest ... passed``).
+    Treat those as evidence unless the text contains a clear reviewer-directed
+    execution cue or a stronger execution term such as ``Reale Gates laufen``.
+    """
+    return bool(
+        _text_contains_any(text, _REVIEWER_DIRECT_EXECUTION_TERMS)
+        or _REVIEWER_DIRECT_RUN_TESTS_RE.search(text)
+    )
+
+
+def _reviewer_text_has_passed_gate_evidence(text: str) -> bool:
+    return bool(_REVIEWER_PASSED_GATE_EVIDENCE_RE.search(text))
+
+_REVIEWER_BLOCKED_MISMATCH_TERMS = (
+    "reviewer cannot run",
+    "reviewer can't run",
+    "reviewer has no terminal",
+    "no terminal access",
+    "role/tool mismatch",
+    "cannot execute gates",
+    "can't execute gates",
+    "verdict-only reviewer asked to run",
+)
+
+_SUPERSEDED_REVIEW_MARKER_TERMS = (
+    "superseded",
+    "audit-only",
+    "audit only",
+    "removed as parent",
+    "replaced by",
+)
+
+_REVIEW_LIKE_TERMS = (
+    "review",
+    "reviewer",
+    "verifier",
+    "verdict",
+    "needs revision",
+    "review-required",
+    "request_changes",
+)
+
+
+def _is_review_like_task(task: Any, text: str) -> bool:
+    assignee = _normalise_text(_task_field(task, "assignee", ""))
+    if assignee in {"reviewer", "verifier"}:
+        return True
+    if assignee not in {"coder", "premium"}:
+        return False
+    return bool(_text_contains_any(text, _REVIEW_LIKE_TERMS))
+
+
+def _superseded_review_markers(text: str) -> list[str]:
+    return _text_contains_any(text, _SUPERSEDED_REVIEW_MARKER_TERMS)
 
 
 def _aux_slot_explicit(slot: Any) -> bool:
@@ -320,6 +517,215 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= 1 else default
+
+
+def _rule_reviewer_role_tool_mismatch(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Warn when a verdict-only reviewer card asks for repo gate execution."""
+    assignee = _normalise_text(_task_field(task, "assignee", ""))
+    if assignee != "reviewer":
+        return []
+    status = _task_field(task, "status")
+    if status not in {"ready", "running", "blocked", "todo"}:
+        return []
+
+    task_text = _task_text(task)
+    matched = _text_contains_any(task_text, _REVIEWER_EXECUTION_TERMS)
+    if not matched:
+        return []
+    if _text_contains_any(task_text, _REVIEWER_VERDICT_ONLY_EXEMPT_TERMS):
+        return []
+    if (
+        (
+            _text_contains_any(task_text, _REVIEWER_WEAK_EVIDENCE_EXEMPT_TERMS)
+            or _reviewer_text_has_passed_gate_evidence(task_text)
+        )
+        and not _reviewer_text_has_direct_execution_request(task_text)
+    ):
+        return []
+
+    all_text = _combined_text(task, events, runs)
+    severity = "warning"
+    if status == "blocked" and _text_contains_any(
+        all_text, _REVIEWER_BLOCKED_MISMATCH_TERMS,
+    ):
+        severity = "error"
+
+    task_id = _task_field(task, "id") or "<task_id>"
+    return [Diagnostic(
+        kind="reviewer_role_tool_mismatch",
+        severity=severity,
+        title="Reviewer task asks for repo gate execution",
+        detail=(
+            "This task is assigned to the verdict-only reviewer lane but its "
+            "title/body appears to ask the reviewer to execute repository "
+            "gates. Use a coder/verifier evidence task to run tests, lint, "
+            "or git checks, then ask reviewer for a verdict over that evidence."
+        ),
+        actions=[
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Inspect task context",
+                payload={"command": f"hermes kanban show {task_id}"},
+                suggested=True,
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Use evidence task before reviewer verdict",
+                payload={
+                    "recommended_shape": (
+                        "coder_or_verifier_evidence_then_reviewer_verdict"
+                    ),
+                },
+            ),
+        ],
+        first_seen_at=now,
+        last_seen_at=now,
+        count=1,
+        data={
+            "assignee": "reviewer",
+            "matched_imperatives": matched,
+            "recommended_shape": (
+                "coder_or_verifier_evidence_then_reviewer_verdict"
+            ),
+        },
+    )]
+
+
+def _rule_superseded_blocked_review_artifact(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Surface explicit supersede/audit markers on blocked review cards.
+
+    The rule is marker-based only. It does not inspect dependency graph state
+    and therefore never claims that a blocked card is truly detached.
+    """
+    if _task_field(task, "status") != "blocked":
+        return []
+    text = _combined_text(task, events, runs)
+    if not _is_review_like_task(task, text):
+        return []
+    markers = _superseded_review_markers(text)
+    if not markers:
+        return []
+
+    task_id = _task_field(task, "id") or "<task_id>"
+    first_seen = min((_event_ts(ev) for ev in events if _event_ts(ev)), default=now)
+    last_seen = max((_event_ts(ev) for ev in events if _event_ts(ev)), default=now)
+    return [Diagnostic(
+        kind="superseded_blocked_review_artifact",
+        severity="warning",
+        title="Blocked review artifact has superseded/audit marker",
+        detail=(
+            "This blocked review-like task contains an explicit superseded or "
+            "audit-only marker. This diagnostic is marker-based and operator-"
+            "visible only; graph state was not checked, so it does not prove "
+            "that the card is detached from all active work."
+        ),
+        actions=[
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Inspect task before acting",
+                payload={"command": f"hermes kanban show {task_id}"},
+                suggested=True,
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="No automatic action; archive only after operator confirmation",
+                payload={"safe_default": "leave_blocked_as_audit_artifact"},
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Use sanctioned operator-gated helper for real rewiring",
+                payload={
+                    "helpers": [
+                        "kanban_rewire_superseding_review",
+                        "kanban_ensure_needs_revision_fix",
+                    ],
+                },
+            ),
+        ],
+        first_seen_at=first_seen,
+        last_seen_at=last_seen,
+        count=1,
+        data={
+            "audit_only_marker_present": True,
+            "graph_state_checked": False,
+            "matched_terms": markers,
+            "safe_default": "leave_blocked_as_audit_artifact",
+        },
+    )]
+
+
+def _rule_stale_review_block_needs_classification(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Warn on old blocked review-like cards that lack supersede markers.
+
+    This intentionally avoids the stronger "detached" claim because the rule
+    does not receive parent/child graph state.
+    """
+    if _task_field(task, "status") != "blocked":
+        return []
+    text = _combined_text(task, events, runs)
+    if not _is_review_like_task(task, text):
+        return []
+    if _superseded_review_markers(text):
+        return []
+
+    last_blocked_ts = 0
+    for ev in events:
+        if _event_kind(ev) == "blocked":
+            last_blocked_ts = max(last_blocked_ts, _event_ts(ev))
+    if last_blocked_ts == 0:
+        return []
+
+    warning_seconds = float(cfg.get("stale_review_block_hours", 2)) * 3600
+    error_seconds = float(cfg.get("stale_review_block_error_hours", 24)) * 3600
+    age_seconds = now - last_blocked_ts
+    if age_seconds < warning_seconds:
+        return []
+    severity = "error" if age_seconds >= error_seconds else "warning"
+
+    task_id = _task_field(task, "id") or "<task_id>"
+    return [Diagnostic(
+        kind="stale_review_block_needs_classification",
+        severity=severity,
+        title="Stale blocked review card needs classification",
+        detail=(
+            "This review-like task has been blocked past the configured stale "
+            "threshold and has no explicit superseded/audit-only marker. "
+            "This diagnostic is age-based only; graph state was not checked, "
+            "so an operator should classify whether it is an audit artifact, "
+            "a stale blocker, or needs a bounded fix task."
+        ),
+        actions=[
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Inspect whether the block is still active",
+                payload={"command": f"hermes kanban show {task_id}"},
+                suggested=True,
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="If superseded, add an explicit audit/supersede comment",
+                payload={"requires_operator_classification": True},
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="If still active, create a bounded fix task; do not auto-rewire",
+                payload={"graph_state_checked": False},
+            ),
+        ],
+        first_seen_at=last_blocked_ts,
+        last_seen_at=last_blocked_ts,
+        count=1,
+        data={
+            "blocked_age_seconds": int(age_seconds),
+            "review_like": True,
+            "graph_state_checked": False,
+            "requires_operator_classification": True,
+            "stale_review_block_hours": cfg.get("stale_review_block_hours", 2),
+            "stale_review_block_error_hours": cfg.get(
+                "stale_review_block_error_hours", 24,
+            ),
+        },
+    )]
 
 
 def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
@@ -979,6 +1385,9 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
     _rule_triage_aux_unavailable,
+    _rule_reviewer_role_tool_mismatch,
+    _rule_superseded_blocked_review_artifact,
+    _rule_stale_review_block_needs_classification,
     _rule_prose_phantom_refs,
     _rule_repeated_failures,
     _rule_repeated_crashes,
@@ -993,6 +1402,9 @@ _RULES: list[RuleFn] = [
 DIAGNOSTIC_KINDS = (
     "hallucinated_cards",
     "triage_aux_unavailable",
+    "reviewer_role_tool_mismatch",
+    "superseded_blocked_review_artifact",
+    "stale_review_block_needs_classification",
     "prose_phantom_refs",
     "repeated_failures",
     "repeated_crashes",
@@ -1010,6 +1422,8 @@ DEFAULT_CONFIG = {
     "spawn_failure_threshold": 2,
     "crash_threshold": 2,
     "blocked_stale_hours": 24,
+    "stale_review_block_hours": 2,
+    "stale_review_block_error_hours": 24,
     # Stranded-task threshold. 30 min by default — below that, the
     # signal is dominated by tasks that are about to be claimed on the
     # next dispatcher tick (default 60s) and would just be noise.

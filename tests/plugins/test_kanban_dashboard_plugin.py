@@ -2254,6 +2254,30 @@ def test_diagnostics_endpoint_surfaces_blocked_hallucination(client):
     assert "t_ffff00001234" in row["diagnostics"][0]["data"]["phantom_ids"]
 
 
+def test_diagnostics_endpoint_surfaces_reviewer_role_tool_mismatch(client):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Reviewer gates",
+            body="Reviewer: run pytest and git diff --check in the repo.",
+            assignee="reviewer",
+        )
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/diagnostics")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    row = data["diagnostics"][0]
+    assert row["task_id"] == task_id
+    assert row["diagnostics"][0]["kind"] == "reviewer_role_tool_mismatch"
+    assert row["diagnostics"][0]["severity"] == "warning"
+
+
 def test_diagnostics_endpoint_severity_filter(client):
     """Severity filter is at-or-above: warning includes warning+error+critical,
     error includes error+critical, critical is exact (no higher level)."""
@@ -2316,6 +2340,31 @@ def test_board_exposes_diagnostics_list_and_summary(client):
     assert task_dict["warnings"] is not None
     assert task_dict["warnings"]["highest_severity"] == "error"
     assert task_dict["diagnostics"][0]["kind"] == "repeated_crashes"
+
+
+def test_board_exposes_new_warning_diagnostic_summary(client):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Reviewer gates",
+            body="Reviewer: run pytest in the repo.",
+            assignee="reviewer",
+        )
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200
+    data = r.json()
+    tasks = [x for col in data["columns"] for x in col["tasks"]]
+    task_dict = next(x for x in tasks if x["id"] == task_id)
+    assert task_dict["warnings"] is not None
+    assert task_dict["warnings"]["highest_severity"] == "warning"
+    assert task_dict["warnings"]["kinds"]["reviewer_role_tool_mismatch"] == 1
+    assert task_dict["diagnostics"][0]["kind"] == "reviewer_role_tool_mismatch"
 
 
 # ---------------------------------------------------------------------------
