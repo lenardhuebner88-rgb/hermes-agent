@@ -105,6 +105,130 @@ def test_k5a_end_run_leaves_cost_null_without_usage(kanban_home):
         assert kb.task_runs_cost_usd_sum(conn, task_id=tid) is None
 
 
+def _write_state_session(
+    home, session_id, *,
+    input_tokens=None, output_tokens=None,
+    actual_cost=None, estimated_cost=None,
+):
+    """Create a minimal state.db with a single sessions row (K5b fixture)."""
+    db = Path(home) / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, "
+            "actual_cost_usd REAL, estimated_cost_usd REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions "
+            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, input_tokens, output_tokens, actual_cost, estimated_cost),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
+def test_k5b_backfills_cost_from_state_db_on_session_match(kanban_home):
+    """K5b: a run with only worker_session_id (no in-process usage) gets its
+    token/cost backfilled from the matching state.db session."""
+    sid = "sess-abc"
+    _write_state_session(
+        kanban_home, sid, input_tokens=900, output_tokens=120, actual_cost=0.044,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="acp-work", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done", metadata={"worker_session_id": sid},
+        )
+        run = kb.list_runs(conn, tid)[0]
+        assert run.input_tokens == 900
+        assert run.output_tokens == 120
+        assert run.cost_usd == pytest.approx(0.044)
+
+
+def test_k5b_uses_estimated_cost_when_actual_is_null(kanban_home):
+    """K5b: estimated_cost_usd is the fallback when actual_cost_usd is NULL."""
+    sid = "sess-est"
+    _write_state_session(
+        kanban_home, sid, input_tokens=1, output_tokens=2,
+        actual_cost=None, estimated_cost=0.02,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="acp-work", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done", metadata={"worker_session_id": sid},
+        )
+        assert kb.list_runs(conn, tid)[0].cost_usd == pytest.approx(0.02)
+
+
+def test_k5b_in_process_metadata_wins_over_backfill(kanban_home):
+    """K5b only fills GAPS: an in-process cost is kept; only the missing
+    token columns are backfilled from state.db."""
+    sid = "sess-mix"
+    _write_state_session(
+        kanban_home, sid, input_tokens=700, output_tokens=80, actual_cost=9.99,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="acp-work", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done",
+            metadata={"worker_session_id": sid, "cost_usd": 0.01},
+        )
+        run = kb.list_runs(conn, tid)[0]
+        assert run.cost_usd == pytest.approx(0.01)  # in-process value kept
+        assert run.input_tokens == 700  # gap backfilled
+        assert run.output_tokens == 80
+
+
+def test_k5b_no_session_match_is_noop(kanban_home):
+    """K5b: a worker_session_id absent from state.db leaves cost NULL."""
+    _write_state_session(
+        kanban_home, "other-sess", input_tokens=10, output_tokens=5, actual_cost=0.01,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done", metadata={"worker_session_id": "missing-sess"},
+        )
+        run = kb.list_runs(conn, tid)[0]
+        assert run.cost_usd is None
+        assert run.input_tokens is None
+
+
+def test_k5b_missing_state_db_is_fail_soft(kanban_home):
+    """K5b: no state.db on disk → NO-OP, _end_run never raises."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done", metadata={"worker_session_id": "any"},
+        )
+        assert kb.list_runs(conn, tid)[0].cost_usd is None
+
+
+def test_k5b_state_db_without_sessions_table_is_fail_soft(kanban_home):
+    """K5b: a state.db lacking the sessions table → caught, NO-OP."""
+    db = Path(kanban_home) / "state.db"
+    c0 = sqlite3.connect(str(db))
+    c0.execute("CREATE TABLE other (x)")
+    c0.commit()
+    c0.close()
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn, tid, result="done", metadata={"worker_session_id": "any"},
+        )
+        assert kb.list_runs(conn, tid)[0].cost_usd is None
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 

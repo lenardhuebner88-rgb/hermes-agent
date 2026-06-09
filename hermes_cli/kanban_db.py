@@ -3205,6 +3205,71 @@ def _extract_run_cost_tokens(
     return input_tokens, output_tokens, cost_usd
 
 
+def _state_db_path() -> Path:
+    """Path to the agent session DB (``state.db``), paired with kanban.db's
+    root. Mirrors ``hermes_state.DEFAULT_DB_PATH`` without importing that
+    heavy module into the kanban write path (K5b)."""
+    from hermes_constants import get_default_hermes_root
+    return get_default_hermes_root() / "state.db"
+
+
+def _backfill_cost_from_state_db(
+    session_id: str,
+) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    """K5b: read a worker session's token/cost from ``state.db`` (read-only).
+
+    Keyed by ``metadata.worker_session_id`` (stamped only for ACP workers, so
+    coverage is intentionally PARTIAL). Fully fail-soft and isolated:
+
+    * Opens ``state.db`` on a SEPARATE read-only connection (``mode=ro``) — it
+      can never acquire a lock on ``kanban.db`` nor write anywhere.
+    * Short busy-timeout so a locked/contended ``state.db`` fails fast to a
+      NO-OP instead of extending the caller's open kanban write transaction.
+    * Any error (missing/locked DB, absent ``sessions`` table, no matching
+      row) returns ``(None, None, None)`` — it must NEVER raise into
+      ``_end_run``.
+    """
+    if not session_id:
+        return None, None, None
+    try:
+        path = _state_db_path()
+    except Exception:
+        return None, None, None
+    try:
+        if not path.exists():
+            return None, None, None
+    except Exception:
+        return None, None, None
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=0.5,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=200")
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, actual_cost_usd, "
+            "estimated_cost_usd FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    except Exception:
+        return None, None, None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if row is None:
+        return None, None, None
+    in_tok = _coerce_int(row["input_tokens"])
+    out_tok = _coerce_int(row["output_tokens"])
+    cost = _coerce_float(row["actual_cost_usd"])
+    if cost is None:
+        cost = _coerce_float(row["estimated_cost_usd"])
+    return in_tok, out_tok, cost
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3234,8 +3299,24 @@ def _end_run(
     # K5a: in-process token/cost write-back. Pull usage out of the metadata the
     # caller handed us (the only in-process source); absent → NULL. COALESCE
     # keeps any value a prior write already set, so re-closing never clobbers
-    # real numbers with NULL. The cross-DB state.db backfill is K5b.
+    # real numbers with NULL.
     in_tok, out_tok, cost = _extract_run_cost_tokens(metadata)
+    # K5b: cross-DB backfill. Only when in-process data left a gap AND the run
+    # carries a worker_session_id, look it up in state.db (read-only, fail-soft,
+    # partial coverage = ACP workers only). Never raises; can't lock kanban.db.
+    if (in_tok is None or out_tok is None or cost is None) and isinstance(metadata, dict):
+        session_id = metadata.get("worker_session_id")
+        if session_id:
+            try:
+                b_in, b_out, b_cost = _backfill_cost_from_state_db(str(session_id))
+            except Exception:
+                b_in = b_out = b_cost = None
+            if in_tok is None:
+                in_tok = b_in
+            if out_tok is None:
+                out_tok = b_out
+            if cost is None:
+                cost = b_cost
     conn.execute(
         """
         UPDATE task_runs
