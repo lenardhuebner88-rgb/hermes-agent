@@ -864,6 +864,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
     p_stats.add_argument("--json", action="store_true")
 
+    p_bfcost = sub.add_parser(
+        "backfill-costs",
+        help="Deferred profile-aware cost backfill for closed runs with NULL "
+             "cost_usd (reads each worker's per-profile state.db)",
+    )
+    p_bfcost.add_argument("--limit", type=int, default=500,
+                          help="Max closed runs to scan (newest first; default 500)")
+    p_bfcost.add_argument("--since-hours", type=int, default=None,
+                          help="Only runs ended within the last H hours (default: all)")
+
     # --- notify subscribe / list / remove ---
     p_nsub = sub.add_parser(
         "notify-subscribe",
@@ -1141,6 +1151,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "daemon":   _cmd_daemon,
             "watch":    _cmd_watch,
             "stats":    _cmd_stats,
+            "backfill-costs": _cmd_backfill_costs,
             "log":      _cmd_log,
             "runs":     _cmd_runs,
             "heartbeat": _cmd_heartbeat,
@@ -2900,6 +2911,17 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     age = stats["oldest_ready_age_seconds"]
     if age is not None:
         print(f"\nOldest ready task age: {int(age)}s")
+    return 0
+
+
+def _cmd_backfill_costs(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        n = kb.backfill_run_costs(
+            conn,
+            limit=args.limit,
+            since_seconds=(args.since_hours * 3600 if args.since_hours else None),
+        )
+    print(f"backfilled cost on {n} runs")
     return 0
 
 

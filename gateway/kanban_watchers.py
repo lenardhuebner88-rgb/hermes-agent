@@ -1891,6 +1891,26 @@ class GatewayKanbanWatchersMixin:
                             bad_ticks,
                         )
                         last_warn_at = now
+
+                # K16: bounded, profile-aware cost backfill for runs whose
+                # final cost flushed to the worker's per-profile state.db
+                # AFTER _end_run ran (so cost_usd was left NULL). Runs once
+                # per tick, capped tight, fully fail-soft — must NEVER affect
+                # dispatch. Off-loop via to_thread like the rest of this tick.
+                try:
+                    def _backfill_recent_costs() -> int:
+                        with _kb.connect_closing() as _c:
+                            return _kb.backfill_run_costs(
+                                _c, limit=50, since_seconds=6 * 3600,
+                            )
+                    n_cost = await asyncio.to_thread(_backfill_recent_costs)
+                    if n_cost:
+                        logger.info(
+                            "kanban dispatcher: backfilled cost on %d recent run(s)",
+                            n_cost,
+                        )
+                except Exception as exc:
+                    logger.debug("kanban dispatcher: cost backfill skipped (%s)", exc)
             except asyncio.CancelledError:
                 logger.debug("kanban dispatcher: cancelled")
                 raise

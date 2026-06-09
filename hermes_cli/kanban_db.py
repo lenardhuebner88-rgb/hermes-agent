@@ -3253,6 +3253,8 @@ def _state_db_path() -> Path:
 
 def _backfill_cost_from_state_db(
     session_id: str,
+    *,
+    profile: Optional[str] = None,
 ) -> tuple[Optional[int], Optional[int], Optional[float]]:
     """K5b: read a worker session's token/cost from ``state.db`` (read-only).
 
@@ -3266,13 +3268,30 @@ def _backfill_cost_from_state_db(
     * Any error (missing/locked DB, absent ``sessions`` table, no matching
       row) returns ``(None, None, None)`` — it must NEVER raise into
       ``_end_run``.
+
+    K16: when ``profile`` is given and non-empty, prefer that profile's
+    ``state.db`` (each kanban worker is a ``hermes -p <profile> chat``
+    subprocess whose session cost lands in the PER-PROFILE ``state.db``, not
+    the hub one). The per-profile path is resolved fail-soft; if it can't be
+    resolved or doesn't exist we fall back to the hub ``_state_db_path()`` so
+    the existing ``_end_run`` caller (``profile=None``) is unaffected.
     """
     if not session_id:
         return None, None, None
-    try:
-        path = _state_db_path()
-    except Exception:
-        return None, None, None
+    path = None
+    if profile:
+        try:
+            from hermes_cli.profiles import resolve_profile_env
+            candidate = Path(resolve_profile_env(profile)) / "state.db"
+            if candidate.exists():
+                path = candidate
+        except Exception:
+            path = None
+    if path is None:
+        try:
+            path = _state_db_path()
+        except Exception:
+            return None, None, None
     try:
         if not path.exists():
             return None, None, None
@@ -3306,6 +3325,77 @@ def _backfill_cost_from_state_db(
     if cost is None:
         cost = _coerce_float(row["estimated_cost_usd"])
     return in_tok, out_tok, cost
+
+
+def backfill_run_costs(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+    since_seconds: Optional[int] = None,
+) -> int:
+    """K16: deferred, profile-aware cost backfill for closed runs.
+
+    The in-process K5a/K5b write-back at ``_end_run`` time often misses the
+    worker's final cost: the worker is a ``hermes -p <profile> chat``
+    subprocess whose session is flushed to the PER-PROFILE ``state.db`` AFTER
+    completion, and the old K5b lookup read only the hub ``state.db``. This
+    runs LATER, profile-aware, over runs that still have ``cost_usd IS NULL``.
+
+    For each candidate run, looks up its ``metadata.worker_session_id`` in the
+    run's own ``profile`` ``state.db`` (``_backfill_cost_from_state_db`` with
+    ``profile=…``) and COALESCE-fills the token/cost columns. Returns the count
+    of runs whose ``cost_usd`` was newly set. Fully fail-soft: a single bad row
+    never aborts the batch, and a run without ``worker_session_id`` is skipped.
+    """
+    sql = (
+        "SELECT id, profile, metadata FROM task_runs "
+        "WHERE cost_usd IS NULL AND ended_at IS NOT NULL"
+    )
+    params: list[Any] = []
+    if since_seconds is not None:
+        sql += " AND ended_at >= ?"
+        params.append(int(time.time()) - int(since_seconds))
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+
+    updated = 0
+    for row in rows:
+        try:
+            run_id = row["id"]
+            profile = row["profile"]
+            raw_meta = row["metadata"]
+            try:
+                metadata = json.loads(raw_meta) if raw_meta else None
+            except (TypeError, ValueError):
+                metadata = None
+            if not isinstance(metadata, dict):
+                continue
+            session_id = metadata.get("worker_session_id")
+            if not session_id:
+                continue
+            b_in, b_out, b_cost = _backfill_cost_from_state_db(
+                str(session_id), profile=profile,
+            )
+            if b_in is None and b_out is None and b_cost is None:
+                continue
+            with write_txn(conn):
+                conn.execute(
+                    """
+                    UPDATE task_runs
+                       SET input_tokens  = COALESCE(?, input_tokens),
+                           output_tokens = COALESCE(?, output_tokens),
+                           cost_usd      = COALESCE(?, cost_usd)
+                     WHERE id = ?
+                    """,
+                    (b_in, b_out, b_cost, run_id),
+                )
+            if b_cost is not None:
+                updated += 1
+        except Exception:
+            # Per-row isolation: one bad row never aborts the batch.
+            continue
+    return updated
 
 
 def _end_run(

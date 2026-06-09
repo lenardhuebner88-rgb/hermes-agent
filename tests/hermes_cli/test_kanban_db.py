@@ -282,6 +282,172 @@ def test_k5b_state_db_without_sessions_table_is_fail_soft(kanban_home):
         assert kb.list_runs(conn, tid)[0].cost_usd is None
 
 
+# ---------------------------------------------------------------------------
+# K16: deferred, profile-aware cost backfill
+# ---------------------------------------------------------------------------
+
+def _write_profile_state_session(
+    profile_dir, session_id, *,
+    input_tokens=None, output_tokens=None,
+    actual_cost=None, estimated_cost=None,
+):
+    """Create a profile-local state.db with a single sessions row (K16)."""
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    db = profile_dir / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, "
+            "actual_cost_usd REAL, estimated_cost_usd REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions "
+            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, input_tokens, output_tokens, actual_cost, estimated_cost),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
+def _insert_ended_run(conn, task_id, *, profile, metadata, ended_at=None):
+    """Insert a closed run row directly (cost_usd NULL). Returns run id."""
+    import json as _json
+    now = int(time.time())
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, started_at, ended_at, outcome, metadata) "
+        "VALUES (?, ?, 'done', ?, ?, 'completed', ?)",
+        (
+            task_id, profile, now, ended_at if ended_at is not None else now,
+            _json.dumps(metadata) if metadata is not None else None,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_k16_backfill_cost_profile_aware_lookup(kanban_home, tmp_path, monkeypatch):
+    """K16: with profile=… the per-profile state.db is used (not the hub one)."""
+    profile_dir = tmp_path / "profiles" / "critic"
+    sid = "sess-prof"
+    _write_profile_state_session(
+        profile_dir, sid, input_tokens=850, output_tokens=130, estimated_cost=0.0522,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(profile_dir),
+    )
+    in_tok, out_tok, cost = kb._backfill_cost_from_state_db(sid, profile="critic")
+    assert in_tok == 850
+    assert out_tok == 130
+    assert cost == pytest.approx(0.0522)
+
+
+def test_k16_backfill_cost_prefers_actual_over_estimated(kanban_home, tmp_path, monkeypatch):
+    """K16: actual_cost_usd wins over estimated_cost_usd when both present."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    sid = "sess-both"
+    _write_profile_state_session(
+        profile_dir, sid, input_tokens=10, output_tokens=20,
+        actual_cost=0.07, estimated_cost=0.05,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(profile_dir),
+    )
+    _, _, cost = kb._backfill_cost_from_state_db(sid, profile="coder")
+    assert cost == pytest.approx(0.07)
+
+
+def test_k16_backfill_run_costs_sets_cost_and_counts(kanban_home, tmp_path, monkeypatch):
+    """K16: an ended run with NULL cost + worker_session_id gets its cost
+    backfilled from the run's per-profile state.db; idempotent on re-run."""
+    profile_dir = tmp_path / "profiles" / "critic"
+    sid = "S1"
+    _write_profile_state_session(
+        profile_dir, sid, input_tokens=900, output_tokens=140, estimated_cost=0.033,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(profile_dir),
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="costed", assignee="critic")
+        run_id = _insert_ended_run(
+            conn, tid, profile="critic",
+            metadata={"worker_session_id": sid},
+        )
+
+        n = kb.backfill_run_costs(conn, limit=50)
+        assert n == 1
+
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row["input_tokens"] == 900
+        assert row["output_tokens"] == 140
+        assert row["cost_usd"] == pytest.approx(0.033)
+
+        # Idempotent: cost is no longer NULL → the row is no longer a candidate.
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+
+
+def test_k16_backfill_run_costs_skips_run_without_session_id(kanban_home, tmp_path, monkeypatch):
+    """K16: a run with no worker_session_id is skipped, never crashes."""
+    profile_dir = tmp_path / "profiles" / "critic"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(profile_dir),
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="no-sess", assignee="critic")
+        run_id = _insert_ended_run(
+            conn, tid, profile="critic", metadata={"other": "x"},
+        )
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+        row = conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert row["cost_usd"] is None
+
+
+def test_k16_backfill_run_costs_fail_soft_missing_profile_db(kanban_home, monkeypatch):
+    """K16: a profile whose state.db is absent → 0 backfilled, no raise."""
+    def _raise(name):
+        raise FileNotFoundError(f"Profile '{name}' does not exist.")
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _raise)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="ghost", assignee="ghost")
+        run_id = _insert_ended_run(
+            conn, tid, profile="ghost",
+            metadata={"worker_session_id": "S-ghost"},
+        )
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+        row = conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert row["cost_usd"] is None
+
+
+def test_k16_backfill_cost_falls_back_to_hub_when_profile_none(kanban_home):
+    """K16 regression: profile=None preserves the legacy hub-state.db path —
+    the _end_run caller (which never passes profile) is unaffected."""
+    sid = "hub-sess"
+    _write_state_session(
+        kanban_home, sid, input_tokens=11, output_tokens=22, actual_cost=0.009,
+    )
+    in_tok, out_tok, cost = kb._backfill_cost_from_state_db(sid)
+    assert in_tok == 11
+    assert out_tok == 22
+    assert cost == pytest.approx(0.009)
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 

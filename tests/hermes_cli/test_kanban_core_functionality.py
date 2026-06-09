@@ -3787,8 +3787,11 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     # skips the dispatch connect because the corrupt board fingerprint is
     # disabled, but the ready/review probes still each connect. PR f55d94a1e
     # added the review-column probe alongside the existing ready-column
-    # probe, bumping this from 3 → 5.
-    assert calls["connect"] == 5
+    # probe, bumping this from 3 → 5. K16 added a per-tick, fail-soft cost
+    # backfill (`connect_closing` → one more `_kb.connect` per tick); on a
+    # corrupt board that connect raises and is swallowed, so it adds exactly
+    # one connect to each of the two ticks: 5 → 7.
+    assert calls["connect"] == 7
 
 
 def test_gateway_dispatcher_retries_corrupt_board_after_quarantine(
