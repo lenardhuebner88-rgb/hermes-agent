@@ -1673,6 +1673,28 @@ class GatewayKanbanWatchersMixin:
                 boards = _kb.list_boards(include_archived=False)
             except Exception:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+
+            def _bump_decompose_counter(target_id: str, *, ok: bool) -> None:
+                """Fail-soft decompose-failure bookkeeping.
+
+                A counter bump must never break the decomposition tick, so
+                any DB error is swallowed (logged at debug). The board is
+                already pinned via HERMES_KANBAN_BOARD, so connect() with no
+                kwarg targets the right DB — same idiom as the rest of this
+                function.
+                """
+                try:
+                    with _kb.connect_closing() as _conn:
+                        if ok:
+                            _kb.reset_decompose_failed(_conn, target_id)
+                        else:
+                            _kb.record_decompose_failure(_conn, target_id)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "kanban auto-decompose: decompose_failed bump failed on %s (%s)",
+                        target_id, exc,
+                    )
+
             attempted = 0
             successes = 0
             for b in boards:
@@ -1707,9 +1729,11 @@ class GatewayKanbanWatchersMixin:
                                 "kanban auto-decompose: decompose_task crashed on %s",
                                 tid,
                             )
+                            _bump_decompose_counter(tid, ok=False)
                             continue
                         if outcome.ok:
                             successes += 1
+                            _bump_decompose_counter(outcome.task_id, ok=True)
                             if outcome.fanout and outcome.child_ids:
                                 logger.info(
                                     "kanban auto-decompose [%s]: %s → %d children",
@@ -1721,6 +1745,7 @@ class GatewayKanbanWatchersMixin:
                                     slug, tid,
                                 )
                         else:
+                            _bump_decompose_counter(outcome.task_id, ok=False)
                             # Common no-op reasons (no aux client configured) shouldn't
                             # spam logs every tick. Log at debug.
                             logger.debug(

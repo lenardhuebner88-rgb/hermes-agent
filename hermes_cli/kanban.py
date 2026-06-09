@@ -3135,6 +3135,16 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
         outcome = decomp.decompose_task(tid, author=author)
         if outcome.ok:
             ok_count += 1
+        # Fail-soft decompose-failure bookkeeping. A counter bump must
+        # never break the decomposition flow, so swallow any DB error.
+        try:
+            with kb.connect_closing() as _conn:
+                if outcome.ok:
+                    kb.reset_decompose_failed(_conn, outcome.task_id)
+                else:
+                    kb.record_decompose_failure(_conn, outcome.task_id)
+        except Exception:  # pragma: no cover - defensive
+            pass
         if want_json:
             print(json.dumps({
                 "task_id": outcome.task_id,

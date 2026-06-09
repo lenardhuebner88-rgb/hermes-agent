@@ -1104,6 +1104,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- The circuit breaker in _record_task_failure trips when this
     -- exceeds DEFAULT_FAILURE_LIMIT consecutive non-successes.
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    -- Lifetime count of failed auto_decompose attempts for this task.
+    -- Incremented whenever ``decompose_task`` returns ok=False (or
+    -- crashes) for the task; reset to 0 on a successful decompose. Unlike
+    -- ``consecutive_failures`` this is a decompose-specific signal and does
+    -- NOT feed the spawn circuit breaker.
+    decompose_failed     INTEGER NOT NULL DEFAULT 0,
     worker_pid           INTEGER,
     -- Short excerpt of the most recent failure's error text.
     last_failure_error   TEXT,
@@ -1799,6 +1805,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "current_run_id" not in cols:
         _add_column_if_missing(
             conn, "tasks", "current_run_id", "current_run_id INTEGER"
+        )
+    if "decompose_failed" not in cols:
+        # Per-task lifetime counter of failed auto_decompose attempts.
+        # Additive; existing rows get the DEFAULT 0. Mirrors the
+        # ``consecutive_failures`` migration above but is decompose-specific
+        # and never feeds the spawn circuit breaker.
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "decompose_failed",
+            "decompose_failed INTEGER NOT NULL DEFAULT 0",
         )
     if "workflow_template_id" not in cols:
         _add_column_if_missing(
@@ -7286,6 +7303,41 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 
 # Legacy alias for test-code and anything else that still imports it.
 _clear_spawn_failures = _clear_failure_counter
+
+
+def record_decompose_failure(conn: sqlite3.Connection, task_id: str) -> int:
+    """Bump the per-task ``decompose_failed`` counter and return its new value.
+
+    Called from the auto_decompose callers when ``decompose_task`` returns
+    ok=False or crashes for ``task_id``. Decompose-specific bookkeeping that
+    is independent of the spawn circuit breaker (``consecutive_failures``).
+    Returns 0 when the row doesn't exist.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET decompose_failed = decompose_failed + 1 "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        if cur.rowcount == 0:
+            return 0
+        row = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        return int(row["decompose_failed"]) if row is not None else 0
+
+
+def reset_decompose_failed(conn: sqlite3.Connection, task_id: str) -> None:
+    """Reset the per-task ``decompose_failed`` counter to 0.
+
+    Called on a successful decompose — a fresh success means the task's
+    decomposition is working and any past failures are history.
+    """
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET decompose_failed = 0 WHERE id = ?",
+            (task_id,),
+        )
 
 
 def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

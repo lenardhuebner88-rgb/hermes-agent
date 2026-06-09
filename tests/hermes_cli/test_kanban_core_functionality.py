@@ -3544,6 +3544,44 @@ def test_cli_create_no_warn_unassigned(kanban_home, monkeypatch, capsys):
     assert "hermes gateway start" not in err
 
 
+def _make_decompose_ns(task_id, **overrides):
+    """Build a Namespace suitable for kb_cli._cmd_decompose()."""
+    ns = argparse.Namespace(
+        task_id=task_id, all_triage=False, tenant=None,
+        author="tester", json=False,
+    )
+    for k, v in overrides.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def test_k11_cli_decompose_failure_increments_counter(kanban_home, capsys):
+    """K11 wiring: a deterministic ok=False decompose (task NOT in triage —
+    no LLM/network needed) bumps the task's ``decompose_failed`` counter via
+    the _cmd_decompose code path."""
+    from hermes_cli import kanban as kb_cli
+    with kb.connect() as conn:
+        # A normal assigned task is created in ``ready`` (not triage), so
+        # decompose_task short-circuits to ok=False "not in triage".
+        tid = kb.create_task(conn, title="not-triage", assignee="worker")
+        assert kb.get_task(conn, tid).status != "triage"
+        before = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()["decompose_failed"]
+    assert before == 0
+
+    # Non-success decompose returns 1 (per-task failure rc), not a crash.
+    rc = kb_cli._cmd_decompose(_make_decompose_ns(tid))
+    assert rc == 1
+    assert "not in triage" in capsys.readouterr().err
+
+    with kb.connect() as conn:
+        after = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()["decompose_failed"]
+    assert after == 1
+
+
 def test_cli_daemon_without_force_prints_deprecation_exits_2(kanban_home, capsys):
     """`hermes kanban daemon` (no --force) is a deprecation stub."""
     from hermes_cli import kanban as kb_cli

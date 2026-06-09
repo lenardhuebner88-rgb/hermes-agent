@@ -68,6 +68,59 @@ def test_k5a_task_runs_cost_columns_present_and_migrate_idempotently(kanban_home
             assert cols2.count(name) == 1
 
 
+def test_k11_decompose_failed_column_present_and_defaults_zero(kanban_home):
+    """K11: tasks gains ``decompose_failed`` (additive), defaulting to 0 on a
+    fresh task."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "decompose_failed" in cols
+        tid = kb.create_task(conn, title="fresh")
+        row = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row["decompose_failed"] == 0
+
+
+def test_k11_record_and_reset_decompose_failure(kanban_home):
+    """K11: ``record_decompose_failure`` increments and returns the new value;
+    ``reset_decompose_failed`` clears it back to 0."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="flaky")
+        assert kb.record_decompose_failure(conn, tid) == 1
+        assert kb.record_decompose_failure(conn, tid) == 2
+        row = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row["decompose_failed"] == 2
+        kb.reset_decompose_failed(conn, tid)
+        row = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row["decompose_failed"] == 0
+
+
+def test_k11_record_decompose_failure_missing_row_returns_zero(kanban_home):
+    """K11: a counter bump on a non-existent task is a no-op returning 0."""
+    with kb.connect() as conn:
+        assert kb.record_decompose_failure(conn, "t_ghost") == 0
+
+
+def test_k11_decompose_failed_migration_idempotent(kanban_home):
+    """K11: re-running the additive migration is a no-op — no duplicate-column
+    crash and the column survives + preserves its value."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="survivor")
+        assert kb.record_decompose_failure(conn, tid) == 1
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+        assert cols.count("decompose_failed") == 1
+        row = conn.execute(
+            "SELECT decompose_failed FROM tasks WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row["decompose_failed"] == 1
+
+
 def test_k5a_end_run_writes_back_tokens_cost_from_metadata(kanban_home):
     """K5a: _end_run persists usage from the in-process metadata dict."""
     with kb.connect() as conn:
