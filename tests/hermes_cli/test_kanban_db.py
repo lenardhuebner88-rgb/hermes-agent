@@ -3020,6 +3020,54 @@ class TestClaudeCliWorkerSpawn:
         m_idx = cmd.index("--model")
         assert cmd[m_idx + 1] == "claude-opus-4-8"
 
+    # --- model routing: per-profile default (claude_model) ----------------
+
+    def _spawn_capture_model(self, tmp_path, monkeypatch, *, config_text, model_override=None):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        (default_home / "config.yaml").write_text(config_text, encoding="utf-8")
+        self._set_home(monkeypatch, tmp_path, default_home)
+        monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                self.pid = 9999
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+        task = self._make_task(tmp_path, assignee="coder", model_override=model_override)
+        kb._default_spawn(task, str(tmp_path / "ws"))
+        return captured["cmd"]
+
+    def test_claude_worker_uses_profile_default_model(self, tmp_path, monkeypatch):
+        # worker_runtime flag + claude_model default, no per-task override →
+        # the profile's claude_model is the --model (routing tier 2).
+        cmd = self._spawn_capture_model(
+            tmp_path, monkeypatch,
+            config_text="worker_runtime: claude-cli\nclaude_model: claude-fable-5\n",
+        )
+        assert cmd[cmd.index("--model") + 1] == "claude-fable-5"
+
+    def test_claude_worker_override_beats_profile_default(self, tmp_path, monkeypatch):
+        # Per-task override (tier 1) wins over the profile default (tier 2).
+        cmd = self._spawn_capture_model(
+            tmp_path, monkeypatch,
+            config_text="worker_runtime: claude-cli\nclaude_model: claude-fable-5\n",
+            model_override="claude-opus-4-8",
+        )
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
+
+    def test_claude_worker_no_model_flag_when_unset(self, tmp_path, monkeypatch):
+        # Flagged worker, no override, no claude_model → omit --model so claude
+        # falls back to the subscription default (routing tier 3).
+        cmd = self._spawn_capture_model(
+            tmp_path, monkeypatch,
+            config_text="worker_runtime: claude-cli\n",
+        )
+        assert "--model" not in cmd
+
     # --- default (hermes) path stays byte-identical -----------------------
 
     def test_default_spawn_no_flag_uses_hermes_path(self, tmp_path, monkeypatch):

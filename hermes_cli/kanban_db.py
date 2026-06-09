@@ -8988,6 +8988,39 @@ def _is_claude_cli_profile(profile_arg: str, hermes_home: Optional[str]) -> bool
         return False
 
 
+def _claude_profile_model(hermes_home: Optional[str]) -> Optional[str]:
+    """Per-profile default claude model for a claude-CLI worker.
+
+    Reads the top-level ``claude_model`` key from the profile-scoped
+    ``<hermes_home>/config.yaml``. Returns None on any error / absence so the
+    worker falls back to the claude subscription default. This is the MIDDLE
+    tier of claude model routing:
+
+        task.model_override  (per-task escalation, highest)
+        > claude_model       (per-profile default tier — this helper)
+        > subscription default (omit --model, currently opus-4-8)
+
+    A profile can thus default to a fast/cheap tier (e.g. ``claude-fable-5``)
+    while hard tasks escalate to Opus via the per-task override.
+    """
+    try:
+        if not hermes_home:
+            return None
+        import yaml
+        cfg_path = os.path.join(hermes_home, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if isinstance(cfg, dict):
+            model = cfg.get("claude_model")
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        return None
+    except Exception:
+        return None
+
+
 def _spawn_claude_worker(
     task: Task,
     workspace: str,
@@ -9036,8 +9069,12 @@ def _spawn_claude_worker(
         "--dangerously-skip-permissions",
         "--output-format", "json",
     ]
-    if task.model_override:
-        cmd.extend(["--model", task.model_override])
+    # Model routing: per-task override > per-profile default (claude_model) >
+    # subscription default (omit --model). A profile can default to a fast/cheap
+    # tier (e.g. claude-fable-5) while hard tasks escalate via model_override.
+    worker_model = task.model_override or _claude_profile_model(env.get("HERMES_HOME"))
+    if worker_model:
+        cmd.extend(["--model", worker_model])
 
     # Per-task log under <board-root>/logs/ — mirror the hermes path so
     # `hermes kanban log` reads the same file and rotation is identical.
