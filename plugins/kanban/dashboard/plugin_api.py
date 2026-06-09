@@ -272,6 +272,10 @@ def _run_dict(conn: sqlite3.Connection, r: kanban_db.Run) -> dict[str, Any]:
         "summary": r.summary,
         "metadata": r.metadata,
         "error": r.error,
+        # K5a: per-run token/cost accounting (NULL until a run records usage).
+        "input_tokens": r.input_tokens,
+        "output_tokens": r.output_tokens,
+        "cost_usd": r.cost_usd,
     }
     d.update(_run_lineage_fields(conn, r.task_id, r.id))
     return d

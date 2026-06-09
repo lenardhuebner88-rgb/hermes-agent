@@ -991,6 +991,10 @@ class Run:
     summary: Optional[str]
     metadata: Optional[dict]
     error: Optional[str]
+    # K5a: per-run token/cost accounting (NULL until a run records usage).
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -998,6 +1002,14 @@ class Run:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
             meta = None
+
+        def _opt(key: str) -> Any:
+            # K5a columns may be absent on rows from narrower SELECTs; tolerate.
+            try:
+                return row[key]
+            except (IndexError, KeyError):
+                return None
+
         return cls(
             id=int(row["id"]),
             task_id=row["task_id"],
@@ -1015,6 +1027,9 @@ class Run:
             summary=row["summary"],
             metadata=meta,
             error=row["error"],
+            input_tokens=_coerce_int(_opt("input_tokens")),
+            output_tokens=_coerce_int(_opt("output_tokens")),
+            cost_usd=_coerce_float(_opt("cost_usd")),
         )
 
 
@@ -1876,6 +1891,35 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_events_run "
         "ON task_events(run_id, id)"
     )
+
+    # K5a: task_runs gained per-run token/cost accounting columns for D7 L1
+    # cost observability. Additive + nullable — historical runs (and any run
+    # the gateway can't attribute token usage to) stay NULL, which the
+    # aggregations (board_stats / get_task / runs summary) treat as "no cost
+    # recorded". The in-process write-back lives in ``_end_run``; the
+    # cross-DB backfill from ``state.db`` is a separate fail-soft slice (K5b).
+    # Guard on table existence: the legacy-migration path can run this on a
+    # very old DB built from just the ``tasks`` table (task_runs predates the
+    # additive-column era but a hand-rolled legacy fixture may omit it).
+    runs_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+    ).fetchone() is not None
+    if runs_table_exists:
+        run_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        }
+        if "input_tokens" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "input_tokens", "input_tokens INTEGER"
+            )
+        if "output_tokens" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "output_tokens", "output_tokens INTEGER"
+            )
+        if "cost_usd" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "cost_usd", "cost_usd REAL"
+            )
 
     notify_table_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
@@ -3091,6 +3135,76 @@ def _append_event(
     )
 
 
+def _coerce_int(val: Any) -> Optional[int]:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(val: Any) -> Optional[float]:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_run_cost_tokens(
+    metadata: Optional[dict],
+) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    """K5a: pull (input_tokens, output_tokens, cost_usd) out of run metadata.
+
+    Purely in-process: the only source is the ``metadata`` dict a caller
+    hands to ``_end_run`` (e.g. a worker that recorded its own usage).
+    Tolerant of the common shapes — top-level keys, a nested ``usage`` block,
+    and the OpenAI-style ``prompt_tokens``/``completion_tokens`` aliases.
+    Returns ``(None, None, None)`` when nothing usable is present, so a run
+    with no usage data writes NULLs rather than crashing or guessing. The
+    cross-DB ``state.db`` backfill is a separate slice (K5b).
+    """
+    if not isinstance(metadata, dict):
+        return None, None, None
+    usage = metadata.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+
+    def _first_int(*vals: Any) -> Optional[int]:
+        for v in vals:
+            out = _coerce_int(v)
+            if out is not None:
+                return out
+        return None
+
+    def _first_float(*vals: Any) -> Optional[float]:
+        for v in vals:
+            out = _coerce_float(v)
+            if out is not None:
+                return out
+        return None
+
+    input_tokens = _first_int(
+        metadata.get("input_tokens"),
+        usage.get("input_tokens"),
+        usage.get("prompt_tokens"),
+    )
+    output_tokens = _first_int(
+        metadata.get("output_tokens"),
+        usage.get("output_tokens"),
+        usage.get("completion_tokens"),
+    )
+    cost_usd = _first_float(
+        metadata.get("cost_usd"),
+        metadata.get("actual_cost_usd"),
+        metadata.get("estimated_cost_usd"),
+        metadata.get("cost"),
+        usage.get("cost_usd"),
+    )
+    return input_tokens, output_tokens, cost_usd
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3117,6 +3231,11 @@ def _end_run(
     if not row or not row["current_run_id"]:
         return None
     run_id = int(row["current_run_id"])
+    # K5a: in-process token/cost write-back. Pull usage out of the metadata the
+    # caller handed us (the only in-process source); absent → NULL. COALESCE
+    # keeps any value a prior write already set, so re-closing never clobbers
+    # real numbers with NULL. The cross-DB state.db backfill is K5b.
+    in_tok, out_tok, cost = _extract_run_cost_tokens(metadata)
     conn.execute(
         """
         UPDATE task_runs
@@ -3126,6 +3245,9 @@ def _end_run(
                error         = ?,
                metadata      = ?,
                ended_at      = ?,
+               input_tokens  = COALESCE(?, input_tokens),
+               output_tokens = COALESCE(?, output_tokens),
+               cost_usd      = COALESCE(?, cost_usd),
                claim_lock    = NULL,
                claim_expires = NULL,
                worker_pid    = NULL
@@ -3139,6 +3261,9 @@ def _end_run(
             error,
             json.dumps(metadata, ensure_ascii=False) if metadata else None,
             now,
+            in_tok,
+            out_tok,
+            cost,
             run_id,
         ),
     )

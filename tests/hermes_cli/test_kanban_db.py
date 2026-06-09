@@ -51,6 +51,60 @@ def test_init_creates_expected_tables(kanban_home):
     assert {"tasks", "task_links", "task_comments", "task_events"} <= names
 
 
+def test_k5a_task_runs_cost_columns_present_and_migrate_idempotently(kanban_home):
+    """K5a: task_runs gains input_tokens/output_tokens/cost_usd, and re-running
+    the additive migration is a no-op (idempotent, no duplicate-column crash)."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
+        assert {"input_tokens", "output_tokens", "cost_usd"} <= cols
+        # Re-running the migration twice on the live connection must not raise.
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols2 = [
+            r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")
+        ]
+        # Still exactly one of each column — no duplicates introduced.
+        for name in ("input_tokens", "output_tokens", "cost_usd"):
+            assert cols2.count(name) == 1
+
+
+def test_k5a_end_run_writes_back_tokens_cost_from_metadata(kanban_home):
+    """K5a: _end_run persists usage from the in-process metadata dict."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="costed", assignee="worker")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(
+            conn, tid,
+            result="done",
+            metadata={
+                "usage": {"input_tokens": 1200, "output_tokens": 340},
+                "cost_usd": 0.0153,
+            },
+        )
+        assert ok
+        runs = kb.list_runs(conn, tid)
+        assert len(runs) == 1
+        assert runs[0].input_tokens == 1200
+        assert runs[0].output_tokens == 340
+        assert runs[0].cost_usd == pytest.approx(0.0153)
+        # K6 per-task cost sum now reflects the written-back value.
+        assert kb.task_runs_cost_usd_sum(conn, task_id=tid) == pytest.approx(0.0153)
+
+
+def test_k5a_end_run_leaves_cost_null_without_usage(kanban_home):
+    """K5a: a run with no usage metadata writes NULLs, never crashes."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="no-usage", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, result="done")
+        runs = kb.list_runs(conn, tid)
+        assert len(runs) == 1
+        assert runs[0].input_tokens is None
+        assert runs[0].output_tokens is None
+        assert runs[0].cost_usd is None
+        assert kb.task_runs_cost_usd_sum(conn, task_id=tid) is None
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 
