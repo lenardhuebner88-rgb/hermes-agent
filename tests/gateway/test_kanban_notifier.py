@@ -739,3 +739,123 @@ def test_standalone_completion_still_sends_single_report(tmp_path, monkeypatch):
     assert text.startswith("✅ Hermes Report — Task abgeschlossen")
     assert "Teilaufgaben" not in text
     assert tid in text
+
+
+def _patch_stall_flush_config(monkeypatch, *, hours=0):
+    """Patch load_config so the F1 stall-flush threshold is ``hours`` old."""
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "descendants_blocked_parent_hours": hours,
+            }
+        },
+    )
+
+
+def _build_stalled_tree(db_path, monkeypatch):
+    """Root (sink) with A,B completed (suppressed) and C sticky-blocked → root
+    can never complete. Returns (root, a, b, c)."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship the feature", triage=True)
+        kb.add_notify_sub(conn, task_id=root, platform="telegram", chat_id="chat-1")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "build module A", "assignee": "coder", "parents": []},
+                {"title": "build module B", "assignee": "coder", "parents": []},
+                {"title": "build module C", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None and len(child_ids) == 3
+        a, b, c = child_ids
+        kb.complete_task(conn, a, summary="Modul A gebaut.")  # suppressed by K2
+        kb.complete_task(conn, b, summary="Modul B gebaut.")  # suppressed by K2
+        assert kb.block_task(conn, c, reason="review-required: needs operator")
+        return root, a, b, c
+    finally:
+        conn.close()
+
+
+def test_stalled_root_flushes_suppressed_child_successes(tmp_path, monkeypatch):
+    """F1: when a root can never complete (a member is sticky-blocked), the
+    child-successes K2 suppressed are flushed once as a trailing report."""
+    db_path = tmp_path / "stalled-flush.db"
+    root, a, b, c = _build_stalled_tree(db_path, monkeypatch)
+    _patch_stall_flush_config(monkeypatch, hours=0)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    flushes = [s for s in adapter.sent if "steckt fest" in s["text"]]
+    assert len(flushes) == 1
+    text = flushes[0]["text"]
+    # The two swallowed successes are surfaced; the blocked member is shown too.
+    assert a in text and b in text
+    assert "Modul A gebaut" in text and "Modul B gebaut" in text
+    assert root in text
+    # The blocked member still gets its own per-task failure ping (K2 keeps it).
+    assert any("blocked" in s["text"] for s in adapter.sent)
+
+
+def test_stalled_root_flush_is_not_double_posted(tmp_path, monkeypatch):
+    """F1: a second tick must not re-flush a root already flushed (dedup)."""
+    db_path = tmp_path / "stalled-flush-dedup.db"
+    _build_stalled_tree(db_path, monkeypatch)
+    _patch_stall_flush_config(monkeypatch, hours=0)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    first = [s for s in adapter.sent if "steckt fest" in s["text"]]
+    assert len(first) == 1
+
+    # Second tick: no new stall flush, even though the root is still stalled.
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    all_flushes = [s for s in adapter.sent if "steckt fest" in s["text"]]
+    assert len(all_flushes) == 1
+
+
+def test_active_root_with_pending_work_does_not_flush(tmp_path, monkeypatch):
+    """F1: a root that can still complete (no dead-end member) is left alone —
+    its suppressed successes wait for K2's consolidated report."""
+    db_path = tmp_path / "active-no-flush.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship it", triage=True)
+        kb.add_notify_sub(conn, task_id=root, platform="telegram", chat_id="chat-1")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "build A", "assignee": "coder", "parents": []},
+                {"title": "build B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        a, _b = child_ids
+        kb.complete_task(conn, a, summary="A fertig.")  # suppressed; B still open
+    finally:
+        conn.close()
+    _patch_stall_flush_config(monkeypatch, hours=0)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert not any("steckt fest" in s["text"] for s in adapter.sent)

@@ -25,9 +25,9 @@ logger = logging.getLogger("gateway.run")
 _COMPLETED_HANDOFF_LIMIT = 1600
 
 _REPORTING_ROUTE_KINDS = {
-    "received", "completed", "blocked", "gave_up",
+    "received", "completed", "blocked", "gave_up", "tree_stalled_flush",
 }
-_NORMAL_REPORT_KINDS = {"received", "completed"}
+_NORMAL_REPORT_KINDS = {"received", "completed", "tree_stalled_flush"}
 
 
 def _clean_completed_handoff(text: str, *, limit: int = _COMPLETED_HANDOFF_LIMIT) -> str:
@@ -306,6 +306,169 @@ def _format_tree_completed_report(
     return _clean_completed_handoff("\n".join(lines), limit=1900)
 
 
+# ── F1 (S2): flush suppressed child-successes for abandoned/stalled roots ────
+# K2 suppresses an interior work node's ``completed`` report and rolls it into
+# the ONE report the sink/root emits when it completes. But if a root NEVER
+# becomes terminal — a member is sticky-blocked or the circuit-breaker gave_up,
+# so the sink can never go ``done`` — those already-consumed child successes are
+# swallowed forever (no emitter fires). F1 detects such a stalled root and
+# flushes the suppressed successes as ONE trailing ``tree_stalled_flush`` report.
+# Emitted at most once per root (dedup marker = the event itself) and only while
+# the root is non-terminal; if the root later completes, K2's consolidated
+# report fires normally and no flush is added (we never flush a terminal root).
+def _member_is_dead_end(conn: Any, member_id: str, now: int, threshold_s: float) -> bool:
+    """True when a tree member is a permanent dead-end that strands its root.
+
+    Either (a) sticky-blocked (worker/operator ``kanban_block``, not a
+    recoverable circuit-breaker) with the newest ``blocked`` event at least
+    ``threshold_s`` old, or (b) a ``gave_up`` circuit-breaker event at least
+    ``threshold_s`` old. Read-only; fail-soft (any hiccup → not-dead-end).
+    """
+    from hermes_cli import kanban_db as _kb
+    try:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (member_id,)
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    if row["status"] == "blocked":
+        try:
+            if _kb._has_sticky_block(conn, member_id):
+                last = conn.execute(
+                    "SELECT MAX(created_at) FROM task_events "
+                    "WHERE task_id = ? AND kind = 'blocked'",
+                    (member_id,),
+                ).fetchone()[0]
+                if last is not None and (now - int(last)) >= threshold_s:
+                    return True
+        except Exception:
+            pass
+    try:
+        last_gu = conn.execute(
+            "SELECT MAX(created_at) FROM task_events "
+            "WHERE task_id = ? AND kind = 'gave_up'",
+            (member_id,),
+        ).fetchone()[0]
+    except Exception:
+        last_gu = None
+    return last_gu is not None and (now - int(last_gu)) >= threshold_s
+
+
+def _format_tree_stall_flush_report(
+    conn: Any,
+    root_id: str,
+    members: list[dict[str, Any]],
+    _kb: Any,
+    *,
+    kanban_cfg: Optional[dict] = None,
+) -> str:
+    """One trailing report for a stalled root's suppressed child-successes (F1)."""
+    root_task = _kb.get_task(conn, root_id)
+    root_title = (getattr(root_task, "title", None) or root_id)[:160]
+    total = len(members)
+    done = sum(1 for m in members if m["status"] in {"done", "archived"})
+    lines = [
+        f"⚠️ Hermes Report — Auftrag steckt fest "
+        f"({done}/{total} Teilaufgaben fertig, Root nicht abgeschlossen)",
+        f"Auftrag: {root_id} — {root_title}",
+        "Bereits erledigte (bisher unterdrückte) Teilaufgaben:",
+    ]
+    for m in members[:_MAX_TREE_SUBTASKS_SHOWN]:
+        if m["status"] in {"done", "archived"}:
+            mark = "✅"
+        elif m["status"] == "blocked":
+            mark = "⏸"
+        elif m["status"] == "gave_up":
+            mark = "✖"
+        else:
+            mark = "•"
+        suffix = f": {m['kurz']}" if m["kurz"] else ""
+        lines.append(f"- {mark} {m['id']} {m['title']}{suffix}")
+    if total > _MAX_TREE_SUBTASKS_SHOWN:
+        lines.append(f"- … +{total - _MAX_TREE_SUBTASKS_SHOWN} weitere")
+    lines.append(f"Dashboard: {_dashboard_link(kanban_cfg, root_id)}")
+    return _clean_completed_handoff("\n".join(lines), limit=1900)
+
+
+def _flush_stalled_trees_for_board(
+    conn: Any, _kb: Any, kanban_cfg: dict, *, now: Optional[int] = None,
+) -> int:
+    """Emit a one-time ``tree_stalled_flush`` event on each stalled sink/root.
+
+    A candidate is a *subscribed* task that is a sink (has parents, no
+    children), is non-terminal, was not flushed before, has at least one
+    long dead-end member (sticky-blocked / gave_up past the threshold) AND at
+    least one suppressed success (``done``/``archived`` member). Returns the
+    number of flush events emitted. Fully fail-soft per root.
+    """
+    now = int(now if now is not None else time.time())
+    hours = float(kanban_cfg.get("descendants_blocked_parent_hours", 24) or 0)
+    threshold_s = hours * 3600.0
+    emitted = 0
+    try:
+        candidates = [
+            r["task_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT task_id FROM kanban_notify_subs"
+            )
+        ]
+    except Exception:
+        return 0
+    for root_id in candidates:
+        try:
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()
+            if row is None or row["status"] in {"done", "archived"}:
+                continue  # only stalled (non-terminal) roots
+            if _kb.child_ids(conn, root_id):
+                continue  # not a sink — interior node, K2 handles it
+            if not _kb.parent_ids(conn, root_id):
+                continue  # standalone task — no tree to flush
+            if conn.execute(
+                "SELECT 1 FROM task_events "
+                "WHERE task_id = ? AND kind = 'tree_stalled_flush' LIMIT 1",
+                (root_id,),
+            ).fetchone():
+                continue  # already flushed once — no double-post
+            members = _collect_tree_members(conn, root_id, _kb)
+            if not any(
+                _member_is_dead_end(conn, mid, now, threshold_s) for mid in members
+            ):
+                continue  # root could still progress — leave to K2
+            details: list[dict[str, Any]] = []
+            for mid in members:
+                detail = _tree_member_detail(conn, mid, _kb)
+                if detail is not None:
+                    details.append(detail)
+            if not any(d["status"] in {"done", "archived"} for d in details):
+                continue  # nothing suppressed to surface
+            details.sort(key=lambda m: (m["created_at"], m["id"]))
+            text = _format_tree_stall_flush_report(
+                conn, root_id, details, _kb, kanban_cfg=kanban_cfg,
+            )
+            _kb.add_event(
+                conn, root_id, "tree_stalled_flush",
+                {
+                    "summary": text,
+                    "suppressed": [
+                        d["id"] for d in details
+                        if d["status"] in {"done", "archived"}
+                    ],
+                },
+            )
+            emitted += 1
+        except Exception:
+            logger.debug(
+                "kanban notifier: stall-flush sweep failed for %s",
+                root_id, exc_info=True,
+            )
+            continue
+    return emitted
+
+
 def _format_received_report(event: Any, task: Any, *, board: Optional[str] = None) -> str:
     task_id = getattr(event, "task_id", None) or getattr(task, "id", "") or "<unknown>"
     title = (getattr(task, "title", None) or task_id)[:160]
@@ -457,7 +620,7 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
             return
 
-        REPORT_KINDS = ("received", "completed", "blocked", "gave_up", "crashed", "timed_out")
+        REPORT_KINDS = ("received", "completed", "blocked", "gave_up", "crashed", "timed_out", "tree_stalled_flush")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -489,6 +652,19 @@ class GatewayKanbanWatchersMixin:
 
         while self._running:
             try:
+                # F1: before collecting deliveries, flush any stalled root's
+                # suppressed child-successes as a one-time trailing report.
+                # Fully fail-soft — a sweep hiccup must never stop the tick.
+                try:
+                    await asyncio.to_thread(
+                        self._kanban_flush_stalled_trees, kanban_cfg, _kb,
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban notifier: stall-flush sweep tick failed",
+                        exc_info=True,
+                    )
+
                 def _collect():
                     deliveries: list[dict] = []
                     active_platforms = {
@@ -667,6 +843,18 @@ class GatewayKanbanWatchersMixin:
                                     _root_run,
                                     board=board_slug,
                                     kanban_cfg=kanban_cfg,
+                                )
+                        elif kind == "tree_stalled_flush":
+                            # F1: trailing flush of a stalled root's suppressed
+                            # child-successes; the consolidated text was built
+                            # and stored on the event at emit time.
+                            msg = ""
+                            if ev.payload and ev.payload.get("summary"):
+                                msg = str(ev.payload["summary"])
+                            if not msg:
+                                msg = (
+                                    f"⚠️ {tag}Kanban-Auftrag {sub['task_id']} steckt fest; "
+                                    "bereits erledigte Teilaufgaben siehe Board."
                                 )
                         elif kind == "received":
                             msg = _format_received_report(ev, task, board=board_slug)
@@ -880,6 +1068,50 @@ class GatewayKanbanWatchersMixin:
             return None
         finally:
             conn.close()
+
+    def _kanban_flush_stalled_trees(self, kanban_cfg: Optional[dict], _kb: Any) -> None:
+        """F1 sweep: emit one-time stall-flush events across every board.
+
+        Runs in ``to_thread`` once per notifier tick (before delivery
+        collection) so a freshly-emitted ``tree_stalled_flush`` is delivered
+        the same tick. Mirrors the notifier's board enumeration and is fully
+        fail-soft per board — never raises into the tick loop.
+        """
+        cfg = kanban_cfg if isinstance(kanban_cfg, dict) else {}
+        try:
+            boards = _kb.list_boards(include_archived=False)
+        except Exception:
+            try:
+                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            except Exception:
+                return
+        seen_db_paths: set[str] = set()
+        for board_meta in boards:
+            slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+            db_path = board_meta.get("db_path")
+            try:
+                resolved = (
+                    str(Path(db_path).expanduser().resolve())
+                    if db_path else str(_kb.kanban_db_path(slug).resolve())
+                )
+            except Exception:
+                resolved = f"slug:{slug}"
+            if resolved in seen_db_paths:
+                continue
+            seen_db_paths.add(resolved)
+            try:
+                conn = _kb.connect(board=slug)
+            except Exception:
+                continue
+            try:
+                _flush_stalled_trees_for_board(conn, _kb, cfg)
+            except Exception:
+                logger.debug(
+                    "kanban notifier: stall-flush sweep failed on board %s",
+                    slug, exc_info=True,
+                )
+            finally:
+                conn.close()
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,
