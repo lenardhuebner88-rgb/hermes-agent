@@ -4529,6 +4529,192 @@ def _submit_for_review(
     return True
 
 
+def _resolve_workflow_next_step(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[tuple[str, str]]:
+    """Return ``(next_step_key, next_assignee)`` when *task_id* is a workflow
+    task with a step *after* its current one, else ``None`` (K8 / D7 L2).
+
+    Fail-soft by contract: a task with no ``workflow_template_id`` / no
+    ``current_step_key``, a missing/broken template, an unknown current step,
+    or a current step that is already the *final* one all return ``None`` so
+    the caller (:func:`complete_task`) falls through to the unchanged
+    completion path. Any error is swallowed — a workflow lookup must never
+    block a completion.
+    """
+    try:
+        row = conn.execute(
+            "SELECT workflow_template_id, current_step_key "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    template_id = row["workflow_template_id"]
+    step_key = row["current_step_key"]
+    if not template_id or not step_key:
+        return None
+    try:
+        from hermes_cli.kanban_workflows import load_workflow_template
+
+        tmpl = load_workflow_template(template_id)
+    except Exception:
+        return None
+    if tmpl is None:
+        return None
+    next_key = tmpl.next_step_key(step_key)
+    if not next_key:
+        return None
+    next_assignee = tmpl.assignee_for(next_key)
+    if not next_assignee:
+        return None
+    return (next_key, next_assignee)
+
+
+def _workflow_step_assignee(
+    template_id: Optional[str], step_key: Optional[str]
+) -> Optional[str]:
+    """Return the assignee for *step_key* in *template_id*, fail-soft.
+
+    Used by :func:`dispatch_once` to route a workflow task by its current
+    step instead of the static ``assignee`` column. ``None`` (template
+    missing/broken or step unknown) means "fall back to the column assignee".
+    """
+    if not template_id or not step_key:
+        return None
+    try:
+        from hermes_cli.kanban_workflows import load_workflow_template
+
+        tmpl = load_workflow_template(template_id)
+    except Exception:
+        return None
+    if tmpl is None:
+        return None
+    return tmpl.assignee_for(step_key)
+
+
+def _advance_workflow_step(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    next_step_key: str,
+    next_assignee: str,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+    verified_cards: list,
+    expected_run_id: Optional[int],
+) -> bool:
+    """Advance a workflow task to its next step instead of completing it.
+
+    Mirrors :func:`complete_task`'s run-closing + handoff-event payload (so the
+    summary/artifacts surface to the next step's worker and the dashboard), but
+    sets the task back to ``ready`` with the next step's ``current_step_key`` +
+    ``assignee`` so the dispatcher re-spawns the next role. Like
+    :func:`_submit_for_review`, it does NOT unblock children (the task is not
+    ``done``) and does NOT clean the workspace (the next step may inspect it).
+
+    The completing worker's run is closed as a normal success — the step DID
+    finish; the *task* is what moves on. The consecutive-failures counter is
+    cleared (the step succeeded) so a transient failure under the previous role
+    cannot prematurely trip the circuit breaker for the next role.
+    """
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status           = 'ready',
+                       current_step_key = ?,
+                       assignee         = ?,
+                       result           = ?,
+                       claim_lock       = NULL,
+                       claim_expires    = NULL,
+                       worker_pid       = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                """,
+                (next_step_key, next_assignee, result, task_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status           = 'ready',
+                       current_step_key = ?,
+                       assignee         = ?,
+                       result           = ?,
+                       claim_lock       = NULL,
+                       claim_expires    = NULL,
+                       worker_pid       = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                   AND current_run_id = ?
+                """,
+                (next_step_key, next_assignee, result, task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn, task_id,
+            outcome="completed", status="ready",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+        if run_id is None and (summary or metadata or result):
+            run_id = _synthesize_ended_run(
+                conn, task_id,
+                outcome="completed",
+                summary=summary if summary is not None else result,
+                metadata=metadata,
+            )
+        ev_summary = (summary if summary is not None else result) or ""
+        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+        payload: dict = {
+            "next_step_key": next_step_key,
+            "next_assignee": next_assignee,
+            "result_len": len(result) if result else 0,
+            "summary": ev_summary or None,
+        }
+        if verified_cards:
+            payload["verified_cards"] = verified_cards
+        if isinstance(metadata, dict):
+            md_artifacts = metadata.get("artifacts")
+            if isinstance(md_artifacts, (list, tuple)):
+                cleaned_artifacts = [
+                    str(p).strip() for p in md_artifacts
+                    if isinstance(p, str) and str(p).strip()
+                ]
+                if cleaned_artifacts:
+                    payload["artifacts"] = cleaned_artifacts
+        _append_event(
+            conn, task_id, "workflow_step_advanced", payload, run_id=run_id,
+        )
+    # Advisory phantom-ref scan, same as the done/review paths (own txn).
+    scan_text = " ".join(filter(None, [summary, result]))
+    if scan_text:
+        phantom_refs = _scan_prose_for_phantom_ids(conn, scan_text)
+        phantom_refs = [
+            p for p in phantom_refs if p not in set(verified_cards or [])
+        ]
+        if phantom_refs:
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "suspected_hallucinated_references",
+                    {
+                        "phantom_refs": phantom_refs,
+                        "source": "completion_summary",
+                    },
+                    run_id=run_id,
+                )
+    # The step succeeded — reset the failure counter so the next role starts
+    # clean (mirrors complete_task's success semantics).
+    _clear_failure_counter(conn, task_id)
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4602,6 +4788,25 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # K8 workflow-step routing (D7 L2): when the task is opted into a workflow
+    # template and its current step is NOT the last, advance to the next step
+    # (back to 'ready', re-assigned to the next role) instead of completing.
+    # Sits BEFORE the review gate so a workflow's own ordered steps — not the
+    # generic code-role review gate — drive the routing of a workflow task.
+    # Fail-soft: no template_id, a missing/broken template, an unknown step,
+    # or the FINAL step all return None here and fall through to the unchanged
+    # done/review path below — so a non-workflow completion is byte-identical
+    # to today and a workflow task is never stranded by template breakage.
+    _wf_next = _resolve_workflow_next_step(conn, task_id)
+    if _wf_next is not None:
+        _next_step_key, _next_assignee = _wf_next
+        return _advance_workflow_step(
+            conn, task_id,
+            next_step_key=_next_step_key, next_assignee=_next_assignee,
+            result=result, summary=summary, metadata=metadata,
+            verified_cards=verified_cards, expected_run_id=expected_run_id,
+        )
 
     # Phase 2 review gate: park code-bearing worker completions in 'review'
     # for an independent verifier instead of moving straight to 'done'.
@@ -7067,7 +7272,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     genuinely dead (no live PID on this host).
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, workflow_template_id FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -7117,13 +7322,21 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
         return "blocker_auth"
 
     # 3. Completed run within guard window — proof of recent success.
-    cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
-    if conn.execute(
-        "SELECT id FROM task_runs "
-        "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ?",
-        (task_id, cutoff),
-    ).fetchone():
-        return "recent_success"
+    #    K8 exemption: a native workflow task (``workflow_template_id`` set)
+    #    that is ``ready`` is mid-chain — its most recent completed run belongs
+    #    to the PREVIOUS step, and the workflow exists precisely to auto-advance
+    #    to the next role rather than "wait for human review". Guarding it here
+    #    would stall every step boundary for the full success window. The final
+    #    step lands in ``done`` (never re-enters ``ready``), so there is no
+    #    respawn-loop risk. Non-workflow tasks are unaffected (byte-identical).
+    if not row["workflow_template_id"]:
+        cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
+        if conn.execute(
+            "SELECT id FROM task_runs "
+            "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ?",
+            (task_id, cutoff),
+        ).fetchone():
+            return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
@@ -7881,7 +8094,7 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, workflow_template_id, current_step_key FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -7940,6 +8153,44 @@ def dispatch_once(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
+        # K8 workflow-step routing (D7 L2): a task opted into a workflow
+        # template is routed by its CURRENT STEP, not the static assignee
+        # column. Resolve the step's role and — when it differs — persist it to
+        # the row (so the downstream claim_task→spawn uses it and the board
+        # reflects the active role), mirroring the default_assignee auto-assign
+        # below. Fail-soft: a missing/broken template or an unresolvable step
+        # leaves the column assignee untouched, so the task routes exactly as
+        # today. Non-workflow tasks (NULL workflow_template_id) skip this block
+        # entirely → byte-identical to the legacy path.
+        _wf_template_id = row["workflow_template_id"]
+        if _wf_template_id:
+            _wf_role = _workflow_step_assignee(
+                _wf_template_id, row["current_step_key"]
+            )
+            if _wf_role and _wf_role != row_assignee:
+                if not dry_run:
+                    try:
+                        with write_txn(conn):
+                            conn.execute(
+                                "UPDATE tasks SET assignee = ? WHERE id = ?",
+                                (_wf_role, row["id"]),
+                            )
+                            _append_event(
+                                conn, row["id"], "assigned",
+                                {
+                                    "assignee": _wf_role,
+                                    "source": "workflow_step",
+                                    "step_key": row["current_step_key"],
+                                    "workflow_template_id": _wf_template_id,
+                                },
+                            )
+                    except Exception:
+                        _log.debug(
+                            "kanban dispatch: failed to apply workflow step "
+                            "assignee=%r to task %s",
+                            _wf_role, row["id"], exc_info=True,
+                        )
+                row_assignee = _wf_role
         if not row_assignee:
             # Honour kanban.default_assignee: when the dispatcher hits an
             # unassigned ready task and an operator-configured fallback
