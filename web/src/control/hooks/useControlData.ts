@@ -779,16 +779,18 @@ export function useTaskDetail() {
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
-  const fetch = useCallback(async (taskId: string) => {
+  const fetch = useCallback(async (taskId: string): Promise<TaskDetailResponse | null> => {
     setLoadingId(taskId);
     try {
       const raw = await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`);
       const data = parseOrThrow(TaskDetailResponseSchema, raw, "tasks/detail");
-      if (!aliveRef.current) return;
+      if (!aliveRef.current) return data;
       setDetailById((prev) => ({ ...prev, [taskId]: data }));
       setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+      return data;
     } catch (err) {
       if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: err instanceof Error ? err.message : String(err) }));
+      return null;
     } finally {
       if (aliveRef.current) setLoadingId(null);
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("BacklogResponseSchema (Family Organizer contract health)", () => {
   it("preserves unknown status/risk values and parses contract-health drift", () => {
@@ -433,6 +433,34 @@ describe("SystemHealthResponseSchema", () => {
     expect(parsed.subsystems.gateway.latency_ms).toBe(8);
     expect(parsed.subsystems.autoresearch.heartbeat_age_s).toBe(12);
     expect(parsed.subsystems.kanban_db.status).toBe("offline");
+  });
+});
+
+
+describe("TaskDetailResponseSchema", () => {
+  it("keeps dependency links from /tasks/:id so Flow can explain the selected chain", () => {
+    const parsed = parseOrThrow(TaskDetailResponseSchema, {
+      task: { id: "t_child", title: "Dependent", status: "todo", assignee: "coder", latest_summary: null },
+      links: { parents: ["t_parent_a", "t_parent_b"], children: ["t_next"] },
+      runs: [],
+      events: [],
+      deliverables: [],
+    }, "kanban/task-detail");
+
+    expect(parsed.links.parents).toEqual(["t_parent_a", "t_parent_b"]);
+    expect(parsed.links.children).toEqual(["t_next"]);
+  });
+
+  it("defaults missing links to empty arrays for older task-detail payloads", () => {
+    const parsed = parseOrThrow(TaskDetailResponseSchema, {
+      task: { id: "t_old", title: "Old detail", status: "done", assignee: "coder" },
+      runs: [],
+      events: [],
+      deliverables: [],
+    }, "kanban/task-detail");
+
+    expect(parsed.links.parents).toEqual([]);
+    expect(parsed.links.children).toEqual([]);
   });
 });
 

@@ -28,4 +28,46 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/useHermesWorkers/);
     expect(src).toMatch(/groupByStage/);
   });
+
+  it("shows quiet operator explanations next to Flow subtask status pills", () => {
+    expect(src).toMatch(/getFlowSubtaskStatusExplanation/);
+    expect(src).toMatch(/c\.status === "blocked" \? c\.latest_summary : null/);
+    expect(src).toMatch(/hc-dim/);
+    expect(src).toMatch(/flex-wrap/);
+  });
+
+  it("renders a compact dependency-chain explanation from task-detail links", () => {
+    expect(src).toMatch(/FlowChainInsight/);
+    expect(src).toMatch(/detail\?\.links/);
+    expect(src).toMatch(/Gehalten/);
+    expect(src).toMatch(/Ready-Nachbar im Snapshot/);
+    expect(src).not.toMatch(/Startbarer Snapshot-Kandidat/);
+    expect(src).toMatch(/Läuft bereits/);
+    expect(src).toMatch(/Direkte Verknüpfungen/);
+    expect(src).toMatch(/Mögliche Vorgänger/);
+    expect(src).toMatch(/Snapshot-Hinweis/);
+    expect(src).toMatch(/todo ist uneindeutig/);
+    expect(src).toMatch(/Snapshot-Alter/);
+  });
+
+  it("does not promote raw task-detail parents into certain blocking-cause copy", () => {
+    expect(src).not.toMatch(/Wartet auf direkte Parents/);
+    expect(src).not.toMatch(/Fan-in: .*Parents müssen abgeschlossen sein/);
+    expect(src).not.toMatch(/Wartet auf direkte Parents:/);
+    expect(src).not.toMatch(/Parent-Warten/);
+    expect(src).not.toMatch(/label=\{`Parent /);
+  });
+
+  it("caveats chain-start copy as release-only rather than a force-run promise", () => {
+    expect(src).toMatch(/keine Scheduler-Zusage/);
+    expect(src).toMatch(/Queue\/Assignee/);
+    expect(src).toMatch(/gibt gehaltene Subtasks frei/);
+  });
+
+  it("guards single dispatch for held Flow subtasks with a chain-first choice", () => {
+    expect(src).toMatch(/getHeldFlowDispatchGuard/);
+    expect(src).toMatch(/singleDispatch/);
+    expect(src).toMatch(/onReleaseChain/);
+    expect(src).toMatch(/onDispatchSingle/);
+  });
 });

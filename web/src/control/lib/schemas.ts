@@ -647,11 +647,16 @@ const TaskDetailTaskSchema = z.object({
   assignee: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
 }).partial().catch({});
+const TaskLinksSchema = z.object({
+  parents: z.array(z.coerce.string()).catch([]),
+  children: z.array(z.coerce.string()).catch([]),
+}).catch({ parents: [], children: [] });
 export const TaskDetailResponseSchema = z.object({
   task: TaskDetailTaskSchema.nullable().catch(null),
   runs: z.array(TaskRunSchema).catch([]),
   events: z.array(TaskEventSchema).catch([]),
   deliverables: z.array(TaskDeliverableSchema).catch([]),
+  links: TaskLinksSchema.default({ parents: [], children: [] }),
 });
 export type TaskRun = z.infer<typeof TaskRunSchema>;
 export type TaskEvent = z.infer<typeof TaskEventSchema>;
