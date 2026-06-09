@@ -7883,12 +7883,27 @@ def dispatch_once(
                 result.held_role_mismatch.append((row["id"], hold_reason))
                 # Emit an event so operators see why it was held (and don't
                 # mistake the steadily-ready reviewer task for "stuck").
+                # F2: dedup — a held task is re-evaluated every dispatch tick,
+                # so without a guard it would emit one ``role_fit_held`` per
+                # tick forever, flooding the timeline. Emit only when the hold
+                # is newly observed: skip when the task's most recent event is
+                # already ``role_fit_held`` (nothing changed since the last
+                # hold). Any intervening event (re-route, comment, status
+                # change) makes the next hold emit a fresh diagnosis. The hold
+                # behaviour itself (append to result + ``continue``) is
+                # unchanged — only the duplicate event emission is suppressed.
                 if not dry_run:
-                    with write_txn(conn):
-                        _append_event(
-                            conn, row["id"], "role_fit_held",
-                            {"reason": hold_reason},
-                        )
+                    latest = conn.execute(
+                        "SELECT kind FROM task_events WHERE task_id = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (row["id"],),
+                    ).fetchone()
+                    if latest is None or latest["kind"] != "role_fit_held":
+                        with write_txn(conn):
+                            _append_event(
+                                conn, row["id"], "role_fit_held",
+                                {"reason": hold_reason},
+                            )
                 continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))

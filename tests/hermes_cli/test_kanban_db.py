@@ -1589,6 +1589,38 @@ def test_dispatch_holds_reviewer_role_execution_mismatch(
         assert "role_fit_held" in kinds
 
 
+def test_dispatch_role_fit_held_event_is_deduped_across_ticks(
+    kanban_home, all_assignees_spawnable
+):
+    """F2: a held reviewer task is re-evaluated every dispatch tick, but the
+    ``role_fit_held`` diagnosis event is emitted only once while the hold
+    state is unchanged — the hold itself stays reported every tick."""
+    def fake_spawn(task, workspace):  # noqa: ARG001 - never invoked for a held task
+        raise AssertionError("held task must not spawn")
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="Review the gate output",
+            assignee="reviewer",
+            body="Bitte führe reale gates aus und run pytest im Repo.",
+        )
+
+        res1 = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        res2 = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        # Hold behaviour is byte-identical every tick (still reported, ready).
+        assert t in [tid for tid, _ in res1.held_role_mismatch]
+        assert t in [tid for tid, _ in res2.held_role_mismatch]
+        assert kb.get_task(conn, t).status == "ready"
+
+        # But the diagnosis event fired exactly once across the two ticks.
+        held_events = [
+            e for e in kb.list_events(conn, t) if e.kind == "role_fit_held"
+        ]
+        assert len(held_events) == 1
+
+
 def test_dispatch_spawns_verdict_only_reviewer(
     kanban_home, all_assignees_spawnable
 ):
