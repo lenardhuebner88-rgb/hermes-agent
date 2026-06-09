@@ -8867,9 +8867,67 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
 # Stats + SLA helpers
 # ---------------------------------------------------------------------------
 
+def _nearest_rank_percentile(
+    sorted_vals: list[int], pct: float,
+) -> Optional[int]:
+    """Nearest-rank percentile over a pre-sorted list. ``None`` when empty.
+
+    Dependency-free (no ``statistics``/``math`` import) and deterministic —
+    fine for a HUD cycle-time signal where exact interpolation is unneeded.
+    """
+    if not sorted_vals:
+        return None
+    n = len(sorted_vals)
+    idx = int(round((pct / 100.0) * (n - 1)))
+    idx = max(0, min(n - 1, idx))
+    return int(sorted_vals[idx])
+
+
+def task_runs_cost_usd_sum(
+    conn: sqlite3.Connection,
+    *,
+    task_id: Optional[str] = None,
+    since_epoch: Optional[int] = None,
+) -> Optional[float]:
+    """Sum ``task_runs.cost_usd`` for a task or a recent window.
+
+    Defensive about the ``cost_usd`` column: it is added by K5a's additive
+    migration, so on a pre-K5a DB the column is absent and this returns
+    ``None`` rather than raising into the dashboard / notifier. Returns
+    ``None`` when there is no cost recorded (column present but all NULL).
+    """
+    where = []
+    params: list[Any] = []
+    if task_id is not None:
+        where.append("task_id = ?")
+        params.append(task_id)
+    if since_epoch is not None:
+        where.append("ended_at IS NOT NULL AND ended_at >= ?")
+        params.append(int(since_epoch))
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    try:
+        row = conn.execute(
+            f"SELECT SUM(cost_usd) AS c FROM task_runs{clause}", params,
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # pre-K5a: cost_usd column not yet migrated in
+    if row is None or row["c"] is None:
+        return None
+    try:
+        return float(row["c"])
+    except (TypeError, ValueError):
+        return None
+
+
 def board_stats(conn: sqlite3.Connection) -> dict:
     """Per-status + per-assignee counts, plus the oldest ``ready`` age in
     seconds (the clearest staleness signal for a router or HUD).
+
+    K6 additively surfaces L1 observability: throughput (``completed_last_24h``
+    / ``completed_last_7d``), cycle-time percentiles over the last 7d
+    (``completed_at - created_at``), and ``total_cost_usd_24h`` (summed from
+    ``task_runs.cost_usd``; ``None`` until K5a populates it). All pre-existing
+    keys are unchanged — callers reading ``by_status`` etc. keep working.
     """
     by_status: dict[str, int] = {}
     for row in conn.execute(
@@ -8895,11 +8953,41 @@ def board_stats(conn: sqlite3.Connection) -> dict:
         if oldest_row and oldest_row["ts"] is not None else None
     )
 
+    # K6: throughput + cycle-time. ``completed_at`` is stamped on every
+    # terminal transition (done/blocked-final), so count and cycle over it.
+    day_ago = now - 86_400
+    week_ago = now - 7 * 86_400
+    completed_last_24h = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks "
+        "WHERE completed_at IS NOT NULL AND completed_at >= ?",
+        (day_ago,),
+    ).fetchone()["n"])
+    completed_last_7d = int(conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks "
+        "WHERE completed_at IS NOT NULL AND completed_at >= ?",
+        (week_ago,),
+    ).fetchone()["n"])
+    durations = sorted(
+        int(r["dt"])
+        for r in conn.execute(
+            "SELECT completed_at - created_at AS dt FROM tasks "
+            "WHERE completed_at IS NOT NULL AND created_at IS NOT NULL "
+            "AND completed_at >= ?",
+            (week_ago,),
+        )
+        if r["dt"] is not None and int(r["dt"]) >= 0
+    )
+
     return {
         "by_status": by_status,
         "by_assignee": by_assignee,
         "oldest_ready_age_seconds": oldest_ready_age,
         "now": now,
+        "completed_last_24h": completed_last_24h,
+        "completed_last_7d": completed_last_7d,
+        "cycle_time_p50_seconds": _nearest_rank_percentile(durations, 50),
+        "cycle_time_p90_seconds": _nearest_rank_percentile(durations, 90),
+        "total_cost_usd_24h": task_runs_cost_usd_sum(conn, since_epoch=day_ago),
     }
 
 

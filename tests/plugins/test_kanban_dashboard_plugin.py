@@ -369,6 +369,39 @@ def test_task_detail_404_on_unknown(client):
     assert r.status_code == 404
 
 
+def test_task_detail_includes_cost_usd_field(client):
+    """K6: GET /tasks/:id surfaces a per-task cost_usd (sum over runs).
+    Pre-K5a there is no cost recorded, so the field is present but None."""
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "costed"},
+    ).json()["task"]
+    data = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()
+    assert "cost_usd" in data["task"]
+    assert data["task"]["cost_usd"] is None
+
+
+def test_stats_includes_k6_throughput_and_cost_keys(client):
+    """K6: GET /stats additively exposes throughput/cycle-time/cost keys
+    alongside the pre-existing per-status/per-assignee counts."""
+    t = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "done-one", "assignee": "x"},
+    ).json()["task"]
+    client.patch(
+        f"/api/plugins/kanban/tasks/{t['id']}", json={"status": "done"},
+    )
+    stats = client.get("/api/plugins/kanban/stats").json()
+    # Pre-existing keys still present.
+    assert "by_status" in stats and "by_assignee" in stats
+    # New additive keys.
+    for key in (
+        "completed_last_24h", "completed_last_7d",
+        "cycle_time_p50_seconds", "cycle_time_p90_seconds", "total_cost_usd_24h",
+    ):
+        assert key in stats
+    assert stats["completed_last_24h"] >= 1
+    assert stats["total_cost_usd_24h"] is None  # pre-K5a
+
+
 # ---------------------------------------------------------------------------
 # PATCH /tasks/:id — status transitions
 # ---------------------------------------------------------------------------

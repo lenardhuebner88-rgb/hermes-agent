@@ -498,6 +498,48 @@ def test_board_stats(kanban_home):
         conn.close()
 
 
+def test_board_stats_k6_throughput_cycle_time_and_cost(kanban_home):
+    """K6: board_stats gains additive throughput/cycle-time/cost keys without
+    disturbing the pre-existing keys (regression proof)."""
+    conn = kb.connect()
+    try:
+        a = kb.create_task(conn, title="a", assignee="x")
+        kb.create_task(conn, title="b", assignee="y")  # stays ready
+        kb.complete_task(conn, a, result="done")
+
+        stats = kb.board_stats(conn)
+        # Pre-existing keys must remain exactly as before.
+        for key in ("by_status", "by_assignee", "oldest_ready_age_seconds", "now"):
+            assert key in stats
+        assert stats["by_status"]["ready"] == 1
+        assert stats["by_status"]["done"] == 1
+
+        # New additive K6 keys.
+        assert stats["completed_last_24h"] == 1
+        assert stats["completed_last_7d"] == 1
+        # One completed task → both percentiles equal its (non-negative) cycle.
+        assert stats["cycle_time_p50_seconds"] is not None
+        assert stats["cycle_time_p50_seconds"] >= 0
+        assert stats["cycle_time_p90_seconds"] is not None
+        # Pre-K5a: no cost_usd column populated → total cost is None, not a crash.
+        assert stats["total_cost_usd_24h"] is None
+    finally:
+        conn.close()
+
+
+def test_task_runs_cost_usd_sum_is_fail_soft_pre_k5a(kanban_home):
+    """K6: summing cost over runs tolerates the missing cost_usd column
+    (added only by K5a) and returns None instead of raising."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="x")
+        kb.complete_task(conn, tid, result="done")
+        assert kb.task_runs_cost_usd_sum(conn, task_id=tid) is None
+        assert kb.task_runs_cost_usd_sum(conn, since_epoch=0) is None
+    finally:
+        conn.close()
+
+
 def test_task_age_helper(kanban_home):
     conn = kb.connect()
     try:

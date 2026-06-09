@@ -1130,6 +1130,9 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        # K6: per-task cost = sum of cost_usd across this task's runs.
+        # None until K5a populates the column / a run records a cost.
+        task_d["cost_usd"] = kanban_db.task_runs_cost_usd_sum(conn, task_id=task_id)
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
         diags = _compute_task_diagnostics(conn, task_ids=[task_id])
