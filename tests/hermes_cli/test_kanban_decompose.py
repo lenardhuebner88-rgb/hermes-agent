@@ -400,6 +400,14 @@ def test_decompose_prompt_mentions_scope_contract_allowed_tools():
     assert "require_scope_attestation" in decomp._SYSTEM_PROMPT
 
 
+def test_decompose_prompt_requires_verifiable_acceptance_criteria():
+    prompt = decomp._SYSTEM_PROMPT
+    assert "at least two acceptance criteria" in prompt.lower()
+    assert "AC-" in prompt
+    assert "verification" in prompt.lower()
+    assert "done_signal" in prompt
+
+
 def test_worker_scope_contract_validator_rejects_broad_allowed_tools():
     children = [{
         "title": "unsafe worker",

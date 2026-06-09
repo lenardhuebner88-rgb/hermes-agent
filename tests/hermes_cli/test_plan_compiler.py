@@ -50,6 +50,118 @@ Ship the compiler.
 """.replace("\n taskgraph_hints", "\ntaskgraph_hints")
 
 
+STRUCTURED_AC_PLAN = """---
+contract_version: 1
+goal: Ship a PlanSpec acceptance-criteria contract
+anti_scope:
+  - no runtime config changes
+acceptance_criteria:
+  - id: AC-PLAN-1
+    scope_level: plan
+    statement: Contract output preserves a structured acceptance criterion.
+    verification: Inspect compiled contract.yaml for AC-PLAN-1.
+    done_signal: contract.acceptance_criteria[0].id == AC-PLAN-1
+    owner: coder
+    required: true
+evidence_required:
+  - pytest tests/hermes_cli/test_plan_compiler.py passes
+risk_class: MEDIUM
+next_decision: Reviewer gate can inspect artifacts
+allowed_actions:
+  - edit hermes_cli local files
+forbidden_actions:
+  - restart services
+requires_approval:
+  - deploy or restart
+---
+## Goal
+Ship the compiler.
+
+## Acceptance Criteria
+- AC-PLAN-1 is structured and verifiable.
+
+## Anti-Scope
+- No runtime mutation.
+
+## Evidence Required
+- Tests pass.
+"""
+
+STRUCTURED_AC_MISSING_VERIFICATION = """---
+contract_version: 1
+goal: Reject incomplete structured criteria
+anti_scope:
+  - no runtime config changes
+acceptance_criteria:
+  - id: AC-PLAN-1
+    scope_level: plan
+    statement: Criterion has no verification.
+    done_signal: validation blocks
+evidence_required:
+  - pytest captures BLOCKED output
+risk_class: MEDIUM
+next_decision: Fix the criterion
+allowed_actions:
+  - edit plan only
+forbidden_actions:
+  - restart services
+requires_approval:
+  - deploy or restart
+---
+## Goal
+Reject the plan.
+
+## Acceptance Criteria
+- Structured ACs need verification.
+
+## Anti-Scope
+- No runtime mutation.
+
+## Evidence Required
+- Blocked output names the missing field.
+"""
+
+DUPLICATE_STRUCTURED_AC_IDS = """---
+contract_version: 1
+goal: Reject duplicate acceptance criteria ids
+anti_scope:
+  - no runtime config changes
+acceptance_criteria:
+  - id: AC-DUP-1
+    scope_level: plan
+    statement: First criterion.
+    verification: Inspect compiled contract.
+    done_signal: first signal
+  - id: AC-DUP-1
+    scope_level: review
+    statement: Second criterion.
+    verification: Inspect validation output.
+    done_signal: second signal
+evidence_required:
+  - pytest captures BLOCKED output
+risk_class: MEDIUM
+next_decision: Fix duplicate ids
+allowed_actions:
+  - edit plan only
+forbidden_actions:
+  - restart services
+requires_approval:
+  - deploy or restart
+---
+## Goal
+Reject the plan.
+
+## Acceptance Criteria
+- AC ids are unique.
+
+## Anti-Scope
+- No runtime mutation.
+
+## Evidence Required
+- Blocked output names duplicate ids.
+"""
+
+
 INVALID_PLAN = """---
 goal: Incomplete plan
 risk_class: MEDIUM
@@ -89,6 +201,63 @@ def test_compile_plan_emits_contract_receipt_source_and_schema(tmp_path: Path):
     assert "taskgraph draft" in receipt
     schema = json.loads(artifacts["schema"].read_text(encoding="utf-8"))
     assert schema["title"] == "PlanContract"
+
+
+def test_compile_plan_accepts_structured_acceptance_criteria(tmp_path: Path):
+    plan = tmp_path / "structured-ac-plan.md"
+    plan.write_text(STRUCTURED_AC_PLAN, encoding="utf-8")
+
+    artifacts = compile_plan(
+        plan,
+        compiled_root=tmp_path / "compiled",
+        templates_root=tmp_path / "templates",
+    )
+
+    contract = yaml.safe_load(artifacts["contract"].read_text(encoding="utf-8"))
+    criterion = contract["acceptance_criteria"][0]
+    assert criterion["id"] == "AC-PLAN-1"
+    assert criterion["scope_level"] == "plan"
+    assert criterion["verification"] == "Inspect compiled contract.yaml for AC-PLAN-1."
+    assert criterion["done_signal"] == "contract.acceptance_criteria[0].id == AC-PLAN-1"
+    assert criterion["owner"] == "coder"
+    assert criterion["required"] is True
+
+    schema = json.loads(artifacts["schema"].read_text(encoding="utf-8"))
+    assert "AcceptanceCriterion" in schema["$defs"]
+
+
+def test_structured_acceptance_criteria_require_verification(tmp_path: Path, capsys):
+    plan = tmp_path / "missing-verification.md"
+    plan.write_text(STRUCTURED_AC_MISSING_VERIFICATION, encoding="utf-8")
+
+    code = main([
+        str(plan),
+        "--compiled-root",
+        str(tmp_path / "compiled"),
+        "--templates-root",
+        str(tmp_path / "templates"),
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "acceptance_criteria.0.verification" in captured.err
+
+
+def test_structured_acceptance_criteria_ids_must_be_unique(tmp_path: Path, capsys):
+    plan = tmp_path / "duplicate-ac-ids.md"
+    plan.write_text(DUPLICATE_STRUCTURED_AC_IDS, encoding="utf-8")
+
+    code = main([
+        str(plan),
+        "--compiled-root",
+        str(tmp_path / "compiled"),
+        "--templates-root",
+        str(tmp_path / "templates"),
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "duplicate acceptance_criteria id: AC-DUP-1" in captured.err
 
 
 def test_invalid_plan_blocks_without_valid_output(tmp_path: Path, capsys):

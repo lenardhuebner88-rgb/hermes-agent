@@ -34,13 +34,53 @@ class TaskgraphHints(BaseModel):
     non_binding: bool = True
 
 
+class AcceptanceCriterion(BaseModel):
+    """Structured PlanSpec acceptance criterion.
+
+    Legacy v1 plans may still provide free-form strings. Dict items are treated
+    as PlanSpec-style criteria and must carry operator-verifiable evidence
+    fields so downstream workers/reviewers can prove the done signal.
+    """
+
+    id: str
+    scope_level: Literal["plan", "child", "review", "receipt"]
+    statement: str
+    verification: str
+    done_signal: str
+    owner: str = "coder"
+    applies_to: list[str] = Field(default_factory=list)
+    required: bool = True
+
+    @field_validator("id")
+    @classmethod
+    def _valid_id(cls, value: str) -> str:
+        value = str(value).strip()
+        if not value:
+            raise ValueError("must be a non-empty string")
+        if any(char.isspace() for char in value):
+            raise ValueError("must not contain whitespace")
+        return value
+
+    @field_validator("statement", "verification", "done_signal", "owner")
+    @classmethod
+    def _non_empty_text(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value.strip()
+
+    @field_validator("applies_to")
+    @classmethod
+    def _clean_applies_to(cls, value: list[str]) -> list[str]:
+        return [str(item).strip() for item in value if str(item).strip()]
+
+
 class PlanContract(BaseModel):
     """Contract schema source of truth for compiler v1."""
 
     contract_version: Literal[1] = 1
     goal: str
     anti_scope: list[str]
-    acceptance_criteria: list[str]
+    acceptance_criteria: list[str | AcceptanceCriterion]
     risk_class: Literal["LOW", "MEDIUM", "HIGH", "CROSS_SYSTEM"]
     evidence_required: list[str]
     next_decision: str
@@ -61,7 +101,6 @@ class PlanContract(BaseModel):
 
     @field_validator(
         "anti_scope",
-        "acceptance_criteria",
         "evidence_required",
         "allowed_actions",
         "forbidden_actions",
@@ -72,6 +111,23 @@ class PlanContract(BaseModel):
         if not isinstance(value, list) or not value:
             raise ValueError("must be a non-empty list")
         cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if not cleaned:
+            raise ValueError("must contain at least one non-empty item")
+        return cleaned
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def _non_empty_acceptance_criteria(cls, value: list[str | AcceptanceCriterion]) -> list[str | AcceptanceCriterion]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("must be a non-empty list")
+        cleaned: list[str | AcceptanceCriterion] = []
+        for item in value:
+            if isinstance(item, AcceptanceCriterion):
+                cleaned.append(item)
+            else:
+                text = str(item).strip()
+                if text:
+                    cleaned.append(text)
         if not cleaned:
             raise ValueError("must contain at least one non-empty item")
         return cleaned
@@ -122,6 +178,47 @@ def _as_list(data: dict[str, Any], key: str) -> list[str]:
     return []
 
 
+def _as_acceptance_criteria(data: dict[str, Any], key: str) -> list[Any]:
+    value = data.get(key)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _normalize_acceptance_criteria(raw_items: list[Any], findings: list[str]) -> list[str | AcceptanceCriterion]:
+    normalized: list[str | AcceptanceCriterion] = []
+    seen_ids: set[str] = set()
+
+    for index, item in enumerate(raw_items):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                normalized.append(text)
+            continue
+
+        if not isinstance(item, dict):
+            findings.append(f"acceptance_criteria.{index}: must be a string or mapping")
+            continue
+
+        try:
+            criterion = AcceptanceCriterion.model_validate(item)
+        except ValidationError as exc:
+            for error in exc.errors():
+                loc_parts = ["acceptance_criteria", str(index), *(str(part) for part in error.get("loc", ()))]
+                findings.append(f"{'.'.join(loc_parts)}: {error.get('msg')}")
+            continue
+
+        if criterion.id in seen_ids:
+            findings.append(f"duplicate acceptance_criteria id: {criterion.id}")
+            continue
+        seen_ids.add(criterion.id)
+        normalized.append(criterion)
+
+    return normalized
+
+
 def _role_hint(roles: list[str], index: int) -> str | None:
     if not roles:
         return None
@@ -169,7 +266,10 @@ def parse_plan(path: Path) -> PlanContract:
         "contract_version": frontmatter.get("contract_version", 1),
         "goal": frontmatter.get("goal") or frontmatter.get("title") or "",
         "anti_scope": _as_list(frontmatter, "anti_scope"),
-        "acceptance_criteria": _as_list(frontmatter, "acceptance_criteria"),
+        "acceptance_criteria": _normalize_acceptance_criteria(
+            _as_acceptance_criteria(frontmatter, "acceptance_criteria"),
+            findings,
+        ),
         "risk_class": str(frontmatter.get("risk_class", "")).upper(),
         "evidence_required": _as_list(frontmatter, "evidence_required"),
         "next_decision": frontmatter.get("next_decision") or "",

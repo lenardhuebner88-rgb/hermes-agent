@@ -91,6 +91,13 @@ Rules:
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
+  - Each child task body MUST include at least two acceptance criteria.
+    Prefer structured bullets with stable `AC-...` ids. Each criterion must
+    be outcome/state-oriented and name a concrete `verification` method
+    (tool output, file path, event, metadata field, test command, or reviewer
+    verdict) plus a concrete `done_signal` the worker/reviewer can cite.
+    Avoid vague activity-only criteria such as "implement X", "tests run",
+    or "documentation updated" without a specific proof signal.
   - For worker-lane children assigned to admin, coder, research, reviewer,
     or critic, include a structured YAML scope block in the body with
     `scope_contract.version: 2`, `allowed_tools`, and
