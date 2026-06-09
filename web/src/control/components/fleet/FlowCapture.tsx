@@ -3,8 +3,10 @@
  * header button on desktop and a sticky FAB on mobile (thumb-reachable above the
  * bottom tab nav); both open the same sheet. The sheet lets the operator pick an
  * honest mode before a REAL Kanban task is created (lib/fleet.captureRequest):
- *   • Parken (sicher, Default) → lands GEPARKT in Plan, no worker auto-starts.
- *   • An Orchestrator (auto)    → lands in Triage, the orchestrator takes over.
+ *   • An Orchestrator (Triage, Default) → lands in Triage; the in-gateway
+ *     orchestrator triages the raw prompt into subtasks / routes it.
+ *   • Parken (selbst dispatchen) → lands GEPARKT in Plan, no worker auto-starts;
+ *     the operator clicks Dispatch.
  * No optimistic illusion — on success the new card appears on the live board.
  */
 import { useEffect, useRef, useState } from "react";
@@ -39,7 +41,7 @@ function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSele
 
 function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?: (taskId: string) => void }) {
   const [title, setTitle] = useState("");
-  const [mode, setMode] = useState<CaptureMode>("park");
+  const [mode, setMode] = useState<CaptureMode>("orchestrate");
   const inputRef = useRef<HTMLInputElement>(null);
   const { state, error, capture, reset } = useCaptureTask(onCreated);
 
@@ -83,8 +85,8 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
         />
 
         <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.modeLabel}>
-          <ModeOption active={mode === "park"} onSelect={() => setMode("park")} title={de.flow.capture.modePark} hint={de.flow.capture.modeParkHint} />
           <ModeOption active={mode === "orchestrate"} onSelect={() => setMode("orchestrate")} title={de.flow.capture.modeOrchestrate} hint={de.flow.capture.modeOrchestrateHint} />
+          <ModeOption active={mode === "park"} onSelect={() => setMode("park")} title={de.flow.capture.modePark} hint={de.flow.capture.modeParkHint} />
         </div>
 
         {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}

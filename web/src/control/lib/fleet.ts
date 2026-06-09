@@ -259,16 +259,26 @@ export function flowCounts(tasks: BoardTaskLite[]): FlowCounts {
 // The "+ Aufgabe" capture button (header on desktop, sticky FAB on mobile) drops
 // a new task into the pipeline. The operator picks one of two honest modes in the
 // sheet — both create a real Kanban task, neither is a UI illusion:
-//   park        → triage + park: lands GEPARKT in `scheduled` (Plan). No worker
-//                 starts on its own; the operator clicks Dispatch. Default — the
-//                 same safe behaviour as the FO/Orchestrator → Fleet buttons.
 //   orchestrate → triage only: lands in `triage` (Capture); the in-gateway
-//                 orchestrator triages/decomposes and may dispatch a worker (~60s).
+//                 orchestrator/decomposer triages the raw prompt — fans a
+//                 multi-part request out into a subtask DAG, or specifies a
+//                 single one and routes it to the right worker (~60s). Default.
+//   park        → triage + park: lands GEPARKT in `scheduled` (Plan). No worker
+//                 starts on its own; the operator clicks Dispatch. The deliberate
+//                 "I'll dispatch it myself" escape hatch.
+//
+// IMPORTANT: assignee is left unset (null) for BOTH modes. Hardcoding "coder"
+// here used to defeat the whole point of orchestrate: the decomposer's no-fanout
+// path only re-routes a task whose assignee is empty (kanban_decompose.py), so a
+// pre-set "coder" sent every raw prompt straight to the coder, never to the
+// orchestrator. With a null assignee the decomposer routes; for the parked path
+// the dispatcher applies `kanban.default_assignee` at manual Dispatch (same end
+// result as before).
 export type CaptureMode = "park" | "orchestrate";
 
 export interface CaptureRequest {
   title: string;
-  assignee: string;
+  assignee: string | null;
   priority: number;
   tenant: string;
   triage: boolean;
@@ -279,7 +289,7 @@ export interface CaptureRequest {
 export function captureRequest(title: string, mode: CaptureMode): CaptureRequest {
   return {
     title: title.trim(),
-    assignee: "coder",
+    assignee: null,
     priority: 0,
     tenant: "flow-capture",
     triage: true,

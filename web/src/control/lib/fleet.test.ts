@@ -187,16 +187,19 @@ describe("flowCounts", () => {
 });
 
 describe("captureRequest", () => {
-  it("park mode → triage+park, trimmed title, no home ping (safe default)", () => {
+  it("park mode → triage+park, trimmed title, no home ping, no hardcoded assignee", () => {
     expect(captureRequest("  Tisch decken  ", "park")).toEqual({
-      title: "Tisch decken", assignee: "coder", priority: 0, tenant: "flow-capture",
+      title: "Tisch decken", assignee: null, priority: 0, tenant: "flow-capture",
       triage: true, park: true, notify_home: false,
     });
   });
-  it("orchestrate mode → triage only (no park), pings home", () => {
+  it("orchestrate mode → triage only (no park), pings home, leaves assignee unset for the decomposer", () => {
     const r = captureRequest("Baue X", "orchestrate");
     expect(r.triage).toBe(true);
     expect(r.park).toBe(false);
     expect(r.notify_home).toBe(true);
+    // Critical: assignee must NOT be hardcoded — the in-gateway decomposer routes
+    // the triage task; a pre-set "coder" would short-circuit it straight to coder.
+    expect(r.assignee).toBeNull();
   });
 });
