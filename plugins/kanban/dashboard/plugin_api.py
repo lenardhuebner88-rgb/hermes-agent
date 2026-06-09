@@ -3194,6 +3194,165 @@ def decompose_task_endpoint(
 
 
 # ---------------------------------------------------------------------------
+# Flow capture Phase B — backend-driven planning (documented/lean) + gate + spec
+# ---------------------------------------------------------------------------
+
+class FlowCaptureBody(BaseModel):
+    title: ShortText
+    # "document" → rich decompose + durable Vault plan-spec; "lean" → base
+    # decompose, no spec. The lean method is routed here ONLY for the lean+GATE
+    # combo — lean+auto stays on the plain POST /tasks (Stufe-A) tick path.
+    method: ShortText = "document"
+    gate: bool = False
+    tenant: Optional[ShortText] = "flow-capture"
+    priority: int = 0
+    notify_home: bool = True
+    author: Optional[ShortText] = None
+
+
+@router.post("/tasks/flow-capture")
+def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
+    """Create a root, PARK it in ``scheduled`` (invisible to the gateway's
+    triage-only auto-decompose tick), then plan it via the aux decomposer.
+
+    ``method='document'`` renders a durable Vault plan-spec (narrative +
+    subtask table) from the same object it creates the subtasks from — one
+    truth, no drift. ``gate=True`` holds the subtasks in ``scheduled`` until
+    released via ``/tasks/{id}/flow-release``; ``gate=False`` auto-promotes
+    them like today.
+
+    Runs in FastAPI's threadpool (sync ``def``) because the LLM planning call
+    can take a while. A non-OK plan leaves the root safely parked in
+    ``scheduled`` (the operator can dispatch/decompose it manually).
+    """
+    method = (payload.method or "document").strip().lower()
+    if method not in ("document", "lean"):
+        raise HTTPException(status_code=400, detail="method must be 'document' or 'lean'")
+    board = _resolve_board(board)
+
+    # 1) Create the root in triage, then park it in scheduled (triage -> todo
+    #    -> scheduled) inside ONE connection so no gateway tick interleaves
+    #    before it is safely parked. Mirrors the create_task park path.
+    conn = _conn(board=board)
+    try:
+        task_id = kanban_db.create_task(
+            conn,
+            title=payload.title,
+            body=None,
+            assignee=None,
+            created_by="dashboard",
+            tenant=payload.tenant,
+            priority=payload.priority,
+            triage=True,
+        )
+        fresh = kanban_db.get_task(conn, task_id)
+        if fresh is not None and fresh.status == "triage":
+            _set_status_direct(conn, task_id, "todo")
+        kanban_db.schedule_task(
+            conn, task_id, reason="Flow-Plan: geparkt während der Planung",
+        )
+        if payload.notify_home:
+            for home in _configured_home_channels():
+                kanban_db.add_notify_sub(
+                    conn,
+                    task_id=task_id,
+                    platform=home["platform"],
+                    chat_id=home["chat_id"],
+                    thread_id=home["thread_id"] or None,
+                    notifier_profile=_active_profile_name(),
+                )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+    # 2) Plan synchronously, board-pinned (the sync endpoint runs in the
+    #    threadpool, so mutating the process-global board env would let
+    #    concurrent requests race — pin context-locally instead). The planner
+    #    expects the root parked in 'scheduled' and fans out atomically from it.
+    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
+        from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
+        outcome = kanban_decompose.plan_and_document(
+            task_id,
+            gate=bool(payload.gate),
+            document=(method == "document"),
+            author=(payload.author or None),
+        )
+
+    return {
+        "ok": bool(outcome.ok),
+        "task_id": outcome.task_id,
+        "reason": outcome.reason,
+        "fanout": bool(outcome.fanout),
+        "child_ids": outcome.child_ids or [],
+        "new_title": outcome.new_title,
+        "spec_relpath": outcome.spec_relpath,
+        "gated": bool(outcome.gated),
+        "method": method,
+    }
+
+
+@router.post("/tasks/{task_id}/flow-release")
+def flow_release(task_id: str, board: Optional[str] = Query(None)):
+    """Release (Flow "Go ausführen") a gated plan: unblock every child of this
+    root currently held in ``scheduled`` so the dispatcher can pick them up.
+
+    DAG-correct via ``unblock_task`` — a parent-free child goes straight to
+    ``ready``, a child still waiting on siblings goes to ``todo`` and
+    ``recompute_ready`` promotes it when its parents finish. Idempotent: a
+    second call finds no scheduled children and releases none.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if kanban_db.get_task(conn, task_id) is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        # decompose_triage_task links the root as the CHILD of every graph
+        # child, so the root's graph children are the parent_ids of rows whose
+        # child_id is this root.
+        rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (task_id,),
+        ).fetchall()
+        released: list[str] = []
+        for r in rows:
+            cid = r["parent_id"]
+            child = kanban_db.get_task(conn, cid)
+            if child is not None and child.status == "scheduled":
+                if kanban_db.unblock_task(conn, cid):
+                    released.append(cid)
+        return {
+            "task_id": task_id,
+            "released": len(released),
+            "released_ids": released,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/tasks/{task_id}/flow-plan")
+def get_flow_plan(task_id: str):
+    """Serve the durable Vault plan-spec for a documented Flow capture root.
+
+    The spec is keyed by task id (``<flow_plans_dir>/<task_id>.md``); 404 when
+    none exists (lean captures and non-Flow tasks have no spec)."""
+    # task_id is the filename stem — restrict to the canonical id charset so a
+    # crafted value can't traverse out of the flow-plans dir.
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", task_id or ""):
+        raise HTTPException(status_code=400, detail="invalid task id")
+    from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
+    path = kanban_decompose.flow_plan_path(task_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="no flow-plan spec for this task")
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        filename=path.name,
+        content_disposition_type="inline",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration settings (kanban.orchestrator_profile / default_assignee /
 # auto_decompose) — surfaced to the dashboard's settings panel
 # ---------------------------------------------------------------------------

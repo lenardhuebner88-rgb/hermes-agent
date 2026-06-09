@@ -680,3 +680,146 @@ def test_decompose_logs_warning_when_critical_not_preserved(kanban_home, caplog)
     assert any("/tmp/hsv1/out.md" in m for m in messages), (
         "expected validator to warn about missing absolute path; got: %r" % messages
     )
+
+
+# ---------------------------------------------------------------------------
+# plan_and_document — Flow capture Phase B (documented/lean + gate + spec)
+# ---------------------------------------------------------------------------
+
+def _park_in_scheduled(tid: str) -> None:
+    """Mimic the flow-capture endpoint: triage -> todo -> scheduled."""
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
+        kb.schedule_task(conn, tid, reason="parked for flow-plan")
+        assert kb.get_task(conn, tid).status == "scheduled"
+
+
+_DOC_PAYLOAD = jsonlib.dumps({
+    "fanout": True,
+    "rationale": "split into independent + one dependent step",
+    "narrative": "We break the request into three parts: two parallel builds and a review that depends on both.",
+    "tasks": [
+        {"title": "part one", "body": "do part one", "assignee": "engineer", "parents": [], "summary": "delivers part one"},
+        {"title": "part two", "body": "do part two", "assignee": "engineer", "parents": [], "summary": "delivers part two"},
+        {"title": "review both", "body": "review 1+2", "assignee": "reviewer", "parents": [0, 1], "summary": "reviews the two parts"},
+    ],
+})
+
+
+def test_plan_and_document_gate_writes_spec_and_holds_children(kanban_home, tmp_path, monkeypatch):
+    spec_dir = tmp_path / "flow-plans"
+    monkeypatch.setenv("HERMES_FLOW_PLANS_DIR", str(spec_dir))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Build a thing in 3 parts", body="part1; part2; part3", triage=True, tenant="flow-capture")
+    _park_in_scheduled(tid)
+
+    patches = _patch_list_profiles(["orchestrator", "engineer", "reviewer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(_DOC_PAYLOAD), _patch_extra_body():
+            outcome = decomp.plan_and_document(tid, gate=True, document=True, author="user")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is True
+    assert outcome.gated is True
+    assert outcome.spec_relpath == f"{tid}.md"
+    assert outcome.child_ids and len(outcome.child_ids) == 3
+
+    # Children are HELD in scheduled (gate), root flips to todo.
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "todo"
+        statuses = [kb.get_task(conn, c).status for c in outcome.child_ids]
+        # The dispatcher tick (recompute_ready) must not leak held children.
+        kb.recompute_ready(conn)
+        statuses_after = [kb.get_task(conn, c).status for c in outcome.child_ids]
+    assert statuses == ["scheduled", "scheduled", "scheduled"], statuses
+    assert statuses_after == ["scheduled", "scheduled", "scheduled"], "GATE LEAK"
+
+    # Spec written: narrative on top, structured subtask table with child ids.
+    spec = (spec_dir / f"{tid}.md").read_text(encoding="utf-8")
+    assert "## Narrativ" in spec
+    assert "three parts" in spec
+    assert "## Subtasks (3)" in spec
+    assert "Gate aktiv" in spec
+    for c in outcome.child_ids:
+        assert c in spec, "every child id must appear in the spec table (spec == subtasks)"
+
+    # flow_plan event recorded on the root for the dashboard rail link.
+    with kb.connect() as conn:
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+    assert "flow_plan" in kinds
+
+
+def test_plan_and_document_auto_promotes_and_writes_spec(kanban_home, tmp_path, monkeypatch):
+    spec_dir = tmp_path / "flow-plans"
+    monkeypatch.setenv("HERMES_FLOW_PLANS_DIR", str(spec_dir))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Auto build", triage=True, tenant="flow-capture")
+    _park_in_scheduled(tid)
+
+    patches = _patch_list_profiles(["orchestrator", "engineer", "reviewer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(_DOC_PAYLOAD), _patch_extra_body():
+            outcome = decomp.plan_and_document(tid, gate=False, document=True, author="user")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.gated is False
+    with kb.connect() as conn:
+        statuses = sorted(kb.get_task(conn, c).status for c in outcome.child_ids)
+    # Parent-free children -> ready, dependent child waits in todo.
+    assert statuses == ["ready", "ready", "todo"], statuses
+    assert (spec_dir / f"{tid}.md").is_file()
+
+
+def test_plan_and_document_lean_gate_holds_without_spec(kanban_home, tmp_path, monkeypatch):
+    spec_dir = tmp_path / "flow-plans"
+    monkeypatch.setenv("HERMES_FLOW_PLANS_DIR", str(spec_dir))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Lean gated", triage=True, tenant="flow-capture")
+    _park_in_scheduled(tid)
+
+    patches = _patch_list_profiles(["orchestrator", "engineer", "reviewer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(_DOC_PAYLOAD), _patch_extra_body():
+            outcome = decomp.plan_and_document(tid, gate=True, document=False, author="user")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.gated is True
+    assert outcome.spec_relpath is None, "lean method writes no spec"
+    assert not (spec_dir / f"{tid}.md").exists()
+    with kb.connect() as conn:
+        statuses = [kb.get_task(conn, c).status for c in outcome.child_ids]
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+    assert all(s == "scheduled" for s in statuses), statuses
+    assert "flow_plan" not in kinds, "lean method emits no flow_plan event"
+
+
+def test_plan_and_document_rejects_non_scheduled_root(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="still in triage", triage=True)
+    patches = _patch_list_profiles(["orchestrator", "engineer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(_DOC_PAYLOAD), _patch_extra_body():
+            outcome = decomp.plan_and_document(tid, gate=True, document=True, author="user")
+    finally:
+        for p in patches:
+            p.stop()
+    assert not outcome.ok
+    assert "scheduled" in outcome.reason

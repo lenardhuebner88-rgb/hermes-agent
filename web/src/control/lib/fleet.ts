@@ -257,24 +257,35 @@ export function flowCounts(tasks: BoardTaskLite[]): FlowCounts {
 
 // ── Quick capture ────────────────────────────────────────────────────────────
 // The "+ Aufgabe" capture button (header on desktop, sticky FAB on mobile) drops
-// a new task into the pipeline. The operator picks one of two honest modes in the
-// sheet — both create a real Kanban task, neither is a UI illusion:
-//   orchestrate → triage only: lands in `triage` (Capture); the in-gateway
-//                 orchestrator/decomposer triages the raw prompt — fans a
-//                 multi-part request out into a subtask DAG, or specifies a
-//                 single one and routes it to the right worker (~60s). Default.
-//   park        → triage + park: lands GEPARKT in `scheduled` (Plan). No worker
-//                 starts on its own; the operator clicks Dispatch. The deliberate
-//                 "I'll dispatch it myself" escape hatch.
+// a new task into the pipeline. The operator picks a PLAN METHOD and (for the two
+// decomposing methods) a GATE/AUTO switch — all create a real Kanban task, none
+// is a UI illusion:
+//   park     → triage + park: lands GEPARKT in `scheduled` (Plan). No worker
+//              starts on its own; the operator clicks Dispatch. The deliberate
+//              "I'll dispatch it myself" escape hatch. (No gate switch — it is
+//              already operator-held.)
+//   lean     → the in-gateway decomposer triages the raw prompt into a subtask
+//              DAG / routes a single one (~60s). DEFAULT. No durable spec.
+//   document → backend-driven rich decompose that ALSO renders a durable Vault
+//              plan-spec (narrative + subtask table) from the same object it
+//              creates the subtasks from (one truth, no drift).
 //
-// IMPORTANT: assignee is left unset (null) for BOTH modes. Hardcoding "coder"
-// here used to defeat the whole point of orchestrate: the decomposer's no-fanout
-// path only re-routes a task whose assignee is empty (kanban_decompose.py), so a
-// pre-set "coder" sent every raw prompt straight to the coder, never to the
-// orchestrator. With a null assignee the decomposer routes; for the parked path
-// the dispatcher applies `kanban.default_assignee` at manual Dispatch (same end
-// result as before).
-export type CaptureMode = "park" | "orchestrate";
+// GATE (lean + document only): hold the subtasks in `scheduled` until the
+// operator clicks "Go ausführen" in the Plan stage. AUTO (default) dispatches
+// them as soon as they are ready — the Stufe-A behaviour, backward-compatible.
+//
+// Routing: park and lean+AUTO use the plain POST /tasks (Stufe-A, unchanged).
+// document* and lean+GATE need the backend-driven POST /tasks/flow-capture
+// (planning + optional spec + gate-hold). See usesFlowCaptureEndpoint().
+//
+// IMPORTANT: assignee is left unset (null) for the POST /tasks path. Hardcoding
+// "coder" here used to defeat the whole point of triage routing: the decomposer's
+// no-fanout path only re-routes a task whose assignee is empty
+// (kanban_decompose.py), so a pre-set "coder" sent every raw prompt straight to
+// the coder, never to the orchestrator. With a null assignee the decomposer
+// routes; for the parked path the dispatcher applies `kanban.default_assignee` at
+// manual Dispatch (same end result as before).
+export type CaptureMethod = "park" | "lean" | "document";
 
 export interface CaptureRequest {
   title: string;
@@ -286,16 +297,47 @@ export interface CaptureRequest {
   notify_home: boolean;
 }
 
-export function captureRequest(title: string, mode: CaptureMode): CaptureRequest {
+/** POST /tasks body for the park / lean+AUTO captures (the Stufe-A path). */
+export function captureRequest(title: string, method: CaptureMethod): CaptureRequest {
   return {
     title: title.trim(),
     assignee: null,
     priority: 0,
     tenant: "flow-capture",
     triage: true,
-    park: mode === "park",
-    // Only ping the home channel for autonomous (orchestrate) captures — a
-    // parked task waits for the operator who is already looking at the board.
-    notify_home: mode === "orchestrate",
+    park: method === "park",
+    // Only ping the home channel for autonomous (lean) captures — a parked task
+    // waits for the operator who is already looking at the board.
+    notify_home: method !== "park",
   };
+}
+
+export interface FlowCaptureRequest {
+  title: string;
+  method: "lean" | "document";
+  gate: boolean;
+  tenant: string;
+  priority: number;
+  notify_home: boolean;
+}
+
+/** POST /tasks/flow-capture body for the backend-driven captures (document*,
+ *  lean+GATE). The backend parks the root, plans it, optionally writes the
+ *  Vault spec, and holds the subtasks when gated. */
+export function flowCaptureRequest(title: string, method: CaptureMethod, gate: boolean): FlowCaptureRequest {
+  return {
+    title: title.trim(),
+    method: method === "document" ? "document" : "lean",
+    gate,
+    tenant: "flow-capture",
+    priority: 0,
+    notify_home: true,
+  };
+}
+
+/** Which backend a (method, gate) capture routes to. park and lean+AUTO use the
+ *  plain POST /tasks (Stufe-A, backward-compatible); everything else needs the
+ *  backend-driven /tasks/flow-capture (planning + spec + gate-hold). */
+export function usesFlowCaptureEndpoint(method: CaptureMethod, gate: boolean): boolean {
+  return method === "document" || (method === "lean" && gate);
 }

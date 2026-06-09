@@ -636,6 +636,9 @@ const TaskEventSchema = z.object({
   kind: z.string().catch(""),
   created_at: z.coerce.number().catch(0),
   run_id: z.coerce.string().nullable().catch(null),
+  // Free-form event payload. The Flow rail reads `decomposed.child_ids`
+  // (the subtask group) and `flow_plan.spec` (the Vault plan-spec link).
+  payload: z.record(z.string(), z.unknown()).nullable().catch(null),
 });
 const TaskDetailTaskSchema = z.object({
   id: z.coerce.string().catch(""),

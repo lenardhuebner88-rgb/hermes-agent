@@ -3112,3 +3112,78 @@ def test_blocked_completions_filters_by_since_hours(client):
     data = r.json()
     assert data["count"] == 0
     assert data["since_hours"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Flow capture Phase B — /flow-release + /flow-plan endpoints
+# ---------------------------------------------------------------------------
+
+
+def _setup_gated_root(tenant="flow-capture"):
+    """Create a root parked in scheduled with three HELD (scheduled) children
+    via the real DB fan-out — no LLM. Returns (root_id, child_ids)."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="gated root", body="a; b; c", triage=True, tenant=tenant)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (root,))
+        kb.schedule_task(conn, root, reason="parked")
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="default",
+            children=[
+                {"title": "a", "body": "a", "assignee": "coder", "parents": []},
+                {"title": "b", "body": "b", "assignee": "coder", "parents": []},
+                {"title": "c needs a,b", "body": "c", "assignee": "reviewer", "parents": [0, 1]},
+            ],
+            author="user", auto_promote=False,
+            initial_child_status="scheduled", expected_root_status="scheduled",
+        )
+    return root, child_ids
+
+
+def test_flow_release_unblocks_scheduled_children_dag_correct(client):
+    root, child_ids = _setup_gated_root()
+    # Pre: all children held in scheduled.
+    with kb.connect() as conn:
+        assert all(kb.get_task(conn, c).status == "scheduled" for c in child_ids)
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == 3, body
+    assert set(body["released_ids"]) == set(child_ids)
+
+    with kb.connect() as conn:
+        st = {c: kb.get_task(conn, c).status for c in child_ids}
+    # Parent-free children -> ready; the dependent child waits in todo.
+    assert st[child_ids[0]] == "ready" and st[child_ids[1]] == "ready", st
+    assert st[child_ids[2]] == "todo", st
+
+    # Idempotent: a second release finds nothing scheduled.
+    r2 = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r2.status_code == 200 and r2.json()["released"] == 0
+
+
+def test_flow_release_unknown_task_404(client):
+    r = client.post("/api/plugins/kanban/tasks/t_nope/flow-release")
+    assert r.status_code == 404
+
+
+def test_flow_plan_serves_spec_and_404s_when_absent(client, tmp_path, monkeypatch):
+    spec_dir = tmp_path / "flow-plans"
+    spec_dir.mkdir()
+    monkeypatch.setenv("HERMES_FLOW_PLANS_DIR", str(spec_dir))
+
+    # No spec yet -> 404.
+    r = client.get("/api/plugins/kanban/tasks/t_abc123/flow-plan")
+    assert r.status_code == 404
+
+    # Write a spec and serve it.
+    (spec_dir / "t_abc123.md").write_text("# Flow-Plan\n\n## Narrativ\n\nhi\n", encoding="utf-8")
+    r = client.get("/api/plugins/kanban/tasks/t_abc123/flow-plan")
+    assert r.status_code == 200, r.text
+    assert "## Narrativ" in r.text
+    assert "markdown" in r.headers.get("content-type", "")
+
+    # Path-traversal attempt rejected by the id charset guard.
+    r = client.get("/api/plugins/kanban/tasks/..%2f..%2fetc/flow-plan")
+    assert r.status_code in (400, 404)

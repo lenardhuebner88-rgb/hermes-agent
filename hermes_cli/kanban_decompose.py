@@ -40,7 +40,9 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
@@ -157,6 +159,30 @@ Default assignee (used when no profile fits a task): {default_assignee}
 """
 
 
+# The documented ("plan + spec") method asks the SAME decomposer for two
+# extra, optional, NON-breaking fields on top of the base schema so the
+# backend can render a human-readable Vault plan-spec (narrative on top,
+# subtask table below) from the very same object it creates the kanban
+# subtasks from — one source, no drift. The base shape is unchanged, so a
+# model that ignores the addendum still yields a valid decomposition.
+_DOCUMENTED_PROMPT_ADDENDUM = """
+
+DOCUMENTED-PLAN MODE (this request only):
+You are additionally writing a short, durable plan document a human will
+read. On top of the base JSON shape, include:
+
+  - A top-level "narrative" string: 2-5 sentences of plain prose
+    explaining the plan — the goal, the chosen approach, and how the
+    subtasks fit together / in what order. Markdown is allowed. This is
+    the reasoning a reader sees BEFORE the subtask table. No code fences.
+  - On EACH task object, a "summary" string: one terse line (<= 120
+    chars) describing what that subtask delivers, for the table row.
+
+These two fields are additive. Keep every base rule (fanout, parents,
+assignees, constraint preservation, scope blocks) exactly as specified.
+Still output only the single JSON object, no prose outside it."""
+
+
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
@@ -170,6 +196,11 @@ class DecomposeOutcome:
     fanout: bool = False
     child_ids: list[str] | None = None
     new_title: Optional[str] = None
+    # Set by the documented ("plan + spec") method only: the relative
+    # filename of the Vault plan-spec written for this root, and whether
+    # the children were held in ``scheduled`` (gate) vs auto-promoted.
+    spec_relpath: Optional[str] = None
+    gated: bool = False
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -785,6 +816,110 @@ def _normalize_assignee_choice(
     return chosen
 
 
+def _children_from_parsed(
+    parsed: dict,
+    task: "kb.Task",
+    *,
+    valid_names: set[str],
+    default_assignee: str,
+) -> tuple[Optional[list[dict]], Optional[str]]:
+    """Build the validated, scope-contracted ``children`` list from a
+    ``fanout=true`` decomposer response.
+
+    Shared by :func:`decompose_task` (lean path) and
+    :func:`plan_and_document` (documented path) so the two NEVER drift on
+    how a raw LLM ``tasks`` array becomes the children the DB inserts.
+    Returns ``(children, None)`` on success or ``(None, reason)`` on a
+    structural error the caller surfaces as ``ok=False``.
+    """
+    raw_tasks = parsed.get("tasks") or []
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return None, "decomposer returned fanout=true with empty tasks list"
+
+    # Rewrite invalid assignees to the default fallback. Never leave a
+    # task with assignee=None — the user explicitly does not want that.
+    children: list[dict] = []
+    for idx, entry in enumerate(raw_tasks):
+        if not isinstance(entry, dict):
+            return None, f"tasks[{idx}] is not an object"
+        title = entry.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None, f"tasks[{idx}].title is missing or empty"
+        body = entry.get("body")
+        if not isinstance(body, str):
+            body = ""
+        assignee = entry.get("assignee")
+        chosen = _normalize_assignee_choice(
+            assignee,
+            default_assignee=default_assignee,
+            valid_names=valid_names,
+        )
+        if (
+            isinstance(assignee, str)
+            and assignee.strip()
+            and assignee.strip() not in valid_names
+        ):
+            logger.info(
+                "decompose: task %s child %d picked unknown assignee %r — "
+                "routing to default_assignee %r",
+                task.id, idx, assignee, default_assignee,
+            )
+        parents = entry.get("parents") or []
+        if not isinstance(parents, list):
+            parents = []
+        # Clean parent indices: drop non-int and out-of-range.
+        clean_parents = [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx]
+        child = {
+            "title": title.strip()[:200],
+            "body": body.strip(),
+            "assignee": chosen,
+            "parents": clean_parents,
+        }
+        children.append(_ensure_worker_scope_contract(child, parent_task=task))
+
+    scope_report = validate_worker_scope_contracts(children)
+    if not scope_report.ok:
+        first = scope_report.issues[0]
+        return None, (
+            "worker scope contract invalid before DB insert: "
+            f"child {first.index} ({first.assignee}) {first.reason}"
+        )
+
+    # Post-validate that the LLM preserved CRITICAL: / MANDATORY: lines and
+    # absolute paths / task ids from the parent body. Warn (not block) so
+    # the operator can act via `kanban comment <kid_id> "MANDATORY: ..."`.
+    preservation = validate_constraint_preservation(task.body or "", children)
+    if not preservation.ok:
+        if preservation.missing_constraints:
+            logger.warning(
+                "decompose: task %s — %d CRITICAL/MANDATORY/MUST/NEVER line(s) "
+                "from parent body did NOT survive into any kid; set MANDATORY "
+                "comments via `kanban comment <kid_id> ... --author user` "
+                "before the dispatcher claims them. Missing: %r",
+                task.id,
+                len(preservation.missing_constraints),
+                preservation.missing_constraints,
+            )
+        if preservation.missing_paths:
+            logger.warning(
+                "decompose: task %s — %d absolute path(s) from parent body "
+                "did NOT survive into any kid: %r",
+                task.id,
+                len(preservation.missing_paths),
+                preservation.missing_paths,
+            )
+        if preservation.missing_task_ids:
+            logger.warning(
+                "decompose: task %s — %d task id(s) from parent body did "
+                "NOT survive into any kid: %r",
+                task.id,
+                len(preservation.missing_task_ids),
+                preservation.missing_task_ids,
+            )
+
+    return children, None
+
+
 def decompose_task(
     task_id: str,
     *,
@@ -905,98 +1040,13 @@ def decompose_task(
             fanout=False, new_title=title_val,
         )
 
-    raw_tasks = parsed.get("tasks") or []
-    if not isinstance(raw_tasks, list) or not raw_tasks:
-        return DecomposeOutcome(
-            task_id, False, "decomposer returned fanout=true with empty tasks list",
-        )
-
-    # Rewrite invalid assignees to the default fallback. Never leave a
-    # task with assignee=None — the user explicitly does not want that.
-    children: list[dict] = []
-    for idx, entry in enumerate(raw_tasks):
-        if not isinstance(entry, dict):
-            return DecomposeOutcome(
-                task_id, False, f"tasks[{idx}] is not an object",
-            )
-        title = entry.get("title")
-        if not isinstance(title, str) or not title.strip():
-            return DecomposeOutcome(
-                task_id, False, f"tasks[{idx}].title is missing or empty",
-            )
-        body = entry.get("body")
-        if not isinstance(body, str):
-            body = ""
-        assignee = entry.get("assignee")
-        chosen = _normalize_assignee_choice(
-            assignee,
-            default_assignee=default_assignee,
-            valid_names=valid_names,
-        )
-        if (
-            isinstance(assignee, str)
-            and assignee.strip()
-            and assignee.strip() not in valid_names
-        ):
-            logger.info(
-                "decompose: task %s child %d picked unknown assignee %r — "
-                "routing to default_assignee %r",
-                task_id, idx, assignee, default_assignee,
-            )
-        parents = entry.get("parents") or []
-        if not isinstance(parents, list):
-            parents = []
-        # Clean parent indices: drop non-int and out-of-range.
-        clean_parents = [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx]
-        child = {
-            "title": title.strip()[:200],
-            "body": body.strip(),
-            "assignee": chosen,
-            "parents": clean_parents,
-        }
-        children.append(_ensure_worker_scope_contract(child, parent_task=task))
-
-    scope_report = validate_worker_scope_contracts(children)
-    if not scope_report.ok:
-        first = scope_report.issues[0]
-        return DecomposeOutcome(
-            task_id,
-            False,
-            "worker scope contract invalid before DB insert: "
-            f"child {first.index} ({first.assignee}) {first.reason}",
-        )
-
-    # Post-validate that the LLM preserved CRITICAL: / MANDATORY: lines and
-    # absolute paths / task ids from the parent body. Warn (not block) so
-    # the operator can act via `kanban comment <kid_id> "MANDATORY: ..."`.
-    preservation = validate_constraint_preservation(task.body or "", children)
-    if not preservation.ok:
-        if preservation.missing_constraints:
-            logger.warning(
-                "decompose: task %s — %d CRITICAL/MANDATORY/MUST/NEVER line(s) "
-                "from parent body did NOT survive into any kid; set MANDATORY "
-                "comments via `kanban comment <kid_id> ... --author user` "
-                "before the dispatcher claims them. Missing: %r",
-                task_id,
-                len(preservation.missing_constraints),
-                preservation.missing_constraints,
-            )
-        if preservation.missing_paths:
-            logger.warning(
-                "decompose: task %s — %d absolute path(s) from parent body "
-                "did NOT survive into any kid: %r",
-                task_id,
-                len(preservation.missing_paths),
-                preservation.missing_paths,
-            )
-        if preservation.missing_task_ids:
-            logger.warning(
-                "decompose: task %s — %d task id(s) from parent body did "
-                "NOT survive into any kid: %r",
-                task_id,
-                len(preservation.missing_task_ids),
-                preservation.missing_task_ids,
-            )
+    children, child_err = _children_from_parsed(
+        parsed, task,
+        valid_names=valid_names,
+        default_assignee=default_assignee,
+    )
+    if child_err is not None:
+        return DecomposeOutcome(task_id, False, child_err)
 
     try:
         with kb.connect_closing() as conn:
@@ -1035,3 +1085,389 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             limit=1000,
         )
     return [row.id for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Documented ("plan + spec") method — Flow capture Phase B
+# ---------------------------------------------------------------------------
+#
+# The documented method reuses the SAME aux decomposer (richer prompt) and the
+# SAME child-building/validation as the lean path, but the BACKEND renders one
+# durable Vault plan-spec (narrative on top, subtask table below) from the very
+# same object it creates the kanban subtasks from — so the spec, the subtasks,
+# and the executed work are one truth (no drift). The Flow capture endpoint
+# parks the root in ``scheduled`` first, so the gateway's triage-only
+# auto-decompose tick never races the (slow) LLM planning call; the fan-out
+# then runs atomically straight from ``scheduled`` (expected_root_status).
+
+
+def _flow_plans_dir() -> Path:
+    """Directory the durable Flow plan-specs are written to.
+
+    Defaults to the shared Vault (``~/vault/03-Agents/_flow-plans``); the
+    ``HERMES_FLOW_PLANS_DIR`` env var overrides it (used by tests / the live
+    E2E to avoid polluting the real Vault)."""
+    raw = os.environ.get("HERMES_FLOW_PLANS_DIR")
+    if raw and raw.strip():
+        return Path(os.path.expanduser(raw.strip()))
+    return Path(os.path.expanduser("~/vault/03-Agents/_flow-plans"))
+
+
+def flow_plan_path(task_id: str) -> Path:
+    """Absolute path of the plan-spec file for ``task_id`` (may not exist)."""
+    return _flow_plans_dir() / f"{task_id}.md"
+
+
+def _write_flow_plan_spec(task_id: str, markdown: str) -> Optional[str]:
+    """Write the spec markdown; return the relative filename or ``None`` on
+    failure (fail-soft — a spec-write error never aborts the decomposition)."""
+    target = flow_plan_path(task_id)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(markdown, encoding="utf-8")
+        return target.name
+    except OSError as exc:
+        logger.warning("flow-plan: could not write spec for %s: %s", task_id, exc)
+        return None
+
+
+def _md_cell(text: object) -> str:
+    """Sanitise a value for a one-line markdown table cell."""
+    s = text if isinstance(text, str) else ("" if text is None else str(text))
+    return s.replace("\n", " ").replace("\r", " ").replace("|", "/").strip()
+
+
+def _subtask_summaries(parsed: dict, n: int) -> list[Optional[str]]:
+    """Pull the optional per-task ``summary`` (documented addendum), aligned to
+    the children list. Index-aligned because ``_children_from_parsed`` keeps the
+    same order and length as ``parsed['tasks']``."""
+    raw = parsed.get("tasks") or []
+    out: list[Optional[str]] = []
+    for i in range(n):
+        val = None
+        if i < len(raw) and isinstance(raw[i], dict):
+            v = raw[i].get("summary")
+            if isinstance(v, str) and v.strip():
+                val = v.strip()
+        out.append(val)
+    return out
+
+
+def _render_flow_plan_spec(
+    *,
+    task: "kb.Task",
+    narrative: str,
+    rationale: str,
+    children: list[dict],
+    child_ids: list[str],
+    summaries: list[Optional[str]],
+    gated: bool,
+    single: bool = False,
+) -> str:
+    """Render the durable plan-spec: frontmatter + narrative block on top, a
+    structured subtask table below. Same source object as the kanban subtasks."""
+    created = time.strftime("%Y-%m-%d", time.localtime())
+    title = (task.title or task.id).strip()
+    lines: list[str] = [
+        "---",
+        "flow_plan: true",
+        f"root_task: {task.id}",
+        f"created: {created}",
+        "method: documented",
+        f"gate: {'true' if gated else 'false'}",
+        "---",
+        "",
+        f"# Flow-Plan — {title}",
+        "",
+        (
+            f"> Quelle: Flow-Capture (dokumentierte Methode) · Root `{task.id}`. "
+            "Diese Spec ≡ die angelegten Kanban-Subtasks ≡ die ausgeführte "
+            "Arbeit — eine Wahrheit."
+        ),
+        "",
+        "## Narrativ",
+        "",
+        narrative or "_(Kein Narrativ vom Planer geliefert.)_",
+    ]
+    if rationale:
+        lines += ["", f"_Rationale:_ {rationale}"]
+    lines.append("")
+
+    if single:
+        c = children[0] if children else {"title": title, "assignee": None}
+        lines += ["## Aufgabe", ""]
+        lines.append(f"- **{_md_cell(c.get('title'))}** → Profil `{c.get('assignee') or '—'}`")
+        if summaries and summaries[0]:
+            lines.append(f"  - {_md_cell(summaries[0])}")
+    else:
+        lines += [f"## Subtasks ({len(children)})", ""]
+        lines.append("| # | Subtask | Profil | Abhängig von | Liefert |")
+        lines.append("|---|---------|--------|--------------|---------|")
+        for idx, c in enumerate(children):
+            cid = child_ids[idx] if idx < len(child_ids) else "?"
+            deps = c.get("parents") or []
+            deps_str = ", ".join(f"#{p + 1}" for p in deps) if deps else "–"
+            summ = summaries[idx] if idx < len(summaries) and summaries[idx] else (
+                (c.get("body") or "").split("\n", 1)[0]
+            )
+            lines.append(
+                f"| {idx + 1} | {_md_cell(c.get('title'))} (`{cid}`) | "
+                f"`{c.get('assignee') or '—'}` | {deps_str} | {_md_cell(summ)[:160]} |"
+            )
+    lines += ["", "## Ausführung", ""]
+    if gated:
+        lines.append(
+            "- **Gate aktiv:** Subtasks sind in `scheduled` gehalten und werden erst "
+            "durch „Go ausführen“ im Flow-Tab freigegeben "
+            "(dann `ready` → Dispatcher)."
+        )
+    else:
+        lines.append(
+            "- **Auto:** Subtasks sind sofort dispatchbar (`todo`/`ready`) — "
+            "der Dispatcher übernimmt."
+        )
+    lines.append(
+        f"- Root `{task.id}` bleibt offen und wacht auf, wenn alle Subtasks "
+        "abgeschlossen sind."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _record_flow_plan(
+    task_id: str,
+    relpath: Optional[str],
+    gate: bool,
+    author: str,
+    n_children: int,
+    *,
+    document: bool,
+) -> None:
+    """Mark the root with a ``flow_plan`` event (documented method, so the
+    dashboard can surface the spec link) + an audit comment noting the gate
+    state. Fail-soft — never aborts the capture."""
+    try:
+        with kb.connect_closing() as conn:
+            if document and relpath:
+                kb.add_event(conn, task_id, "flow_plan", {"spec": relpath, "gated": bool(gate)})
+            if document:
+                if relpath:
+                    note = f"Flow-Plan-Spec geschrieben: {relpath}"
+                else:
+                    note = "Flow-Plan dokumentiert (Spec-Schreiben fehlgeschlagen, siehe Log)."
+            else:
+                note = "Flow-Plan (Lean) — keine Spec (Lean schreibt bewusst keine Vault-Spec)."
+            if gate and n_children:
+                note += (
+                    f" · Gate aktiv: {n_children} Subtask(s) gehalten in 'scheduled' "
+                    "bis „Go ausführen“."
+                )
+            kb.add_comment(conn, task_id, author, note)
+    except Exception as exc:  # noqa: BLE001 — marker write must never fail the capture
+        logger.warning("flow-plan: could not record spec marker for %s: %s", task_id, exc)
+
+
+def _apply_single_task_from_scheduled(
+    task_id: str,
+    title: Optional[str],
+    body: Optional[str],
+    assignee: Optional[str],
+    target_status: str,
+    author: str,
+) -> bool:
+    """Tighten + land a fanout=false documented root straight from its parked
+    ``scheduled`` state: ``gate`` keeps it ``scheduled`` (held); ``auto`` flips
+    it to ``todo`` and lets ``recompute_ready`` promote it. Atomic + guarded on
+    the current ``scheduled`` status so a concurrent dispatch can't be lost."""
+    assignee_c = kb._canonical_assignee(assignee) if assignee else None
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET title = ?, body = ?, assignee = ?, status = ? "
+                "WHERE id = ? AND status = 'scheduled'",
+                (title, body, assignee_c, target_status, task_id),
+            )
+            updated = cur.rowcount == 1
+        if not updated:
+            return False
+        kb.add_event(conn, task_id, "specified", {"flow_plan": True})
+        if target_status == "todo":
+            kb.recompute_ready(conn)
+    return True
+
+
+def plan_and_document(
+    task_id: str,
+    *,
+    gate: bool,
+    document: bool = True,
+    author: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> DecomposeOutcome:
+    """Backend-driven Flow capture planner (both planning modes).
+
+    ``document=True`` is the documented method: rich decompose (narrative +
+    structured subtasks) + a durable Vault plan-spec. ``document=False`` is the
+    lean method routed through this same backend path (used only for the
+    lean+GATE combo — lean+auto stays on the Stufe-A POST /tasks tick): base
+    prompt, no spec.
+
+    ``gate=True`` holds the subtasks in ``scheduled`` until an explicit release
+    (Flow "Go ausführen"); ``gate=False`` auto-promotes them like today.
+
+    PRECONDITION: ``task_id`` is parked in ``scheduled`` (the Flow capture
+    endpoint parks it before calling this, so the gateway's triage-only
+    auto-decompose tick can never see it during the LLM call). Returns an
+    outcome with ``spec_relpath`` (documented only) + ``gated`` set. Never
+    raises for expected failure modes — they surface via ``ok=False``.
+    """
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+    if task is None:
+        return DecomposeOutcome(task_id, False, "unknown task id")
+    if task.status != "scheduled":
+        return DecomposeOutcome(
+            task_id, False,
+            f"flow-plan root must be parked in 'scheduled' (status={task.status!r})",
+        )
+
+    cfg = _load_config()
+    orchestrator = _resolve_orchestrator_profile(cfg)
+    default_assignee = _resolve_default_assignee(cfg)
+    roster, valid_names = _build_roster()
+
+    try:
+        from agent.auxiliary_client import (  # type: ignore
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
+    except Exception as exc:
+        logger.debug("flow-plan: auxiliary client import failed: %s", exc)
+        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
+
+    try:
+        client, model = get_text_auxiliary_client("kanban_decomposer")
+    except Exception as exc:
+        logger.debug("flow-plan: get_text_auxiliary_client failed: %s", exc)
+        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
+
+    if client is None or not model:
+        return DecomposeOutcome(task_id, False, "no auxiliary client configured")
+
+    user_msg = _USER_TEMPLATE.format(
+        task_id=task.id,
+        title=_truncate(task.title or "", 400),
+        body=_truncate(task.body or "(no body)", 4000),
+        roster=_format_roster(roster),
+        default_assignee=default_assignee,
+    )
+
+    system_prompt = _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM if document else _SYSTEM_PROMPT
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.3,
+            max_tokens=4000,
+            timeout=timeout or 180,
+            extra_body=get_auxiliary_extra_body() or None,
+        )
+    except Exception as exc:
+        logger.info("flow-plan: API call failed for %s (%s)", task_id, exc)
+        return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
+
+    try:
+        raw = resp.choices[0].message.content or ""
+    except Exception:
+        raw = ""
+
+    parsed = _extract_json_blob(raw)
+    if parsed is None:
+        return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+
+    narrative = parsed.get("narrative")
+    narrative = narrative.strip() if isinstance(narrative, str) and narrative.strip() else ""
+    rationale = parsed.get("rationale")
+    rationale = rationale.strip() if isinstance(rationale, str) and rationale.strip() else ""
+    audit_author = author or _profile_author()
+    fanout = bool(parsed.get("fanout"))
+
+    if fanout:
+        children, child_err = _children_from_parsed(
+            parsed, task, valid_names=valid_names, default_assignee=default_assignee,
+        )
+        if child_err is not None:
+            return DecomposeOutcome(task_id, False, child_err)
+        summaries = _subtask_summaries(parsed, len(children))
+        child_status = "scheduled" if gate else "todo"
+        try:
+            with kb.connect_closing() as conn:
+                child_ids = kb.decompose_triage_task(
+                    conn,
+                    task_id,
+                    root_assignee=orchestrator,
+                    children=children,
+                    author=audit_author,
+                    auto_promote=(not gate),
+                    initial_child_status=child_status,
+                    expected_root_status="scheduled",
+                )
+        except ValueError as exc:
+            return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
+        except Exception:
+            logger.exception("flow-plan: DB error on task %s", task_id)
+            return DecomposeOutcome(task_id, False, "DB error during fan-out")
+        if child_ids is None:
+            return DecomposeOutcome(
+                task_id, False, "flow-plan root left 'scheduled' before fan-out",
+            )
+        relpath = None
+        if document:
+            markdown = _render_flow_plan_spec(
+                task=task, narrative=narrative, rationale=rationale,
+                children=children, child_ids=child_ids, summaries=summaries, gated=gate,
+            )
+            relpath = _write_flow_plan_spec(task_id, markdown)
+        _record_flow_plan(task_id, relpath, gate, audit_author, len(child_ids), document=document)
+        kind = "documented plan" if document else "lean plan"
+        return DecomposeOutcome(
+            task_id, True, f"{kind} with {len(child_ids)} subtasks",
+            fanout=True, child_ids=child_ids, spec_relpath=relpath, gated=gate,
+        )
+
+    # fanout=false — single atomic task, still documented with a (1-row) spec.
+    new_title = parsed.get("title")
+    new_body = parsed.get("body")
+    title_val = new_title.strip() if isinstance(new_title, str) and new_title.strip() else (task.title or "")
+    body_val = new_body if isinstance(new_body, str) and new_body.strip() else task.body
+    assignee_val = task.assignee
+    if not assignee_val:
+        assignee_val = _normalize_assignee_choice(
+            parsed.get("assignee"), default_assignee=default_assignee, valid_names=valid_names,
+        )
+    target_status = "scheduled" if gate else "todo"
+    ok = _apply_single_task_from_scheduled(
+        task_id, title_val, body_val, assignee_val, target_status, audit_author,
+    )
+    if not ok:
+        return DecomposeOutcome(
+            task_id, False, "flow-plan root left 'scheduled' before promotion",
+        )
+    relpath = None
+    if document:
+        summaries = _subtask_summaries(parsed, 1)
+        markdown = _render_flow_plan_spec(
+            task=task, narrative=narrative, rationale=rationale,
+            children=[{"title": title_val, "assignee": assignee_val, "parents": []}],
+            child_ids=[task_id], summaries=summaries, gated=gate, single=True,
+        )
+        relpath = _write_flow_plan_spec(task_id, markdown)
+    _record_flow_plan(task_id, relpath, gate, audit_author, 0, document=document)
+    kind = "documented single task" if document else "lean single task"
+    return DecomposeOutcome(
+        task_id, True, f"{kind} (no fanout)",
+        fanout=False, new_title=title_val, spec_relpath=relpath, gated=gate,
+    )

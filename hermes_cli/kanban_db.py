@@ -2890,6 +2890,27 @@ def add_comment(
         return int(cur.lastrowid or 0)
 
 
+def add_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+    payload: Optional[dict] = None,
+) -> None:
+    """Public wrapper to append one timeline event for a task.
+
+    Thin, self-contained (opens its own write txn) so callers outside
+    this module can record a domain event (e.g. the Flow capture's
+    ``flow_plan`` marker) without reaching into the private
+    ``_append_event``. Raises ``ValueError`` for an unknown task id.
+    """
+    with write_txn(conn):
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        _append_event(conn, task_id, kind, payload)
+
+
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
     rows = conn.execute(
         "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
@@ -5286,6 +5307,8 @@ def decompose_triage_task(
     children: list[dict],
     author: Optional[str] = None,
     auto_promote: bool = True,
+    initial_child_status: str = "todo",
+    expected_root_status: str = "triage",
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
 
@@ -5306,15 +5329,40 @@ def decompose_triage_task(
     Returns the list of created child task ids (in input order) on
     success. Returns ``None`` when:
       - The root task does not exist
-      - The root task is not in ``triage``
+      - The root task is not in ``expected_root_status``
       - A cycle would result (caller built a bad graph)
+
+    ``expected_root_status`` (default ``'triage'`` — the long-standing
+    behaviour) is the status the root MUST be in for the fan-out to
+    proceed. The Flow capture's documented method passes ``'scheduled'``
+    so the root can be fanned out atomically straight from the parked
+    state it sat in during the (slow) LLM planning call — the gateway's
+    auto-decompose tick only ever scans ``triage``, so a scheduled root
+    is invisible to it and there is no race window between planning and
+    fan-out. The root is still flipped to ``'todo'`` on success either
+    way.
 
     Validation of titles/assignees happens inside the same write_txn as
     the inserts so a malformed entry aborts the whole decomposition
     cleanly (no orphan children).
+
+    ``initial_child_status`` is the status children are created in
+    (default ``'todo'`` — the long-standing behaviour). Pass
+    ``'scheduled'`` to land them HELD instead: ``recompute_ready`` only
+    touches ``todo``/``blocked`` and the dispatcher claims only
+    ``ready``, so ``scheduled`` children sit untouched until an explicit
+    release (``unblock_task``). This is the gate-hold used by the Flow
+    capture's "Gate" mode and implies ``auto_promote`` has no effect on
+    the held children (a scheduled task is never promoted by
+    ``recompute_ready``).
     """
     if not children:
         return None
+    if initial_child_status not in ("todo", "scheduled"):
+        raise ValueError(
+            "initial_child_status must be 'todo' or 'scheduled', "
+            f"got {initial_child_status!r}"
+        )
     if root_assignee is not None:
         root_assignee = _canonical_assignee(root_assignee)
 
@@ -5377,7 +5425,7 @@ def decompose_triage_task(
         ).fetchone()
         if root_row is None:
             return None
-        if root_row["status"] != "triage":
+        if root_row["status"] != expected_root_status:
             return None
         tenant = root_row["tenant"]
         # Children inherit the root's workspace by default so a fan-out
@@ -5387,10 +5435,12 @@ def decompose_triage_task(
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
 
-        # Create children. Status is 'todo' regardless of parents — we
-        # link them under the root AFTER creation so the dispatcher
+        # Create children. Status is normally 'todo' regardless of parents
+        # — we link them under the root AFTER creation so the dispatcher
         # sees a coherent state, and recompute_ready() at the end
-        # promotes parent-free children to 'ready'.
+        # promotes parent-free children to 'ready'. When the caller asks
+        # for 'scheduled' (gate-hold) the children are parked instead and
+        # recompute_ready never touches them until an explicit release.
         for idx, child in enumerate(children):
             new_id = _new_task_id()
             title = child["title"].strip()
@@ -5412,12 +5462,13 @@ def decompose_triage_task(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
                     body if isinstance(body, str) else None,
                     assignee,
+                    initial_child_status,
                     child_ws_kind,
                     child_ws_path,
                     tenant,

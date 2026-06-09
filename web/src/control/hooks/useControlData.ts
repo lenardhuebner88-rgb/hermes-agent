@@ -31,7 +31,7 @@ import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
 import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
-import { captureRequest, type CaptureMode } from "../lib/fleet";
+import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -688,7 +688,13 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
   const [error, setError] = useState<string>("");
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
-  const capture = useCallback(async (title: string, mode: CaptureMode): Promise<CaptureResult> => {
+  // `capture(title, method, gate)` routes to the right backend: park & lean+AUTO
+  // hit the plain POST /tasks (Stufe-A); document* and lean+GATE hit the
+  // backend-driven POST /tasks/flow-capture (which plans synchronously, so this
+  // promise can take a little longer — the sheet shows a "planning" state). Both
+  // resolve to the new task id; flow-capture also reports ok=false + reason when
+  // the planner itself fails (the root is left safely parked).
+  const capture = useCallback(async (title: string, method: CaptureMethod, gate: boolean): Promise<CaptureResult> => {
     if (!title.trim()) {
       setState("error");
       setError("Titel fehlt");
@@ -697,10 +703,28 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
     setState("busy");
     setError("");
     try {
+      if (usesFlowCaptureEndpoint(method, gate)) {
+        const res = await fetchJSON<{ ok?: boolean; task_id?: string; reason?: string }>("/api/plugins/kanban/tasks/flow-capture", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(flowCaptureRequest(title, method, gate)),
+        });
+        if (res.ok === false) {
+          const detail = res.reason || "Planung fehlgeschlagen";
+          if (aliveRef.current) { setState("error"); setError(detail); }
+          // The root was still created (parked) — surface it so the operator can
+          // act on the parked card.
+          if (res.task_id) onCreated?.(res.task_id);
+          return { ok: false, taskId: res.task_id, detail };
+        }
+        if (aliveRef.current) setState("done");
+        if (res.task_id) onCreated?.(res.task_id);
+        return { ok: true, taskId: res.task_id };
+      }
       const res = await fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(captureRequest(title, mode)),
+        body: JSON.stringify(captureRequest(title, method)),
       });
       if (aliveRef.current) setState("done");
       if (res.task?.id) onCreated?.(res.task.id);
@@ -716,6 +740,34 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
   }, [onCreated]);
   const reset = useCallback(() => { setState("idle"); setError(""); }, []);
   return { state, error, capture, reset };
+}
+
+// Release ("Go ausführen") a gated Flow plan: POST /tasks/{root}/flow-release
+// unblocks every subtask held in `scheduled` so the dispatcher picks them up.
+export function useFlowRelease(onDone?: () => void | Promise<void>) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const release = useCallback(async (rootId: string): Promise<{ ok: boolean; released?: number; detail?: string }> => {
+    setBusyId(rootId);
+    setErrorById((prev) => ({ ...prev, [rootId]: "" }));
+    try {
+      const res = await fetchJSON<{ released?: number }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-release`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      );
+      await onDone?.();
+      return { ok: true, released: res.released ?? 0 };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [rootId]: detail }));
+      return { ok: false, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, [onDone]);
+  return { busyId, errorById, release };
 }
 
 // On-demand task detail (runs + events + deliverables) for the Flow board's live

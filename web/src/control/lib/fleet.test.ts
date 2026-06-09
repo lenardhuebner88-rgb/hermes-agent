@@ -9,6 +9,8 @@ import {
   groupByStage,
   flowCounts,
   captureRequest,
+  flowCaptureRequest,
+  usesFlowCaptureEndpoint,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
@@ -187,19 +189,49 @@ describe("flowCounts", () => {
 });
 
 describe("captureRequest", () => {
-  it("park mode → triage+park, trimmed title, no home ping, no hardcoded assignee", () => {
+  it("park method → triage+park, trimmed title, no home ping, no hardcoded assignee", () => {
     expect(captureRequest("  Tisch decken  ", "park")).toEqual({
       title: "Tisch decken", assignee: null, priority: 0, tenant: "flow-capture",
       triage: true, park: true, notify_home: false,
     });
   });
-  it("orchestrate mode → triage only (no park), pings home, leaves assignee unset for the decomposer", () => {
-    const r = captureRequest("Baue X", "orchestrate");
+  it("lean method → triage only (no park), pings home, leaves assignee unset for the decomposer", () => {
+    const r = captureRequest("Baue X", "lean");
     expect(r.triage).toBe(true);
     expect(r.park).toBe(false);
     expect(r.notify_home).toBe(true);
     // Critical: assignee must NOT be hardcoded — the in-gateway decomposer routes
     // the triage task; a pre-set "coder" would short-circuit it straight to coder.
     expect(r.assignee).toBeNull();
+  });
+});
+
+describe("flowCaptureRequest", () => {
+  it("document method → method=document, carries the gate flag, trims title", () => {
+    expect(flowCaptureRequest("  Baue X in 3 Teilen  ", "document", true)).toEqual({
+      title: "Baue X in 3 Teilen", method: "document", gate: true,
+      tenant: "flow-capture", priority: 0, notify_home: true,
+    });
+  });
+  it("lean method maps to method=lean (only ever routed here for the gate combo)", () => {
+    const r = flowCaptureRequest("Baue X", "lean", true);
+    expect(r.method).toBe("lean");
+    expect(r.gate).toBe(true);
+  });
+  it("park is never a flow-capture method → coerces to lean shape", () => {
+    expect(flowCaptureRequest("X", "park", false).method).toBe("lean");
+  });
+});
+
+describe("usesFlowCaptureEndpoint", () => {
+  it("park and lean+AUTO use the plain POST /tasks (Stufe-A, backward-compat)", () => {
+    expect(usesFlowCaptureEndpoint("park", false)).toBe(false);
+    expect(usesFlowCaptureEndpoint("park", true)).toBe(false);
+    expect(usesFlowCaptureEndpoint("lean", false)).toBe(false);
+  });
+  it("document (either gate) and lean+GATE use the backend-driven endpoint", () => {
+    expect(usesFlowCaptureEndpoint("lean", true)).toBe(true);
+    expect(usesFlowCaptureEndpoint("document", false)).toBe(true);
+    expect(usesFlowCaptureEndpoint("document", true)).toBe(true);
   });
 });

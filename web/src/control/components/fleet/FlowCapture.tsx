@@ -14,7 +14,7 @@ import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
 import { useCaptureTask } from "../../hooks/useControlData";
-import type { CaptureMode } from "../../lib/fleet";
+import { usesFlowCaptureEndpoint, type CaptureMethod } from "../../lib/fleet";
 
 function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSelect: () => void; title: string; hint: string }) {
   return (
@@ -39,9 +39,39 @@ function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSele
   );
 }
 
+function GateToggle({ gate, onChange }: { gate: boolean; onChange: (g: boolean) => void }) {
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--hc-border)] p-2.5">
+      <p className="hc-type-label text-white">{de.flow.capture.gateLabel}</p>
+      <div className="mt-2 flex gap-2" role="radiogroup" aria-label={de.flow.capture.gateLabel}>
+        {[
+          { val: false, title: de.flow.capture.gateAuto, hint: de.flow.capture.gateAutoHint },
+          { val: true, title: de.flow.capture.gateGate, hint: de.flow.capture.gateGateHint },
+        ].map((opt) => (
+          <button
+            key={String(opt.val)}
+            type="button"
+            role="radio"
+            aria-checked={gate === opt.val}
+            onClick={() => onChange(opt.val)}
+            className={cn(
+              "flex-1 rounded-md border px-2.5 py-1.5 text-left transition",
+              gate === opt.val ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
+            )}
+          >
+            <span className="block text-sm font-medium text-white">{opt.title}</span>
+            <span className="mt-0.5 block text-[0.7rem] hc-dim">{opt.hint}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?: (taskId: string) => void }) {
   const [title, setTitle] = useState("");
-  const [mode, setMode] = useState<CaptureMode>("orchestrate");
+  const [method, setMethod] = useState<CaptureMethod>("lean");
+  const [gate, setGate] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { state, error, capture, reset } = useCaptureTask(onCreated);
 
@@ -53,8 +83,14 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   }, [onClose]);
 
   const busy = state === "busy";
+  // park is operator-held already; the gate switch only applies to the two
+  // decomposing methods. Park always behaves as "auto" (effective gate=false).
+  const effectiveGate = method === "park" ? false : gate;
+  // The backend-driven path plans synchronously (LLM) — show a "planning" label.
+  const planning = busy && usesFlowCaptureEndpoint(method, effectiveGate);
+  const doneLabel = method === "park" ? de.flow.capture.donePark : method === "document" ? de.flow.capture.doneDocument : de.flow.capture.doneLean;
   const submit = async () => {
-    const res = await capture(title, mode);
+    const res = await capture(title, method, effectiveGate);
     if (res.ok) {
       // brief "done" flash, then close so the operator sees the new card land
       window.setTimeout(onClose, 650);
@@ -84,10 +120,13 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
           className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
         />
 
-        <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.modeLabel}>
-          <ModeOption active={mode === "orchestrate"} onSelect={() => setMode("orchestrate")} title={de.flow.capture.modeOrchestrate} hint={de.flow.capture.modeOrchestrateHint} />
-          <ModeOption active={mode === "park"} onSelect={() => setMode("park")} title={de.flow.capture.modePark} hint={de.flow.capture.modeParkHint} />
+        <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.methodLabel}>
+          <ModeOption active={method === "lean"} onSelect={() => setMethod("lean")} title={de.flow.capture.methodLean} hint={de.flow.capture.methodLeanHint} />
+          <ModeOption active={method === "document"} onSelect={() => setMethod("document")} title={de.flow.capture.methodDocument} hint={de.flow.capture.methodDocumentHint} />
+          <ModeOption active={method === "park"} onSelect={() => setMethod("park")} title={de.flow.capture.methodPark} hint={de.flow.capture.methodParkHint} />
         </div>
+
+        {method !== "park" ? <GateToggle gate={gate} onChange={setGate} /> : null}
 
         {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
 
@@ -100,7 +139,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
             className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : state === "done" ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-            {busy ? de.flow.capture.submitting : state === "done" ? (mode === "park" ? de.flow.capture.donePark : de.flow.capture.doneOrchestrate) : de.flow.capture.submit}
+            {busy ? (planning ? de.flow.capture.planning : de.flow.capture.submitting) : state === "done" ? doneLabel : de.flow.capture.submit}
           </button>
         </div>
       </div>

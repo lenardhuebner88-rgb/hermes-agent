@@ -10,7 +10,7 @@
  * exist for a stage.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Lock, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
@@ -18,6 +18,7 @@ import { fmtAge, freshness } from "../lib/derive";
 import { FLEET_STAGES, STAGE_META, flowCounts, groupByStage, roleChip, stageActions, stageGuard, type StageAction } from "../lib/fleet";
 import {
   useBoard,
+  useFlowRelease,
   useHermesBlockedCompletions,
   useHermesRecentResults,
   useHermesReviewVerdicts,
@@ -25,7 +26,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask } from "../lib/types";
+import type { BoardTask, TaskStatus } from "../lib/types";
 import type { TaskDetailResponse } from "../lib/schemas";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { Eyebrow, SkeletonCard, Text } from "../components/primitives";
@@ -54,6 +55,8 @@ const EVENT_LABEL: Record<string, string> = {
   submitted_for_review: "Zum Review eingereicht", verified: "Verifiziert", reclaimed: "Zurückgeholt",
   edited: "Bearbeitet", reprioritized: "Neu priorisiert", assigned: "Zugewiesen",
   deliverables_preserved: "Deliverables gesichert", spawn_failed: "Spawn fehlgeschlagen",
+  decomposed: "In Subtasks zerlegt", specified: "Spezifiziert", linked: "Verknüpft",
+  commented: "Kommentiert", flow_plan: "Plan-Spec geschrieben",
 };
 function eventLabel(kind: string): string {
   return EVENT_LABEL[kind] ?? kind.replace(/_/g, " ");
@@ -121,6 +124,7 @@ function FlowRunCard({ task, enriched, selected, busy, error, now, onSelect, onA
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <StatusPill tone={isBlocked ? "red" : isDone ? "emerald" : isReview ? "amber" : task.status === "running" ? "cyan" : "zinc"} label={taskStatusLabel[task.status] ?? task.status} dot={task.status === "running" ? "live" : isBlocked ? "error" : isDone ? "ready" : isReview ? "warn" : "idle"} />
         {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[0.7rem] text-rose-200">High</span> : null}
+        {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[0.7rem] text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
         {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[0.7rem] text-cyan-100">{enriched.verdict}</span> : null}
         {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[0.7rem] text-emerald-100">{enriched.resultQualityLabel}</span> : null}
       </div>
@@ -137,8 +141,80 @@ function FlowRunCard({ task, enriched, selected, busy, error, now, onSelect, onA
   );
 }
 
-function FlowReceiptRail({ taskId, task, detail, loading, error, now }: {
+// The Plan panel: when the selected task is a decompose root, surface its real
+// subtask GROUP (resolved live from the board), the durable Vault plan-spec link
+// (documented method), and a "Go ausführen" release when subtasks are gate-held
+// in `scheduled`. This is the visible+operative proof — the same child ids run
+// on through Execute → Verify → Ship.
+function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, releaseError, released }: {
+  rootId: string; detail?: TaskDetailResponse; boardTasks: BoardTask[];
+  onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const events = detail?.events ?? [];
+  const decomposed = [...events].reverse().find((e) => e.kind === "decomposed");
+  const hasSpec = events.some((e) => e.kind === "flow_plan");
+  const rawIds = (decomposed?.payload?.child_ids as unknown);
+  const childIds: string[] = Array.isArray(rawIds) ? rawIds.filter((x): x is string => typeof x === "string") : [];
+  if (!childIds.length && !hasSpec) return null;
+
+  const byId = new Map(boardTasks.map((t) => [t.id, t]));
+  const children = childIds.map((id) => byId.get(id)).filter((t): t is BoardTask => !!t);
+  const heldCount = children.filter((c) => c.status === "scheduled").length;
+  const specUrl = `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-plan`;
+
+  const statusTone = (s: TaskStatus) =>
+    s === "done" ? "emerald" : s === "blocked" ? "red" : s === "review" ? "amber" : s === "running" ? "cyan" : s === "scheduled" ? "violet" : "zinc";
+
+  return (
+    <div className="mt-4 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Eyebrow>{childIds.length ? de.flow.plan.decomposedInto(childIds.length) : de.flow.plan.subtasksHeading}</Eyebrow>
+        {hasSpec ? (
+          <a href={specUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[0.72rem] text-sky-200 hover:text-sky-100">
+            <FileText className="h-3.5 w-3.5" />{de.flow.plan.openSpec}
+          </a>
+        ) : null}
+      </div>
+
+      {children.length ? (
+        <ul className="mt-2 space-y-1.5">
+          {children.map((c) => (
+            <li key={c.id} className="flex items-center gap-2 rounded-md border border-[var(--hc-border)] px-2 py-1.5">
+              <span className="hc-mono text-[0.66rem] hc-dim">{c.id}</span>
+              <span className="min-w-0 flex-1 truncate text-[0.78rem] text-white">{c.title}</span>
+              <StatusPill tone={statusTone(c.status)} label={taskStatusLabel[c.status] ?? c.status} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {heldCount > 0 ? (
+        <div className="mt-2.5">
+          {confirming ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[0.7rem] hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
+              <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : "Bestätigen"}</button>
+              <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft">Abbrechen</button>
+            </div>
+          ) : (
+            <button type="button" disabled={releaseBusy} onClick={() => setConfirming(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs font-medium text-emerald-100 transition hover:brightness-110 disabled:opacity-40">
+              <Play className="h-3.5 w-3.5" />{de.flow.plan.release} · {de.flow.plan.subtasksOf(heldCount)}
+            </button>
+          )}
+          <p className="mt-1.5 flex items-center gap-1.5 text-[0.68rem] hc-dim"><Lock className="h-3 w-3" />{de.flow.plan.heldGate}</p>
+        </div>
+      ) : null}
+
+      {released ? <p className="mt-1.5 text-[0.7rem] text-emerald-300">{de.flow.plan.released(released)}</p> : null}
+      {releaseError ? <p className="mt-1.5 flex items-start gap-1 text-[0.7rem] text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
+    </div>
+  );
+}
+
+function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks, onRelease, releaseBusy, releaseError, released }: {
   taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; loading: boolean; error?: string; now: number;
+  boardTasks: BoardTask[]; onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
 }) {
   if (!taskId) {
     return (
@@ -165,6 +241,18 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now }: {
           </div>
         ) : null}
       </div>
+
+      {taskId ? (
+        <FlowPlanPanel
+          rootId={taskId}
+          detail={detail}
+          boardTasks={boardTasks}
+          onRelease={onRelease}
+          releaseBusy={releaseBusy}
+          releaseError={releaseError}
+          released={released}
+        />
+      ) : null}
 
       {error ? <div className="mt-3"><ToneCallout tone="red">{error}</ToneCallout></div> : null}
       {loading && !detail ? <div className="mt-3"><SkeletonCard rows={3} /></div> : null}
@@ -237,6 +325,8 @@ export function FlowView() {
   const blocked = useHermesBlockedCompletions();
   const { run: runAction, busyId, errorById } = useTaskAction(board.reload);
   const taskDetail = useTaskDetail();
+  const flowRelease = useFlowRelease(board.reload);
+  const [releasedById, setReleasedById] = useState<Record<string, number>>({});
   const [fallbackNow] = useState(() => Math.floor(Date.now() / 1000));
   const now = board.data?.now ?? fallbackNow;
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -278,6 +368,16 @@ export function FlowView() {
     void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Rework aus dem Flow-Board" } : undefined);
     if (selectedId === taskId) void fetchDetail(taskId);
   };
+  // Release a gated plan: unblock the held subtasks, then refresh the board +
+  // this root's detail so the held banner clears and the children move on.
+  const onReleasePlan = useCallback((rootId: string, n: number) => {
+    void flowRelease.release(rootId).then((res) => {
+      if (res.ok) {
+        setReleasedById((prev) => ({ ...prev, [rootId]: res.released ?? n }));
+        void fetchDetail(rootId);
+      }
+    });
+  }, [flowRelease, fetchDetail]);
   // A freshly captured task: select it so its receipt rail is ready, and pull the
   // board now so the new card appears without waiting for the next poll.
   const onCaptured = useCallback((taskId: string) => {
@@ -374,7 +474,19 @@ export function FlowView() {
             </div>
           </div>
           <div ref={railRef} className="scroll-mt-4">
-            <FlowReceiptRail taskId={selectedId} task={selectedTask} detail={selectedId ? taskDetail.detailById[selectedId] : undefined} loading={taskDetail.loadingId === selectedId} error={selectedId ? taskDetail.errorById[selectedId] : undefined} now={now} />
+            <FlowReceiptRail
+              taskId={selectedId}
+              task={selectedTask}
+              detail={selectedId ? taskDetail.detailById[selectedId] : undefined}
+              loading={taskDetail.loadingId === selectedId}
+              error={selectedId ? taskDetail.errorById[selectedId] : undefined}
+              now={now}
+              boardTasks={allTasks}
+              onRelease={onReleasePlan}
+              releaseBusy={flowRelease.busyId === selectedId}
+              releaseError={selectedId ? flowRelease.errorById[selectedId] : undefined}
+              released={selectedId ? releasedById[selectedId] : undefined}
+            />
           </div>
         </div>
       )}
