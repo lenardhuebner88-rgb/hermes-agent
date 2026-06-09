@@ -56,15 +56,38 @@ Every claim must end in exactly one of:
 
 The kanban kernel enforces that exactly one of these terminates each run. A worker that calls neither and exits normally is treated as crashed.
 
-## Outputs and the review-required convention
+## Outputs and the review gate
 
-For most code-changing tasks, the work isn't truly *done* the moment the worker finishes — it needs a human reviewer. The kanban kernel doesn't enforce this distinction (a "code-changing task" is fuzzy and forcing block-instead-of-complete on every code worker would break flows where no review is wanted). It's a convention layered on top:
+For code-changing tasks, a worker requests review by calling `kanban_complete(summary=..., metadata=...)`, not by blocking the card. In review-gated boards, the kernel parks the completion in `review`; an independent verifier audits the real diff/tests and then returns `APPROVED` (task becomes done) or `REQUEST_CHANGES` / `BLOCKED` with concrete defects.
 
-- **Block instead of complete**, with `reason` prefixed `review-required: ` so the dashboard / `hermes kanban show` surfaces the row as awaiting review.
-- **Drop structured metadata into a `kanban_comment` first** since `kanban_block` only carries the human-readable `reason`. Comments are the durable annotation channel — every audit-relevant field (changed_files, tests_run, diff_path or PR url, decisions) belongs there.
-- **Reviewer either approves and unblocks**, which respawns the worker with the comment thread for follow-ups; or asks for changes via another comment, which the next worker run sees as part of `kanban_show`'s context.
+Good completion metadata is what makes that gate auditable:
 
-The [`kanban-worker`](https://github.com/NousResearch/hermes-agent/blob/main/skills/devops/kanban-worker/SKILL.md) skill has worked examples for both `kanban_complete` (truly terminal tasks — typo fixes, docs changes, research writeups) and the `review-required` block pattern.
+- `changed_files`: exact files touched.
+- `tests_run` / `verification_evidence`: real commands, receipts, diffs, or file sections checked.
+- `scope_contract_version`, `scope_attestation`, `forbidden_actions_taken`: scope proof when the task's completion policy requires it.
+- `residual_risk`: `none`, `low`, `medium`, or `high` plus a short reason.
+
+Do **not** use `kanban_block(reason="review-required: ...")` for a finished, gates-green code task. Blocking is reserved for a genuine human-input dependency (missing credential, ambiguous approval, contradictory scope). A review-required block is a legacy anti-pattern: it bypasses the verifier loop and leaves dependent tasks waiting on a sticky human-gated state.
+
+## Writing verifiable acceptance criteria
+
+Acceptance criteria should describe the state that proves the task is done, plus how that state will be verified. Prefer stable IDs (`AC-...`) so worker handoffs and reviewer findings can cite the exact criterion.
+
+Bad:
+
+> Akzeptanzkriterium: Dokumentation aktualisiert.
+
+Good:
+
+> AC-DOC-1: `website/docs/user-guide/features/kanban-worker-lanes.md` documents that code-bearing workers finish with `kanban_complete -> review gate`, and no normative `review-required` block guidance remains. Verification: diff or file section shows the review-gate semantics; completion metadata lists the file and `forbidden_actions_taken=0`.
+
+Bad:
+
+> Akzeptanzkriterium: Tests laufen und Scope ist eingehalten.
+
+Good:
+
+> AC-CODE-1: The worker changes only `hermes_cli/kanban_decompose.py` and `tests/hermes_cli/test_kanban_decompose.py` for acceptance-criteria prompting. Verification: `changed_files` contains only those paths; `venv/bin/python -m pytest tests/hermes_cli/test_kanban_decompose.py -q` passes; metadata includes `scope_contract_version` and `forbidden_actions_taken=0`.
 
 ## Logs and audit trail
 

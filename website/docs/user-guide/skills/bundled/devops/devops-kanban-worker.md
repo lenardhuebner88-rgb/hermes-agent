@@ -37,7 +37,7 @@ Your workspace kind determines how you should behave inside `$HERMES_KANBAN_WORK
 
 | Kind | What it is | How to work |
 |---|---|---|
-| `scratch` | Fresh tmp dir, yours alone | Read/write freely; it gets GC'd when the task is archived. |
+| `scratch` | Fresh tmp dir, yours alone | Read/write freely. **It is DELETED the moment you `kanban_complete`** (not when archived) — to keep any deliverable, pass its absolute path in `kanban_complete(artifacts=[...])` (see "Preserving deliverables" below). |
 | `dir:<path>` | Shared persistent directory | Other runs will read what you write. Treat it like long-lived state. Path is guaranteed absolute (the kernel rejects relative paths). |
 | `worktree` | Git worktree at the resolved path | If `.git` doesn't exist, run `git worktree add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo first, then cd and work normally. Commit work here. |
 
@@ -47,6 +47,27 @@ If `$HERMES_TENANT` is set, the task belongs to a tenant namespace. When reading
 
 - Good: `business-a: Acme is our biggest customer`
 - Bad (leaks): `Acme is our biggest customer`
+
+## Preserving deliverables
+
+A `scratch` workspace is wiped as soon as you `kanban_complete` — only the run's `summary`/`metadata` strings survive in the DB. If your task produced a real file the operator should be able to open later (a `RESULT.md`, a generated report, a build artifact), pass its **absolute** path in the `artifacts` list:
+
+```python
+kanban_complete(
+    summary="generated the weekly digest",
+    artifacts=["/abs/path/in/workspace/digest.md"],  # copied out BEFORE the wipe
+)
+```
+
+Each listed artifact that resolves *inside* your scratch workspace is copied to `~/.hermes/reports/by-task/<your-task-id>/<basename>` before deletion, and a `deliverables_preserved` event records where they landed. Pass absolute paths (workspace-relative paths are skipped). Anything you don't list is gone.
+
+## Don't end your turn without completing
+
+The dispatcher treats a clean exit while the task is still `running` as a **protocol violation**: it counts a failed run and auto-blocks the task. Your run is only over once you call `kanban_complete` or `kanban_block`. Never answer in prose and stop.
+
+## Scope contract is advisory
+
+If the task body carries a `scope_contract.allowed_tools` list, treat it as an attestation of intent — **not** a runtime allowlist. Your actual tools come from your profile. If you need a tool your profile grants (e.g. `write_file`, `terminal`) that the contract didn't enumerate, use it; do not block solely because it's absent from the list.
 
 ## Good summary + metadata shapes
 
@@ -65,28 +86,26 @@ kanban_complete(
 )
 ```
 
-**Coding task that needs human review (review-required):**
+**Coding task that needs review (the verifier gate):**
 
-For most code-changing tasks, the work isn't truly *done* until a human reviewer has eyes on it. Block instead of complete, with `reason` prefixed `review-required: ` so the dashboard surfaces the row as needing review. Drop the structured metadata (changed files, test counts, diff/PR url) into a comment first, since `kanban_block` only carries the human-readable reason — comments are the durable annotation channel. Reviewer either approves and runs `hermes kanban unblock <id>` (which re-spawns you with the comment thread for any follow-ups) or asks for changes via another comment.
+Code changes DO get reviewed — but you request that review by **completing**, not blocking. When your code task is done and your gates pass, call `kanban_complete` with the structured handoff. If you're a code role (e.g. `coder`, `premium`), the **review gate** automatically parks your completion in `review` and hands it to an independent `verifier` profile, which re-runs the real gates (tests/build/lint) on your actual changes and renders the verdict: APPROVED → the task moves to `done`; REQUEST_CHANGES → it's blocked for a follow-up fix with the failing command output attached. **That verifier IS the review** — so completing is how you ask for it.
+
+Put the handoff in `kanban_complete` itself — its `summary` / `metadata` / `artifacts` carry everything the verifier and the dashboard read, so you don't need a separate comment + block:
 
 ```python
-import json
-
-kanban_comment(
-    body="review-required handoff:\n" + json.dumps({
+kanban_complete(
+    summary="shipped rate limiter — token bucket, keys on user_id with IP fallback, 14/14 tests pass",
+    metadata={
         "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
         "tests_run": 14,
         "tests_passed": 14,
-        "diff_path": "/path/to/worktree",  # or PR url if pushed
         "decisions": ["user_id primary, IP fallback for unauthenticated requests"],
-    }, indent=2),
-)
-kanban_block(
-    reason="review-required: rate limiter shipped, 14/14 tests pass — needs eyes on the user_id/IP fallback choice before merging",
+    },
+    artifacts=["/abs/path/to/RESULT.md"],  # optional; preserved past the scratch wipe
 )
 ```
 
-Use `kanban_complete` only when the task is genuinely terminal — e.g. a one-line typo fix, a docs change with no functional consequences, or a research task where the artifact IS the writeup itself.
+Do **not** end a finished, gates-green code task with `kanban_block(reason="review-required: ...")`. `blocked` is a sticky, human-gated dead end that no reviewer loop consumes — it bypasses the verifier and stalls every task that depends on yours. Reserve `kanban_block` for a genuine blocker: a decision only a human can make, a missing credential, a contradiction in the task (see "Block reasons that get answered fast" below).
 
 **Research task:**
 ```python
@@ -208,3 +227,60 @@ Every tool has a CLI equivalent for human operators and scripts:
 - etc.
 
 Use the tools from inside an agent; the CLI exists for the human at the terminal.
+
+## Sandboxing kanban side-effects in worker-spawned scripts (HERMES_SANDBOX_MODE)
+
+**Warning:** A worker process inherits `HERMES_KANBAN_DB` and
+`HERMES_KANBAN_BOARD` from the dispatcher, both pinned to the LIVE
+production board. Any helper script you launch (sample-builder, fixture
+generator, test harness, etc.) that calls
+`hermes kanban create` / `kanban_db.create_task()` will land rows on the
+LIVE board unless you explicitly opt into sandbox mode.
+
+This is the **live-DB-leak footgun**: a coder run on 2026-05-27 created
+3 accidental tasks (`t_5d4138fe`, `t_632b8e1b`, `t_63f39a2f`) on the
+production board from a sample-builder script. The self-recovery worked
+but the pattern is dangerous in autonomy.
+
+### The fix: opt into HERMES_SANDBOX_MODE=1
+
+In any shell script that calls `hermes kanban <write-verb>`:
+
+```bash
+#!/usr/bin/env bash
+export HERMES_SANDBOX_MODE=1
+# Now `hermes kanban create / promote / complete / link / ...` writes
+# go to `${HERMES_HOME}/.kanban-sandbox/default.db` instead of the
+# live `${HERMES_HOME}/kanban.db`.
+hermes kanban create "smoke-test task" --body "sandbox"
+hermes kanban list   # shows the sandbox board
+```
+
+Equivalent in a Python sub-process:
+
+```python
+import os, subprocess
+env = {**os.environ, "HERMES_SANDBOX_MODE": "1"}
+subprocess.run(
+    ["hermes", "kanban", "create", "smoke", "--body", "sandbox"],
+    env=env, check=True,
+)
+```
+
+`HERMES_SANDBOX_MODE=1`:
+- redirects `kanban_db_path()` → `${HERMES_HOME}/.kanban-sandbox/<board>.db`
+- redirects `workspaces_root()` → `${HERMES_HOME}/.kanban-sandbox/workspaces/`
+- **takes precedence over `HERMES_KANBAN_DB`** (so it survives the
+  dispatcher's worker-env injection)
+- ignores `HERMES_KANBAN_BOARD` (uses sandbox-local "default" board)
+
+When you're done, wipe the sandbox to start fresh:
+
+```bash
+rm -rf "${HERMES_HOME}/.kanban-sandbox"
+```
+
+**Inverse rule:** if you genuinely need a worker script to mutate the
+LIVE board (rare, usually a coordinator-style helper), call the tool
+directly via `kanban_create(...)` — that is the documented audited
+path. Don't shell out from inside a worker to mutate the live board.
