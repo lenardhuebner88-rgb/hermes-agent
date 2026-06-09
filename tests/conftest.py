@@ -714,6 +714,44 @@ def _live_system_guard(request, monkeypatch):
                     return True
         return False
 
+    def _is_hermes_self_update(cmd) -> bool:
+        """Block the Hermes self-update spawn (``hermes update [...]``).
+
+        ``hermes update`` git-stashes + checks out + ``reset --hard``s the REAL
+        hermes-agent checkout it is installed into — it resolves that path from
+        the binary location, NOT from HERMES_HOME/cwd. So a test that reaches the
+        real spawn (e.g. the gateway ``/update`` handler without mocking
+        ``subprocess.Popen``) silently wipes the developer's working tree and
+        flips the branch (exactly the failure seen 2026-06-09). Same foreign-
+        mutation risk class as the systemctl / process-killer guards above; the
+        old guard's ``_HERMES_TOKENS`` only matched the *gateway*, never
+        ``hermes update``, so it slipped through. Catches the bare form, the
+        ``bash -c "... hermes update --gateway ..."`` wrapper, and the
+        ``python -m hermes_cli.main update`` / ``hermes_cli/main.py update`` forms.
+        """
+        cmd_str = _cmd_to_string(cmd)
+        low = cmd_str.lower()
+        if "update" not in low:
+            return False
+        if (
+            "hermes update" in low
+            or "hermes_cli.main update" in low
+            or "hermes_cli/main.py update" in low
+        ):
+            return True
+        try:
+            tokens = _shlex.split(cmd_str)
+        except ValueError:
+            tokens = cmd_str.split()
+        for i, tok in enumerate(tokens):
+            head = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+            if head == "hermes" or head == "main.py" or tok == "hermes_cli.main":
+                # First non-flag token after the executable is the subcommand.
+                rest = [t for t in tokens[i + 1:] if not t.startswith("-")]
+                if rest and rest[0] == "update":
+                    return True
+        return False
+
     def _check_subprocess_cmd(name, cmd):
         if _is_blocked_systemctl(cmd):
             raise RuntimeError(
@@ -730,6 +768,16 @@ def _live_system_guard(request, monkeypatch):
                 "targeting hermes/python could hit the live gateway. "
                 "Mark with @pytest.mark.live_system_guard_bypass if "
                 "intentional."
+            )
+        if _is_hermes_self_update(cmd):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — `hermes update` self-update would "
+                "git-stash/checkout/reset the REAL hermes-agent checkout it is "
+                "installed into (wipes the working tree, flips the branch). Mock "
+                "subprocess.Popen (or the /update handler's spawn) in the test, "
+                "or mark with @pytest.mark.live_system_guard_bypass if a real "
+                "update spawn is genuinely required."
             )
 
     def _wrap_subprocess(name, real):

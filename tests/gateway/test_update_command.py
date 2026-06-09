@@ -917,3 +917,90 @@ class TestUpdateInHelp:
         import inspect
         source = inspect.getsource(GatewayRunner._handle_message)
         assert '"update"' in source
+
+
+# ---------------------------------------------------------------------------
+# Live-system guard: `hermes update` self-update can NEVER reach a real spawn
+# (regression for the 2026-06-09 incident where the full suite git-reset the
+# live checkout). The guard lives in tests/conftest.py::_live_system_guard.
+# ---------------------------------------------------------------------------
+
+
+class TestLiveGuardBlocksHermesSelfUpdate:
+    """The conftest live-system guard must block every form of a real
+    ``hermes update`` spawn across all subprocess primitives, so no test can
+    git-stash/checkout/reset the developer's real hermes-agent checkout."""
+
+    _SPAWN_FORMS = [
+        # The exact detached form the /update handler builds (bash -c wrapper).
+        ["setsid", "bash", "-c",
+         "PYTHONUNBUFFERED=1 /home/piet/.local/bin/hermes update --gateway "
+         "> /tmp/x/.update_output.txt 2>&1; rc=$?"],
+        ["bash", "-c", "hermes update --gateway"],
+        ["/usr/local/bin/hermes", "update", "--gateway"],
+        ["hermes", "update"],
+        ["python", "-m", "hermes_cli.main", "update", "--gateway"],
+    ]
+
+    @pytest.mark.parametrize("cmd", _SPAWN_FORMS)
+    def test_popen_blocks_self_update(self, cmd):
+        import subprocess
+        with pytest.raises(RuntimeError, match="hermes update"):
+            subprocess.Popen(cmd)  # guarded — never actually spawns
+
+    @pytest.mark.parametrize("cmd", _SPAWN_FORMS)
+    def test_run_blocks_self_update(self, cmd):
+        import subprocess
+        with pytest.raises(RuntimeError, match="hermes update"):
+            subprocess.run(cmd)
+
+    def test_os_system_blocks_self_update(self):
+        import os
+        with pytest.raises(RuntimeError, match="hermes update"):
+            os.system("hermes update --gateway")
+
+    @pytest.mark.asyncio
+    async def test_async_exec_blocks_self_update(self):
+        import asyncio
+        with pytest.raises(RuntimeError, match="hermes update"):
+            await asyncio.create_subprocess_exec("hermes", "update", "--gateway")
+
+    @pytest.mark.parametrize("cmd", [
+        ["git", "--version"],     # unrelated tool
+        ["true", "update"],       # "update" arg but not a hermes binary
+        ["true"],                 # trivially-true control
+    ])
+    def test_guard_allows_unrelated_commands(self, cmd):
+        """No false positives: package-manager updates / other tools with an
+        ``update`` arg / unrelated commands still run."""
+        import subprocess
+        assert subprocess.run(cmd).returncode == 0
+
+    @pytest.mark.asyncio
+    async def test_update_handler_cannot_spawn_real_update(self, tmp_path):
+        """End-to-end: even when the /update handler reaches its spawn (not
+        managed, real .git, resolvable binary), the guarded ``subprocess.Popen``
+        blocks the real ``hermes update`` and the handler's try/except reports a
+        start failure — the live checkout is never git-mutated."""
+        runner = _make_runner()
+        event = _make_event()
+        from hermes_cli.config import is_managed
+        assert not is_managed(), "hermetic env must not look managed"
+        # Fake project root WITH .git + a resolvable binary so the handler walks
+        # past every early-return straight to the spawn. Redirect _hermes_home to
+        # the tmp dir so the pre-spawn marker files don't touch real ~/.hermes.
+        fake_root = tmp_path / "project"
+        (fake_root / ".git").mkdir(parents=True)
+        (fake_root / "gateway").mkdir(parents=True)
+        (fake_root / "gateway" / "slash_commands.py").touch()
+        fake_file = str(fake_root / "gateway" / "slash_commands.py")
+        with patch("gateway.slash_commands.__file__", fake_file), \
+             patch("gateway.run._hermes_home", tmp_path), \
+             patch("gateway.run._resolve_hermes_bin", return_value=["/usr/local/bin/hermes"]):
+            result = await runner._handle_update_command(event)
+        # Guard raised inside Popen → handler caught it → start-failure message
+        # carrying the guard error (NOT the success "starting" message).
+        assert isinstance(result, str)
+        assert "hermes update" in result.lower(), (
+            f"expected the guard error to surface via start_failed; got: {result!r}"
+        )
