@@ -873,6 +873,12 @@ class Task:
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # Earliest time (unix epoch seconds) the task may be promoted from
+    # ``todo``/``blocked`` to ``ready``. NULL (the common case) = eligible
+    # immediately, exactly as before this column existed. A future value
+    # holds the task in place in ``recompute_ready`` until the wall clock
+    # reaches it — native time-based scheduling without a separate cron.
+    due_at: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -960,6 +966,9 @@ class Task:
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
+            ),
+            due_at=(
+                row["due_at"] if "due_at" in keys else None
             ),
         )
 
@@ -1152,7 +1161,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- for tasks created from the CLI, dashboard, or any path that doesn't
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
-    session_id           TEXT
+    session_id           TEXT,
+    -- Earliest promotion time (unix epoch seconds). NULL = eligible
+    -- immediately (legacy behaviour). recompute_ready holds a task in
+    -- ``todo``/``blocked`` until the wall clock reaches a future due_at.
+    due_at               INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1862,6 +1875,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(
             conn, "tasks", "session_id", "session_id TEXT"
         )
+
+    if "due_at" not in cols:
+        # Earliest promotion time (unix epoch seconds) for time-based
+        # scheduling. NULL on legacy rows = eligible immediately, preserving
+        # the exact promote behaviour those rows had before the column
+        # existed. recompute_ready holds a task whose due_at is still in the
+        # future.
+        _add_column_if_missing(conn, "tasks", "due_at", "due_at INTEGER")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -3640,14 +3661,25 @@ def recompute_ready(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
+    now = int(time.time())
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, due_at "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            # K9 time-based scheduling gate: hold a task whose due_at is still
+            # in the future, regardless of status or parent state — it is not
+            # yet eligible for promotion. NULL due_at (the common case) is
+            # eligible immediately, so a task without a due time promotes
+            # exactly as before this column existed (no extra 'promoted' event,
+            # identical count). A past/equal due_at falls through to the normal
+            # parent-completion check below.
+            due_at = row["due_at"]
+            if due_at is not None and int(due_at) > now:
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for human review — do not
                 # silently auto-recover.  ``unblock_task`` is the only
