@@ -1411,6 +1411,7 @@ DIAGNOSTIC_KINDS = (
     "stuck_in_blocked",
     "block_unblock_cycling",
     "stranded_in_ready",
+    "descendants_blocked_by_stuck_parent",
 )
 
 
@@ -1428,7 +1429,134 @@ DEFAULT_CONFIG = {
     # signal is dominated by tasks that are about to be claimed on the
     # next dispatcher tick (default 60s) and would just be noise.
     "stranded_threshold_seconds": 30 * 60,
+    # How long a parent must be sticky-blocked before its waiting ``todo``
+    # descendants are flagged as stranded (K4). Mirrors blocked_stale_hours.
+    "descendants_blocked_parent_hours": 24,
 }
+
+
+def find_descendants_blocked_by_stuck_parent(
+    conn,
+    *,
+    now: Optional[int] = None,
+    config: Optional[dict] = None,
+) -> dict[str, list[Diagnostic]]:
+    """Flag ``todo`` tasks whose transitive parent is long-sticky-blocked (K4).
+
+    This is a *cross-task* diagnostic and therefore lives OUTSIDE the per-task
+    rule engine (``compute_task_diagnostics``), which is graph-blind — it only
+    ever sees one task and that task's own events. Here we take the open board
+    connection and walk ``task_links`` downward from each long-sticky-blocked
+    task to the ``todo`` descendants it is stranding, returning a
+    ``{todo_task_id: [Diagnostic]}`` map the caller can merge into its
+    per-task diagnostics.
+
+    "long-sticky-blocked" = status ``blocked`` AND a worker/operator
+    ``kanban_block`` (``_has_sticky_block``, i.e. not a circuit-breaker
+    ``gave_up``) AND the newest ``blocked`` event is at least
+    ``config['descendants_blocked_parent_hours']`` old. Read-only; cycle-safe.
+    """
+    now = int(now if now is not None else time.time())
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
+    hours = float(
+        cfg.get("descendants_blocked_parent_hours")
+        or cfg.get("blocked_stale_hours", 24)
+    )
+
+    from hermes_cli import kanban_db as _kb  # lazy: avoid import cycle
+
+    # 1) Collect long-sticky-blocked tasks (the stuck parents/blockers).
+    stuck: dict[str, float] = {}
+    for row in conn.execute("SELECT id FROM tasks WHERE status = 'blocked'"):
+        bid = row["id"]
+        last_blocked = conn.execute(
+            "SELECT MAX(created_at) FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked'",
+            (bid,),
+        ).fetchone()[0]
+        if not last_blocked:
+            continue  # no real block event → circuit-breaker / direct DB set
+        age_hours = (now - int(last_blocked)) / 3600.0
+        if age_hours < hours:
+            continue
+        try:
+            if not _kb._has_sticky_block(conn, bid):
+                continue
+        except Exception:
+            continue
+        stuck[bid] = age_hours
+    if not stuck:
+        return {}
+
+    # 2) Status map once, so the descendant walk is pure in-memory after links.
+    status_by = {
+        r["id"]: r["status"]
+        for r in conn.execute("SELECT id, status FROM tasks")
+    }
+
+    # 3) Walk descendants downward (cycle-safe) from each stuck blocker; record
+    #    every ``todo`` task it strands and which blocker(s) reach it.
+    stranded: dict[str, dict[str, Any]] = {}
+    for bid, age_hours in stuck.items():
+        seen: set[str] = set()
+        stack = list(_kb.child_ids(conn, bid))
+        while stack:
+            cid = stack.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if status_by.get(cid) == "todo":
+                entry = stranded.setdefault(
+                    cid, {"blockers": set(), "max_age": 0.0}
+                )
+                entry["blockers"].add(bid)
+                entry["max_age"] = max(entry["max_age"], age_hours)
+            stack.extend(_kb.child_ids(conn, cid))
+
+    if not stranded:
+        return {}
+
+    out: dict[str, list[Diagnostic]] = {}
+    for tid, info in stranded.items():
+        blockers = sorted(info["blockers"])
+        primary = blockers[0]
+        age = int(info["max_age"])
+        out[tid] = [Diagnostic(
+            kind="descendants_blocked_by_stuck_parent",
+            severity="warning",
+            title=(
+                f"Stranded by a sticky-blocked parent "
+                f"({len(blockers)} blocker(s), {age}h)"
+            ),
+            detail=(
+                "This todo task cannot start because a task it depends on has "
+                f"been sticky-blocked for ~{age}h. Until the blocking parent is "
+                "unblocked (or the dependency removed), this task waits "
+                "indefinitely. Unblock the parent with feedback, or re-route "
+                "this task if the dependency is stale."
+            ),
+            actions=[
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Unblock the stuck parent",
+                    payload={"command": f"hermes kanban unblock {primary}"},
+                    suggested=True,
+                ),
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Inspect the blocking parent",
+                    payload={"command": f"hermes kanban show {primary}"},
+                ),
+            ],
+            first_seen_at=now,
+            last_seen_at=now,
+            count=1,
+            data={
+                "blocked_parents": blockers,
+                "max_block_age_hours": round(info["max_age"], 1),
+            },
+        )]
+    return out
 
 
 def config_from_kanban_config(kanban_cfg: Optional[dict]) -> dict:

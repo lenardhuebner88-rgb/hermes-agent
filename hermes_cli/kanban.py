@@ -1948,6 +1948,22 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                     if dl:
                         diags_by_task[tid] = dl
 
+        # K4 cross-task pass: flag todo tasks stranded by a sticky-blocked
+        # parent. The per-task engine above is graph-blind, so this runs as a
+        # board-level pass with the open conn. Read-only and fail-soft — a
+        # diagnostics hiccup must never break the command.
+        try:
+            cross = kd.find_descendants_blocked_by_stuck_parent(
+                conn, config=diag_config,
+            )
+            focus = getattr(args, "task", None)
+            for tid, dl in cross.items():
+                if focus and tid != focus:
+                    continue
+                diags_by_task.setdefault(tid, []).extend(dl)
+        except Exception:
+            pass
+
         # Severity filter.
         sev = getattr(args, "severity", None)
         if sev:

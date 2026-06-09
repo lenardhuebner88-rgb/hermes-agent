@@ -970,3 +970,95 @@ def test_severity_at_or_above_uses_threshold_semantics():
     assert kd.severity_at_or_above("error", "critical") is False
     assert kd.severity_at_or_above("mystery", "warning") is False
     assert kd.severity_at_or_above("warning", None) is True
+
+
+# ---------------------------------------------------------------------------
+# K4 — descendants_blocked_by_stuck_parent (cross-task, conn-bearing)
+# ---------------------------------------------------------------------------
+
+
+def _block_parent_long_ago(conn, parent_id, *, age_hours=48):
+    """Claim + block a parent and backdate its blocked event to ``age_hours``."""
+    kb.claim_task(conn, parent_id)  # ready -> running (block needs running)
+    kb.block_task(conn, parent_id, reason="needs operator input")
+    conn.execute(
+        "UPDATE task_events SET created_at = ? "
+        "WHERE task_id = ? AND kind = 'blocked'",
+        (int(time.time()) - 3600 * age_hours, parent_id),
+    )
+    conn.commit()
+
+
+def test_descendants_blocked_by_stuck_parent_flags_todo_child(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="blocker work", assignee="coder")
+        child = kb.create_task(
+            conn, title="waits on parent", assignee="coder", parents=[parent],
+        )
+        # A linked child of a not-done parent sits in todo.
+        assert kb.get_task(conn, child).status == "todo"
+        _block_parent_long_ago(conn, parent, age_hours=48)
+
+        out = kd.find_descendants_blocked_by_stuck_parent(conn)
+
+    assert child in out
+    diags = out[child]
+    assert any(d.kind == "descendants_blocked_by_stuck_parent" for d in diags)
+    # The suggested remediation unblocks the stuck PARENT, not the child.
+    cmds = [
+        a.payload.get("command")
+        for d in diags
+        for a in d.actions
+        if isinstance(a.payload, dict)
+    ]
+    assert any(f"unblock {parent}" in (c or "") for c in cmds)
+    assert parent in diags[0].data["blocked_parents"]
+
+
+def test_descendants_blocked_by_stuck_parent_transitive(kanban_home):
+    """A grandchild two links below the stuck parent is still flagged."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="root blocker", assignee="coder")
+        mid = kb.create_task(
+            conn, title="mid", assignee="coder", parents=[parent],
+        )
+        grandchild = kb.create_task(
+            conn, title="grandchild", assignee="coder", parents=[mid],
+        )
+        _block_parent_long_ago(conn, parent, age_hours=72)
+
+        out = kd.find_descendants_blocked_by_stuck_parent(conn)
+
+    # Both the direct todo child and the transitive todo grandchild are stranded.
+    assert mid in out
+    assert grandchild in out
+
+
+def test_descendants_blocked_by_stuck_parent_silent_when_block_recent(kanban_home):
+    """A freshly blocked parent is below threshold → no stranding flag."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="blocker", assignee="coder")
+        child = kb.create_task(
+            conn, title="child", assignee="coder", parents=[parent],
+        )
+        kb.claim_task(conn, parent)
+        kb.block_task(conn, parent, reason="just now")  # recent, not "long"
+
+        out = kd.find_descendants_blocked_by_stuck_parent(conn)
+
+    assert child not in out
+
+
+def test_descendants_blocked_by_stuck_parent_silent_when_parent_recovered(kanban_home):
+    """An unblocked (non-sticky) parent strands nobody."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="blocker", assignee="coder")
+        child = kb.create_task(
+            conn, title="child", assignee="coder", parents=[parent],
+        )
+        _block_parent_long_ago(conn, parent, age_hours=48)
+        kb.unblock_task(conn, parent)  # latest block/unblock event is unblock
+
+        out = kd.find_descendants_blocked_by_stuck_parent(conn)
+
+    assert child not in out
