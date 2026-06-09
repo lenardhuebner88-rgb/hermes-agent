@@ -4747,6 +4747,37 @@ def _advance_workflow_step(
     return True
 
 
+def set_task_workflow(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    template_id: str,
+    first_step_key: str,
+) -> bool:
+    """Atomically assign a workflow template + seed its first step on a task.
+
+    Writes ``workflow_template_id`` and ``current_step_key`` in a single
+    statement so a task can never be left with a template but no step (or vice
+    versa). The caller is responsible for resolving ``first_step_key`` from the
+    template; this helper hard-guards against a half-seed by refusing to run
+    with an empty ``template_id`` or ``first_step_key``. Returns ``True`` when
+    exactly one row was updated.
+    """
+    if not template_id or not first_step_key:
+        raise ValueError(
+            "set_task_workflow requires a non-empty template_id and "
+            "first_step_key (never half-seed a workflow)"
+        )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET workflow_template_id = ?, current_step_key = ? "
+            "WHERE id = ?",
+            (template_id, first_step_key, task_id),
+        )
+        return cur.rowcount == 1
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,

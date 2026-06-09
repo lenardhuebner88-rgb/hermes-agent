@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -343,3 +344,53 @@ def test_broken_template_falls_back_to_column_assignee(isolated_kanban_home):
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
     assert row["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# CLI verb: `kanban set-workflow <task_id> <template_id>`
+# ---------------------------------------------------------------------------
+
+def test_set_workflow_seeds_template_and_first_step(isolated_kanban_home):
+    kb, _wf, wf_dir = isolated_kanban_home
+    _write_template(wf_dir, "crc", _THREE_STEP)
+    from hermes_cli import kanban
+
+    with kb.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        task_id = kb.create_task(conn, title="plain", assignee=None)
+        conn.commit()
+
+    args = types.SimpleNamespace(task_id=task_id, template_id="crc")
+    rc = kanban._cmd_set_workflow(args)
+    assert rc == 0
+
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT workflow_template_id, current_step_key FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    # Both columns written atomically: template id + its first step.
+    assert row["workflow_template_id"] == "crc"
+    assert row["current_step_key"] == "code"
+
+
+def test_set_workflow_unknown_template_no_partial_seed(isolated_kanban_home):
+    kb, _wf, _wf_dir = isolated_kanban_home
+    from hermes_cli import kanban
+
+    with kb.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        task_id = kb.create_task(conn, title="plain", assignee=None)
+        conn.commit()
+
+    args = types.SimpleNamespace(task_id=task_id, template_id="does-not-exist")
+    rc = kanban._cmd_set_workflow(args)
+    # Fail-soft: non-zero exit, and NEITHER column touched (no partial seed).
+    assert rc != 0
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT workflow_template_id, current_step_key FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    assert row["workflow_template_id"] is None
+    assert row["current_step_key"] is None

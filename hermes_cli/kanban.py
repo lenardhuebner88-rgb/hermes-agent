@@ -607,6 +607,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
 
+    p_set_wf = sub.add_parser("set-workflow", help="Assign a workflow template to a task (seeds the first step)")
+    p_set_wf.add_argument("task_id")
+    p_set_wf.add_argument("template_id")
+
     p_schedule = sub.add_parser("schedule", help="Park one or more tasks in Scheduled (waiting on time, not human input)")
     p_schedule.add_argument("task_id")
     p_schedule.add_argument("reason", nargs="*", help="Reason/timing note (also appended as a comment)")
@@ -1125,6 +1129,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "review-commit": _cmd_review_commit,
             "edit":     _cmd_edit,
             "block":    _cmd_block,
+            "set-workflow": _cmd_set_workflow,
             "schedule": _cmd_schedule,
             "unblock":  _cmd_unblock,
             "promote":  _cmd_promote,
@@ -2267,6 +2272,31 @@ def _cmd_block(args: argparse.Namespace) -> int:
             else:
                 print(f"Blocked {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
+
+
+def _cmd_set_workflow(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_workflows import load_workflow_template
+
+    tmpl = load_workflow_template(args.template_id)
+    if tmpl is None:
+        print(f"unknown workflow template: {args.template_id}", file=sys.stderr)
+        return 1
+    first = tmpl.first_step_key()
+    if not first:
+        print(f"workflow template has no steps: {args.template_id}", file=sys.stderr)
+        return 1
+    with kb.connect_closing() as conn:
+        ok = kb.set_task_workflow(
+            conn,
+            args.task_id,
+            template_id=args.template_id,
+            first_step_key=first,
+        )
+    if ok:
+        print(f"set workflow {args.template_id} on {args.task_id} (step {first})")
+        return 0
+    print(f"cannot set workflow on {args.task_id}", file=sys.stderr)
+    return 1
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
