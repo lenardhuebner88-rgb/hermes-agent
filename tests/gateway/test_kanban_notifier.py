@@ -859,3 +859,63 @@ def test_active_root_with_pending_work_does_not_flush(tmp_path, monkeypatch):
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert not any("steckt fest" in s["text"] for s in adapter.sent)
+
+
+def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
+    """K12: a task reaching terminal ``done`` drops a `<task_id>.md` receipt
+    into HERMES_AUTO_RECEIPT_DIR containing the task id and title.
+    """
+    db_path = tmp_path / "auto-receipt-done.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    receipt_dir = tmp_path / "receipts"
+    monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(receipt_dir))
+
+    tid = _create_completed_subscription(
+        summary="Alles erledigt: Feature gebaut und getestet.",
+        title="ship the receipt feature",
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    # Normal delivery is unchanged by the receipt write.
+    assert len(adapter.sent) == 1
+
+    receipt = receipt_dir / f"{tid}.md"
+    assert receipt.exists(), f"expected auto-receipt at {receipt}"
+    content = receipt.read_text(encoding="utf-8")
+    assert tid in content
+    assert "ship the receipt feature" in content
+    assert "Alles erledigt" in content
+
+
+def test_auto_receipt_fail_soft_unwritable_dir(tmp_path, monkeypatch):
+    """K12: an impossible receipt dir (a path *under a regular file*, so
+    mkdir raises NotADirectoryError) must not break the tick or change
+    delivery — the write is swallowed and the done ping still goes out.
+    """
+    db_path = tmp_path / "auto-receipt-failsoft.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    # A regular file; using it as a parent directory makes mkdir() raise.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    bad_dir = blocker / "nested" / "receipts"
+    monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(bad_dir))
+
+    tid = _create_completed_subscription(title="fail-soft check")
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    # Must not raise despite the unwritable receipt dir.
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    # Delivery is untouched by the swallowed receipt failure.
+    assert len(adapter.sent) == 1
+    assert tid in adapter.sent[0]["text"]
+    # No stray receipt file got created.
+    assert not bad_dir.exists()

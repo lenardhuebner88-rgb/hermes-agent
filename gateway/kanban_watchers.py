@@ -567,6 +567,58 @@ def _gave_up_message(task_id: str, tag: str, payload: Optional[dict]) -> str:
     return f"✖ {tag}Kanban {task_id} gave up {reason}{err}"
 
 
+# K12: where auto vault-receipts land when a task reaches terminal ``done``.
+# The env override is REQUIRED so tests can point the write at a tmp dir; in
+# production it falls back to the shared Hermes vault receipts dir.
+_AUTO_RECEIPT_DEFAULT_DIR = "/home/piet/vault/03-Agents/Hermes/receipts/auto"
+
+
+def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary: Optional[str] = None) -> None:
+    """K12: write a tiny Markdown receipt for a task that reached ``done``.
+
+    FAIL-SOFT by contract: a missing/unwritable vault dir or any other error
+    is swallowed (logged at debug) so the notifier tick continues uninterrupted
+    and delivery behaviour never changes. One file per task at
+    ``<base>/<task_id>.md`` — overwriting is fine since the terminal delivery
+    fires once. Filesystem only; never touches an adapter.
+    """
+    try:
+        base = os.environ.get("HERMES_AUTO_RECEIPT_DIR") or _AUTO_RECEIPT_DEFAULT_DIR
+        base_path = Path(base)
+        base_path.mkdir(parents=True, exist_ok=True)
+
+        task_id = getattr(task, "id", None) or "<unknown>"
+        title = getattr(task, "title", None) or task_id
+        assignee = getattr(task, "assignee", None) or "unbekannt"
+        status = getattr(task, "status", None) or "done"
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")
+        body = (summary or "").strip()
+
+        lines = [
+            "---",
+            "kind: auto-receipt",
+            f"task_id: {task_id}",
+            f"title: {title}",
+            f"assignee: {assignee}",
+            f"status: {status}",
+            f"board: {board_slug or ''}",
+            f"completed_at: {ts}",
+            "---",
+            "",
+            f"# {title}",
+            "",
+            f"Task `{task_id}` reached terminal **{status}** "
+            f"(assignee: {assignee}, board: {board_slug or '—'}) at {ts}.",
+        ]
+        if body:
+            lines += ["", "## Ergebnis", "", body]
+        lines.append("")
+
+        (base_path / f"{task_id}.md").write_text("\n".join(lines), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("auto-receipt write failed: %s", exc, exc_info=True)
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -1005,6 +1057,31 @@ class GatewayKanbanWatchersMixin:
                         # above for the failure mode this prevents.
                         task_terminal = task and task.status in {"done", "archived"}
                         if task_terminal:
+                            # K12: on terminal ``done`` (NOT archived — avoid
+                            # receipt-spam when tasks get archived later) write a
+                            # fail-soft vault receipt. Own try/except so a write
+                            # hiccup can never affect the unsub below; the helper
+                            # is itself swallow-all and filesystem-only (never an
+                            # adapter send), so the delivery count is unchanged.
+                            if task.status == "done":
+                                try:
+                                    run = runs_by_event_id.get(
+                                        int(getattr(ev, "id", 0) or 0)
+                                    )
+                                    summary = getattr(run, "summary", None) or getattr(
+                                        task, "result", None
+                                    )
+                                    await asyncio.to_thread(
+                                        _write_auto_receipt,
+                                        task,
+                                        board_slug=board_slug,
+                                        summary=summary,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "kanban notifier: auto-receipt for %s failed",
+                                        sub["task_id"], exc_info=True,
+                                    )
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
                             )
