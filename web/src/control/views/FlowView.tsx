@@ -9,13 +9,13 @@
  * honest guard. NO mock/demo data — a quiet empty state shows when no runs
  * exist for a stage.
  */
-import { useMemo, useState } from "react";
-import { AlertTriangle, ArrowRight, Lock, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, ArrowRight, Lock, RefreshCw, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge } from "../lib/derive";
-import { FLEET_STAGES, STAGE_META, groupByStage, roleChip, stageActions, stageGuard, type StageAction } from "../lib/fleet";
+import { fmtAge, freshness } from "../lib/derive";
+import { FLEET_STAGES, STAGE_META, flowCounts, groupByStage, roleChip, stageActions, stageGuard, type StageAction } from "../lib/fleet";
 import {
   useBoard,
   useHermesBlockedCompletions,
@@ -31,6 +31,7 @@ import { StatusPill, ToneCallout } from "../components/atoms";
 import { Eyebrow, SkeletonCard, Text } from "../components/primitives";
 import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { RoleChip } from "../components/fleet/atoms";
+import { FlowCapture } from "../components/fleet/FlowCapture";
 
 const MAX_CARDS = 12;
 
@@ -67,8 +68,8 @@ function FlowCardActions({ status, busy, error, onAct }: { status: BoardTask["st
       {pending ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[0.7rem] hc-soft">{pending.confirm}</span>
-          <button type="button" disabled={busy} onClick={() => { onAct(pending); setPending(null); }} className="inline-flex min-h-7 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 text-xs text-[var(--hc-accent-text)] disabled:opacity-40">{busy ? "…" : "Bestätigen"}</button>
-          <button type="button" onClick={() => setPending(null)} className="inline-flex min-h-7 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft">Abbrechen</button>
+          <button type="button" disabled={busy} onClick={() => { onAct(pending); setPending(null); }} className="inline-flex min-h-11 sm:min-h-7 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 text-xs text-[var(--hc-accent-text)] disabled:opacity-40">{busy ? "…" : "Bestätigen"}</button>
+          <button type="button" onClick={() => setPending(null)} className="inline-flex min-h-11 sm:min-h-7 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft">Abbrechen</button>
         </div>
       ) : actions.length ? (
         <div className="flex flex-wrap items-center gap-1.5">
@@ -76,7 +77,7 @@ function FlowCardActions({ status, busy, error, onAct }: { status: BoardTask["st
             const color = TONE_HEX[action.tone];
             return (
               <button key={action.key} type="button" disabled={busy} onClick={() => setPending(action)} style={{ borderColor: `${color}55`, color }}
-                className={cn("inline-flex min-h-7 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition disabled:opacity-40", action.intent === "danger" ? "hover:bg-red-500/10" : "hover:bg-white/5")}>
+                className={cn("inline-flex min-h-11 sm:min-h-7 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition disabled:opacity-40", action.intent === "danger" ? "hover:bg-red-500/10" : "hover:bg-white/5")}>
                 {action.label}{action.intent === "advance" ? <ArrowRight className="h-3 w-3" /> : null}
               </button>
             );
@@ -260,25 +261,49 @@ export function FlowView() {
     return map;
   }, [workers.data, reviews.data, blocked.data, results.data]);
 
+  const railRef = useRef<HTMLDivElement>(null);
+  const reloadBoard = board.reload;
+  const fetchDetail = taskDetail.fetch;
+
   const selectTask = (id: string) => {
     setSelectedId(id);
-    if (!taskDetail.detailById[id]) void taskDetail.fetch(id);
+    if (!taskDetail.detailById[id]) void fetchDetail(id);
+    // On mobile/tablet the receipt rail stacks below the board (xl breakpoint),
+    // so a tap would otherwise change something off-screen — bring it into view.
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches) {
+      window.setTimeout(() => railRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    }
   };
   const onAct = (taskId: string, action: StageAction) => {
     void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Rework aus dem Flow-Board" } : undefined);
-    if (selectedId === taskId) void taskDetail.fetch(taskId);
+    if (selectedId === taskId) void fetchDetail(taskId);
   };
+  // A freshly captured task: select it so its receipt rail is ready, and pull the
+  // board now so the new card appears without waiting for the next poll.
+  const onCaptured = useCallback((taskId: string) => {
+    setSelectedId(taskId);
+    void reloadBoard();
+    void fetchDetail(taskId);
+  }, [reloadBoard, fetchDetail]);
 
-  const counts = useMemo(() => ({
-    running: columns.execute.filter((t) => t.status === "running").length,
-    plan: columns.plan.length,
-    review: columns.verify.length,
-    total: allTasks.filter((t) => t.status !== "done" && t.status !== "archived").length,
-  }), [columns, allTasks]);
+  const counts = useMemo(() => flowCounts(allTasks), [allTasks]);
+  const fresh = freshness(board.lastUpdated, 8000, now);
 
   const selectedTask = selectedId ? allTasks.find((t) => t.id === selectedId) : undefined;
+  const selectedStatus = selectedTask?.status;
   const loadingFirst = board.loading && board.data == null;
   const hasAnyRun = allTasks.length > 0;
+
+  // Keep the receipt rail live while a non-terminal task is selected: re-fetch
+  // its detail every 8s so runs/events/the verifier verdict stream in during a
+  // run. Pauses when the tab is hidden (same contract as usePolling).
+  useEffect(() => {
+    if (!selectedId || selectedStatus === "done" || selectedStatus === "archived") return;
+    const handle = window.setInterval(() => {
+      if (!document.hidden) void fetchDetail(selectedId);
+    }, 8000);
+    return () => window.clearInterval(handle);
+  }, [selectedId, selectedStatus, fetchDetail]);
 
   return (
     <div className="space-y-4">
@@ -288,10 +313,21 @@ export function FlowView() {
           <h1 className="hc-type-title mt-1 text-white">{de.flow.title}</h1>
           <Text variant="body" className="mt-1 max-w-2xl hc-soft">{de.flow.subtitle}</Text>
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          <FleetPod label={de.flow.runsActive} dot="live" value={loadingFirst ? "—" : counts.running} />
-          <FleetPod label={de.flow.wip} value={loadingFirst ? "—" : counts.total} />
-          <FleetPod label={de.flow.review} dot="warn" value={loadingFirst ? "—" : counts.review} />
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <div className="flex items-center gap-2 self-end">
+            <span className="flex items-center gap-1.5 text-[0.68rem] hc-dim" title={fresh.stale ? de.flow.paused : undefined}>
+              <span className={cn("h-1.5 w-1.5 rounded-full", fresh.stale ? "bg-amber-400" : "bg-emerald-400 animate-pulse")} />
+              {board.lastUpdated ? (fresh.stale ? de.flow.paused : de.flow.updated(fresh.label.replace("vor ", ""))) : ""}
+            </span>
+            <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-3.5 w-3.5" /></button>
+            <FlowCapture onCreated={onCaptured} />
+          </div>
+          <div className={cn("grid gap-2", counts.blocked > 0 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3")}>
+            <FleetPod label={de.flow.runsActive} dot="live" value={loadingFirst ? "—" : counts.running} />
+            <FleetPod label={de.flow.wip} value={loadingFirst ? "—" : counts.wip} />
+            <FleetPod label={de.flow.review} dot="warn" value={loadingFirst ? "—" : counts.review} />
+            {counts.blocked > 0 ? <FleetPod label={de.flow.rework} dot="error" value={loadingFirst ? "—" : counts.blocked} /> : null}
+          </div>
         </div>
       </div>
 
@@ -303,7 +339,7 @@ export function FlowView() {
         <FleetEmptyState title={de.flow.emptyTitle} desc={de.flow.emptyDesc} />
       ) : (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="overflow-x-auto pb-2">
+          <div className="snap-x overflow-x-auto pb-2">
             <div className="flex min-w-max gap-3">
               {FLEET_STAGES.map((stage, idx) => {
                 const meta = STAGE_META[stage];
@@ -312,7 +348,7 @@ export function FlowView() {
                 const shown = items.slice(0, MAX_CARDS);
                 const fill = items.length ? Math.min(1, items.length / 6) : 0;
                 return (
-                  <section key={stage} className="flex w-[15.5rem] shrink-0 flex-col">
+                  <section key={stage} className="flex w-[15.5rem] shrink-0 snap-start flex-col">
                     <div className="flex items-center gap-2">
                       <span className="hc-mono text-[0.7rem] hc-dim">{String(idx + 1).padStart(2, "0")}</span>
                       <span className="text-xs font-semibold uppercase tracking-wide text-white">{meta.label}</span>
@@ -337,7 +373,9 @@ export function FlowView() {
               })}
             </div>
           </div>
-          <FlowReceiptRail taskId={selectedId} task={selectedTask} detail={selectedId ? taskDetail.detailById[selectedId] : undefined} loading={taskDetail.loadingId === selectedId} error={selectedId ? taskDetail.errorById[selectedId] : undefined} now={now} />
+          <div ref={railRef} className="scroll-mt-4">
+            <FlowReceiptRail taskId={selectedId} task={selectedTask} detail={selectedId ? taskDetail.detailById[selectedId] : undefined} loading={taskDetail.loadingId === selectedId} error={selectedId ? taskDetail.errorById[selectedId] : undefined} now={now} />
+          </div>
         </div>
       )}
     </div>

@@ -7,6 +7,8 @@ import {
   roleChip,
   buildPipeline,
   groupByStage,
+  flowCounts,
+  captureRequest,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
@@ -147,5 +149,54 @@ describe("groupByStage", () => {
     const cols = groupByStage([t("lo", "todo", 1), t("hi", "todo", 5), t("blk", "blocked")]);
     expect(cols.execute.map((x) => x.id)).toEqual(["blk"]);
     expect(cols.plan.map((x) => x.id)).toEqual(["hi", "lo"]);
+  });
+
+  it("sorts Ship by completion recency (newest first), NOT priority — a fresh ship is always on top", () => {
+    const done = (id: string, completed_at: number, created_age: number, priority = 0): BoardTaskLite => ({
+      id, title: id, status: "done", priority, completed_at, age: { created_age_seconds: created_age },
+    });
+    const cols = groupByStage([
+      done("old", 1000, 99999, 9), // ancient + highest priority — must NOT win
+      done("newest", 5000, 10, 0),
+      done("mid", 3000, 500, 5),
+    ]);
+    expect(cols.ship.map((x) => x.id)).toEqual(["newest", "mid", "old"]);
+  });
+
+  it("Ship falls back to creation recency when completed_at is missing", () => {
+    const cols = groupByStage([
+      { id: "older", title: "older", status: "done", age: { created_age_seconds: 900 } },
+      { id: "newer", title: "newer", status: "done", age: { created_age_seconds: 100 } },
+    ]);
+    expect(cols.ship.map((x) => x.id)).toEqual(["newer", "older"]);
+  });
+});
+
+describe("flowCounts", () => {
+  const t = (status: TaskStatus): BoardTaskLite => ({ id: status, title: status, status });
+  it("counts running/plan/review/blocked + wip, excluding done/archived", () => {
+    const c = flowCounts([
+      t("triage"), t("todo"), t("scheduled"), t("ready"),
+      t("running"), t("review"), t("blocked"), t("done"), t("archived"),
+    ]);
+    expect(c).toEqual({ running: 1, plan: 3, review: 1, blocked: 1, wip: 7 });
+  });
+  it("is all-zero for an empty / fully-terminal board", () => {
+    expect(flowCounts([t("done"), t("archived")])).toEqual({ running: 0, plan: 0, review: 0, blocked: 0, wip: 0 });
+  });
+});
+
+describe("captureRequest", () => {
+  it("park mode → triage+park, trimmed title, no home ping (safe default)", () => {
+    expect(captureRequest("  Tisch decken  ", "park")).toEqual({
+      title: "Tisch decken", assignee: "coder", priority: 0, tenant: "flow-capture",
+      triage: true, park: true, notify_home: false,
+    });
+  });
+  it("orchestrate mode → triage only (no park), pings home", () => {
+    const r = captureRequest("Baue X", "orchestrate");
+    expect(r.triage).toBe(true);
+    expect(r.park).toBe(false);
+    expect(r.notify_home).toBe(true);
   });
 });

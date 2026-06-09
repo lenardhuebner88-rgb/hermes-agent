@@ -31,6 +31,7 @@ import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
 import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import { captureRequest, type CaptureMode } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -668,6 +669,53 @@ export function useCommissionToFleet() {
     }
   }, []);
   return { stateById, errorById, taskIdById, commission };
+}
+
+// Quick-capture a brand-new task into the Flow pipeline from the "+ Aufgabe"
+// button (POST /tasks). `mode` is the operator's pick in the sheet: "park"
+// (safe default — lands GEPARKT in scheduled/Plan, no auto-start) or
+// "orchestrate" (lands in triage/Capture, the in-gateway orchestrator takes
+// over). The payload shape lives in lib/fleet.captureRequest (pure + tested).
+export type CaptureState = "idle" | "busy" | "done" | "error";
+export interface CaptureResult {
+  ok: boolean;
+  taskId?: string;
+  taskStatus?: string;
+  detail?: string;
+}
+export function useCaptureTask(onCreated?: (taskId: string) => void) {
+  const [state, setState] = useState<CaptureState>("idle");
+  const [error, setError] = useState<string>("");
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const capture = useCallback(async (title: string, mode: CaptureMode): Promise<CaptureResult> => {
+    if (!title.trim()) {
+      setState("error");
+      setError("Titel fehlt");
+      return { ok: false, detail: "Titel fehlt" };
+    }
+    setState("busy");
+    setError("");
+    try {
+      const res = await fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(captureRequest(title, mode)),
+      });
+      if (aliveRef.current) setState("done");
+      if (res.task?.id) onCreated?.(res.task.id);
+      return { ok: true, taskId: res.task?.id, taskStatus: res.task?.status };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) {
+        setState("error");
+        setError(detail);
+      }
+      return { ok: false, detail };
+    }
+  }, [onCreated]);
+  const reset = useCallback(() => { setState("idle"); setError(""); }, []);
+  return { state, error, capture, reset };
 }
 
 // On-demand task detail (runs + events + deliverables) for the Flow board's live

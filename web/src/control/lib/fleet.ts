@@ -146,6 +146,8 @@ export interface BoardTaskLite {
   assignee?: string | null;
   priority?: number;
   age?: { created_age_seconds: number | null } | null;
+  /** Epoch seconds the task reached `done` — used to sort Ship newest-first. */
+  completed_at?: number | null;
   latest_summary?: string | null;
 }
 
@@ -209,7 +211,81 @@ export function groupByStage<T extends BoardTaskLite>(tasks: T[]): Record<FleetS
     if (stage) out[stage].push(task);
   }
   for (const stage of FLEET_STAGES) {
-    out[stage].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.age?.created_age_seconds ?? 0) - (a.age?.created_age_seconds ?? 0));
+    if (stage === "ship") {
+      // Ship = "what just shipped": newest completion first, so a freshly
+      // shipped task is always at the top instead of buried under hundreds of
+      // old high-priority done tasks. Falls back to creation recency
+      // (smaller created age = newer) when completed_at is missing.
+      out[stage].sort((a, b) =>
+        (b.completed_at ?? 0) - (a.completed_at ?? 0) ||
+        (a.age?.created_age_seconds ?? 0) - (b.age?.created_age_seconds ?? 0));
+    } else {
+      out[stage].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.age?.created_age_seconds ?? 0) - (a.age?.created_age_seconds ?? 0));
+    }
   }
   return out;
+}
+
+// ── Flow counts ──────────────────────────────────────────────────────────────
+// The header metric pods. blocked (Nacharbeit) is surfaced as its own number so
+// a rework signal is visible at a glance instead of hidden as a red card inside
+// Execute. wip = every non-terminal task on the board.
+export interface FlowCounts {
+  running: number;
+  plan: number;
+  review: number;
+  blocked: number;
+  wip: number;
+}
+
+export function flowCounts(tasks: BoardTaskLite[]): FlowCounts {
+  let running = 0, plan = 0, review = 0, blocked = 0, wip = 0;
+  for (const task of tasks) {
+    if (task.status === "archived" || task.status === "done") continue;
+    wip += 1;
+    switch (task.status) {
+      case "running": running += 1; break;
+      case "blocked": blocked += 1; break;
+      case "review": review += 1; break;
+      case "todo":
+      case "scheduled":
+      case "ready": plan += 1; break;
+    }
+  }
+  return { running, plan, review, blocked, wip };
+}
+
+// ── Quick capture ────────────────────────────────────────────────────────────
+// The "+ Aufgabe" capture button (header on desktop, sticky FAB on mobile) drops
+// a new task into the pipeline. The operator picks one of two honest modes in the
+// sheet — both create a real Kanban task, neither is a UI illusion:
+//   park        → triage + park: lands GEPARKT in `scheduled` (Plan). No worker
+//                 starts on its own; the operator clicks Dispatch. Default — the
+//                 same safe behaviour as the FO/Orchestrator → Fleet buttons.
+//   orchestrate → triage only: lands in `triage` (Capture); the in-gateway
+//                 orchestrator triages/decomposes and may dispatch a worker (~60s).
+export type CaptureMode = "park" | "orchestrate";
+
+export interface CaptureRequest {
+  title: string;
+  assignee: string;
+  priority: number;
+  tenant: string;
+  triage: boolean;
+  park: boolean;
+  notify_home: boolean;
+}
+
+export function captureRequest(title: string, mode: CaptureMode): CaptureRequest {
+  return {
+    title: title.trim(),
+    assignee: "coder",
+    priority: 0,
+    tenant: "flow-capture",
+    triage: true,
+    park: mode === "park",
+    // Only ping the home channel for autonomous (orchestrate) captures — a
+    // parked task waits for the operator who is already looking at the board.
+    notify_home: mode === "orchestrate",
+  };
 }
