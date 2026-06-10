@@ -596,8 +596,9 @@ type DeliveredItem =
   | { kind: "chain"; at: number; chain: ChainModel<BoardTask> }
   | { kind: "single"; at: number; task: BoardTask };
 
-function DeliveredList({ items, selectedId, onSelect, now }: {
+function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
   items: DeliveredItem[]; selectedId: string | null; onSelect: (id: string) => void; now: number;
+  enrichmentById: Record<string, Enriched>;
 }) {
   const shown = items.slice(0, MAX_DELIVERED);
   return (
@@ -610,6 +611,9 @@ function DeliveredList({ items, selectedId, onSelect, now }: {
         {shown.map((item) => {
           const id = item.kind === "chain" ? item.chain.rootId : item.task.id;
           const title = item.kind === "chain" ? (item.chain.root?.title ?? id) : item.task.title;
+          // Effektivitäts-Signale (Phase 4): Verifier-Qualität + Liefergegen-
+          // stand aus den recent-results — nur gezeigt, wenn real vorhanden.
+          const enriched = enrichmentById[id];
           return (
             <li key={`${item.kind}-${id}`}>
               <button
@@ -622,6 +626,17 @@ function DeliveredList({ items, selectedId, onSelect, now }: {
               >
                 <span className="hc-mono text-[0.66rem] hc-dim">{id}</span>
                 <span className="min-w-0 flex-1 truncate text-[0.8rem] text-zinc-100">{title}</span>
+                {enriched?.resultQualityLabel ? (
+                  <span className={cn(
+                    "shrink-0 rounded-full border px-1.5 py-0.5 text-[0.62rem]",
+                    enriched.resultQualityTone === "emerald" ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200" : "border-amber-500/25 bg-amber-500/10 text-amber-200",
+                  )}>{enriched.resultQualityLabel}</span>
+                ) : null}
+                {enriched?.deliverableCount ? (
+                  <span className="shrink-0 rounded-full border border-cyan-500/25 bg-cyan-500/10 px-1.5 py-0.5 text-[0.62rem] text-cyan-200">
+                    {enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}
+                  </span>
+                ) : null}
                 {item.kind === "chain" ? <span className="hc-mono text-[0.66rem] hc-soft">{item.chain.total} Tasks</span> : null}
                 <span className="shrink-0 text-[0.66rem] text-emerald-300">{item.at ? `vor ${fmtAge(item.at, now)}` : ""}</span>
               </button>
@@ -975,7 +990,7 @@ export function FlowView() {
 
                 {/* Geliefert — Ketten + Einzeltasks, jüngste zuerst */}
                 {deliveredItems.length ? (
-                  <DeliveredList items={deliveredItems} selectedId={selectedId} onSelect={selectTask} now={now} />
+                  <DeliveredList items={deliveredItems} selectedId={selectedId} onSelect={selectTask} now={now} enrichmentById={enrichmentById} />
                 ) : null}
               </>
             )}
