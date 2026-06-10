@@ -5669,3 +5669,96 @@ def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# E1 (N-E1): consolidated decision queue
+# ---------------------------------------------------------------------------
+
+def _kinds_for(task_id, result):
+    return [d["kind"] for d in result["decisions"] if d["task_id"] == task_id]
+
+
+def test_e1_decision_queue_empty_board(kanban_home):
+    with kb.connect() as conn:
+        result = kb.decision_queue(conn)
+    assert result["decisions"] == []
+    assert result["count"] == 0
+    assert "checked_at" in result
+
+
+def test_e1_decision_queue_sticky_blocked_appears_once(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stuck", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="needs human eyes")
+        result = kb.decision_queue(conn)
+    assert _kinds_for(t, result) == ["sticky_blocked"]
+    row = next(d for d in result["decisions"] if d["task_id"] == t)
+    assert row["suggested_command"] == f"hermes kanban unblock {t}"
+    assert row["age_seconds"] is not None
+
+
+def test_e1_decision_queue_review_rejection_outranks_sticky(kanban_home):
+    """A blocked task whose latest run was a verifier REQUEST_CHANGES is
+    classified as review_rejected, not the generic sticky_blocked — appears
+    exactly once."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        kb.claim_review_task(conn, t)
+        kb.block_task(conn, t, reason="missing tests")
+        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+        result = kb.decision_queue(conn)
+    assert _kinds_for(t, result) == ["review_rejected"]
+
+
+def test_e1_decision_queue_role_fit_held(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="reviewer probe", assignee="reviewer")
+        _set_task_status(conn, t, "ready")
+        with kb.write_txn(conn):
+            kb._append_event(conn, t, "role_fit_held", {"reason": "wants repo gates"})
+        result = kb.decision_queue(conn)
+    assert _kinds_for(t, result) == ["role_fit_held"]
+    row = next(d for d in result["decisions"] if d["task_id"] == t)
+    assert "wants repo gates" in row["reason"]
+
+
+def test_e1_decision_queue_decompose_failed(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="undecomposable", assignee="coder")
+        kb.record_decompose_failure(conn, t)
+        kb.record_decompose_failure(conn, t)
+        result = kb.decision_queue(conn)
+    assert _kinds_for(t, result) == ["decompose_failed"]
+    row = next(d for d in result["decisions"] if d["task_id"] == t)
+    assert "2" in row["reason"]
+
+
+def test_e1_decision_queue_done_task_with_decompose_failed_excluded(kanban_home):
+    """A completed task that once failed decompose is not a pending decision."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="done now", assignee="coder")
+        kb.record_decompose_failure(conn, t)
+        kb.claim_task(conn, t)
+        kb.complete_task(conn, t, result="done", summary="done")
+        result = kb.decision_queue(conn)
+    assert _kinds_for(t, result) == []
+
+
+def test_e1_decision_queue_failsoft_on_corrupt_event_payload(kanban_home):
+    """A blocked task with a non-JSON event payload must not crash the queue."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stuck", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="x")
+        # Corrupt the blocked-event payload directly.
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE task_id = ? AND kind = 'blocked'",
+            ("{not json", t),
+        )
+        conn.commit()
+        result = kb.decision_queue(conn)
+    # Still surfaces (fail-soft reason fallback), no exception.
+    assert _kinds_for(t, result) == ["sticky_blocked"]

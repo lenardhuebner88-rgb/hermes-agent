@@ -3314,3 +3314,32 @@ def test_flow_plan_serves_spec_and_404s_when_absent(client, tmp_path, monkeypatc
     # Path-traversal attempt rejected by the id charset guard.
     r = client.get("/api/plugins/kanban/tasks/..%2f..%2fetc/flow-plan")
     assert r.status_code in (400, 404)
+
+
+# ---------------------------------------------------------------------------
+# N-E1: GET /decision-queue
+# ---------------------------------------------------------------------------
+
+
+def test_decision_queue_empty(client):
+    r = client.get("/api/plugins/kanban/decision-queue")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["decisions"] == []
+    assert data["count"] == 0
+    assert "checked_at" in data
+
+
+def test_decision_queue_surfaces_sticky_blocked(client):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stuck", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="needs human eyes")
+    r = client.get("/api/plugins/kanban/decision-queue")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    row = data["decisions"][0]
+    assert row["kind"] == "sticky_blocked"
+    assert row["task_id"] == t
+    assert row["suggested_command"] == f"hermes kanban unblock {t}"

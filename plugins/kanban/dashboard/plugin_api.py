@@ -2083,6 +2083,25 @@ def list_active_workers(
 
 
 
+@router.get("/decision-queue")
+def get_decision_queue(
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """N-E1: consolidated operator-decision feed.
+
+    Folds every decision-ready board state (sticky_blocked, review_rejected,
+    role_fit_held, budget_held, decompose_failed, stranded_by_stuck_parent)
+    into one read-only list, one row per decision. Thin wrapper around
+    :func:`kanban_db.decision_queue` (read-only, fail-soft per category).
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.decision_queue(conn)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/summary")
 def get_runs_summary(
     since_hours: int = Query(24, ge=1, le=720),

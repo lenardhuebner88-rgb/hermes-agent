@@ -10261,6 +10261,221 @@ def runs_summary(
     }
 
 
+def _decision_event_reason(payload) -> Optional[str]:
+    """Pull a human ``reason`` string out of a task_events payload, fail-soft."""
+    if payload is None:
+        return None
+    try:
+        data = json.loads(payload) if isinstance(payload, str) else payload
+        if isinstance(data, dict):
+            reason = data.get("reason")
+            if reason:
+                return str(reason)
+    except Exception:
+        pass
+    return None
+
+
+def decision_queue(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    config: Optional[dict] = None,
+) -> dict:
+    """E1 (N-E1): fold every operator-decision-ready board state into ONE
+    read-only feed.
+
+    Today these states are scattered or invisible: sticky-blocked tasks live
+    only inside ``recompute_ready`` logic; ``role_fit_held`` is emitted as an
+    event nobody consumes; ``decompose_failed`` is a bare counter column; K4's
+    stranded-by-stuck-parent only surfaces in the CLI ``diagnostics`` command;
+    verifier REQUEST_CHANGES (B2) is a verdict column; and the C1 budget gate
+    emits ``budget_held`` events. This consolidates all of them, one row per
+    decision::
+
+        {kind, task_id, title, reason, age_seconds, suggested_command}
+
+    Read-only and fail-soft: every category is gathered independently inside its
+    own ``try`` so a failure in one never drops the others. Each task appears at
+    most once, classified by its most specific reason (priority order: a blocked
+    task whose latest run is a verifier rejection is ``review_rejected``, not the
+    generic ``sticky_blocked``; a held ready task is ``budget_held`` /
+    ``role_fit_held`` per its latest event).
+    """
+    now = int(now if now is not None else time.time())
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _age(ts) -> Optional[int]:
+        if ts is None:
+            return None
+        try:
+            return max(0, now - int(ts))
+        except Exception:
+            return None
+
+    def _add(kind, task_id, title, reason, age_seconds, suggested_command):
+        if task_id in seen:
+            return
+        seen.add(task_id)
+        rows.append({
+            "kind": kind,
+            "task_id": task_id,
+            "title": title,
+            "reason": reason,
+            "age_seconds": age_seconds,
+            "suggested_command": suggested_command,
+        })
+
+    def _last_event_at(task_id, kinds=None) -> Optional[int]:
+        if kinds:
+            ph = ",".join("?" for _ in kinds)
+            r = conn.execute(
+                f"SELECT MAX(created_at) FROM task_events "
+                f"WHERE task_id = ? AND kind IN ({ph})",
+                (task_id, *kinds),
+            ).fetchone()
+        else:
+            r = conn.execute(
+                "SELECT MAX(created_at) FROM task_events WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return r[0] if r else None
+
+    # 1) review_rejected — blocked task whose MOST RECENT run was a verifier
+    #    REQUEST_CHANGES (B2 verdict). More specific than sticky_blocked.
+    try:
+        for row in conn.execute(
+            "SELECT id, title FROM tasks WHERE status = 'blocked'"
+        ).fetchall():
+            verdict = conn.execute(
+                "SELECT verdict FROM task_runs WHERE task_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if verdict and (verdict["verdict"] or "").upper() == "REQUEST_CHANGES":
+                _add(
+                    "review_rejected", row["id"], row["title"],
+                    "Verifier requested changes (REQUEST_CHANGES)",
+                    _age(_last_event_at(row["id"], ("blocked",))),
+                    f"hermes kanban show {row['id']}",
+                )
+    except Exception:
+        pass
+
+    # 2) budget_held / role_fit_held — a READY task whose LATEST event is a hold
+    #    (F2-dedup semantics: the most recent event IS the standing hold).
+    try:
+        for row in conn.execute(
+            "SELECT id, title FROM tasks WHERE status = 'ready'"
+        ).fetchall():
+            if row["id"] in seen:
+                continue
+            ev = conn.execute(
+                "SELECT kind, created_at, payload FROM task_events "
+                "WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if ev is None:
+                continue
+            if ev["kind"] == "budget_held":
+                _add(
+                    "budget_held", row["id"], row["title"],
+                    _decision_event_reason(ev["payload"])
+                    or "Daily budget cap reached — dispatch held",
+                    _age(ev["created_at"]),
+                    f"hermes kanban show {row['id']}",
+                )
+            elif ev["kind"] == "role_fit_held":
+                _add(
+                    "role_fit_held", row["id"], row["title"],
+                    _decision_event_reason(ev["payload"])
+                    or "Held: assignee role does not fit the task",
+                    _age(ev["created_at"]),
+                    f"hermes kanban show {row['id']}",
+                )
+    except Exception:
+        pass
+
+    # 3) sticky_blocked — worker/operator kanban_block, not a review rejection.
+    try:
+        for row in conn.execute(
+            "SELECT id, title FROM tasks WHERE status = 'blocked'"
+        ).fetchall():
+            if row["id"] in seen:
+                continue
+            if _has_sticky_block(conn, row["id"]):
+                last = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? "
+                    "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                _add(
+                    "sticky_blocked", row["id"], row["title"],
+                    _decision_event_reason(last["payload"] if last else None)
+                    or "Blocked — awaiting operator unblock",
+                    _age(_last_event_at(row["id"], ("blocked",))),
+                    f"hermes kanban unblock {row['id']}",
+                )
+    except Exception:
+        pass
+
+    # 4) decompose_failed — unresolved decompose failures on a non-terminal task.
+    try:
+        for row in conn.execute(
+            "SELECT id, title, decompose_failed FROM tasks "
+            "WHERE decompose_failed > 0 AND status NOT IN ('done', 'archived')"
+        ).fetchall():
+            if row["id"] in seen:
+                continue
+            _add(
+                "decompose_failed", row["id"], row["title"],
+                f"auto_decompose failed {int(row['decompose_failed'])}× "
+                "(last attempt unparsed or errored)",
+                _age(_last_event_at(row["id"])),
+                f"hermes kanban show {row['id']}",
+            )
+    except Exception:
+        pass
+
+    # 5) stranded_by_stuck_parent — K4 cross-task diagnostic (todo descendants
+    #    of a long-sticky-blocked parent). Reuse the diagnostics helper.
+    try:
+        from hermes_cli import kanban_diagnostics as _kdiag  # lazy: import cycle
+        cross = _kdiag.find_descendants_blocked_by_stuck_parent(
+            conn, now=now, config=config,
+        )
+        for tid, diags in cross.items():
+            if tid in seen or not diags:
+                continue
+            d = diags[0]
+            title_row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (tid,),
+            ).fetchone()
+            data = getattr(d, "data", None) or {}
+            blockers = data.get("blocked_parents") or []
+            primary = blockers[0] if blockers else None
+            age = data.get("max_block_age_hours")
+            _add(
+                "stranded_by_stuck_parent", tid,
+                title_row["title"] if title_row else tid,
+                getattr(d, "detail", None) or getattr(d, "title", None)
+                or "Stranded by a sticky-blocked parent",
+                int(float(age) * 3600) if age is not None else None,
+                f"hermes kanban unblock {primary}" if primary
+                else f"hermes kanban show {tid}",
+            )
+    except Exception:
+        pass
+
+    # Oldest decisions first (most likely to be stale/forgotten); unknown ages
+    # sort to the end.
+    rows.sort(
+        key=lambda r: (r["age_seconds"] is None, -(r["age_seconds"] or 0)),
+    )
+    return {"decisions": rows, "count": len(rows), "checked_at": now}
+
+
 def _to_epoch(val) -> Optional[int]:
     """Normalise a timestamp to unix epoch seconds.
 
