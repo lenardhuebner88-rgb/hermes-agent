@@ -10,14 +10,13 @@ import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 import { severitySpine } from "../lib/tones";
 import { StatusPill, ToneCallout } from "../components/atoms";
+import { Hero } from "../components/Hero";
 import {
   Card,
   Skeleton,
   SkeletonCard,
   Stagger,
   StaggerItem,
-  Stat,
-  Text,
 } from "../components/primitives";
 
 const SURFACE_META: Record<InboxSurface, { label: string; tone: ToneName }> = {
@@ -25,13 +24,6 @@ const SURFACE_META: Record<InboxSurface, { label: string; tone: ToneName }> = {
   family: { label: de.inbox.surfaceFamily, tone: "violet" },
   orchestrator: { label: de.inbox.surfaceOrchestrator, tone: "sky" },
   kanban: { label: de.inbox.surfaceKanban, tone: "amber" },
-};
-
-// worstTone → the hero's mood (gradient accent + the big number's colour).
-const HERO_ACCENT: Record<ToneName, string> = {
-  red: "var(--hc-red)", rose: "var(--hc-red)", amber: "var(--hc-amber)",
-  emerald: "var(--hc-emerald)", cyan: "var(--hc-cyan)", sky: "var(--hc-cyan)",
-  indigo: "var(--hc-cyan)", violet: "var(--hc-accent)", zinc: "var(--hc-zinc)",
 };
 
 export function InboxView({ density }: { density: Density }) {
@@ -45,7 +37,7 @@ export function InboxView({ density }: { density: Density }) {
   // don't flash a reassuring "0 / alles ruhig" that might be wrong a tick later.
   const settling = loading && items.length === 0;
   const heroTone: ToneName = settling ? "zinc" : calm ? "emerald" : worstTone;
-  const accent = HERO_ACCENT[heroTone];
+  const alarm = worstTone === "red" || worstTone === "rose";
 
   const chips: Array<{ id: InboxSurface | null; label: string; count: number }> = [
     { id: null, label: de.inbox.filterAll, count: summary.total },
@@ -57,41 +49,21 @@ export function InboxView({ density }: { density: Density }) {
 
   return (
     <div className={cn("space-y-4", density === "compact" && "space-y-3")}>
-      {/* Hero — the spine. The one number, oversized and tone-driven. The Stat
-          `accent` renders the headline count as aurora-gradient display type;
-          the .hc-hero shell carries the tone-driven gradient + edge. */}
-      <section
-        className="hc-hero p-5 sm:p-6"
-        style={{ "--hc-hero-accent": accent } as React.CSSProperties}
-      >
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          {/* Clamp the hero column at 390px so the display number + copy never
-              overflow on phones (display type is large; ellipsis the title). */}
-          <div className="min-w-0 max-w-[390px]">
-            <Stat
-              label={de.inbox.eyebrow}
-              value={
-                settling ? (
-                  <Skeleton className="h-[1em] w-16 rounded-md" />
-                ) : (
-                  summary.total
-                )
-              }
-              hint={settling ? de.inbox.loading : de.inbox.subtitle(summary.total)}
-              accent
-            />
-            <Text as="h2" variant="title" className="mt-2 truncate text-[var(--hc-text)]">
-              {de.inbox.title}
-            </Text>
-          </div>
-          <StatusPill
-            tone={calm ? "emerald" : worstTone === "red" || worstTone === "rose" ? "red" : "amber"}
-            label={settling ? de.inbox.loading : calm ? de.inbox.calm : de.inbox.attention}
-            dot={settling ? "idle" : calm ? "live" : worstTone === "red" || worstTone === "rose" ? "error" : "warn"}
-            size="md"
-          />
-        </div>
-      </section>
+      {/* Hero — the spine, now the shared Hero primitive. The one number,
+          oversized aurora; the tone drives the shell gradient + the status dot. */}
+      <Hero
+        eyebrow={de.inbox.eyebrow}
+        count={settling ? <Skeleton className="h-[1em] w-16 rounded-md" /> : summary.total}
+        countHint={settling ? de.inbox.loading : de.inbox.subtitle(summary.total)}
+        title={de.inbox.title}
+        tone={heroTone}
+        density={density}
+        status={{
+          label: settling ? de.inbox.loading : calm ? de.inbox.calm : de.inbox.attention,
+          tone: calm ? "emerald" : alarm ? "red" : "amber",
+          dot: settling ? "idle" : calm ? "live" : alarm ? "error" : "warn",
+        }}
+      />
 
       {sourceErrors.length ? <ToneCallout tone="amber">{sourceErrors.join(" · ")}</ToneCallout> : null}
 
