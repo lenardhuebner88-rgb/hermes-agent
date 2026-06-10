@@ -5581,4 +5581,91 @@ def test_a1_parse_numbered_bullets():
     assert len(parsed) == 2
 
 
+# ---------------------------------------------------------------------------
+# A2 (N-A2): verifier binding — review context + acceptance_roles config
+# ---------------------------------------------------------------------------
+
+@requires_git
+def test_a2_review_context_has_checklist_and_changed_files(kanban_home, tmp_path):
+    import json
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="widget", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        # A1 column is normally filled at decompose; set it directly here.
+        conn.execute(
+            "UPDATE tasks SET acceptance_criteria = ? WHERE id = ?",
+            (json.dumps(["AC-1: endpoint returns 200",
+                         "AC-2: widget row persisted"]), t),
+        )
+        # Coder submits → B1 snapshot rides the submitted_for_review event.
+        kb._submit_for_review(
+            conn, t, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+        # Verifier claims the review lane → its run is the current run.
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ctx = kb.build_worker_context(conn, t)
+    assert "Acceptance checklist" in ctx
+    assert "AC-1: endpoint returns 200" in ctx
+    assert "AC-2: widget row persisted" in ctx
+    assert "Changed files at submit" in ctx
+    assert "tracked.py" in ctx
+    assert "caller" in ctx.lower()
+
+
+def test_a2_review_context_fallbacks_when_no_acs_no_snapshot(kanban_home):
+    """Review run with NULL acceptance_criteria and no diff snapshot → both
+    fallback notes render, no crash."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ctx = kb.build_worker_context(conn, t)
+    assert "No structured acceptance criteria" in ctx
+    assert "No machine diff snapshot" in ctx
+
+
+def test_a2_non_review_context_has_no_review_section(kanban_home):
+    """Regression: an ordinary worker's context carries NONE of the A2 section,
+    preserving the pre-A2 output."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="code", assignee="coder")
+        kb.claim_task(conn, t)
+        ctx = kb.build_worker_context(conn, t)
+    assert "Acceptance checklist" not in ctx
+    assert "Changed files at submit" not in ctx
+
+
+def test_a2_acceptance_roles_default_empty_is_noop(kanban_home):
+    cfg = kb._review_gate_config()
+    assert cfg["acceptance_roles"] == frozenset()
+    # Default code_roles unchanged (union with ∅).
+    assert cfg["code_roles"] == frozenset(kb._DEFAULT_REVIEW_CODE_ROLES)
+
+
+def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
+    import yaml
+    (kanban_home / "config.yaml").write_text(
+        yaml.safe_dump({
+            "kanban": {"review_gate": {
+                "enabled": True, "acceptance_roles": ["docs", "qa"],
+            }}
+        }),
+        encoding="utf-8",
+    )
+    cfg = kb._review_gate_config()
+    assert cfg["acceptance_roles"] == frozenset({"docs", "qa"})
+    assert {"docs", "qa"} <= cfg["code_roles"]
+    # Defaults preserved alongside the additions.
+    assert frozenset(kb._DEFAULT_REVIEW_CODE_ROLES) <= cfg["code_roles"]
+
+
 

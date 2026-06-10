@@ -4506,6 +4506,17 @@ def _review_gate_config() -> dict:
         )
     else:
         code_roles = frozenset(_DEFAULT_REVIEW_CODE_ROLES)
+    # A2 (N-A2): ``acceptance_roles`` extends the gated role set without
+    # touching the default. Absent/empty → union with ∅ → byte-identical to
+    # today's behaviour. Lets the gate cover extra roles via config alone.
+    acc = rg.get("acceptance_roles")
+    if isinstance(acc, (list, tuple)) and acc:
+        acceptance_roles = frozenset(
+            str(r).strip().lower() for r in acc if str(r).strip()
+        )
+    else:
+        acceptance_roles = frozenset()
+    code_roles = code_roles | acceptance_roles
     vp = rg.get("verifier_profile")
     verifier_profile = (
         str(vp).strip().lower()
@@ -4515,6 +4526,7 @@ def _review_gate_config() -> dict:
     return {
         "enabled": bool(rg.get("enabled", False)),
         "code_roles": code_roles,
+        "acceptance_roles": acceptance_roles,
         "verifier_profile": verifier_profile,
     }
 
@@ -9662,6 +9674,136 @@ def run_daemon(
 # Worker context builder (what a spawned worker sees)
 # ---------------------------------------------------------------------------
 
+# A2 (N-A2): caps for the verifier-only review section.
+_CTX_REVIEW_MAX_CHANGED_FILES = 50
+_CTX_REVIEW_MAX_DIFF_STAT = 2000
+
+
+def _latest_review_diff_snapshot(
+    conn: sqlite3.Connection, task_id: str
+) -> tuple[list, Optional[str]]:
+    """Return ``(changed_files, diff_stat)`` from the most recent B1 snapshot.
+
+    Reads the latest ``submitted_for_review`` event payload. Fail-soft: returns
+    ``([], None)`` when there is no such event, no snapshot keys, or the payload
+    is unreadable.
+    """
+    try:
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return [], None
+    if not row or not row["payload"]:
+        return [], None
+    try:
+        payload = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return [], None
+    if not isinstance(payload, dict):
+        return [], None
+    cf = payload.get("changed_files")
+    changed = [str(x) for x in cf] if isinstance(cf, list) else []
+    ds = payload.get("diff_stat")
+    diff_stat = ds if isinstance(ds, str) and ds.strip() else None
+    return changed, diff_stat
+
+
+def _render_review_verifier_section(
+    conn: sqlite3.Connection, task_id: str
+) -> list:
+    """A2: context rendered ONLY for a run claimed from the review lane.
+
+    Gives the verifier (a) the task's structured acceptance criteria (A1) as an
+    explicit per-item checklist and (b) the changed-files snapshot captured at
+    submit (B1) so it can run the mandated caller-grep. Returns ``[]`` for any
+    non-review run, so an ordinary worker's context stays byte-identical.
+    """
+    run_id = _current_run_id(conn, task_id)
+    if not _run_originated_from_review(conn, task_id, run_id):
+        return []
+
+    lines: list = ["## Acceptance checklist (verifier — judge each item)"]
+    # (a) acceptance criteria (A1 column)
+    acc_json = None
+    try:
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row:
+            acc_json = row["acceptance_criteria"]
+    except sqlite3.Error:
+        acc_json = None
+    criteria: list = []
+    if acc_json:
+        try:
+            parsed = json.loads(acc_json)
+            if isinstance(parsed, list):
+                criteria = parsed
+        except (ValueError, TypeError):
+            criteria = []
+    if criteria:
+        for item in criteria:
+            if isinstance(item, dict):
+                label = item.get("id") or ""
+                stmt = item.get("statement") or ""
+                head = ": ".join(p for p in [str(label), str(stmt)] if p)
+                extra = "; ".join(
+                    f"{k}: {v}" for k, v in (
+                        ("verification", item.get("verification")),
+                        ("done_signal", item.get("done_signal")),
+                    ) if v
+                )
+                line = f"- [ ] {head or str(item)}"
+                if extra:
+                    line += f" ({extra})"
+                lines.append(line)
+            else:
+                lines.append(f"- [ ] {str(item).strip()}")
+        lines.append("")
+        lines.append(
+            "Render a per-criterion verdict — each item MET or UNMET with the "
+            "evidence you checked. Any UNMET → kanban_block."
+        )
+    else:
+        lines.append(
+            "_No structured acceptance criteria were recorded for this task. "
+            "Derive the acceptance bar from the Body above and judge against it._"
+        )
+
+    # (b) changed-files snapshot from the submit event (B1)
+    changed_files, diff_stat = _latest_review_diff_snapshot(conn, task_id)
+    lines.append("")
+    lines.append("## Changed files at submit (caller check required)")
+    if changed_files:
+        for f in changed_files[:_CTX_REVIEW_MAX_CHANGED_FILES]:
+            lines.append(f"- `{f}`")
+        if len(changed_files) > _CTX_REVIEW_MAX_CHANGED_FILES:
+            extra_n = len(changed_files) - _CTX_REVIEW_MAX_CHANGED_FILES
+            lines.append(f"- _(+{extra_n} more)_")
+        if diff_stat:
+            lines.append("")
+            lines.append("```")
+            lines.append(diff_stat[:_CTX_REVIEW_MAX_DIFF_STAT])
+            lines.append("```")
+        lines.append("")
+        lines.append(
+            "MANDATORY: for any CHANGED existing symbol (function/class/const), "
+            "grep its callers (`rg`) and confirm they still hold — an unchecked "
+            "caller of a changed symbol is a blocking finding."
+        )
+    else:
+        lines.append(
+            "_No machine diff snapshot was captured. Inspect the workspace "
+            "directly (git status / git diff) before judging._"
+        )
+    lines.append("")
+    return lines
+
+
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Return the full text a worker should read to understand its task.
 
@@ -9733,6 +9875,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         lines.append("## Body")
         lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
+
+    # A2: verifier-only section (acceptance checklist + changed-files snapshot).
+    # Empty for every non-review run, so an ordinary worker's context is
+    # byte-identical to the pre-A2 output.
+    lines.extend(_render_review_verifier_section(conn, task_id))
 
     # Attachments — files uploaded to this task (PDFs, source docs,
     # images). Surface the absolute on-disk path so the worker, which has
