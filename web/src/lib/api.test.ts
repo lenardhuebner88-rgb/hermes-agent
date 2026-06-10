@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, fetchJSON } from "./api";
+import { api, fetchJSON, openAuthedApiFile } from "./api";
 
 // Regression coverage for the loopback stale-token auto-reload (commit
 // fe5c8ec4a). The bug: /api/auth/me answers 401 on every call in non-gated
@@ -60,6 +60,52 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("authenticated file opening", () => {
+  it("opens a placeholder tab, fetches API deliverables with the session-token header, then navigates to a blob URL", async () => {
+    const blob = new Blob(["# receipt"], { type: "text/markdown" });
+    const opened = {
+      opener: {} as unknown,
+      location: { href: "about:blank" },
+      document: { write: vi.fn() },
+      close: vi.fn(),
+    };
+    const open = vi.fn(() => opened);
+    const createObjectURL = vi.fn(() => "blob:receipt");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      async blob() {
+        return blob;
+      },
+      async text() {
+        return "";
+      },
+    } as unknown as Response)));
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    (window as unknown as { open: typeof open }).open = open;
+
+    await openAuthedApiFile("/api/plugins/kanban/tasks/t_408/deliverables/RESULT.md");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/plugins/kanban/tasks/t_408/deliverables/RESULT.md",
+      expect.objectContaining({
+        credentials: "include",
+        headers: expect.any(Headers),
+      }),
+    );
+    const headers = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers;
+    expect(headers.get("X-Hermes-Session-Token")).toBe("tok-123");
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(opened.opener).toBeNull();
+    expect(opened.document.write).toHaveBeenCalledWith("<p>Hermes-Deliverable wird geladen…</p>");
+    expect(opened.location.href).toBe("blob:receipt");
+    expect(opened.close).not.toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
 });
 
 describe("fetchJSON loopback stale-token reload", () => {

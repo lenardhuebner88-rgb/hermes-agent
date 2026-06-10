@@ -20,7 +20,7 @@ function receiptLabel(result: KanbanResult): string {
   const hasTest = (result.verification ?? []).length > 0 || (result.verifier_evidence ?? []).length > 0;
   if (hasReceipt && hasTest) return de.fleet.receiptTestLog;
   if (hasReceipt) return de.fleet.receiptOnly;
-  if (hasTest) return "test log";
+  if (hasTest) return "Test-Log";
   return "kein Beleg";
 }
 
@@ -39,7 +39,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
   return (
     <article className="hc-surface-card p-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusPill tone="emerald" label="Completed" dot="ready" />
+        <StatusPill tone="emerald" label="Abgeschlossen" dot="ready" />
         <RoleChip role={role} />
         <button
           type="button"
@@ -91,7 +91,7 @@ export function FleetResultCard({ result, now }: { result: KanbanResult; now: nu
           ) : null}
           {verifierEvidence.length ? (
             <div className="space-y-1.5">
-              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-cyan-200"><Quote className="h-3.5 w-3.5" />Verifier evidence</p>
+              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-cyan-200"><Quote className="h-3.5 w-3.5" />Verifier-Belege</p>
               {verifierEvidence.map((line) => (
                 <blockquote key={line} className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-sm leading-6 text-cyan-50">{line}</blockquote>
               ))}

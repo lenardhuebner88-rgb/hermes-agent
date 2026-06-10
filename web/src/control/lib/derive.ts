@@ -44,7 +44,7 @@ export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
     return { key: 'blocked', tone: 'red', label: 'Blockiert', dot: 'error' };
   }
   if (expired || heartbeatStale) {
-    return { key: 'stuck', tone: 'amber', label: 'Stuck', dot: 'warn' };
+    return { key: 'stuck', tone: 'amber', label: 'Hängt', dot: 'warn' };
   }
   return { key: 'healthy', tone: 'cyan', label: 'Läuft', dot: 'live' };
 }

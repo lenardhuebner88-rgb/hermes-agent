@@ -39,6 +39,10 @@ describe('workerHealth', () => {
     const w = mkWorker({ last_heartbeat_at: NOW - (STUCK_HEARTBEAT_S + 1) });
     expect(workerHealth(w, NOW).key).toBe('stuck');
   });
+  it('benennt festhängende Worker deutsch', () => {
+    const w = mkWorker({ last_heartbeat_at: NOW - (STUCK_HEARTBEAT_S + 1) });
+    expect(workerHealth(w, NOW).label).toBe('Hängt');
+  });
   it('stuck bei abgelaufenem claim_expires (trotz frischem Heartbeat)', () => {
     expect(workerHealth(mkWorker({ claim_expires: NOW - 1 }), NOW).key).toBe('stuck');
   });

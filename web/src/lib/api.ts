@@ -240,6 +240,46 @@ export async function authedFetch(
 }
 
 /**
+ * Open a protected dashboard API file endpoint in a new tab.
+ *
+ * A plain ``<a href="/api/..."></a>`` cannot attach the loopback dashboard's
+ * ``X-Hermes-Session-Token`` header, so protected deliverable links opened in a
+ * new tab get ``401 Unauthorized`` even though normal SPA fetches work. Open a
+ * placeholder tab synchronously from the click handler so popup blockers allow
+ * it, fetch the file through the authenticated API path, then navigate the new
+ * tab to a browser-owned blob URL for viewing/downloading.
+ */
+export async function openAuthedApiFile(url: string): Promise<void> {
+  const opened = window.open("about:blank", "_blank");
+  if (!opened) {
+    throw new Error("Der Browser hat den Deliverable-Tab blockiert.");
+  }
+  try {
+    opened.opener = null;
+  } catch {
+    /* best-effort noopener hardening */
+  }
+  try {
+    opened.document?.write("<p>Hermes-Deliverable wird geladen…</p>");
+  } catch {
+    /* some browsers disallow writing to the placeholder; navigation below still works */
+  }
+  const res = await authedFetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    try {
+      opened.close();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`Deliverable konnte nicht geladen werden (${res.status}: ${text})`);
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  opened.location.href = blobUrl;
+}
+
+/**
  * Build an absolute ``ws(s)://`` URL for a dashboard WebSocket endpoint,
  * with the correct auth query param appended for the active mode (fresh
  * single-use ``ticket`` in gated mode, ``token`` in loopback). Plugins and

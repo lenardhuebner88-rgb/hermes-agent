@@ -104,7 +104,7 @@ export function CommandHome({ density }: { density: Density }) {
           </div>
           <div className="hc-aurora-text hc-type-display mt-2 tabular-nums">{settling ? "—" : inbox.summary.total}</div>
           <Text as="h1" variant="title" className="hc-hero-statement mt-1 text-[var(--hc-text)]">
-            {calm ? "Bereit. Nichts wartet auf dich." : "Was braucht mich gerade?"}
+            {calm ? "Ruhig. Nichts wartet auf dich." : "Was braucht mich gerade?"}
           </Text>
 
           {top && !settling ? (
@@ -264,7 +264,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now }: {
     <div className="flex flex-col gap-3 rounded-xl border border-[var(--hc-border)] bg-black/20 p-4 backdrop-blur-sm">
       <div className="grid grid-cols-3 gap-3">
         <RailStat label="Laufen" value={running} tone="cyan" dot={running > 0 ? "live" : "idle"} />
-        <RailStat label="Im Review" value={inReview} tone={inReview > 0 ? "amber" : "zinc"} dot={inReview > 0 ? "warn" : "idle"} />
+        <RailStat label="In Prüfung" value={inReview} tone={inReview > 0 ? "amber" : "zinc"} dot={inReview > 0 ? "warn" : "idle"} />
         <RailStat label="Blockiert" value={blocked} tone={blocked > 0 ? "red" : "zinc"} dot={blocked > 0 ? "error" : "idle"} />
       </div>
       <div className="flex items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/[.07] px-3 py-2">

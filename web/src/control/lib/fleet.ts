@@ -67,8 +67,8 @@ export interface StageAction {
 const ACTION: Record<StageActionKey, StageAction> = {
   plan: { key: "plan", label: "Plan", target: "todo", tone: "sky", intent: "advance", confirm: "Aufgabe spezifizieren (Triage → Plan)?" },
   dispatch: { key: "dispatch", label: "Dispatch", target: "ready", tone: "amber", intent: "advance", confirm: "Startklar setzen — der Dispatcher übernimmt automatisch?" },
-  ship: { key: "ship", label: "Ship", target: "done", tone: "emerald", intent: "advance", confirm: "Review abnehmen und auf Fertig setzen?" },
-  rework: { key: "rework", label: "Rework", target: "blocked", tone: "red", intent: "danger", confirm: "Zurück in Nacharbeit (Review → Blockiert)?" },
+  ship: { key: "ship", label: "Ausliefern", target: "done", tone: "emerald", intent: "advance", confirm: "Prüfung abnehmen und auf Fertig setzen?" },
+  rework: { key: "rework", label: "Nacharbeit", target: "blocked", tone: "red", intent: "danger", confirm: "Zurück in Nacharbeit (Prüfung → Blockiert)?" },
   reopen: { key: "reopen", label: "Reopen", target: "ready", tone: "sky", intent: "advance", confirm: "Blockade lösen und neu einreihen?" },
 };
 

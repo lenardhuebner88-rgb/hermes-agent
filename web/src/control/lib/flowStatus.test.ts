@@ -5,7 +5,7 @@ describe("getFlowSubtaskStatusExplanation", () => {
   it("explains normal Flow subtask wait states as expected operator states", () => {
     expect(getFlowSubtaskStatusExplanation("scheduled")).toBe("wartet auf Kette starten");
     const readyExplanation = getFlowSubtaskStatusExplanation("ready");
-    expect(readyExplanation).toBe("ready im Snapshot; Start hängt von Queue/Assignee und Worker-Kapazität ab");
+    expect(readyExplanation).toBe("startklar im Snapshot; Start hängt von Queue/Assignee und Worker-Kapazität ab");
     expect(readyExplanation).not.toMatch(/nächsten Dispatcher-Tick|startet/i);
   });
 

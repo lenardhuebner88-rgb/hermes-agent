@@ -34,8 +34,8 @@ export const TONE_HEX: Record<ToneName, string> = {
 
 /** Task-Status → Ton (für Hermes task_status). */
 export const taskStatusLabel: Record<string, string> = {
-  triage: 'Triage', todo: 'Offen', scheduled: 'Geplant', ready: 'Bereit',
-  running: 'Läuft', blocked: 'Blockiert', review: 'Review', done: 'Fertig', archived: 'Archiv',
+  triage: 'Triage', todo: 'Offen', scheduled: 'Geplant', ready: 'Startklar',
+  running: 'Läuft', blocked: 'Blockiert', review: 'In Prüfung', done: 'Fertig', archived: 'Archiv',
 };
 
 /** Profil-Rollen in Klartext. */

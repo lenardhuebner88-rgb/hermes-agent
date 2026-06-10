@@ -12,7 +12,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchJSON } from "@/lib/api";
+import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
 import { fmtAge, fmtTokens, freshness, workerHealth, workerSortRank } from "../lib/derive";
@@ -98,7 +98,7 @@ function sameEnriched(a: Enriched, b: Enriched): boolean {
 const EVENT_LABEL: Record<string, string> = {
   created: "Erstellt", claimed: "Worker claimte", completed: "Abgeschlossen", done: "Fertig",
   blocked: "Blockiert", unblocked: "Entblockt", scheduled: "Geplant", promoted: "Befördert",
-  submitted_for_review: "Zum Review eingereicht", verified: "Verifiziert", reclaimed: "Zurückgeholt",
+  submitted_for_review: "Zur Prüfung eingereicht", verified: "Verifiziert", reclaimed: "Zurückgeholt",
   edited: "Bearbeitet", reprioritized: "Neu priorisiert", assigned: "Zugewiesen",
   deliverables_preserved: "Deliverables gesichert", spawn_failed: "Spawn fehlgeschlagen",
   decomposed: "In Subtasks zerlegt", specified: "Spezifiziert", linked: "Verknüpft",
@@ -218,7 +218,7 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <StatusPill tone={isBlocked ? "red" : isDone ? "emerald" : isReview ? "amber" : task.status === "running" ? "cyan" : "zinc"} label={taskStatusLabel[task.status] ?? task.status} dot={task.status === "running" ? "live" : isBlocked ? "error" : isDone ? "ready" : isReview ? "warn" : "idle"} />
-        {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[0.7rem] text-rose-200">High</span> : null}
+        {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[0.7rem] text-rose-200">Hoch</span> : null}
         {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[0.7rem] text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
         {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[0.7rem] text-cyan-100">{enriched.verdict}</span> : null}
         {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[0.7rem] text-emerald-100">{enriched.resultQualityLabel}</span> : null}
@@ -228,7 +228,7 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
         <p className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[0.7rem] text-red-200"><Lock className="mt-0.5 h-3 w-3 shrink-0" />{enriched.blockedReason}</p>
       ) : null}
       {isReview ? (
-        <p className="mt-2 flex items-center gap-1.5 text-[0.68rem] hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — Ship nimmt ab, Rework schickt zurück.</p>
+        <p className="mt-2 flex items-center gap-1.5 text-[0.68rem] hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — Ausliefern nimmt ab, Nacharbeit schickt zurück.</p>
       ) : null}
       {enriched.deliverableCount ? <p className="mt-1.5 text-[0.68rem] text-emerald-300">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</p> : null}
       <FlowCardActions
@@ -395,6 +395,35 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
   );
 }
 
+function DeliverableOpenButton({ url }: { url: string }) {
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const onOpen = useCallback(async () => {
+    setBusy(true);
+    setOpenError(null);
+    try {
+      await openAuthedApiFile(url);
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [url]);
+  return (
+    <div className="shrink-0 text-right">
+      <button
+        type="button"
+        className="text-[0.7rem] text-emerald-200 hover:text-emerald-100 disabled:cursor-wait disabled:opacity-60"
+        onClick={onOpen}
+        disabled={busy}
+      >
+        {busy ? "öffnet…" : "öffnen"}
+      </button>
+      {openError ? <p className="mt-1 max-w-32 text-[0.62rem] text-red-300">{openError}</p> : null}
+    </div>
+  );
+}
+
 function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released }: {
   taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; loading: boolean; error?: string; now: number;
   boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
@@ -475,7 +504,7 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
             {deliverables.map((d) => (
               <li key={d.relative_path} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5">
                 <span className="min-w-0 truncate text-[0.78rem] text-white">{d.relative_path}</span>
-                <a className="shrink-0 text-[0.7rem] text-emerald-200 hover:text-emerald-100" href={d.url} target="_blank" rel="noreferrer">öffnen</a>
+                <DeliverableOpenButton url={d.url} />
               </li>
             ))}
           </ul>
@@ -893,7 +922,7 @@ export function FlowView() {
   }, [fetchDetail, taskDetail.detailById]);
   const clearDispatchChoice = useCallback(() => setDispatchChoice(null), []);
   const runTaskAction = useCallback((taskId: string, action: StageAction) => {
-    void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Rework aus dem Flow-Board" } : undefined);
+    void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Nacharbeit aus dem Flow-Board" } : undefined);
     if (selectedId === taskId) void fetchDetail(taskId);
   }, [runAction, selectedId, fetchDetail]);
   const onAct = useCallback((task: BoardTask, action: StageAction) => {

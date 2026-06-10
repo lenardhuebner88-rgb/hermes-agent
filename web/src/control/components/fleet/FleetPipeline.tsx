@@ -3,7 +3,7 @@
  * per-stage counts from GET /board, and a list of tasks awaiting an operator
  * decision whose buttons drive REAL Kanban transitions via PATCH /tasks/{id}:
  *   Plan (triage→todo) · Dispatch (todo→ready, auto-dispatches) ·
- *   Ship (review→done) · Rework (review→blocked) · Reopen (blocked→ready).
+ *   Ship (review→done) · Nacharbeit (review→blocked) · Reopen (blocked→ready).
  * Worker/gate-driven stages (ready/running/review-verify) show an honest,
  * explaining guard instead of a fake button. Every write is confirm-gated and
  * surfaces the backend's 409 detail verbatim (e.g. "blocked by parent(s)").
@@ -118,7 +118,7 @@ function ActionRow({
       {isReview && !pending ? (
         <p className="mt-2 flex items-center gap-1.5 text-[0.7rem] hc-dim">
           <ShieldCheck className="h-3.5 w-3.5 text-cyan-300" />
-          Verify: Verifier-Gate läuft automatisch — Ship nimmt manuell ab, Rework schickt zurück.
+          Prüfung: Verifier-Gate läuft automatisch — Ausliefern nimmt manuell ab, Nacharbeit schickt zurück.
         </p>
       ) : null}
 
@@ -138,7 +138,7 @@ export function FleetPipeline({ tasks, reload }: { tasks: BoardTask[]; reload: (
   const maxCount = Math.max(1, ...pipeline.buckets.map((b) => b.count));
 
   const onAct = (taskId: string, action: StageAction) => {
-    void run(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Rework aus dem Fleet-Tab" } : undefined);
+    void run(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Nacharbeit aus dem Fleet-Tab" } : undefined);
   };
 
   const blockedMeta = pipeline.blockedCount > 0 ? de.fleet.pipelineBlocked(pipeline.blockedCount) : `${pipeline.total} Aufgaben`;

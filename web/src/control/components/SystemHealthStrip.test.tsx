@@ -97,6 +97,6 @@ describe("SystemHealthStrip", () => {
   it("degrades the metrics tile without breaking subsystem lights when metrics is null", () => {
     const html = renderToStaticMarkup(<SystemHealthStrip data={baseHealth} metrics={null} />);
     expect(html).toContain("Hermes-Gateway"); // subsystem lights intact
-    expect(html).toContain("nicht ladbar"); // metrics tile degraded
+    expect(html).toContain("Metriken konnten nicht geladen werden."); // metrics tile degraded
   });
 });

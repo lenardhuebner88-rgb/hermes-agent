@@ -52,6 +52,12 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/Snapshot-Alter/);
   });
 
+  it("opens deliverables through authenticated blob fetches, not raw API anchors", () => {
+    expect(src).toMatch(/openAuthedApiFile/);
+    expect(src).toMatch(/DeliverableOpenButton/);
+    expect(src).not.toMatch(/href=\{d\.url\}/);
+  });
+
   it("does not promote raw task-detail parents into certain blocking-cause copy", () => {
     expect(src).not.toMatch(/Wartet auf direkte Parents/);
     expect(src).not.toMatch(/Fan-in: .*Parents müssen abgeschlossen sein/);
@@ -71,5 +77,10 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/singleDispatch/);
     expect(src).toMatch(/onReleaseChain/);
     expect(src).toMatch(/onDispatchSingle/);
+  });
+
+  it("uses scoped Worker action failure copy in the Worker strip", () => {
+    expect(src).toMatch(/de\.worker\.actionFailed/);
+    expect(src).not.toMatch(/Aktion fehlgeschlagen/);
   });
 });

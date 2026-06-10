@@ -22,7 +22,7 @@ type Focus = "hermes" | "proposals" | "warnings" | null;
 // zeigt nur noch die lebenden Systeme (Hermes + Autoresearch). Die frei gewordene
 // Kachel ist jetzt der Autoresearch-Loop-Status.
 const arStateLabel: Record<"idle" | "running" | "stopping" | "crashed", string> = {
-  idle: "Bereit", running: "Läuft", stopping: "Stoppt", crashed: "Fehler",
+  idle: "Inaktiv", running: "Läuft", stopping: "Stoppt", crashed: "Abgestürzt",
 };
 
 interface Props {
@@ -51,7 +51,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
 
   const allCalm = overview.allHealthy && inboxCounts.total === 0;
   const title = allCalm ? de.overview.healthyTitle : de.overview.warnTitle(overview.warnings.length + inboxCounts.total);
-  const proposalValue = proposalsError ? "Fehler" : proposalsLoading && proposals.length === 0 ? "unbekannt" : String(overview.openProposals);
+  const proposalValue = proposalsError ? "Nicht geladen" : proposalsLoading && proposals.length === 0 ? "unbekannt" : String(overview.openProposals);
 
   const arState = autoresearch.data?.state ?? "idle";
   const arValue = arState === "running" ? `Iter ${autoresearch.data?.iteration ?? 0}` : arStateLabel[arState];
@@ -140,7 +140,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
                 key={s.label}
                 tone={toned}
                 label={s.label}
-                value={s.err ? "Fehler" : s.fresh.stale ? de.overview.staleWarn(s.fresh.label.replace("vor ", "")) : s.fresh.label}
+                value={s.err ? "Nicht geladen" : s.fresh.stale ? de.overview.staleWarn(s.fresh.label.replace("vor ", "")) : s.fresh.label}
                 hint={hint}
               />
             );
