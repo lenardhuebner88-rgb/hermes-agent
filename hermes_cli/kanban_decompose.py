@@ -70,6 +70,7 @@ Output a single JSON object with this exact shape:
   {
     "fanout": true,
     "rationale": "<one sentence on why this decomposition>",
+    "epic": "<id of an OPEN epic from the provided list, or null>",
     "tasks": [
       {
         "title": "<concrete task title, imperative voice, <= 80 chars>",
@@ -143,12 +144,22 @@ CRITICAL: Constraint preservation (non-negotiable).
     "rephrase for clarity" license you have on the rest of the
     body. Constraints LOSE their meaning when they are paraphrased.
 
+Optional epic assignment (conservative, top-level "epic" field):
+  - You may receive a list of OPEN epics (durable initiatives) with ids and
+    titles. Set "epic" to the id of the ONE epic whose subject CLEARLY
+    matches this task's content.
+  - When in doubt, when nothing matches, or when no list is provided:
+    "epic": null. A wrong grouping is worse than no grouping.
+  - NEVER invent epic ids and NEVER create new epics — only ids verbatim
+    from the provided list are valid.
+
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
 
   {
     "fanout": false,
     "rationale": "<one sentence>",
+    "epic": "<id of an OPEN epic from the provided list, or null>",
     "title": "<tightened title>",
     "body":  "<concrete spec for a single worker>",
     "assignee": "<profile name from the roster, or null for default>",
@@ -172,6 +183,9 @@ Available profiles (assignees you may pick from):
 {roster}
 
 Default assignee (used when no profile fits a task): {default_assignee}
+
+Open epics (set "epic" ONLY on a clear content match, else null):
+{epics}
 """
 
 
@@ -1004,6 +1018,48 @@ def _children_from_parsed(
     return children, None
 
 
+# ── N-Epics P5: konservative Auto-Zuordnung beim Zerlegen ────────────────────
+# Der Decomposer sieht die OFFENEN Epics (id+title) und darf das Top-Level-Feld
+# "epic" setzen — nur bei klarer inhaltlicher Passung. Validierung hier ist die
+# harte Grenze: nur existierende offene Epics aus genau dieser Liste, nie neu
+# anlegen, Operator-Zuordnung (vorhandenes epic_id) gewinnt immer.
+
+def _open_epics_context() -> tuple[set[str], str]:
+    """(gültige offene Epic-IDs, Prompt-Block) — fail-soft zu "(none)"."""
+    ids: set[str] = set()
+    lines: list[str] = []
+    try:
+        with kb.connect_closing() as conn:
+            for e in kb.list_epics(conn, include_closed=False):
+                ids.add(e["id"])
+                lines.append(f"- {e['id']}: {_truncate(e['title'] or '', 120)}")
+    except Exception as exc:
+        logger.debug("decompose: open-epics lookup failed: %s", exc)
+    return ids, "\n".join(lines) if lines else "(none)"
+
+
+def _apply_epic_choice(task, parsed: dict, open_epic_ids: set[str]) -> None:
+    """Wendet die "epic"-Wahl des Decomposers an — konservativ.
+
+    Greift nur, wenn die ID wörtlich aus der angebotenen Open-Epics-Liste
+    stammt UND der Task noch kein Epic hat. Alles andere (halluzinierte ID,
+    geschlossenes Epic, Unsicherheit=null) bleibt still ohne Epic. Läuft VOR
+    dem Decompose-Write, damit die bestehende Root→Kinder-Propagation greift.
+    """
+    choice = parsed.get("epic")
+    if not isinstance(choice, str):
+        return
+    choice = choice.strip()
+    if not choice or choice not in open_epic_ids or task.epic_id:
+        return
+    try:
+        with kb.connect_closing() as conn:
+            kb.set_task_epic(conn, task.id, choice)
+    except Exception as exc:
+        # z.B. zwischenzeitlich geschlossen — konservativ: kein Epic.
+        logger.debug("decompose: epic assignment skipped for %s: %s", task.id, exc)
+
+
 def decompose_task(
     task_id: str,
     *,
@@ -1056,12 +1112,14 @@ def decompose_task(
     if client is None or not model:
         return DecomposeOutcome(task_id, False, "no auxiliary client configured")
 
+    open_epic_ids, epics_block = _open_epics_context()
     user_msg = _USER_TEMPLATE.format(
         task_id=task.id,
         title=_truncate(task.title or "", 400),
         body=_truncate(task.body or "(no body)", 4000),
         roster=_format_roster(roster),
         default_assignee=default_assignee,
+        epics=epics_block,
     )
 
     try:
@@ -1090,6 +1148,9 @@ def decompose_task(
     parsed = _extract_json_blob(raw)
     if parsed is None:
         return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+
+    # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).
+    _apply_epic_choice(task, parsed, open_epic_ids)
 
     fanout = bool(parsed.get("fanout"))
     audit_author = author or _profile_author()
@@ -1448,12 +1509,14 @@ def plan_and_document(
     if client is None or not model:
         return DecomposeOutcome(task_id, False, "no auxiliary client configured")
 
+    open_epic_ids, epics_block = _open_epics_context()
     user_msg = _USER_TEMPLATE.format(
         task_id=task.id,
         title=_truncate(task.title or "", 400),
         body=_truncate(task.body or "(no body)", 4000),
         roster=_format_roster(roster),
         default_assignee=default_assignee,
+        epics=epics_block,
     )
 
     system_prompt = _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM if document else _SYSTEM_PROMPT
@@ -1481,6 +1544,9 @@ def plan_and_document(
     parsed = _extract_json_blob(raw)
     if parsed is None:
         return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+
+    # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).
+    _apply_epic_choice(task, parsed, open_epic_ids)
 
     narrative = parsed.get("narrative")
     narrative = narrative.strip() if isinstance(narrative, str) and narrative.strip() else ""

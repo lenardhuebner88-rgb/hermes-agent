@@ -988,3 +988,133 @@ def test_plan_and_document_rejects_non_scheduled_root(kanban_home):
             p.stop()
     assert not outcome.ok
     assert "scheduled" in outcome.reason
+
+
+# ---------------------------------------------------------------------------
+# N-Epics P5: konservative Auto-Zuordnung beim Zerlegen
+# ---------------------------------------------------------------------------
+
+_EPIC_FANOUT = {
+    "fanout": True,
+    "rationale": "split",
+    "tasks": [
+        {"title": "research", "body": "look it up", "assignee": None, "parents": []},
+        {"title": "build", "body": "code it", "assignee": None, "parents": [0]},
+    ],
+}
+
+
+def _run_decompose(tid: str, payload: dict) -> "decomp.DecomposeOutcome":
+    patches = _patch_list_profiles(["orchestrator", "fallback"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(jsonlib.dumps(payload)), _patch_extra_body():
+            return decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+
+def test_p5_decompose_assigns_matching_open_epic_and_children_inherit(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="Dashboard reliability")
+        tid = kb.create_task(conn, title="harden the dashboard", triage=True)
+    outcome = _run_decompose(tid, {**_EPIC_FANOUT, "epic": eid})
+    assert outcome.ok, outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).epic_id == eid
+        for cid in outcome.child_ids:
+            assert kb.get_task(conn, cid).epic_id == eid
+
+
+def test_p5_decompose_ignores_hallucinated_epic_id(kanban_home):
+    with kb.connect() as conn:
+        kb.create_epic(conn, title="real epic")
+        tid = kb.create_task(conn, title="unrelated", triage=True)
+    outcome = _run_decompose(tid, {**_EPIC_FANOUT, "epic": "e_deadbeef"})
+    assert outcome.ok, outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).epic_id is None
+
+
+def test_p5_decompose_ignores_closed_epic(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="finished initiative")
+        kb.close_epic(conn, eid)
+        tid = kb.create_task(conn, title="late arrival", triage=True)
+    outcome = _run_decompose(tid, {**_EPIC_FANOUT, "epic": eid})
+    assert outcome.ok, outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).epic_id is None
+
+
+def test_p5_decompose_null_epic_means_no_epic(kanban_home):
+    with kb.connect() as conn:
+        kb.create_epic(conn, title="open but unrelated")
+        tid = kb.create_task(conn, title="standalone", triage=True)
+    outcome = _run_decompose(tid, {**_EPIC_FANOUT, "epic": None})
+    assert outcome.ok, outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).epic_id is None
+
+
+def test_p5_decompose_operator_assignment_wins(kanban_home):
+    """Ein vom Operator gesetztes Epic wird nie vom Decomposer umgehängt."""
+    with kb.connect() as conn:
+        manual = kb.create_epic(conn, title="operator pick")
+        other = kb.create_epic(conn, title="llm pick")
+        tid = kb.create_task(conn, title="pre-assigned", triage=True, epic_id=manual)
+    outcome = _run_decompose(tid, {**_EPIC_FANOUT, "epic": other})
+    assert outcome.ok, outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).epic_id == manual
+
+
+def test_p5_prompt_lists_open_epics_only(kanban_home):
+    with kb.connect() as conn:
+        open_eid = kb.create_epic(conn, title="open initiative")
+        closed_eid = kb.create_epic(conn, title="closed initiative")
+        kb.close_epic(conn, closed_eid)
+        tid = kb.create_task(conn, title="anything", triage=True)
+
+    client = _mock_client_returning(jsonlib.dumps({**_EPIC_FANOUT, "epic": None}))
+    patches = _patch_list_profiles(["orchestrator", "fallback"])
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(client, "test-model"),
+        ), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    user_msg = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "Open epics" in user_msg
+    assert open_eid in user_msg
+    assert closed_eid not in user_msg
+
+
+def test_p5_prompt_says_none_without_open_epics(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="anything", triage=True)
+    client = _mock_client_returning(jsonlib.dumps(_EPIC_FANOUT))
+    patches = _patch_list_profiles(["orchestrator", "fallback"])
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(client, "test-model"),
+        ), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+    assert outcome.ok, outcome.reason
+    user_msg = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "(none)" in user_msg
