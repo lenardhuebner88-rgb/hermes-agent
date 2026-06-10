@@ -9671,11 +9671,24 @@ def _spawn_claude_worker(
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
         "Work in the current directory.\n\n"
-        "MANDATORY: your turn is not over until you report back. On success "
-        'run via the Bash tool: hermes kanban complete "$HERMES_KANBAN_TASK" '
-        '--summary "<one line>". If you cannot finish, run: hermes kanban '
-        'block "$HERMES_KANBAN_TASK" "<reason>". The hermes binary is on '
-        "PATH. Do not ask for confirmation."
+        "MANDATORY: your turn is not over until you report back, via the "
+        "Bash tool (the hermes binary is on PATH; do not ask for "
+        "confirmation):\n"
+        "1. Post your end RESULT first — the answer/report a human asked "
+        "for, not how you went about it — as one self-contained Markdown "
+        'comment: hermes kanban comment "$HERMES_KANBAN_TASK" '
+        '"<deliverable>".\n'
+        "2. Then complete with a structured handoff: hermes kanban "
+        'complete "$HERMES_KANBAN_TASK" --summary "<one line>" '
+        "--metadata '<json>' where <json> is ONE JSON object with "
+        '"residual_risk" (one line: what could still break or was not '
+        'verified) plus the facts that apply: "changed_files": [...], '
+        '"tests_run": N, "decisions": [...]. To keep a file you created, '
+        'add "artifacts": ["<absolute path>"] — the workspace is deleted '
+        "on completion; listed workspace files are copied to "
+        "~/.hermes/reports/by-task/ first, anything unlisted is gone.\n"
+        "3. If you cannot finish, run: hermes kanban block "
+        '"$HERMES_KANBAN_TASK" "<reason>" instead.'
     )
 
     cmd = [
