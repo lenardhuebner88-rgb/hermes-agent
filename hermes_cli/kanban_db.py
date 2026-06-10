@@ -9657,6 +9657,62 @@ def _claude_profile_model(hermes_home: Optional[str]) -> Optional[str]:
         return None
 
 
+# --- Worker env allowlist (security hardening S1) -------------------------
+#
+# Workers are spawned with broad autonomy (the claude-CLI lane even runs
+# `--dangerously-skip-permissions`), so the dispatcher must NOT forward its
+# own environment wholesale: the gateway env carries Discord bot tokens,
+# API_SERVER_KEY, and provider keys for lanes the worker doesn't run.
+# Hermes-lane workers re-load their profile-scoped `.env` from disk at
+# startup (load_hermes_dotenv, override=True), so stripping inherited
+# secrets does not starve them of their own lane credentials.
+
+# Name prefixes forwarded to workers: the Hermes worker contract + config
+# vars, terminal/timeout knobs, locale, and XDG base dirs.
+_WORKER_ENV_PREFIXES = ("HERMES_", "TERMINAL_", "LC_", "XDG_")
+
+# Exact names forwarded to workers: process basics only.
+_WORKER_ENV_PASSTHROUGH = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+    "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP", "PWD",
+    "VIRTUAL_ENV", "PYTHONUNBUFFERED", "PYTHONIOENCODING",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    # Windows process basics (no-ops elsewhere).
+    "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "PATHEXT",
+})
+
+# LLM provider keys hermes-lane workers may legitimately use. Passed through
+# as a safety net for profiles without their own `.env` (the profile `.env`
+# overrides these on load anyway). Deliberately NOT bot tokens / gateway
+# secrets. The claude-CLI lane drops even these (Max subscription needs no
+# provider key at all).
+_WORKER_LANE_PROVIDER_KEYS = frozenset({
+    "OPENROUTER_API_KEY", "MINIMAX_API_KEY", "MINIMAX_BASE_URL",
+    "KIMI_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL",
+    "HONCHO_API_KEY",
+})
+
+
+def _build_worker_env(parent_env) -> dict:
+    """Allowlisted copy of ``parent_env`` for spawned kanban workers.
+
+    Everything not matched by the allowlist is dropped — most importantly
+    DISCORD_* bot tokens, API_SERVER_KEY, ANTHROPIC_API_KEY and any other
+    credential the dispatcher process happens to hold.
+    """
+    env: dict = {}
+    for key, value in parent_env.items():
+        if (
+            key in _WORKER_ENV_PASSTHROUGH
+            or key in _WORKER_LANE_PROVIDER_KEYS
+            or key.startswith(_WORKER_ENV_PREFIXES)
+        ):
+            env[key] = value
+    return env
+
+
 def _spawn_claude_worker(
     task: Task,
     workspace: str,
@@ -9683,6 +9739,13 @@ def _spawn_claude_worker(
     # must be on the child's PATH. Prepend the hermes binary's directory.
     hermes_dir = os.path.dirname(shutil.which("hermes") or "/home/piet/.local/bin/hermes")
     env["PATH"] = hermes_dir + os.pathsep + env.get("PATH", "")
+
+    # Tighten the env beyond the dispatcher allowlist: the claude CLI runs
+    # on the subscription (it must NOT see ANTHROPIC_API_KEY, or billing
+    # silently switches to the API key) and never re-loads Hermes .env
+    # files, so no LLM provider key has any business in this process.
+    for key in _WORKER_LANE_PROVIDER_KEYS | {"ANTHROPIC_API_KEY"}:
+        env.pop(key, None)
 
     body = task.body or ""
     title = task.title or ""
@@ -9716,6 +9779,13 @@ def _spawn_claude_worker(
         _claude_worker_bin(),
         "-p", prompt,
         "--dangerously-skip-permissions",
+        # Deny the direct-HTTP tools (S2): with --dangerously-skip-permissions
+        # an --allowedTools list would be a no-op (everything is auto-approved),
+        # but disallowed tools stay hard-denied even in bypass mode. Bash-level
+        # egress (curl -d, scp, nc, ...) is gated by the user-global
+        # guard-dangerous-ops.sh PreToolUse hook, which loads for these
+        # workers too.
+        "--disallowedTools", "WebFetch,WebSearch",
         "--output-format", "json",
     ]
     # Model routing: per-task override > per-profile default (claude_model) >
@@ -9783,12 +9853,13 @@ def _default_spawn(
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
-    env = dict(os.environ)
+    env = _build_worker_env(os.environ)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root
-    # config.  Without this, `env = dict(os.environ)` copies only the parent's
-    # env, and when the child process starts `hermes -p <name>` the
+    # config.  Without this, the allowlisted copy of the parent's env carries
+    # the dispatcher's HERMES_HOME, and when the child process starts
+    # `hermes -p <name>` the
     # _apply_profile_override() runs *before* hermes_constants is imported.
     # If HERMES_HOME is absent from the child's env, get_hermes_home() falls
     # back to Path.home() / ".hermes" (the DEFAULT profile root), ignoring the
