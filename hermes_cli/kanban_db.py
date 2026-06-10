@@ -5374,6 +5374,49 @@ def complete_task(
             verified_cards=verified_cards, expected_run_id=expected_run_id,
         )
 
+    # Worker-isolation integrator (kanban_worktrees, Phase 3): when this
+    # completion closes the LAST open task of a dispatcher-provisioned
+    # worktree chain, the chain branch is merged --no-ff into its frozen
+    # merge target HERE — after Verifier-APPROVED routing, before the task
+    # goes done. A parked integration (pre-check / conflict / red post-merge
+    # gate) blocks the task instead of completing it: park, don't guess.
+    # GUARD FIRST: the hook has real git side effects, so it must only run
+    # for a completion that the done-UPDATE below would actually accept —
+    # same status set, same expected_run_id match. Without this, a stale
+    # worker (claim expired, task re-claimed) or a CLI complete on a task
+    # parked in 'review' would merge an unreviewed/abandoned chain.
+    # Fail-open on unexpected hook errors — completion semantics for
+    # non-isolated tasks must never depend on this module. (Git-level
+    # failures are converted to a 'parked' outcome inside the module.)
+    _wt_outcome: Optional[dict] = None
+    try:
+        _wt_row = conn.execute(
+            "SELECT status, current_run_id, workspace_path "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        _wt_eligible = (
+            _wt_row is not None
+            and _wt_row["workspace_path"]
+            and _wt_row["status"] in ("running", "ready", "blocked")
+            and (
+                expected_run_id is None
+                or _wt_row["current_run_id"] == int(expected_run_id)
+            )
+        )
+        if _wt_eligible:
+            from hermes_cli.kanban_worktrees import maybe_integrate_on_complete
+            _wt_outcome = maybe_integrate_on_complete(conn, task_id)
+    except Exception:
+        _log.error(
+            "worker-isolation integration hook failed for %s",
+            task_id, exc_info=True,
+        )
+    if _wt_outcome and _wt_outcome.get("action") == "parked":
+        return _park_integration(
+            conn, task_id, _wt_outcome, expected_run_id=expected_run_id,
+        )
+
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -5456,6 +5499,12 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+            # Worker isolation (Phase 2): promote the worker's commit hash
+            # onto the completed event so receipts/notifiers can render
+            # "fertig = committeter Hash" without fetching the run row.
+            md_commit = metadata.get("commit")
+            if isinstance(md_commit, str) and md_commit.strip():
+                completed_payload["commit"] = md_commit.strip()[:64]
         _append_event(
             conn, task_id, "completed",
             completed_payload,
@@ -5994,6 +6043,64 @@ def edit_completed_task_result(
             },
             run_id=run_id,
         )
+    return True
+
+
+def _park_integration(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: dict,
+    *,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Park a completion whose chain integration failed (worker isolation).
+
+    Called from :func:`complete_task` when the kanban_worktrees integrator
+    returns ``parked`` (pre-check, merge conflict, or red post-merge gate).
+    The task goes ``blocked`` — surfacing in the decision queue — instead of
+    ``done``. The closing run keeps outcome ``completed``, and a review-lane
+    run keeps its APPROVED verdict: the verifier DID approve; only the
+    integration into the live branch is parked for the operator.
+    """
+    reason = f"integration parked: {outcome.get('reason', 'unknown')}"
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'blocked',
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'blocked',
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn, task_id,
+            outcome="completed", status="blocked",
+            summary=reason, metadata=outcome,
+        )
+        if _run_originated_from_review(conn, task_id, run_id):
+            _set_run_verdict(conn, run_id, "APPROVED")
+        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
     return True
 
 
@@ -9156,6 +9263,25 @@ def dispatch_once(
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
+        # Worker isolation (kanban.worker_isolation: worktree): provision a
+        # dispatcher-managed git worktree for repo tasks at claim time. The
+        # provisioner re-persists the worktree path on the task row; a
+        # provisioning failure counts as a spawn failure, exactly like a
+        # resolve_workspace error. Flag off → byte-identical to before.
+        try:
+            from hermes_cli import kanban_worktrees as _kwt
+            if _kwt.isolation_mode() == "worktree":
+                workspace = _kwt.provision_for_task(
+                    conn, claimed, workspace, board=board,
+                )
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, f"worktree provisioning: {exc}",
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+            continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
@@ -9266,6 +9392,15 @@ def dispatch_once(
         # so the verifier inherits the coder's preserved workspace and can
         # inspect the real changes.
         set_workspace_path(conn, claimed.id, str(workspace))
+        # Worker isolation: surface uncommitted leftovers in a provisioned
+        # worktree to the verifier as a task comment — the worker contract
+        # requires committing on green gates, so leftovers are grounds for
+        # REQUEST_CHANGES. Best-effort; non-provisioned workspaces no-op.
+        try:
+            from hermes_cli import kanban_worktrees as _kwt
+            _kwt.note_dirty_worktree(conn, claimed.id, str(workspace))
+        except Exception:
+            pass
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         claimed.assignee = _spawn_profile
         claimed.skills = []
@@ -9767,12 +9902,33 @@ def _spawn_claude_worker(
 
     body = task.body or ""
     title = task.title or ""
+    # Worker isolation (Phase 2, Entscheidung 1): the commit contract is
+    # injected ONLY for dispatcher-provisioned worktrees. Workers in the
+    # live checkout (flag off, legacy dir tasks) keep today's prompt —
+    # a `git add -A` there would commit foreign dirty work.
+    git_contract = ""
+    try:
+        from hermes_cli.kanban_worktrees import is_provisioned_path
+        if is_provisioned_path(workspace):
+            git_contract = (
+                "Git contract: this directory is a dispatcher-provisioned "
+                "git worktree on your own task branch. When your gates are "
+                "green, commit your work: git add -A && git commit -m "
+                '"kanban($HERMES_KANBAN_TASK): <one-line summary>" — and '
+                'include the hash in your completion metadata as "commit". '
+                "NEVER push, NEVER merge into another branch, NEVER switch "
+                "branches; integration happens outside your run after "
+                "review.\n\n"
+            )
+    except Exception:
+        git_contract = ""
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
         "Work in the current directory.\n\n"
+        f"{git_contract}"
         "MANDATORY: your turn is not over until you report back, via the "
         "Bash tool (the hermes binary is on PATH; do not ask for "
         "confirmation):\n"

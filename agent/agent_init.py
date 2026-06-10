@@ -974,9 +974,15 @@ def init_agent(
     # Resolving the ~835-token block once here avoids re-running the
     # membership test + reference on every system-prompt rebuild
     # (init + each context compression).
-    from agent.prompt_builder import KANBAN_GUIDANCE
+    from agent.prompt_builder import KANBAN_GUIDANCE, kanban_commit_guidance_for
     agent._kanban_worker_guidance = (
-        KANBAN_GUIDANCE if "kanban_show" in agent.valid_tool_names else ""
+        # Worker isolation: the commit contract is appended ONLY when the
+        # dispatcher provisioned a dedicated worktree for this worker
+        # (workspace under …/.worktrees/kanban/). Live-checkout workers
+        # keep the unchanged guidance.
+        KANBAN_GUIDANCE
+        + kanban_commit_guidance_for(os.environ.get("HERMES_KANBAN_WORKSPACE"))
+        if "kanban_show" in agent.valid_tool_names else ""
     )
 
     # Check tool requirements
