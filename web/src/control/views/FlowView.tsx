@@ -35,6 +35,7 @@ import { getFlowSubtaskStatusExplanation } from "../lib/flowStatus";
 import { getHeldFlowDispatchGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
 import {
   useBoard,
+  useEpicActions,
   useEpics,
   useFlowRelease,
   useHermesBlockedCompletions,
@@ -52,6 +53,7 @@ import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { RoleChip } from "../components/fleet/atoms";
+import { EpicCreate } from "../components/fleet/EpicCreate";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
 
@@ -528,8 +530,56 @@ function ChainStagePills({ chain }: { chain: ChainModel<BoardTask> }) {
   );
 }
 
-function ChainCard({ chain, epicTitle, onEpicClick, expanded, onToggle, selectedId, onSelect, now, renderTask }: {
+// Epic-Picker am Kettenkopf (Phase 3): die Zuordnung gilt IMMER für die ganze
+// Kette (alle Mitglieder werden gepatcht) — bewusst kein Einzel-Task-Picker
+// (Grill-Entscheid 3). Zwei-Schritt-Muster wie die Fleet-Aktionen.
+function ChainEpicPicker({ chain, openEpics, busy, onAssign }: {
+  chain: ChainModel<BoardTask>; openEpics: Epic[]; busy: boolean;
+  onAssign: (epicId: string | null) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  const [choice, setChoice] = useState<string>("");
+  if (!openEpics.length && !chain.epicId) return null;
+  if (!picking) {
+    return (
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => { setChoice(chain.epicId ?? ""); setPicking(true); }}
+        className="inline-flex min-h-8 items-center rounded-full border border-indigo-400/25 px-2.5 text-xs text-indigo-200 transition hover:bg-indigo-400/10 disabled:opacity-40"
+      >
+        {busy ? de.flow.epicAssignBusy : chain.epicId ? de.flow.epicChange : de.flow.epicAssign}
+      </button>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <select
+        value={choice}
+        onChange={(e) => setChoice(e.target.value)}
+        aria-label={de.flow.epicAssign}
+        className="min-h-8 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-white outline-none focus:border-[var(--hc-accent-border)]"
+      >
+        <option value="">{de.flow.epicNoneOption}</option>
+        {openEpics.map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}
+      </select>
+      <span className="text-[0.68rem] hc-dim">{de.flow.epicAssignNote(chain.total)}</span>
+      <button
+        type="button"
+        disabled={busy || (choice || null) === chain.epicId}
+        onClick={() => { onAssign(choice || null); setPicking(false); }}
+        className="inline-flex min-h-8 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 text-xs text-[var(--hc-accent-text)] disabled:opacity-40"
+      >
+        Bestätigen
+      </button>
+      <button type="button" onClick={() => setPicking(false)} className="inline-flex min-h-8 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft">Abbrechen</button>
+    </div>
+  );
+}
+
+function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssignEpic, expanded, onToggle, selectedId, onSelect, now, renderTask }: {
   chain: ChainModel<BoardTask>; epicTitle?: string | null; onEpicClick?: (epicId: string) => void;
+  openEpics: Epic[]; epicBusy: boolean; onAssignEpic: (chain: ChainModel<BoardTask>, epicId: string | null) => void;
   expanded: boolean; onToggle: () => void;
   selectedId: string | null; onSelect: (id: string) => void; now: number;
   renderTask: (task: BoardTask) => React.ReactNode;
@@ -575,6 +625,9 @@ function ChainCard({ chain, epicTitle, onEpicClick, expanded, onToggle, selected
       </div>
       {expanded ? (
         <div className="mt-3 space-y-2">
+          <div onClick={(e) => e.stopPropagation()}>
+            <ChainEpicPicker chain={chain} openEpics={openEpics} busy={epicBusy} onAssign={(epicId) => onAssignEpic(chain, epicId)} />
+          </div>
           {openMembers.length ? (
             <div className="grid gap-2 sm:grid-cols-2">{openMembers.map((m) => <div key={m.id}>{renderTask(m)}</div>)}</div>
           ) : null}
@@ -607,7 +660,12 @@ function ChainCard({ chain, epicTitle, onEpicClick, expanded, onToggle, selected
 // Epic-Gruppen-Header (Gruppier-Toggle): Titel statt roher ID, Fortschritt +
 // Token-Burn aus dem GET /epics-Rollup — board-weit, nicht nur die gefilterte
 // Sicht. Ohne Rollup (Epics-Endpoint down) degradiert er auf die rohe ID.
-function EpicGroupHeader({ epicId, epic }: { epicId: string | null; epic?: Epic }) {
+// "Epic schließen" ist confirm-gated (Zwei-Schritt wie die Fleet-Aktionen);
+// Schließen ist ein organisatorischer Akt, die Tasks bleiben unberührt.
+function EpicGroupHeader({ epicId, epic, closeBusy, onClose }: {
+  epicId: string | null; epic?: Epic; closeBusy?: boolean; onClose?: (epicId: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
   const tokens = epic ? (epic.input_tokens ?? 0) + (epic.output_tokens ?? 0) : 0;
   return (
     <div id={epicId ? `epic-group-${epicId}` : undefined} className="flex scroll-mt-4 flex-wrap items-center gap-2">
@@ -619,6 +677,31 @@ function EpicGroupHeader({ epicId, epic }: { epicId: string | null; epic?: Epic 
           <span className="hc-mono text-[0.68rem] hc-soft">{de.flow.epicGroupProgress(epic.done_tasks, epic.task_count)}</span>
           <span className="hc-mono text-[0.68rem] hc-dim">{tokens > 0 ? de.flow.epicGroupTokens(fmtTokens(tokens)) : de.flow.epicGroupNoTokens}</span>
         </>
+      ) : null}
+      {epicId && epic?.status === "open" && onClose ? (
+        confirming ? (
+          <span className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="text-[0.7rem] hc-soft">{de.flow.epicCloseConfirm}</span>
+            <button
+              type="button"
+              disabled={closeBusy}
+              onClick={() => { onClose(epicId); setConfirming(false); }}
+              className="inline-flex min-h-8 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 text-xs text-[var(--hc-accent-text)] disabled:opacity-40"
+            >
+              {closeBusy ? de.flow.epicCloseBusy : "Bestätigen"}
+            </button>
+            <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-8 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft">Abbrechen</button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            disabled={closeBusy}
+            onClick={() => setConfirming(true)}
+            className="ml-auto inline-flex min-h-8 items-center rounded-full border border-[var(--hc-border)] px-2.5 text-xs hc-soft transition hover:border-[var(--hc-border-strong)] disabled:opacity-40"
+          >
+            {closeBusy ? de.flow.epicCloseBusy : de.flow.epicClose}
+          </button>
+        )
       ) : null}
     </div>
   );
@@ -725,6 +808,21 @@ export function FlowView() {
     setGroupByEpic(true);
     window.setTimeout(() => document.getElementById(`epic-group-${epicId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   }, []);
+
+  // Epic-Aktionen (Phase 3): anlegen / Kette zuordnen / schließen — nach
+  // Erfolg Epics + Board neu laden, damit Badges und Rollups ehrlich bleiben.
+  const epicsReload = epics.reload;
+  const boardReloadRef = board.reload;
+  const epicActions = useEpicActions(useCallback(async () => {
+    await Promise.all([epicsReload(), boardReloadRef()]);
+  }, [epicsReload, boardReloadRef]));
+  const openEpics = useMemo(() => (epics.data?.epics ?? []).filter((e) => e.status === "open"), [epics.data]);
+  const onAssignEpic = useCallback((chain: ChainModel<BoardTask>, epicId: string | null) => {
+    void epicActions.assignChain(chain.rootId, chain.members.map((m) => m.id), epicId);
+  }, [epicActions]);
+  const onCloseEpic = useCallback((epicId: string) => {
+    void epicActions.closeEpic(epicId);
+  }, [epicActions]);
 
   // Worker-Strip (Fleet-Absorption): Live-Läufe mit Laufzeit-Budget + Aktionen.
   const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
@@ -923,6 +1021,7 @@ export function FlowView() {
         action={
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-4 w-4" /></button>
+            <EpicCreate onCreated={() => void epicsReload()} />
             <FlowCapture onCreated={onCaptured} />
           </div>
         }
@@ -1016,11 +1115,17 @@ export function FlowView() {
                         {de.flow.epicGroupToggle}
                       </button>
                     </div>
+                    {epicActions.error ? <div className="mt-2"><ToneCallout tone="red">{epicActions.error}</ToneCallout></div> : null}
                     {epicGroups ? (
                       <div className="mt-2 space-y-4">
                         {epicGroups.map((group) => (
                           <div key={group.epicId ?? "none"}>
-                            <EpicGroupHeader epicId={group.epicId} epic={group.epicId ? epicsById.get(group.epicId) : undefined} />
+                            <EpicGroupHeader
+                              epicId={group.epicId}
+                              epic={group.epicId ? epicsById.get(group.epicId) : undefined}
+                              closeBusy={group.epicId != null && epicActions.busyKey === group.epicId}
+                              onClose={onCloseEpic}
+                            />
                             <div className="mt-2 space-y-2.5">
                               {group.chains.map((chain) => (
                                 <ChainCard
@@ -1028,6 +1133,9 @@ export function FlowView() {
                                   chain={chain}
                                   epicTitle={chain.epicId ? epicsById.get(chain.epicId)?.title ?? null : null}
                                   onEpicClick={onEpicBadgeClick}
+                                  openEpics={openEpics}
+                                  epicBusy={epicActions.busyKey === chain.rootId}
+                                  onAssignEpic={onAssignEpic}
                                   expanded={effectiveExpanded === chain.rootId}
                                   onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
                                   selectedId={selectedId}
@@ -1048,6 +1156,9 @@ export function FlowView() {
                             chain={chain}
                             epicTitle={chain.epicId ? epicsById.get(chain.epicId)?.title ?? null : null}
                             onEpicClick={onEpicBadgeClick}
+                            openEpics={openEpics}
+                            epicBusy={epicActions.busyKey === chain.rootId}
+                            onAssignEpic={onAssignEpic}
                             expanded={effectiveExpanded === chain.rootId}
                             onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
                             selectedId={selectedId}
