@@ -2285,6 +2285,157 @@ def close_epic_endpoint(
         conn.close()
 
 
+# --- Lanes (night-sprint F1) — switchable profile→(runtime, model) presets ---
+
+
+def _lane_profile_catalog() -> list[dict]:
+    """Profile names + config defaults for the Lanes UI dropdowns.
+
+    Fail-soft: any error yields an empty list — the UI then falls back to
+    free-text profile entry. Reads worker_runtime / claude_model straight
+    from each profile's config.yaml (same seams the dispatcher uses).
+    """
+    out: list[dict] = []
+    try:
+        import yaml
+        from hermes_cli.profiles import list_profiles
+        for info in list_profiles():
+            if info.name == "default":
+                continue
+            runtime = "hermes"
+            claude_model = None
+            try:
+                cfg_path = info.path / "config.yaml"
+                if cfg_path.is_file():
+                    with open(cfg_path, "r", encoding="utf-8") as fh:
+                        cfg = yaml.safe_load(fh) or {}
+                    if isinstance(cfg, dict):
+                        if cfg.get("worker_runtime") == "claude-cli":
+                            runtime = "claude-cli"
+                        cm = cfg.get("claude_model")
+                        if isinstance(cm, str) and cm.strip():
+                            claude_model = cm.strip()
+            except Exception:
+                pass
+            out.append({
+                "name": info.name,
+                "worker_runtime": runtime,
+                "default_model": claude_model if runtime == "claude-cli" else info.model,
+                "description": info.description or "",
+            })
+    except Exception:
+        return []
+    return out
+
+
+@router.get("/lanes")
+def list_lanes_endpoint(
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F1: all lane presets (seeding api-standard/max-abo on first contact)
+    plus the profile catalog for the editor dropdowns."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        lanes = kanban_db.list_lanes(conn)
+        return {
+            "lanes": lanes,
+            "count": len(lanes),
+            "active_id": next((l["id"] for l in lanes if l["active"]), None),
+            "profiles": _lane_profile_catalog(),
+        }
+    finally:
+        conn.close()
+
+
+class LaneBody(BaseModel):
+    name: Optional[ShortText] = None
+    profiles: Optional[dict] = None
+
+
+@router.post("/lanes")
+def create_lane_endpoint(
+    payload: LaneBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F1: create a lane preset (inactive until explicitly activated)."""
+    if not payload.name:
+        raise HTTPException(status_code=400, detail="name is required")
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            lane = kanban_db.create_lane(
+                conn, name=payload.name, profiles=payload.profiles,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"lane": lane}
+    finally:
+        conn.close()
+
+
+@router.put("/lanes/{lane_id}")
+def update_lane_endpoint(
+    lane_id: str,
+    payload: LaneBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F1: rename a lane and/or replace its profile mapping."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            lane = kanban_db.update_lane(
+                conn, lane_id, name=payload.name, profiles=payload.profiles,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if lane is None:
+            raise HTTPException(status_code=404, detail=f"lane {lane_id} not found")
+        return {"lane": lane}
+    finally:
+        conn.close()
+
+
+@router.delete("/lanes/{lane_id}")
+def delete_lane_endpoint(
+    lane_id: str,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F1: delete a lane. The active lane is protected (409)."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            ok = kanban_db.delete_lane(conn, lane_id)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"lane {lane_id} not found")
+        return {"deleted": lane_id}
+    finally:
+        conn.close()
+
+
+@router.post("/lanes/{lane_id}/activate")
+def activate_lane_endpoint(
+    lane_id: str,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F1: make this the single active lane. Takes effect from the next
+    worker spawn — the dispatcher hot-reads the active lane per spawn."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        lane = kanban_db.activate_lane(conn, lane_id)
+        if lane is None:
+            raise HTTPException(status_code=404, detail=f"lane {lane_id} not found")
+        return {"lane": lane}
+    finally:
+        conn.close()
+
+
 @router.get("/runs/summary")
 def get_runs_summary(
     since_hours: int = Query(24, ge=1, le=720),

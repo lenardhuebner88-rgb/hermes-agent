@@ -5,7 +5,7 @@ import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -28,6 +28,9 @@ const moreTabs = [
   { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
   { label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
   { label: de.tabs.crons, path: "/control/crons", icon: Clock },
+  // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
+  // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
+  { label: "Lanes", path: "/control/lanes", icon: Shield },
 ];
 
 const secondaryNav = [
