@@ -28,8 +28,8 @@ const TONE_CLASS: Record<ToneName, string> = {
 
 /** Roher Hex-Wert eines Tons (für inline-Style, LED-Glow, Border-Akzent). */
 export const TONE_HEX: Record<ToneName, string> = {
-  emerald: '#22c55e', cyan: '#22d3ee', sky: '#38bdf8', indigo: '#818cf8',
-  amber: '#f59e0b', rose: '#f43f5e', red: '#ef4444', zinc: '#52525b', violet: '#8b5cf6',
+  emerald: '#0a8a60', cyan: '#0a87a8', sky: '#0369a1', indigo: '#4338ca',
+  amber: '#b3590a', rose: '#be123c', red: '#d23b4e', zinc: '#79808f', violet: '#2e45d4',
 };
 
 /** Task-Status → Ton (für Hermes task_status). */

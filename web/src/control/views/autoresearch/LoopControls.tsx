@@ -86,7 +86,7 @@ export function LoopControls({
             <div className="flex flex-col gap-2">
               <label className="text-xs hc-soft" htmlFor="loop-area">{de.autoresearch.triggerArea}</label>
               <select id="loop-area" value={area} onChange={(event) => onAreaChange(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-                {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[#16181d] text-white">{a.value} — {a.scope}</option>)}
+                {AUTORESEARCH_AREAS.map((a) => <option key={a.value} value={a.value} className="bg-[var(--hc-panel)] text-[var(--hc-text)]">{a.value} — {a.scope}</option>)}
               </select>
               <label className="text-xs hc-soft" htmlFor="loop-focus">{de.autoresearch.triggerFocus}</label>
               <input id="loop-focus" type="text" inputMode="text" pattern="[a-z0-9][a-z0-9_-]*" placeholder={de.autoresearch.triggerFocusPlaceholder} value={focus} onChange={(event) => onFocusChange(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />

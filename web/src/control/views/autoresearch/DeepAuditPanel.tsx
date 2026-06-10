@@ -29,7 +29,7 @@ export function DeepAuditPanel({ deepAudit, running, effectiveSubsystem, focus, 
           <RunGuidanceCard guidance={guidance} />
           <label className="text-xs hc-soft" htmlFor="deep-audit-subsystem">Subsystem</label>
           <select id="deep-audit-subsystem" value={effectiveSubsystem} onChange={(event) => onSubsystemChange(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-            {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+            {deepAudit.subsystems.map((name) => <option key={name} value={name} className="bg-[var(--hc-panel)] text-[var(--hc-text)]">{name}</option>)}
           </select>
           <label className="text-xs hc-soft" htmlFor="deep-audit-focus">Focus</label>
           <input id="deep-audit-focus" value={focus} onChange={(event) => onFocusChange(event.target.value)} placeholder="optional" className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]" />

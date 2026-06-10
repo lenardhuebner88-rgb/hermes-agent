@@ -32,7 +32,7 @@ export function TestFoundryPanel({ testFoundry, running, effectiveTarget, autoAp
           <RunGuidanceCard guidance={guidance} />
           <label className="text-xs hc-soft" htmlFor="test-foundry-target">Target</label>
           <select id="test-foundry-target" value={effectiveTarget} onChange={(event) => onTargetChange(event.target.value)} className="hc-hit rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none focus:border-[var(--hc-accent-border)]">
-            {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[#16181d] text-white">{name}</option>)}
+            {testFoundry.targets.map((name) => <option key={name} value={name} className="bg-[var(--hc-panel)] text-[var(--hc-text)]">{name}</option>)}
           </select>
           <TestHardeningSlotPicker />
           <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 bg-black/20 p-2 text-sm text-white">

@@ -5,25 +5,25 @@
  * mit currentColor, recharts-Farben).
  */
 export const tokens = {
-  // Aurora Violet accent (mirrors --hc-accent* in control-tokens.css).
-  accent: '#8b5cf6',
-  accentStrong: '#a78bfa',
-  accentText: '#ddd6fe',
-  accent2: '#22d3ee',
-  accentWash: 'rgba(139,92,246,0.14)',
-  accentBorder: 'rgba(139,92,246,0.34)',
-  accentGlow: '0 0 20px rgba(139,92,246,0.28)',
-  /** The aurora gradient stops, in order (violet → indigo → cyan). */
-  aurora: ['#8b5cf6', '#6366f1', '#22d3ee'],
+  // Daylight ultramarine accent (mirrors --hc-accent* in control-tokens.css).
+  accent: '#2e45d4',
+  accentStrong: '#1d2fa8',
+  accentText: '#2334b8',
+  accent2: '#0a8aa6',
+  accentWash: 'rgba(46,69,212,0.08)',
+  accentBorder: 'rgba(46,69,212,0.32)',
+  accentGlow: '0 0 18px rgba(46,69,212,0.22)',
+  /** The signal gradient stops, in order (ultramarine → azure → teal). */
+  aurora: ['#1d2fa8', '#2e5be8', '#0a8aa6'],
 
-  bg: '#0d0d0f', rail: '#0f0f0f', panel: '#111111', panel2: '#141414',
-  panelCard: '#161b22', border: '#1e1e1e', borderStrong: '#2a2a2a',
-  text: '#f0f0f0', textSoft: '#6b7280', textDim: '#374151',
+  bg: '#f2f0ea', rail: '#edeae2', panel: '#faf9f5', panel2: '#f5f3ec',
+  panelCard: '#fcfbf8', border: '#ddd8cb', borderStrong: '#c7c1b1',
+  text: '#1a1d28', textSoft: '#555c6e', textDim: '#8b8f9c',
 
   /** Elevation shadows (mirror --hc-elev-* in control-tokens.css). */
   elev: {
-    1: '0 1px 0 rgba(255,255,255,.03) inset, 0 4px 18px rgba(0,0,0,.30)',
-    2: '0 1px 0 rgba(255,255,255,.04) inset, 0 12px 40px rgba(0,0,0,.44)',
+    1: 'inset 0 1px 0 #fff, 0 1px 2px rgba(26,29,40,.05), 0 12px 28px -20px rgba(26,29,40,.16)',
+    2: 'inset 0 1px 0 #fff, 0 2px 6px rgba(26,29,40,.06), 0 28px 60px -30px rgba(26,29,40,.24)',
   },
 
   /** Named type scale (mirror .hc-type-* / --hc-type-* in control-tokens.css). */
@@ -37,13 +37,13 @@ export const tokens = {
   },
 
   status: {
-    emerald: '#22c55e', cyan: '#22d3ee', sky: '#38bdf8', indigo: '#818cf8',
-    amber: '#f59e0b', rose: '#f43f5e', red: '#ef4444', zinc: '#52525b',
+    emerald: '#0a8a60', cyan: '#0a87a8', sky: '#0369a1', indigo: '#4338ca',
+    amber: '#b3590a', rose: '#be123c', red: '#d23b4e', zinc: '#79808f',
   },
   agent: {
-    'main': '#14b8a6', 'sre-expert': '#f97316', 'frontend-guru': '#d946ef',
-    'efficiency-auditor': '#eab308', 'james': '#10b981', 'spark': '#ec4899',
-    operator: '#3b82f6',
+    'main': '#0f766e', 'sre-expert': '#c2410c', 'frontend-guru': '#a21caf',
+    'efficiency-auditor': '#a16207', 'james': '#047857', 'spark': '#be185d',
+    operator: '#1d4ed8',
   },
 
   radius: { sm: 6, md: 8, lg: 10, xl: 14, '2xl': 18, card: 20, pill: 999 },
