@@ -3424,11 +3424,100 @@ def _backfill_cost_from_state_db(
     return in_tok, out_tok, cost
 
 
+# K17: how far back into a claude-CLI worker log we look for the final
+# ``{"type": "result", ...}`` JSON. The result object is the LAST thing the
+# CLI prints; 1 MB of tail comfortably covers even verbose result texts.
+_CLAUDE_RESULT_TAIL_BYTES = 1_000_000
+
+
+def _is_claude_cli_runtime(profile: Optional[str]) -> bool:
+    """K17: True when ``profile`` dispatches via the ``claude`` CLI.
+
+    Thin wrapper that resolves the profile's env dir so the existing
+    ``_is_claude_cli_profile`` seam (env allowlist + ``worker_runtime:
+    claude-cli`` in the profile config) can be reused from the backfill
+    path, where only the profile NAME is at hand. Fail-soft False — a
+    broken profile can never divert the state.db backfill branch.
+    """
+    if not profile:
+        return False
+    try:
+        hermes_home: Optional[str] = None
+        try:
+            from hermes_cli.profiles import resolve_profile_env
+            hermes_home = resolve_profile_env(profile)
+        except Exception:
+            hermes_home = None
+        return _is_claude_cli_profile(profile, hermes_home)
+    except Exception:
+        return False
+
+
+def _parse_claude_cli_result(log_path: Path) -> Optional[dict]:
+    """K17: last ``{"type": "result", ...}`` object in a claude-CLI task log.
+
+    ``_spawn_claude_worker`` runs ``claude -p … --output-format json`` with
+    stdout+stderr appended to the per-task worker log, so the final result
+    JSON (``total_cost_usd`` + ``usage``) is the last JSON line in that log.
+    Reads at most ``_CLAUDE_RESULT_TAIL_BYTES`` from the end; returns the
+    LAST parseable result object (retries append, so last wins). Fully
+    fail-soft: missing/unreadable log or no result line → ``None``.
+    """
+    try:
+        if not log_path.exists():
+            return None
+        size = log_path.stat().st_size
+        with open(log_path, "rb") as fh:
+            if size > _CLAUDE_RESULT_TAIL_BYTES:
+                fh.seek(size - _CLAUDE_RESULT_TAIL_BYTES)
+            data = fh.read()
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    result: Optional[dict] = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"type"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            result = obj
+    return result
+
+
+def _extract_claude_cli_cost(
+    result: dict,
+) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    """K17: (input_tokens, output_tokens, cost_usd_equivalent) from a result.
+
+    ``input_tokens`` counts fresh tokens (``input_tokens`` +
+    ``cache_creation_input_tokens``); cache READS are excluded — they are
+    near-free against the subscription quota and would triple-count the
+    same context on every turn. The raw ``usage`` block is preserved in run
+    metadata by the caller, so nothing is lost. ``total_cost_usd`` is the
+    API-EQUIVALENT value, not real spend (subscription runs bill $0).
+    """
+    usage = result.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    base = _coerce_int(usage.get("input_tokens"))
+    cache_w = _coerce_int(usage.get("cache_creation_input_tokens"))
+    in_tok: Optional[int] = None
+    if base is not None or cache_w is not None:
+        in_tok = (base or 0) + (cache_w or 0)
+    out_tok = _coerce_int(usage.get("output_tokens"))
+    equiv = _coerce_float(result.get("total_cost_usd"))
+    return in_tok, out_tok, equiv
+
+
 def backfill_run_costs(
     conn: sqlite3.Connection,
     *,
     limit: int = 200,
     since_seconds: Optional[int] = None,
+    board: Optional[str] = None,
 ) -> int:
     """K16: deferred, profile-aware cost backfill for closed runs.
 
@@ -3443,9 +3532,21 @@ def backfill_run_costs(
     ``profile=…``) and COALESCE-fills the token/cost columns. Returns the count
     of runs whose ``cost_usd`` was newly set. Fully fail-soft: a single bad row
     never aborts the batch, and a run without ``worker_session_id`` is skipped.
+
+    K17: claude-CLI lanes (``worker_runtime: claude-cli`` — coder-claude,
+    premium) have no hermes session at all, so there is nothing in any
+    ``state.db``. Their usage lives in the final result JSON of the per-task
+    worker log instead (``--output-format json``), which the CLI prints only
+    AFTER the worker already closed its run via ``hermes kanban complete`` —
+    hence post-hoc here, never at ``_end_run`` time. Tokens go into the
+    columns, ``cost_usd`` is stamped ``0.0`` (the run is included in the
+    subscription — keeps the honest-$0 convention), and the API-equivalent
+    value is preserved as ``metadata.cost_usd_equivalent``. ``board`` selects
+    the worker-log directory and defaults to the current board, matching the
+    default ``connect_closing()`` the callers pair this with.
     """
     sql = (
-        "SELECT id, profile, metadata FROM task_runs "
+        "SELECT id, task_id, profile, metadata FROM task_runs "
         "WHERE cost_usd IS NULL AND ended_at IS NOT NULL"
     )
     params: list[Any] = []
@@ -3467,6 +3568,54 @@ def backfill_run_costs(
             except (TypeError, ValueError):
                 metadata = None
             if not isinstance(metadata, dict):
+                metadata = None
+
+            # K17: claude-CLI branch — no state.db session exists; read the
+            # final result JSON from the per-task worker log instead.
+            if _is_claude_cli_runtime(profile):
+                task_id = row["task_id"]
+                latest = conn.execute(
+                    "SELECT MAX(id) FROM task_runs WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                if not latest or latest[0] != run_id:
+                    # The per-task log only proves the LAST run's result —
+                    # never stamp an older run from a newer run's JSON.
+                    continue
+                result = _parse_claude_cli_result(
+                    worker_logs_dir(board=board) / f"{task_id}.log"
+                )
+                if not isinstance(result, dict):
+                    continue
+                c_in, c_out, c_equiv = _extract_claude_cli_cost(result)
+                if c_in is None and c_out is None and c_equiv is None:
+                    continue
+                stamped = dict(metadata or {})
+                stamped.setdefault("billing_mode", "subscription_included")
+                if c_equiv is not None:
+                    stamped.setdefault("cost_usd_equivalent", c_equiv)
+                claude_sid = result.get("session_id")
+                if claude_sid:
+                    stamped.setdefault("claude_session_id", str(claude_sid))
+                usage = result.get("usage")
+                if isinstance(usage, dict):
+                    stamped.setdefault("usage", usage)
+                with write_txn(conn):
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                           SET input_tokens  = COALESCE(?, input_tokens),
+                               output_tokens = COALESCE(?, output_tokens),
+                               cost_usd      = COALESCE(cost_usd, 0.0),
+                               metadata      = ?
+                         WHERE id = ?
+                        """,
+                        (c_in, c_out, json.dumps(stamped), run_id),
+                    )
+                updated += 1
+                continue
+
+            if metadata is None:
                 continue
             session_id = metadata.get("worker_session_id")
             if not session_id:

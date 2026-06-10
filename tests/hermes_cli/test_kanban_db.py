@@ -585,6 +585,134 @@ def test_k16_backfill_cost_falls_back_to_hub_when_profile_none(kanban_home):
     assert cost == pytest.approx(0.009)
 
 
+def _write_claude_result_log(task_id, *, total_cost_usd=0.28, input_tokens=11529,
+                             cache_creation=24778, cache_read=93776,
+                             output_tokens=861, session_id="sess-claude-1"):
+    """Append a realistic ``claude -p --output-format json`` result line to the
+    per-task worker log (the shape the live CLI v2.1.x emits)."""
+    import json as _json
+    log_dir = kb.worker_logs_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    result = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "num_turns": 3, "result": "done", "stop_reason": "end_turn",
+        "session_id": session_id, "total_cost_usd": total_cost_usd,
+        "usage": {
+            "input_tokens": input_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "output_tokens": output_tokens,
+        },
+    }
+    with open(log_dir / f"{task_id}.log", "a", encoding="utf-8") as fh:
+        fh.write("some non-json worker chatter\n")
+        fh.write(_json.dumps(result) + "\n")
+
+
+def test_k17_backfill_claude_cli_run_stamps_tokens_from_log(kanban_home, monkeypatch):
+    """K17: a claude-CLI run (NULL metadata, no state.db session) gets tokens
+    from the worker log's result JSON; cost_usd=0.0 (subscription_included)
+    with the API-equivalent preserved in metadata. Idempotent on re-run."""
+    import json as _json
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="cli-costed", assignee="coder-claude")
+        run_id = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
+        _write_claude_result_log(tid)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        # fresh tokens = input + cache_creation; cache READS excluded
+        assert row["input_tokens"] == 11529 + 24778
+        assert row["output_tokens"] == 861
+        assert row["cost_usd"] == pytest.approx(0.0)
+        meta = _json.loads(row["metadata"])
+        assert meta["billing_mode"] == "subscription_included"
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.28)
+        assert meta["claude_session_id"] == "sess-claude-1"
+        assert meta["usage"]["input_tokens"] == 11529
+
+        # Idempotent: cost_usd is no longer NULL → no longer a candidate.
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+
+
+def test_k17_backfill_claude_cli_missing_or_garbled_log_fail_soft(kanban_home, monkeypatch):
+    """K17: missing log or log without a result line → skipped, no raise,
+    run stays NULL (re-scanned next tick)."""
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="cli-no-log", assignee="coder-claude")
+        run_id = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"{tid}.log").write_text("plain text\n{broken json\n")
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+
+        row = conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert row["cost_usd"] is None
+
+
+def test_k17_backfill_claude_cli_skips_stale_run(kanban_home, monkeypatch):
+    """K17: only the task's LATEST run is stamped from the shared per-task
+    log — an older run never inherits a newer run's result JSON."""
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="cli-retry", assignee="coder-claude")
+        old_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
+        new_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
+        _write_claude_result_log(tid, output_tokens=42)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        rows = {
+            r["id"]: r for r in conn.execute(
+                "SELECT id, output_tokens, cost_usd FROM task_runs "
+                "WHERE task_id = ?",
+                (tid,),
+            )
+        }
+        assert rows[new_run]["output_tokens"] == 42
+        assert rows[new_run]["cost_usd"] == pytest.approx(0.0)
+        assert rows[old_run]["cost_usd"] is None
+
+
+def test_k17_backfill_non_claude_profile_unaffected(kanban_home, monkeypatch):
+    """K17 regression: a non-claude-cli run without worker_session_id keeps
+    the legacy skip behavior even when a stray log file exists."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="api-lane", assignee="critic")
+        run_id = _insert_ended_run(conn, tid, profile="critic", metadata={"other": "x"})
+        _write_claude_result_log(tid)
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+        row = conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert row["cost_usd"] is None
+
+
+def test_k17_extract_claude_cli_cost_shapes():
+    """K17 unit: fresh-token sum, cache-read exclusion, missing-field tolerance."""
+    full = kb._extract_claude_cli_cost({
+        "total_cost_usd": 1.5,
+        "usage": {"input_tokens": 100, "cache_creation_input_tokens": 50,
+                  "cache_read_input_tokens": 9000, "output_tokens": 7},
+    })
+    assert full == (150, 7, 1.5)
+    no_usage = kb._extract_claude_cli_cost({"total_cost_usd": 0.1})
+    assert no_usage == (None, None, 0.1)
+    empty = kb._extract_claude_cli_cost({})
+    assert empty == (None, None, None)
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 
