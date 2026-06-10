@@ -394,3 +394,46 @@ def test_command_contains_heavy_workload_helper():
     assert g("echo pytest") is None
     assert g("rg pytest src/") is None
     assert g("grep mypy README.md") is None
+
+
+def test_get_env_config_ignores_bad_docker_json_for_local_backend(monkeypatch):
+    """Docker-only JSON env vars must not break the default local backend."""
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", "None")
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV", "not-json")
+    monkeypatch.setenv("TERMINAL_DOCKER_FORWARD_ENV", "not-json")
+    monkeypatch.setenv("TERMINAL_DOCKER_EXTRA_ARGS", "not-json")
+
+    config = terminal_tool._get_env_config()
+
+    assert config["env_type"] == "local"
+    assert config["docker_volumes"] == []
+    assert config["docker_env"] == {}
+    assert config["docker_forward_env"] == []
+    assert config["docker_extra_args"] == []
+
+
+def test_get_env_config_ignores_bad_docker_json_for_ssh_backend(monkeypatch):
+    """Non-container remote backends should also ignore Docker-only JSON."""
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", "None")
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV", "not-json")
+
+    config = terminal_tool._get_env_config()
+
+    assert config["env_type"] == "ssh"
+    assert config["docker_volumes"] == []
+    assert config["docker_env"] == {}
+
+
+def test_get_env_config_still_rejects_bad_docker_json_for_docker_backend(monkeypatch):
+    """Selecting Docker should keep the existing actionable config error."""
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", "None")
+
+    try:
+        terminal_tool._get_env_config()
+    except ValueError as exc:
+        assert "TERMINAL_DOCKER_VOLUMES" in str(exc)
+    else:
+        raise AssertionError("Docker backend must validate TERMINAL_DOCKER_VOLUMES")
