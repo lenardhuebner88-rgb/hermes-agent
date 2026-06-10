@@ -5099,6 +5099,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
+        # Start background kanban alerting (F2 night-sprint) — pushes
+        # failed/blocked-run, error-rate and daily-cost alerts to Discord.
+        # Opt-in via `kanban.alerts.enabled` (default False → no-op loop).
+        asyncio.create_task(self._kanban_alerts_watcher())
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
