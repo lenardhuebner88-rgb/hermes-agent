@@ -200,6 +200,12 @@ export interface BoardTask {
   comment_count: number;
   progress: { done: number; total: number } | null;
   age: { created_age_seconds: number | null; started_age_seconds: number | null; time_to_complete_seconds: number | null } | null;
+  /** Projekt-Achse: the task's tenant ("family-organizer", "orchestrator", …); null = Unsortiert. */
+  tenant: string | null;
+  /** Chain key — the tree-sink root this task rolls up into (own id for standalone/roots). */
+  root_id: string | null;
+  /** Epic membership when assigned (first-class backend grouping). */
+  epic_id: string | null;
 }
 
 export interface BoardColumn {

@@ -235,3 +235,103 @@ describe("usesFlowCaptureEndpoint", () => {
     expect(usesFlowCaptureEndpoint("document", true)).toBe(true);
   });
 });
+
+// ── Ketten-Modell + Projekt-Achse (Phase 2, Operator-Vertrag 2026-06-10) ────
+import { buildChains, projectKey, projectLabel, projectOptions, UNSORTED_PROJECT, type ChainTaskLite } from "./fleet";
+
+function task(over: Partial<ChainTaskLite> & { id: string; status: TaskStatus }): ChainTaskLite {
+  return { title: over.id, priority: 0, ...over };
+}
+
+describe("buildChains", () => {
+  it("groups members by root_id, keeps the sink as root and counts stages", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "root", status: "todo", root_id: "root", tenant: "family-organizer" }),
+      task({ id: "a", status: "running", root_id: "root" }),
+      task({ id: "b", status: "done", root_id: "root", completed_at: 100 }),
+      task({ id: "solo", status: "review", root_id: "solo" }),
+    ];
+    const board = buildChains(tasks);
+    expect(board.active).toHaveLength(1);
+    const chain = board.active[0];
+    expect(chain.rootId).toBe("root");
+    expect(chain.root?.id).toBe("root");
+    expect(chain.total).toBe(3);
+    expect(chain.doneCount).toBe(1);
+    expect(chain.runningCount).toBe(1);
+    expect(chain.stageCounts.execute).toBe(1);
+    expect(chain.stageCounts.ship).toBe(1);
+    expect(chain.tenant).toBe("family-organizer");
+    expect(board.singles.map((t) => t.id)).toEqual(["solo"]);
+  });
+
+  it("splits done chains/singles from active ones and sorts done newest-first", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "r1", status: "done", root_id: "r1", completed_at: 50 }),
+      task({ id: "m1", status: "done", root_id: "r1", completed_at: 60 }),
+      task({ id: "r2", status: "done", root_id: "r2", completed_at: 200 }),
+      task({ id: "m2", status: "done", root_id: "r2", completed_at: 190 }),
+      task({ id: "old", status: "done", root_id: "old", completed_at: 10 }),
+      task({ id: "new", status: "done", root_id: "new", completed_at: 999 }),
+    ];
+    const board = buildChains(tasks);
+    expect(board.active).toHaveLength(0);
+    expect(board.done.map((c) => c.rootId)).toEqual(["r2", "r1"]);
+    expect(board.done[0].latestCompletedAt).toBe(200);
+    expect(board.doneSingles.map((t) => t.id)).toEqual(["new", "old"]);
+  });
+
+  it("ranks active chains by urgency: running > review > blocked > plan", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "p", status: "todo", root_id: "p" }), task({ id: "p1", status: "todo", root_id: "p" }),
+      task({ id: "b", status: "todo", root_id: "b" }), task({ id: "b1", status: "blocked", root_id: "b" }),
+      task({ id: "v", status: "todo", root_id: "v" }), task({ id: "v1", status: "review", root_id: "v" }),
+      task({ id: "x", status: "todo", root_id: "x" }), task({ id: "x1", status: "running", root_id: "x" }),
+    ];
+    expect(buildChains(tasks).active.map((c) => c.rootId)).toEqual(["x", "v", "b", "p"]);
+  });
+
+  it("drops archived tasks and treats a missing root_id as standalone", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "gone", status: "archived" }),
+      task({ id: "legacy", status: "ready" }), // kein root_id-Feld (alter Server)
+    ];
+    const board = buildChains(tasks);
+    expect(board.active).toHaveLength(0);
+    expect(board.singles.map((t) => t.id)).toEqual(["legacy"]);
+  });
+
+  it("sorts chain members in stage order (execute first, ship last)", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "root", status: "done", root_id: "root", completed_at: 5 }),
+      task({ id: "a", status: "review", root_id: "root" }),
+      task({ id: "c", status: "running", root_id: "root" }),
+      task({ id: "d", status: "todo", root_id: "root" }),
+    ];
+    const chain = buildChains(tasks).active[0];
+    expect(chain.members.map((m) => m.id)).toEqual(["c", "a", "d", "root"]);
+  });
+});
+
+describe("projectOptions / projectLabel", () => {
+  it("counts per tenant, labels known projects and puts Unsortiert last", () => {
+    const tasks = [
+      task({ id: "1", status: "todo", tenant: "family-organizer" }),
+      task({ id: "2", status: "todo", tenant: "family-organizer" }),
+      task({ id: "3", status: "review", tenant: "orchestrator" }),
+      task({ id: "4", status: "done" }),
+      task({ id: "5", status: "archived", tenant: "family-organizer" }), // zählt nicht
+    ];
+    const opts = projectOptions(tasks);
+    expect(opts.map((o) => [o.key, o.label, o.count])).toEqual([
+      ["family-organizer", "Family Organizer", 2],
+      ["orchestrator", "Orchestrierung", 1],
+      [UNSORTED_PROJECT, "Unsortiert", 1],
+    ]);
+  });
+  it("projectKey/Label fall back honestly for unknown tenants", () => {
+    expect(projectKey(null)).toBe(UNSORTED_PROJECT);
+    expect(projectLabel("acme")).toBe("acme");
+    expect(projectLabel(null)).toBe("Unsortiert");
+  });
+});

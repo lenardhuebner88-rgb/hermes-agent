@@ -951,8 +951,11 @@ def get_board(
             workflow_template_id=workflow_template_id,
             current_step_key=current_step_key,
         )
-        # Pre-fetch link counts per task (cheap: one query).
+        # Pre-fetch link counts per task (cheap: one query). The same pass
+        # collects the dependents adjacency (parent → children) used to
+        # resolve each card's chain root below.
         link_counts: dict[str, dict[str, int]] = {}
+        dependents: dict[str, list[str]] = {}
         for row in conn.execute(
             "SELECT parent_id, child_id FROM task_links"
         ).fetchall():
@@ -962,6 +965,31 @@ def get_board(
             link_counts.setdefault(row["child_id"], {"parents": 0, "children": 0})[
                 "parents"
             ] += 1
+            dependents.setdefault(row["parent_id"], []).append(row["child_id"])
+
+        # Chain root per card: the tree SINK — the task nobody depends on
+        # (link convention: a child waits for its parent; decompose links the
+        # root as child of every subtask, see kanban_db.decompose_triage_task).
+        # Same root definition as kanban_db.runs_summary. Memoised + cycle-
+        # safe; a diamond (multiple dependents) resolves deterministically via
+        # the smallest child id. Standalone tasks are their own root.
+        root_cache: dict[str, str] = {}
+
+        def _resolve_root(tid: str) -> str:
+            visited: list[str] = []
+            cur = tid
+            while cur not in root_cache:
+                if cur in visited:
+                    break  # cycle guard: current node becomes the sink
+                visited.append(cur)
+                nxt = dependents.get(cur)
+                if not nxt:
+                    break
+                cur = min(nxt)
+            sink = root_cache.get(cur, cur)
+            for v in visited:
+                root_cache[v] = sink
+            return sink
 
         # Comment + event counts (both cheap aggregates).
         comment_counts: dict[str, int] = {
@@ -1013,6 +1041,9 @@ def get_board(
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
+            # Chain key for the /control Flow board: equals the task's own id
+            # for standalone tasks and chain roots, the sink's id for members.
+            d["root_id"] = _resolve_root(t.id)
             diags = diagnostics_per_task.get(t.id)
             if diags:
                 # The full list lets a drawer render without a second round-trip

@@ -26,7 +26,9 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/useBoard/);
     expect(src).toMatch(/useTaskDetail/);
     expect(src).toMatch(/useHermesWorkers/);
-    expect(src).toMatch(/groupByStage/);
+    // Phase 2: das Board gruppiert nach Root-Ketten (lib/fleet.buildChains),
+    // nicht mehr nach flachen Stage-Spalten.
+    expect(src).toMatch(/buildChains/);
   });
 
   it("shows quiet operator explanations next to Flow subtask status pills", () => {

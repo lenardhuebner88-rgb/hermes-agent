@@ -22,9 +22,6 @@ const PulseView = lazy(() =>
 const AgentOpsView = lazy(() =>
   import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
 );
-const HermesFleet = lazy(() =>
-  import("./views/HermesFleet").then((m) => ({ default: m.HermesFleet })),
-);
 const FlowView = lazy(() =>
   import("./views/FlowView").then((m) => ({ default: m.FlowView })),
 );
@@ -47,7 +44,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
   if (pathname.includes("/control/pulse")) return "pulse";
   if (pathname.includes("/control/workstreams")) return "workstreams";
-  if (pathname.includes("/control/hermes")) return "hermes";
+  // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
   if (pathname.includes("/control/flow")) return "flow";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
@@ -62,7 +59,6 @@ const tabPath: Record<ControlTab, string> = {
   overview: "/control/overview",
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
-  hermes: "/control/hermes",
   flow: "/control/flow",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
@@ -117,7 +113,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", h: "hermes", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -148,7 +144,8 @@ export default function ControlPage() {
             <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
-            <Route path="hermes" element={<HermesFleet density={density.density} />} />
+            {/* hermes wurde in Flow absorbiert (Phase 2) */}
+            <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
             <Route path="flow" element={<FlowView />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />

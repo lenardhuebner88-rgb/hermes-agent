@@ -144,3 +144,35 @@ describe('fmtClock (Design-System-Format bleibt DD/MM/YYYY, HH:mm)', () => {
     expect(fmtClock(NOW)).toMatch(/^\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}$/);
   });
 });
+
+// ── Runaway-Erkennung (Phase 2, Operator-Vertrag 2026-06-10) ───────────────
+import { workerRunaway, RUNAWAY_RUNTIME_WARN_PCT } from './derive';
+
+describe('workerRunaway', () => {
+  it('none bei junger Laufzeit + frischem Heartbeat', () => {
+    const w = mkWorker({ started_at: NOW - 600, max_runtime_seconds: 7200, last_heartbeat_at: NOW - 10 });
+    expect(workerRunaway(w, NOW).level).toBe('none');
+  });
+  it('warn ab 80 % der max_runtime', () => {
+    const w = mkWorker({ started_at: NOW - Math.ceil(7200 * RUNAWAY_RUNTIME_WARN_PCT), max_runtime_seconds: 7200, last_heartbeat_at: NOW - 10 });
+    const r = workerRunaway(w, NOW);
+    expect(r.level).toBe('warn');
+    expect(r.reasons[0]).toMatch(/Laufzeit/);
+  });
+  it('critical ab 100 % der max_runtime', () => {
+    const w = mkWorker({ started_at: NOW - 7200, max_runtime_seconds: 7200, last_heartbeat_at: NOW - 10 });
+    expect(workerRunaway(w, NOW).level).toBe('critical');
+  });
+  it('Heartbeat-Stille: warn > 120 s, critical > 300 s — nur wenn Heartbeats existieren', () => {
+    const base = { started_at: NOW - 600, max_runtime_seconds: 7200 };
+    expect(workerRunaway(mkWorker({ ...base, last_heartbeat_at: NOW - 150 }), NOW).level).toBe('warn');
+    expect(workerRunaway(mkWorker({ ...base, last_heartbeat_at: NOW - 301 }), NOW).level).toBe('critical');
+    expect(workerRunaway(mkWorker({ ...base, last_heartbeat_at: 0 }), NOW).level).toBe('none');
+  });
+  it('kein Laufzeit-Limit (max_runtime_seconds=0) → keine Laufzeit-Regel', () => {
+    const w = mkWorker({ started_at: NOW - 99999, max_runtime_seconds: 0, last_heartbeat_at: NOW - 10 });
+    const r = workerRunaway(w, NOW);
+    expect(r.level).toBe('none');
+    expect(r.pct).toBe(0);
+  });
+});

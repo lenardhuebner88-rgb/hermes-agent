@@ -44,7 +44,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
       { id: "nav-inbox", group: "Navigation", label: "Postfach", hint: "/control", icon: <Inbox className="h-4 w-4" />, action: () => onNavigate("/control") },
       { id: "nav-overview", group: "Navigation", label: "Übersicht", hint: "/control/overview", icon: <LayoutDashboard className="h-4 w-4" />, action: () => onNavigate("/control/overview") },
       { id: "nav-workstreams", group: "Navigation", label: "Arbeitsströme", hint: "/control/workstreams", icon: <GitBranch className="h-4 w-4" />, action: () => onNavigate("/control/workstreams") },
-      { id: "nav-hermes", group: "Navigation", label: "Hermes-Worker", hint: "/control/hermes", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/hermes") },
+      { id: "nav-flow-workers", group: "Navigation", label: "Worker (Flow)", hint: "/control/flow", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/flow") },
       { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
     ];
     const more = secondary.map(([label, path]) => ({ id: `more-${path}`, group: "Mehr", label, hint: path, icon: <ArrowRight className="h-4 w-4" />, action: () => onNavigate(path) }));
@@ -52,7 +52,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
       { id: "act-generate", group: "Aktionen", label: "Verbesserungen holen", hint: "Autoresearch", icon: <Search className="h-4 w-4" />, action: onGenerate },
       { id: "act-apply-all", group: "Aktionen", label: "Alle übernehmen", hint: "offene Skill-Vorschläge", icon: <ArrowRight className="h-4 w-4" />, action: onApplyAll },
     ];
-    const workerItems = workers.map((w) => ({ id: `worker-${w.run_id}`, group: "Worker", label: w.task_title || w.run_id, hint: w.profile, icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/hermes") }));
+    const workerItems = workers.map((w) => ({ id: `worker-${w.run_id}`, group: "Worker", label: w.task_title || w.run_id, hint: w.profile, icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/flow") }));
     return [...nav, ...more, ...actions, ...workerItems];
   }, [onApplyAll, onGenerate, onNavigate, workers]);
 

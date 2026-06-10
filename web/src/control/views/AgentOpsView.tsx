@@ -393,7 +393,7 @@ export function AgentOpsView({ density }: { density: Density }) {
         meta="Letzte Ergebnisse"
       >
         <div className="mb-3 flex justify-end">
-          <a href="/control/hermes" className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Hermes</a>
+          <a href="/control/flow" className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1.5 text-sm hc-soft hover:bg-white/5">Flow</a>
         </div>
         {(results.data?.results ?? []).length === 0 ? (
           <FleetEmptyState title="Keine Ergebnisse im Zeitraum." desc="Noch keine abgeschlossenen Runs zu zeigen." />

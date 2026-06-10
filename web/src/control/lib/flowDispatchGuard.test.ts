@@ -18,6 +18,9 @@ function task(id: string, status: BoardTask["status"]): BoardTask {
     link_counts: { parents: 0, children: 0 },
     comment_count: 0,
     progress: null,
+    tenant: null,
+    root_id: null,
+    epic_id: null,
     age: null,
   };
 }

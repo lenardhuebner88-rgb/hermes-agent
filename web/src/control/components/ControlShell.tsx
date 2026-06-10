@@ -1,11 +1,11 @@
-import { Activity, Bot, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "hermes" | "flow" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
 // The daily spine — radically slimmed from 10 tabs to 3. Start (the Command
 // cockpit: needs-me + fleet + health, absorbs Übersicht/Puls), Flow (the live
@@ -21,7 +21,6 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
 // rail/bottom-bar. The Command home already surfaces their headline signal.
 const moreTabs = [
   { label: de.tabs.overview, path: "/control/overview", icon: Activity },
-  { label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
   { label: de.tabs.pulse, path: "/control/pulse", icon: Activity },
   { label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
   { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },

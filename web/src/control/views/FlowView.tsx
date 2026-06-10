@@ -10,12 +10,26 @@
  * exist for a stage.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge, freshness } from "../lib/derive";
-import { FLEET_STAGES, STAGE_META, flowCounts, groupByStage, roleChip, stageActions, stageGuard, type StageAction } from "../lib/fleet";
+import { fmtAge, freshness, workerHealth, workerSortRank } from "../lib/derive";
+import {
+  FLEET_STAGES,
+  STAGE_META,
+  buildChains,
+  flowCounts,
+  projectKey,
+  projectLabel,
+  projectOptions,
+  roleChip,
+  stageActions,
+  stageGuard,
+  type ChainModel,
+  type StageAction,
+} from "../lib/fleet";
 import { getFlowSubtaskStatusExplanation } from "../lib/flowStatus";
 import { getHeldFlowDispatchGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
 import {
@@ -25,6 +39,7 @@ import {
   useHermesRecentResults,
   useHermesReviewVerdicts,
   useHermesWorkers,
+  useRunInspect,
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
@@ -33,11 +48,13 @@ import type { TaskDetailResponse } from "../lib/schemas";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
-import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
+import { FleetPod, FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { FlowCapture } from "../components/fleet/FlowCapture";
+import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
 
 const MAX_CARDS = 12;
+const MAX_DELIVERED = 8;
 
 // Enrichment for a board task, gathered from the live sidecar endpoints.
 interface Enriched {
@@ -481,6 +498,142 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
   );
 }
 
+/* ── Ketten-Board (Phase 2) ────────────────────────────────────────────────
+   Die primäre Einheit ist die Root-Kette (board root_id): eine Karte pro
+   Kette mit Mini-Pipeline (Capture→Ship-Zählern), expandierbar zu den
+   Mitglieds-Tasks mit allen Stage-Aktionen. Einzeltasks laufen als eigene
+   Gruppe; Geliefertes sammelt sich kompakt unten. */
+
+function ChainStagePills({ chain }: { chain: ChainModel<BoardTask> }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {FLEET_STAGES.map((stage) => {
+        const meta = STAGE_META[stage];
+        const n = chain.stageCounts[stage];
+        const hex = TONE_HEX[meta.tone];
+        return (
+          <span
+            key={stage}
+            title={`${meta.label}: ${n}`}
+            className={cn("hc-mono inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[0.64rem]", n === 0 && "opacity-40")}
+            style={n > 0 ? { borderColor: `${hex}55`, color: hex } : { borderColor: "var(--hc-border)", color: "var(--hc-text-dim)" }}
+          >
+            {meta.label[0]}<span>{n}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function ChainCard({ chain, expanded, onToggle, selectedId, onSelect, now, renderTask }: {
+  chain: ChainModel<BoardTask>; expanded: boolean; onToggle: () => void;
+  selectedId: string | null; onSelect: (id: string) => void; now: number;
+  renderTask: (task: BoardTask) => React.ReactNode;
+}) {
+  const openMembers = chain.members.filter((m) => m.status !== "done");
+  const doneMembers = chain.members.filter((m) => m.status === "done");
+  const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
+  return (
+    <article className={cn("hc-surface-card p-3", chain.blockedCount > 0 && "border-red-500/40")}>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
+        className="cursor-pointer"
+      >
+        <div className="flex items-center gap-2">
+          <span className="hc-mono text-[0.7rem] hc-dim">{chain.rootId}</span>
+          <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.66rem] hc-soft">{projectLabel(chain.tenant)}</span>
+          {chain.epicId ? <span className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2 py-0.5 text-[0.66rem] text-indigo-200">{de.flow.epicBadge(chain.epicId)}</span> : null}
+          <span className="ml-auto inline-flex items-center gap-1 text-[0.7rem] hc-soft">
+            {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            {expanded ? de.flow.chainCollapse : de.flow.chainExpand}
+          </span>
+        </div>
+        <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{title}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <ChainStagePills chain={chain} />
+          <span className="hc-mono text-[0.68rem] hc-soft">{de.flow.chainMembers(chain.doneCount, chain.total)}</span>
+          {chain.blockedCount > 0 ? <StatusPill tone="red" label={`${chain.blockedCount} blockiert`} dot="error" /> : null}
+          {chain.runningCount > 0 ? <StatusPill tone="cyan" label={`${chain.runningCount} läuft`} dot="live" /> : null}
+        </div>
+      </div>
+      {expanded ? (
+        <div className="mt-3 space-y-2">
+          {openMembers.length ? (
+            <div className="grid gap-2 sm:grid-cols-2">{openMembers.map((m) => <div key={m.id}>{renderTask(m)}</div>)}</div>
+          ) : null}
+          {doneMembers.length ? (
+            <ul className="space-y-1">
+              {doneMembers.map((m) => (
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(m.id)}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition",
+                      selectedId === m.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
+                    )}
+                  >
+                    <span className="hc-mono text-[0.66rem] hc-dim">{m.id}</span>
+                    <span className="min-w-0 flex-1 truncate text-[0.78rem] text-zinc-200">{m.title}</span>
+                    <span className="text-[0.66rem] text-emerald-300">✓{m.completed_at ? ` vor ${fmtAge(m.completed_at, now)}` : ""}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+type DeliveredItem =
+  | { kind: "chain"; at: number; chain: ChainModel<BoardTask> }
+  | { kind: "single"; at: number; task: BoardTask };
+
+function DeliveredList({ items, selectedId, onSelect, now }: {
+  items: DeliveredItem[]; selectedId: string | null; onSelect: (id: string) => void; now: number;
+}) {
+  const shown = items.slice(0, MAX_DELIVERED);
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <Eyebrow>{de.flow.deliveredHeading}</Eyebrow>
+        <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{items.length}</span>
+      </div>
+      <ul className="mt-2 space-y-1.5">
+        {shown.map((item) => {
+          const id = item.kind === "chain" ? item.chain.rootId : item.task.id;
+          const title = item.kind === "chain" ? (item.chain.root?.title ?? id) : item.task.title;
+          return (
+            <li key={`${item.kind}-${id}`}>
+              <button
+                type="button"
+                onClick={() => onSelect(id)}
+                className={cn(
+                  "hc-decision hc-sev-calm flex w-full items-center gap-2 px-3 py-2 text-left",
+                  selectedId === id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
+                )}
+              >
+                <span className="hc-mono text-[0.66rem] hc-dim">{id}</span>
+                <span className="min-w-0 flex-1 truncate text-[0.8rem] text-zinc-100">{title}</span>
+                {item.kind === "chain" ? <span className="hc-mono text-[0.66rem] hc-soft">{item.chain.total} Tasks</span> : null}
+                <span className="shrink-0 text-[0.66rem] text-emerald-300">{item.at ? `vor ${fmtAge(item.at, now)}` : ""}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {items.length > shown.length ? <p className="mt-1.5 px-1 text-[0.68rem] hc-dim">{de.flow.deliveredMore(items.length - shown.length)}</p> : null}
+    </div>
+  );
+}
+
 export function FlowView() {
   const board = useBoard();
   const workers = useHermesWorkers();
@@ -498,7 +651,56 @@ export function FlowView() {
   const [checkingDispatchId, setCheckingDispatchId] = useState<string | null>(null);
 
   const allTasks: BoardTask[] = useMemo(() => board.data?.columns.flatMap((c) => c.tasks) ?? [], [board.data]);
-  const columns = useMemo(() => groupByStage(allTasks), [allTasks]);
+
+  // Projekt-Filter (tenant-Achse). "all" = kein Filter; Altlasten ohne tenant
+  // laufen unter "Unsortiert" (projectKey).
+  const [projectFilter, setProjectFilter] = useState<string>("all");
+  const projects = useMemo(() => projectOptions(allTasks), [allTasks]);
+  const filteredTasks = useMemo(
+    () => (projectFilter === "all" ? allTasks : allTasks.filter((t) => projectKey(t.tenant) === projectFilter)),
+    [allTasks, projectFilter],
+  );
+  const chainBoard = useMemo(() => buildChains(filteredTasks), [filteredTasks]);
+  const [expandedRoot, setExpandedRoot] = useState<string | null>(null);
+  // Ohne manuelle Wahl ist die dringendste Kette aufgeklappt.
+  const effectiveExpanded = expandedRoot ?? chainBoard.active[0]?.rootId ?? null;
+
+  // Worker-Strip (Fleet-Absorption): Live-Läufe mit Laufzeit-Budget + Aktionen.
+  const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
+  const [busyRun, setBusyRun] = useState<string | null>(null);
+  const [workerActionError, setWorkerActionError] = useState<string | null>(null);
+  const workerList = useMemo(
+    () =>
+      (workers.data?.workers ?? [])
+        .map((w) => ({ ...w, inspect: inspectByRun[w.run_id] ?? w.inspect }))
+        .sort((a, b) => workerSortRank(b, now) - workerSortRank(a, now)),
+    [workers.data, inspectByRun, now],
+  );
+  const workersReload = workers.reload;
+  const onWorkerAction = useCallback(async (runId: string, action: WorkerActionKey) => {
+    setBusyRun(runId);
+    setWorkerActionError(null);
+    try {
+      if (action === "terminate") {
+        // Eigener Endpoint: SIGTERM→SIGKILL + Task-Reclaim (kein workers/action-Verb).
+        await fetchJSON<{ ok?: boolean }>(
+          `/api/plugins/kanban/runs/${encodeURIComponent(runId)}/terminate`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Operator-Terminate aus dem Flow-Board" }) },
+        );
+      } else {
+        const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
+          `/api/plugins/kanban/workers/${encodeURIComponent(runId)}/action`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, confirm: true }) },
+        );
+        if (res.ok === false) setWorkerActionError(res.detail || de.worker.actionFailed);
+      }
+    } catch (e) {
+      setWorkerActionError(`${de.worker.actionFailed}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusyRun(null);
+      await workersReload();
+    }
+  }, [workersReload]);
 
   const enrichmentById = useMemo(() => {
     const map: Record<string, Enriched> = {};
@@ -589,8 +791,43 @@ export function FlowView() {
     void fetchDetail(taskId);
   }, [reloadBoard, fetchDetail]);
 
-  const counts = useMemo(() => flowCounts(allTasks), [allTasks]);
+  const counts = useMemo(() => flowCounts(filteredTasks), [filteredTasks]);
   const fresh = freshness(board.lastUpdated, 8000, now);
+  const hasAnyFiltered = filteredTasks.some((t) => t.status !== "archived");
+
+  // Geliefert-Liste: fertige Ketten + fertige Einzeltasks, jüngste zuerst.
+  const deliveredItems = useMemo<DeliveredItem[]>(() => {
+    const items: DeliveredItem[] = [
+      ...chainBoard.done.map((chain) => ({ kind: "chain" as const, at: chain.latestCompletedAt ?? 0, chain })),
+      ...chainBoard.doneSingles.map((task) => ({ kind: "single" as const, at: task.completed_at ?? 0, task })),
+    ];
+    items.sort((a, b) => b.at - a.at);
+    return items;
+  }, [chainBoard]);
+
+  // Eine Task-Karte mit kompletter Aktions-Mechanik — von Ketten-Mitgliedern
+  // und Einzeltasks geteilt (FlowRunCard bleibt memoisiert; die Props hier
+  // sind dieselben stabilen Referenzen wie vorher).
+  const renderTaskCard = useCallback((task: BoardTask) => {
+    const taskDispatchChoice = dispatchChoice?.taskId === task.id ? dispatchChoice : null;
+    const isBusy = busyId === task.id || checkingDispatchId === task.id || (taskDispatchChoice != null && flowRelease.busyId === taskDispatchChoice.rootId);
+    return (
+      <FlowRunCard
+        task={task}
+        enriched={enrichmentById[task.id] ?? EMPTY_ENRICHED}
+        selected={task.id === selectedId}
+        busy={isBusy}
+        error={errorById[task.id] || undefined}
+        now={now}
+        dispatchChoice={taskDispatchChoice}
+        onSelect={selectTask}
+        onReleaseChain={onReleaseChain}
+        onDispatchSingle={onDispatchSingle}
+        onCancelDispatchChoice={clearDispatchChoice}
+        onAct={onAct}
+      />
+    );
+  }, [dispatchChoice, busyId, checkingDispatchId, flowRelease.busyId, enrichmentById, selectedId, errorById, now, selectTask, onReleaseChain, onDispatchSingle, clearDispatchChoice, onAct]);
 
   const selectedTask = selectedId ? allTasks.find((t) => t.id === selectedId) : undefined;
   const selectedStatus = selectedTask?.status;
@@ -638,63 +875,110 @@ export function FlowView() {
 
       {board.error ? <ToneCallout tone="red">{de.flow.loadError}<br />{board.error}</ToneCallout> : null}
 
+      {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
+          Runaway-Wache und vollen Aktionen (alle confirm-gated). */}
+      <FleetPanel eyebrow={de.flow.workersHeading} meta={de.flow.workersHint}>
+        {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
+        {workerActionError ? <div className="mb-3"><ToneCallout tone="red">{workerActionError}</ToneCallout></div> : null}
+        {workerList.length && errorByRun[workerList[0].run_id] ? <div className="mb-3"><ToneCallout tone="amber">{de.worker.actionFailed}: {errorByRun[workerList[0].run_id]}</ToneCallout></div> : null}
+        {workers.loading && workers.data == null ? (
+          <div className="grid gap-3 lg:grid-cols-2"><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>
+        ) : workerList.length === 0 ? (
+          <FleetEmptyState ok title={de.flow.workersEmptyTitle} desc={de.flow.workersEmptyDesc} />
+        ) : (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {workerList.map((worker) => (
+              <WorkerCard
+                key={worker.run_id}
+                worker={worker}
+                health={workerHealth(worker, now)}
+                density="airy"
+                now={now}
+                inspectLoading={loadingRun === worker.run_id}
+                onInspect={inspect}
+                onAction={onWorkerAction}
+                actionBusy={busyRun === worker.run_id}
+              />
+            ))}
+          </div>
+        )}
+      </FleetPanel>
+
       {loadingFirst ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><SkeletonCard rows={4} /><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>
-      ) : !hasAnyRun ? (
-        <FleetEmptyState title={de.flow.emptyTitle} desc={de.flow.emptyDesc} />
       ) : (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="snap-x overflow-x-auto pb-2">
-            <div className="flex min-w-max gap-3">
-              {FLEET_STAGES.map((stage, idx) => {
-                const meta = STAGE_META[stage];
-                const items = columns[stage];
-                const hex = TONE_HEX[meta.tone];
-                const shown = items.slice(0, MAX_CARDS);
-                const fill = items.length ? Math.min(1, items.length / 6) : 0;
-                return (
-                  <section key={stage} className="flex w-[15.5rem] shrink-0 snap-start flex-col">
+          <div className="min-w-0 space-y-5">
+            {/* Projekt-Filter (tenant-Achse) */}
+            {projects.length > 1 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="hc-eyebrow mr-1">{de.flow.projects}</span>
+                {[{ key: "all", label: de.flow.projectAll, count: allTasks.filter((t) => t.status !== "archived").length }, ...projects].map((p) => (
+                  <button
+                    key={p.key}
+                    type="button"
+                    onClick={() => setProjectFilter(p.key)}
+                    className={cn(
+                      "inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs transition",
+                      projectFilter === p.key
+                        ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+                        : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
+                    )}
+                  >
+                    {p.label}<span className="hc-mono text-[0.66rem] opacity-70">{p.count}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {!hasAnyFiltered ? (
+              <FleetEmptyState title={de.flow.emptyTitle} desc={de.flow.emptyDesc} />
+            ) : (
+              <>
+                {/* Aktive Ketten — die primäre Einheit des Boards */}
+                {chainBoard.active.length ? (
+                  <section>
                     <div className="flex items-center gap-2">
-                      <span className="hc-mono text-[0.7rem] hc-dim">{String(idx + 1).padStart(2, "0")}</span>
-                      <span className="text-xs font-semibold uppercase tracking-wide text-white">{meta.label}</span>
-                      <span className="ml-auto hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{items.length}</span>
+                      <Eyebrow>{de.flow.chainsHeading}</Eyebrow>
+                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{chainBoard.active.length}</span>
                     </div>
-                    <p className="mt-1 text-[0.7rem] hc-dim">{meta.purpose}</p>
-                    <div className="hc-stage-rail mt-1.5" style={{ "--hc-role": hex } as React.CSSProperties}><i style={{ width: `${fill * 100}%` }} /></div>
-                    <div className="mt-2.5 flex flex-col gap-2">
-                      {items.length === 0 ? (
-                        <p className="rounded-lg border border-dashed border-[var(--hc-border)] px-2.5 py-4 text-center text-[0.7rem] hc-dim">{de.flow.stageEmpty}</p>
-                      ) : (
-                        <>
-                          {shown.map((task) => {
-                            const taskDispatchChoice = dispatchChoice?.taskId === task.id ? dispatchChoice : null;
-                            const isBusy = busyId === task.id || checkingDispatchId === task.id || (taskDispatchChoice != null && flowRelease.busyId === taskDispatchChoice.rootId);
-                            return (
-                              <FlowRunCard
-                                key={task.id}
-                                task={task}
-                                enriched={enrichmentById[task.id] ?? EMPTY_ENRICHED}
-                                selected={task.id === selectedId}
-                                busy={isBusy}
-                                error={errorById[task.id] || undefined}
-                                now={now}
-                                dispatchChoice={taskDispatchChoice}
-                                onSelect={selectTask}
-                                onReleaseChain={onReleaseChain}
-                                onDispatchSingle={onDispatchSingle}
-                                onCancelDispatchChoice={clearDispatchChoice}
-                                onAct={onAct}
-                              />
-                            );
-                          })}
-                          {items.length > shown.length ? <p className="px-1 py-1 text-center text-[0.68rem] hc-dim">+ {items.length - shown.length} weitere</p> : null}
-                        </>
-                      )}
+                    <div className="mt-2 space-y-2.5">
+                      {chainBoard.active.map((chain) => (
+                        <ChainCard
+                          key={chain.rootId}
+                          chain={chain}
+                          expanded={effectiveExpanded === chain.rootId}
+                          onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
+                          selectedId={selectedId}
+                          onSelect={selectTask}
+                          now={now}
+                          renderTask={renderTaskCard}
+                        />
+                      ))}
                     </div>
                   </section>
-                );
-              })}
-            </div>
+                ) : null}
+
+                {/* Einzelne Aufgaben (keine Kette) */}
+                {chainBoard.singles.length ? (
+                  <section>
+                    <div className="flex items-center gap-2">
+                      <Eyebrow>{de.flow.singlesHeading}</Eyebrow>
+                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{chainBoard.singles.length}</span>
+                    </div>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {chainBoard.singles.slice(0, MAX_CARDS).map((task) => <div key={task.id}>{renderTaskCard(task)}</div>)}
+                    </div>
+                    {chainBoard.singles.length > MAX_CARDS ? <p className="mt-1.5 px-1 text-[0.68rem] hc-dim">+ {chainBoard.singles.length - MAX_CARDS} weitere</p> : null}
+                  </section>
+                ) : null}
+
+                {/* Geliefert — Ketten + Einzeltasks, jüngste zuerst */}
+                {deliveredItems.length ? (
+                  <DeliveredList items={deliveredItems} selectedId={selectedId} onSelect={selectTask} now={now} />
+                ) : null}
+              </>
+            )}
           </div>
           <div ref={railRef} className="scroll-mt-4">
             <FlowReceiptRail

@@ -341,3 +341,188 @@ export function flowCaptureRequest(title: string, method: CaptureMethod, gate: b
 export function usesFlowCaptureEndpoint(method: CaptureMethod, gate: boolean): boolean {
   return method === "document" || (method === "lean" && gate);
 }
+
+// ── Projekt-Achse (tenant) ──────────────────────────────────────────────────
+// Der Operator-Vertrag 2026-06-10: tenant = Projekt, Epics = Vorhaben darunter.
+// Altlasten ohne tenant laufen als "Unsortiert" — kein Backfill-Zwang.
+
+export const UNSORTED_PROJECT = "__none__";
+
+const PROJECT_LABELS: Record<string, string> = {
+  "family-organizer": "Family Organizer",
+  orchestrator: "Orchestrierung",
+  "flow-capture": "Flow",
+  hermes: "Hermes",
+};
+
+/** Anzeige-Name eines Projekts (tenant). null/leer → "Unsortiert". */
+export function projectLabel(tenant: string | null | undefined): string {
+  if (!tenant) return "Unsortiert";
+  return PROJECT_LABELS[tenant] ?? tenant;
+}
+
+/** Filter-Schlüssel eines Tasks für den Projekt-Filter. */
+export function projectKey(tenant: string | null | undefined): string {
+  return tenant || UNSORTED_PROJECT;
+}
+
+export interface ProjectOption {
+  key: string;
+  label: string;
+  count: number;
+}
+
+/** Projekt-Filter-Optionen aus den Board-Tasks (nur nicht-archivierte),
+ *  sortiert nach Größe; "Unsortiert" immer zuletzt. */
+export function projectOptions<T extends { tenant?: string | null; status: TaskStatus }>(tasks: T[]): ProjectOption[] {
+  const counts = new Map<string, number>();
+  for (const t of tasks) {
+    if (t.status === "archived") continue;
+    const key = projectKey(t.tenant);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const opts = [...counts.entries()].map(([key, count]) => ({
+    key,
+    label: projectLabel(key === UNSORTED_PROJECT ? null : key),
+    count,
+  }));
+  opts.sort((a, b) => {
+    if (a.key === UNSORTED_PROJECT) return 1;
+    if (b.key === UNSORTED_PROJECT) return -1;
+    return b.count - a.count;
+  });
+  return opts;
+}
+
+// ── Ketten-Modell (root_id-Gruppen) ─────────────────────────────────────────
+// Die primäre Einheit des Flow-Boards: eine Root-Kette = der Tree-Sink
+// (board `root_id`) + alle Tasks, die in ihn rollen. Einzeltasks (Gruppe der
+// Größe 1) laufen separat als "singles".
+
+export interface ChainTaskLite extends BoardTaskLite {
+  root_id?: string | null;
+  tenant?: string | null;
+  epic_id?: string | null;
+  progress?: { done: number; total: number } | null;
+}
+
+export interface ChainModel<T extends ChainTaskLite> {
+  rootId: string;
+  /** Der Root-Task selbst, wenn er im Board-Snapshot liegt. */
+  root: T | null;
+  /** Alle Mitglieder inkl. Root, Stage-sortiert (Capture→Ship-Reihenfolge). */
+  members: T[];
+  total: number;
+  doneCount: number;
+  stageCounts: Record<FleetStage, number>;
+  blockedCount: number;
+  runningCount: number;
+  reviewCount: number;
+  /** true, wenn jede Karte der Kette done/archived ist. */
+  isDone: boolean;
+  /** Jüngstes completed_at der Kette (Sortierung der Geliefert-Liste). */
+  latestCompletedAt: number | null;
+  tenant: string | null;
+  epicId: string | null;
+}
+
+export interface ChainBoard<T extends ChainTaskLite> {
+  /** Ketten mit aktiver Arbeit, dringendste zuerst. */
+  active: ChainModel<T>[];
+  /** Komplett gelieferte Ketten, jüngste zuerst. */
+  done: ChainModel<T>[];
+  /** Einzeltasks (keine Kette) mit aktiver Arbeit, Stage-sortiert. */
+  singles: T[];
+  /** Gelieferte Einzeltasks, jüngste zuerst. */
+  doneSingles: T[];
+}
+
+const STAGE_ORDER: Record<FleetStage, number> = { execute: 0, verify: 1, plan: 2, capture: 3, ship: 4 };
+
+/** Dringlichkeits-Rang einer Kette: running > review > blocked > plan/capture. */
+function chainUrgency<T extends ChainTaskLite>(c: ChainModel<T>): number {
+  if (c.runningCount > 0) return 4;
+  if (c.reviewCount > 0) return 3;
+  if (c.blockedCount > 0) return 2;
+  return 1;
+}
+
+/** Gruppiert Board-Tasks in Root-Ketten + Einzeltasks. Archivierte fallen raus. */
+export function buildChains<T extends ChainTaskLite>(tasks: T[]): ChainBoard<T> {
+  const groups = new Map<string, T[]>();
+  for (const t of tasks) {
+    if (t.status === "archived") continue;
+    const key = (t as { root_id?: string | null }).root_id || t.id;
+    const list = groups.get(key);
+    if (list) list.push(t);
+    else groups.set(key, [t]);
+  }
+
+  const active: ChainModel<T>[] = [];
+  const done: ChainModel<T>[] = [];
+  const singles: T[] = [];
+  const doneSingles: T[] = [];
+
+  for (const [rootId, members] of groups) {
+    if (members.length === 1 && members[0].id === rootId) {
+      const t = members[0];
+      (t.status === "done" ? doneSingles : singles).push(t);
+      continue;
+    }
+    const stageCounts: Record<FleetStage, number> = { capture: 0, plan: 0, execute: 0, verify: 0, ship: 0 };
+    let blockedCount = 0, runningCount = 0, reviewCount = 0, doneCount = 0;
+    let latestCompletedAt: number | null = null;
+    for (const m of members) {
+      const stage = statusToStage(m.status);
+      if (stage) stageCounts[stage] += 1;
+      if (m.status === "blocked") blockedCount += 1;
+      if (m.status === "running") runningCount += 1;
+      if (m.status === "review") reviewCount += 1;
+      if (m.status === "done") {
+        doneCount += 1;
+        if (m.completed_at && (latestCompletedAt == null || m.completed_at > latestCompletedAt)) {
+          latestCompletedAt = m.completed_at;
+        }
+      }
+    }
+    members.sort((a, b) => {
+      const sa = STAGE_ORDER[statusToStage(a.status) ?? "ship"];
+      const sb = STAGE_ORDER[statusToStage(b.status) ?? "ship"];
+      if (sa !== sb) return sa - sb;
+      return (b.priority ?? 0) - (a.priority ?? 0);
+    });
+    const root = members.find((m) => m.id === rootId) ?? null;
+    const chain: ChainModel<T> = {
+      rootId,
+      root,
+      members,
+      total: members.length,
+      doneCount,
+      stageCounts,
+      blockedCount,
+      runningCount,
+      reviewCount,
+      isDone: doneCount === members.length,
+      latestCompletedAt,
+      tenant: root?.tenant ?? members.find((m) => m.tenant)?.tenant ?? null,
+      epicId: root?.epic_id ?? members.find((m) => m.epic_id)?.epic_id ?? null,
+    };
+    (chain.isDone ? done : active).push(chain);
+  }
+
+  active.sort((a, b) => {
+    const ua = chainUrgency(a), ub = chainUrgency(b);
+    if (ua !== ub) return ub - ua;
+    return (b.root?.priority ?? 0) - (a.root?.priority ?? 0);
+  });
+  done.sort((a, b) => (b.latestCompletedAt ?? 0) - (a.latestCompletedAt ?? 0));
+  singles.sort((a, b) => {
+    const sa = STAGE_ORDER[statusToStage(a.status) ?? "ship"];
+    const sb = STAGE_ORDER[statusToStage(b.status) ?? "ship"];
+    if (sa !== sb) return sa - sb;
+    return (b.priority ?? 0) - (a.priority ?? 0);
+  });
+  doneSingles.sort((a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0));
+
+  return { active, done, singles, doneSingles };
+}

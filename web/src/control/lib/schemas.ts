@@ -95,6 +95,10 @@ export const BoardTaskSchema = z.object({
     })
     .nullable()
     .catch(null),
+  // Projekt-Achse + Ketten-Schlüssel (additiv; ältere Server liefern sie nicht).
+  tenant: z.string().nullable().catch(null),
+  root_id: z.string().nullable().catch(null),
+  epic_id: z.string().nullable().catch(null),
 });
 
 export const BoardResponseSchema = z.object({

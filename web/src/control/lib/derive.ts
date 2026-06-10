@@ -61,6 +61,53 @@ export const workerRemaining = (w: Worker, now: number = nowSec()) =>
 export const workerHeartbeatAge = (w: Worker, now: number = nowSec()) =>
   now - w.last_heartbeat_at;
 
+/* ── Runaway-Erkennung (Zeitbomben-Läufe) ─────────────────────────────────
+ * Ein Lauf gilt als Runaway-Kandidat, BEVOR er Budget verbrennt:
+ *   warn     ≥ 80 % der max_runtime_seconds ODER Heartbeat > 120 s alt
+ *   critical ≥ 100 % der max_runtime_seconds ODER Heartbeat > 300 s alt
+ * Heartbeat-Regeln greifen NUR, wenn der Run überhaupt Heartbeats schreibt
+ * (gleiches Prinzip wie workerHealth). max_runtime_seconds ≤ 0 → keine
+ * Laufzeit-Regel (kein Limit gesetzt). Operator-Vertrag 2026-06-10. */
+export const RUNAWAY_RUNTIME_WARN_PCT = 0.8;
+export const RUNAWAY_HEARTBEAT_WARN_S = 120;
+export const RUNAWAY_HEARTBEAT_CRIT_S = 300;
+
+export type RunawayLevel = 'none' | 'warn' | 'critical';
+
+export interface RunawayState {
+  level: RunawayLevel;
+  /** Anteil der verbrauchten Laufzeit (0..>1); 0 wenn kein Limit gesetzt. */
+  pct: number;
+  /** Menschlich lesbare Gründe (leer bei level='none'). */
+  reasons: string[];
+}
+
+export function workerRunaway(w: Worker, now: number = nowSec()): RunawayState {
+  const runtime = workerRuntime(w, now);
+  const max = w.max_runtime_seconds > 0 ? w.max_runtime_seconds : null;
+  const pct = max ? runtime / max : 0;
+  const hasHeartbeat = w.last_heartbeat_at > 0;
+  const hbAge = hasHeartbeat ? now - w.last_heartbeat_at : null;
+
+  const reasons: string[] = [];
+  let level: RunawayLevel = 'none';
+  if (max && runtime >= max) {
+    level = 'critical';
+    reasons.push(`Laufzeit ${fmtDur(runtime)} ≥ Limit ${fmtDur(max)}`);
+  } else if (max && pct >= RUNAWAY_RUNTIME_WARN_PCT) {
+    level = 'warn';
+    reasons.push(`Laufzeit ${fmtDur(runtime)} von ${fmtDur(max)} (${Math.round(pct * 100)} %)`);
+  }
+  if (hbAge != null && hbAge > RUNAWAY_HEARTBEAT_CRIT_S) {
+    level = 'critical';
+    reasons.push(`Heartbeat seit ${fmtDur(hbAge)} still`);
+  } else if (hbAge != null && hbAge > RUNAWAY_HEARTBEAT_WARN_S) {
+    if (level === 'none') level = 'warn';
+    reasons.push(`Heartbeat vor ${fmtDur(hbAge)}`);
+  }
+  return { level, pct, reasons };
+}
+
 /* ── Übersichts-Aggregation („Ist alles gesund?") ──────────────────────── */
 
 export type Warning = { kind: 'hermes'; worker: Worker; health: WorkerHealth };

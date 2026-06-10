@@ -162,7 +162,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
         <Drilldown
           id="dd-hermes"
           title="Hermes-Worker"
-          tab="/control/hermes"
+          tab="/control/flow"
           navigate={navigate}
           empty={de.overview.noProblemWorkers}
           loading={workersLoading}
@@ -189,7 +189,7 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
           ) : hermesWarnings.length === 0 ? (
             <FleetEmptyState ok title={de.overview.nothingUrgent} desc="Keine Hermes-Worker brauchen gerade Aufmerksamkeit." />
           ) : (
-            <div className="grid gap-3 lg:grid-cols-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/hermes")} className="hc-surface-card hc-hit flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:border-white/15"><span className="min-w-0 truncate">{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>
+            <div className="grid gap-3 lg:grid-cols-2">{hermesWarnings.map((warning) => <button key={warning.worker.run_id} type="button" onClick={() => navigate("/control/flow")} className="hc-surface-card hc-hit flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:border-white/15"><span className="min-w-0 truncate">{warning.worker.task_title}</span><StatusPill tone={workerHealth(warning.worker, now).tone} label={workerHealth(warning.worker, now).label} dot={workerHealth(warning.worker, now).dot} /></button>)}</div>
           )}
         </Panel>
       ) : null}

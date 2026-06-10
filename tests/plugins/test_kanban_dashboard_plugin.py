@@ -903,6 +903,42 @@ def test_board_progress_rollup(client):
 
 
 # ---------------------------------------------------------------------------
+# Board cards carry their chain root (root_id)
+# ---------------------------------------------------------------------------
+
+
+def test_board_root_id_resolves_chain(client):
+    """Every card resolves its chain ROOT (the tree sink). Link convention:
+    a child waits for its parent — the work tasks are PARENTS of the sink,
+    so the sink is reached by walking child links. Standalone tasks are
+    their own root."""
+    # sink waits for two work tasks: work_a, work_b are parents of sink.
+    work_a = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "work a"},
+    ).json()["task"]
+    work_b = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "work b"},
+    ).json()["task"]
+    sink = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "sink", "parents": [work_a["id"], work_b["id"]]},
+    ).json()["task"]
+    lone = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "standalone"},
+    ).json()["task"]
+
+    cards = {
+        t["id"]: t
+        for col in client.get("/api/plugins/kanban/board").json()["columns"]
+        for t in col["tasks"]
+    }
+    assert cards[work_a["id"]]["root_id"] == sink["id"]
+    assert cards[work_b["id"]]["root_id"] == sink["id"]
+    assert cards[sink["id"]]["root_id"] == sink["id"]
+    assert cards[lone["id"]]["root_id"] == lone["id"]
+
+
+# ---------------------------------------------------------------------------
 # Auto-init on first board read
 # ---------------------------------------------------------------------------
 
