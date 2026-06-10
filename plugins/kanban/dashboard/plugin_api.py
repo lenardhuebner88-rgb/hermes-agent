@@ -1323,6 +1323,9 @@ class CreateTaskBody(BaseModel):
     notify_home: bool = True
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
+    # Phase B (Programm 3): per-task model escalation — highest precedence in
+    # the spawn resolution (task.model_override > active lane > profile).
+    model_override: Optional[ShortText] = None
 
 
 @router.post("/tasks")
@@ -1347,6 +1350,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             skills=payload.skills,
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
+            model_override=payload.model_override,
         )
         # Park: move the brand-new task into ``scheduled`` so the autonomous
         # orchestrator (triage -> auto-specify/decompose) and the dispatcher
@@ -1582,6 +1586,8 @@ class UpdateTaskBody(BaseModel):
     # Epic membership: explicit null detaches; absent leaves it untouched
     # (distinguished via model_fields_set in the handler).
     epic_id: Optional[ShortText] = None
+    # Phase B: explicit null clears the override; absent leaves it untouched.
+    model_override: Optional[ShortText] = None
 
 
 @router.patch("/tasks/{task_id}")
@@ -1610,6 +1616,14 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 ok = kanban_db.set_task_epic(conn, task_id, payload.epic_id or None)
             except ValueError as e:
                 raise HTTPException(status_code=409, detail=str(e))
+            if not ok:
+                raise HTTPException(status_code=404, detail="task not found")
+
+        # --- model override (Phase B) ---------------------------------------
+        if "model_override" in payload.model_fields_set:
+            ok = kanban_db.set_task_model_override(
+                conn, task_id, payload.model_override,
+            )
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
 

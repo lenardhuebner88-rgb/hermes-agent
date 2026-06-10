@@ -3773,3 +3773,41 @@ def test_workers_active_carries_note_and_eta(client):
     assert worker["last_heartbeat_note_at"] is not None
     assert worker["eta_p50_seconds"] == 240
     assert worker["eta_p90_seconds"] == 600
+
+
+def test_task_model_override_roundtrip(client):
+    """Phase B: POST /tasks akzeptiert model_override, PATCH setzt/löscht ihn,
+    und der Wert steht in der Task-Antwort (Spawn-Resolution liest tasks.model_override)."""
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "needs strong model", "model_override": "claude-fable-5"},
+    ).json()["task"]
+    assert created["model_override"] == "claude-fable-5"
+    tid = created["id"]
+
+    # Eskalation per PATCH umschwenken
+    patched = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}", json={"model_override": "claude-opus-4-8"},
+    )
+    assert patched.status_code == 200
+    got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
+    assert got["model_override"] == "claude-opus-4-8"
+
+    # Explizites null löscht; Event-Trail dokumentiert beide Schritte
+    cleared = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}", json={"model_override": None},
+    )
+    assert cleared.status_code == 200
+    got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
+    assert got["model_override"] is None
+    conn = kb.connect()
+    try:
+        kinds = [
+            r["payload"] for r in conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? "
+                "AND kind = 'model_override_set' ORDER BY id", (tid,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert len(kinds) == 2

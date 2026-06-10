@@ -82,18 +82,10 @@ export function deleteLane(laneId: string): Promise<{ deleted: string }> {
   );
 }
 
-/** Datalist suggestions for the model field — free text stays allowed. */
-export const MODEL_SUGGESTIONS = [
-  "claude-fable-5",
-  "claude-opus-4-8",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-  "gpt-5.5",
-  "gpt-5.4",
-  "kimi-for-coding",
-  "kimi-k2.6",
-  "qwen3.7-max",
-];
+/** Datalist suggestions for the model field — free text stays allowed.
+ *  Phase B: kanonische Liste lebt jetzt in components/ModelPicker (gehoben),
+ *  hier nur Re-Export für die bestehenden LanesView-Importe. */
+export { MODEL_SUGGESTIONS } from "../../components/ModelPicker";
 
 // --- draft helpers (pure; unit-tested) -------------------------------------
 

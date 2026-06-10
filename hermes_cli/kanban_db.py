@@ -2443,6 +2443,7 @@ def create_task(
     epic_id: Optional[str] = None,
     kind: Optional[str] = None,
     board: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2612,8 +2613,9 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
-                        goal_mode, goal_max_turns, session_id, epic_id, kind
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, epic_id, kind,
+                        model_override
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2639,6 +2641,7 @@ def create_task(
                         session_id,
                         epic_id,
                         kind,
+                        (model_override or "").strip() or None,
                     ),
                 )
                 for pid in parents:
@@ -11739,6 +11742,28 @@ def set_task_epic(
             "UPDATE tasks SET epic_id = ? WHERE id = ?", (epic_id, task_id)
         )
         _append_event(conn, task_id, "epic_changed", {"epic_id": epic_id})
+        return True
+
+
+def set_task_model_override(
+    conn: sqlite3.Connection, task_id: str, model: Optional[str],
+) -> bool:
+    """Phase B (Programm 3): set/clear ``tasks.model_override`` — the highest
+    precedence step of the spawn resolution (task > active lane > profile
+    default). ``model=None``/leer löscht den Override. Greift ab dem
+    nächsten Spawn; ein laufender Run bleibt unberührt.
+
+    Returns False if the task doesn't exist.
+    """
+    value = (model or "").strip() or None
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET model_override = ? WHERE id = ?",
+            (value, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "model_override_set", {"model": value})
         return True
 
 
