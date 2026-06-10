@@ -9,7 +9,7 @@
  * honest guard. NO mock/demo data — a quiet empty state shows when no runs
  * exist for a stage.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -31,7 +31,8 @@ import {
 import type { BoardTask, TaskStatus } from "../lib/types";
 import type { TaskDetailResponse } from "../lib/schemas";
 import { StatusPill, ToneCallout } from "../components/atoms";
-import { Eyebrow, SkeletonCard, Text } from "../components/primitives";
+import { Hero } from "../components/Hero";
+import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { FlowCapture } from "../components/fleet/FlowCapture";
@@ -49,6 +50,28 @@ interface Enriched {
   resultQualityLabel?: string | null;
   resultQualityTone?: string | null;
   deliverableCount?: number;
+}
+
+// A single frozen empty-enrichment object: cards with no sidecar data get this
+// stable reference (not a fresh `{}` per render) so React.memo can skip them.
+const EMPTY_ENRICHED: Enriched = Object.freeze({});
+
+// Shallow field compare so enrichmentById can keep the PREVIOUS object reference
+// for an entry whose content didn't change across a poll tick — without it every
+// workers/reviews/results tick hands each card a new `enriched` object and the
+// memo never holds.
+function sameEnriched(a: Enriched, b: Enriched): boolean {
+  return (
+    a.workerProfile === b.workerProfile &&
+    a.workerHeartbeat === b.workerHeartbeat &&
+    a.verdict === b.verdict &&
+    a.verifierEvidenceCount === b.verifierEvidenceCount &&
+    a.blockedKind === b.blockedKind &&
+    a.blockedReason === b.blockedReason &&
+    a.resultQualityLabel === b.resultQualityLabel &&
+    a.resultQualityTone === b.resultQualityTone &&
+    a.deliverableCount === b.deliverableCount
+  );
 }
 
 const EVENT_LABEL: Record<string, string> = {
@@ -121,10 +144,34 @@ function FlowCardActions({ status, busy, error, dispatchChoice, onReleaseChain, 
   );
 }
 
-function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
+interface FlowRunCardProps {
   task: BoardTask; enriched: Enriched; selected: boolean; busy: boolean; error?: string; now: number; dispatchChoice?: FlowDispatchChoice | null;
-  onSelect: (id: string) => void; onReleaseChain?: () => void; onDispatchSingle?: () => void; onCancelDispatchChoice?: () => void; onAct: (action: StageAction) => void;
-}) {
+  onSelect: (id: string) => void; onReleaseChain?: () => void; onDispatchSingle?: () => void; onCancelDispatchChoice?: () => void; onAct: (task: BoardTask, action: StageAction) => void;
+}
+
+// Re-render a card only when something it shows actually changed. `enriched` is a
+// fresh object every poll tick (enrichmentById rebuilds), so compare it by
+// content; everything else is stable by identity (callbacks are useCallback'd;
+// `task`/`now` only change on a board tick). Without this, a workers/reviews/
+// results tick reconciles all ~60 cards every 5 s.
+function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
+  return (
+    a.task === b.task &&
+    a.selected === b.selected &&
+    a.busy === b.busy &&
+    a.error === b.error &&
+    a.now === b.now &&
+    a.dispatchChoice === b.dispatchChoice &&
+    a.onSelect === b.onSelect &&
+    a.onReleaseChain === b.onReleaseChain &&
+    a.onDispatchSingle === b.onDispatchSingle &&
+    a.onCancelDispatchChoice === b.onCancelDispatchChoice &&
+    a.onAct === b.onAct &&
+    sameEnriched(a.enriched, b.enriched)
+  );
+}
+
+const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
   const role = roleChip(enriched.workerProfile ?? task.assignee, task.status === "review" ? "verification" : null);
   const isBlocked = task.status === "blocked";
   const isReview = task.status === "review";
@@ -171,11 +218,11 @@ function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoic
         onReleaseChain={onReleaseChain}
         onDispatchSingle={onDispatchSingle}
         onCancelDispatchChoice={onCancelDispatchChoice}
-        onAct={onAct}
+        onAct={(action) => onAct(task, action)}
       />
     </article>
   );
-}
+}, flowCardPropsEqual);
 
 // The Plan panel: when the selected task is a decompose root, surface its real
 // subtask GROUP (resolved live from the board), the durable Vault plan-spec link
@@ -474,7 +521,7 @@ export function FlowView() {
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
 
-  const selectTask = (id: string) => {
+  const selectTask = useCallback((id: string) => {
     setSelectedId(id);
     if (!taskDetail.detailById[id]) void fetchDetail(id);
     // On mobile/tablet the receipt rail stacks below the board (xl breakpoint),
@@ -482,12 +529,13 @@ export function FlowView() {
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches) {
       window.setTimeout(() => railRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
     }
-  };
+  }, [fetchDetail, taskDetail.detailById]);
+  const clearDispatchChoice = useCallback(() => setDispatchChoice(null), []);
   const runTaskAction = useCallback((taskId: string, action: StageAction) => {
     void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Rework aus dem Flow-Board" } : undefined);
     if (selectedId === taskId) void fetchDetail(taskId);
   }, [runAction, selectedId, fetchDetail]);
-  const onAct = (task: BoardTask, action: StageAction) => {
+  const onAct = useCallback((task: BoardTask, action: StageAction) => {
     if (action.key !== "dispatch") {
       runTaskAction(task.id, action);
       return;
@@ -510,7 +558,7 @@ export function FlowView() {
       }
       setCheckingDispatchId(null);
     })();
-  };
+  }, [runTaskAction, taskDetail.detailById, fetchDetail, allTasks]);
   // Release a gated plan: unblock the held subtasks, then refresh the board +
   // this root's detail so the held banner clears and the children move on.
   const onReleasePlan = useCallback((rootId: string, n: number) => {
@@ -562,29 +610,31 @@ export function FlowView() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <Eyebrow>{de.flow.eyebrow}</Eyebrow>
-          <h1 className="hc-type-title mt-1 text-white">{de.flow.title}</h1>
-          <Text variant="body" className="mt-1 max-w-2xl hc-soft">{de.flow.subtitle}</Text>
-        </div>
-        <div className="flex flex-col items-stretch gap-2 sm:items-end">
-          <div className="flex items-center gap-2 self-end">
-            <span className="flex items-center gap-1.5 text-[0.68rem] hc-dim" title={fresh.stale ? de.flow.paused : undefined}>
-              <span className={cn("h-1.5 w-1.5 rounded-full", fresh.stale ? "bg-amber-400" : "bg-emerald-400 animate-pulse")} />
-              {board.lastUpdated ? (fresh.stale ? de.flow.paused : de.flow.updated(fresh.label.replace("vor ", ""))) : ""}
-            </span>
-            <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-3.5 w-3.5" /></button>
+      <Hero
+        eyebrow={de.flow.eyebrow}
+        count={loadingFirst ? "—" : counts.running}
+        countHint={!hasAnyRun ? de.flow.heroHintCalm : counts.running > 0 ? de.flow.heroHint(counts.running) : de.flow.heroHintParked}
+        title={!hasAnyRun && !loadingFirst ? de.flow.heroLeadCalm : counts.running > 0 ? de.flow.heroLead(counts.running) : de.flow.heroLeadParked}
+        subtitle={de.flow.subtitle}
+        tone={counts.blocked > 0 ? "amber" : counts.running > 0 ? "cyan" : hasAnyRun ? "violet" : "emerald"}
+        status={board.lastUpdated ? {
+          label: fresh.stale ? de.flow.paused : de.flow.updated(fresh.label.replace("vor ", "")),
+          tone: fresh.stale ? "amber" : "emerald",
+          dot: fresh.stale ? "warn" : "live",
+        } : undefined}
+        action={
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-4 w-4" /></button>
             <FlowCapture onCreated={onCaptured} />
           </div>
-          <div className={cn("grid gap-2", counts.blocked > 0 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3")}>
-            <FleetPod label={de.flow.runsActive} dot="live" value={loadingFirst ? "—" : counts.running} />
-            <FleetPod label={de.flow.wip} value={loadingFirst ? "—" : counts.wip} />
-            <FleetPod label={de.flow.review} dot="warn" value={loadingFirst ? "—" : counts.review} />
-            {counts.blocked > 0 ? <FleetPod label={de.flow.rework} dot="error" value={loadingFirst ? "—" : counts.blocked} /> : null}
-          </div>
+        }
+      >
+        <div className={cn("grid gap-2", counts.blocked > 0 ? "grid-cols-3" : "grid-cols-2")}>
+          <FleetPod label={de.flow.wip} value={loadingFirst ? "—" : counts.wip} />
+          <FleetPod label={de.flow.review} dot="warn" value={loadingFirst ? "—" : counts.review} />
+          {counts.blocked > 0 ? <FleetPod label={de.flow.rework} dot="error" value={loadingFirst ? "—" : counts.blocked} /> : null}
         </div>
-      </div>
+      </Hero>
 
       {board.error ? <ToneCallout tone="red">{de.flow.loadError}<br />{board.error}</ToneCallout> : null}
 
@@ -623,7 +673,7 @@ export function FlowView() {
                               <FlowRunCard
                                 key={task.id}
                                 task={task}
-                                enriched={enrichmentById[task.id] ?? {}}
+                                enriched={enrichmentById[task.id] ?? EMPTY_ENRICHED}
                                 selected={task.id === selectedId}
                                 busy={isBusy}
                                 error={errorById[task.id] || undefined}
@@ -632,8 +682,8 @@ export function FlowView() {
                                 onSelect={selectTask}
                                 onReleaseChain={onReleaseChain}
                                 onDispatchSingle={onDispatchSingle}
-                                onCancelDispatchChoice={() => setDispatchChoice(null)}
-                                onAct={(a) => onAct(task, a)}
+                                onCancelDispatchChoice={clearDispatchChoice}
+                                onAct={onAct}
                               />
                             );
                           })}

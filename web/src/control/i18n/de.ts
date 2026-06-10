@@ -82,6 +82,12 @@ export const de = {
     updated: (label: string) => `aktualisiert vor ${label}`,
     paused: "pausiert (Tab im Hintergrund)",
     refresh: "Aktualisieren",
+    heroLead: (n: number) => (n === 1 ? "Ein Auftrag in Bearbeitung" : `${n} Aufträge in Bearbeitung`),
+    heroLeadParked: "Aufträge geparkt — keiner läuft",
+    heroLeadCalm: "Bereit für den nächsten Auftrag",
+    heroHint: (n: number) => (n === 1 ? "Ein Lauf aktiv im Kanban-Board" : `${n} Läufe aktiv im Kanban-Board`),
+    heroHintParked: "Geparkt im Board · „Dispatch“ startet sie",
+    heroHintCalm: "Capture legt den ersten Auftrag an",
     capture: {
       button: "Aufgabe",
       fabAria: "Neue Aufgabe erfassen",
