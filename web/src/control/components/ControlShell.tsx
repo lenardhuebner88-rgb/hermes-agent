@@ -1,4 +1,4 @@
-import { Activity, Bot, Clock, Columns3, Command, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, Bot, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -7,28 +7,34 @@ import type { ToneName } from "../lib/types";
 
 export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "hermes" | "flow" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
-// Inbox is the landing (the decision spine) and sits first; Übersicht is the
-// secondary telemetry surface behind it.
+// The daily spine — radically slimmed from 10 tabs to 3. Start (the Command
+// cockpit: needs-me + fleet + health, absorbs Übersicht/Puls), Flow (the live
+// work board), Autoresearch (the self-improvement console). Everything else is
+// a re-slice of these and lives in the "Mehr" overflow (moreTabs) below.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: "inbox", label: de.tabs.inbox, mobileLabel: "Postf.", path: "/control", icon: Inbox },
-  { id: "overview", label: de.tabs.overview, mobileLabel: "Übers.", path: "/control/overview", icon: LayoutDashboard },
-  { id: "pulse", label: de.tabs.pulse, mobileLabel: "Puls", path: "/control/pulse", icon: Activity },
-  { id: "workstreams", label: de.tabs.workstreams, mobileLabel: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
-  { id: "hermes", label: de.tabs.hermes, mobileLabel: "Hermes", path: "/control/hermes", icon: Bot },
+  { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
   { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
-  { id: "backlog", label: de.tabs.backlog, mobileLabel: "Family", path: "/control/backlog", icon: KanbanSquare },
-  { id: "orchestrator", label: de.tabs.orchestrator, mobileLabel: "Orch.", path: "/control/orchestrator", icon: Workflow },
-  { id: "crons", label: de.tabs.crons, mobileLabel: "Crons", path: "/control/crons", icon: Clock },
+];
+
+// Demoted control surfaces — still routed + reachable, just not in the primary
+// rail/bottom-bar. The Command home already surfaces their headline signal.
+const moreTabs = [
+  { label: de.tabs.overview, path: "/control/overview", icon: Activity },
+  { label: de.tabs.hermes, path: "/control/hermes", icon: Bot },
+  { label: de.tabs.pulse, path: "/control/pulse", icon: Activity },
+  { label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
+  { label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
+  { label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
+  { label: de.tabs.crons, path: "/control/crons", icon: Clock },
 ];
 
 const secondaryNav = [
   { label: "Sessions", path: "/sessions", icon: MessageSquare },
-  { label: "Kanban", path: "/plugins", icon: LayoutDashboard },
+  { label: "Kanban", path: "/plugins", icon: KanbanSquare },
   { label: "Modelle", path: "/models", icon: Shield },
   { label: "Logs", path: "/logs", icon: PanelLeft },
-  { label: "Cron", path: "/cron", icon: Sparkles },
-  { label: "Skills", path: "/skills", icon: Bot },
+  { label: "Skills", path: "/skills", icon: Sparkles },
   { label: "Konfig", path: "/config", icon: Settings },
 ];
 
@@ -132,7 +138,9 @@ function MoreNav() {
   return (
     <details className="group relative">
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
-      <div className="absolute right-0 top-12 z-50 hidden w-52 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
+      <div className="absolute right-0 top-12 z-50 hidden w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
+        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+        <div className="my-1.5 border-t border-[var(--hc-border)]" />
         {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
       </div>
     </details>
@@ -143,7 +151,9 @@ function RailMoreNav() {
   return (
     <div className="group relative">
       <button type="button" title="Mehr" aria-label="Mehr" className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><MoreHorizontal className="h-5 w-5" /></button>
-      <div className="invisible absolute left-12 top-0 z-50 w-52 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+      <div className="invisible absolute left-12 top-0 z-50 w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+        <div className="my-1.5 border-t border-[var(--hc-border)]" />
         {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
       </div>
     </div>

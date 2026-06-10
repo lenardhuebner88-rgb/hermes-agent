@@ -1,0 +1,310 @@
+/**
+ * CommandHome (/control) — the operator's cockpit.
+ *
+ * Replaces the flat Postfach list with one composed screen that answers the
+ * three questions a solo fleet-operator actually has, in priority order:
+ *   1. "Was braucht mich JETZT?"  → the #1 decision, promoted to an actionable
+ *      hero (the rest queue below).               [useDecisionInbox]
+ *   2. "Was tut die Flotte gerade?" → a live worker strip + today's throughput.
+ *                                                 [useHermesWorkers / board / digest]
+ *   3. "Läuft die Maschine?"        → a compact health pulse.   [useSystemHealth]
+ *
+ * Everything is real, polled data (no mocks). One screen instead of the
+ * inbox+overview+pulse triple that all re-rendered slices of the same sources.
+ */
+import { useMemo, useState } from "react";
+import { ArrowRight, ChevronRight, Inbox as InboxIcon } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { cn } from "@/lib/utils";
+import {
+  useBoard,
+  useDecisionInbox,
+  useHermesTodayDigest,
+  useHermesWorkers,
+  useSystemHealth,
+} from "../hooks/useControlData";
+import type { Density } from "../hooks/useDensity";
+import type { BoardTask, ToneName, Worker } from "../lib/types";
+import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
+import { severitySpine } from "../lib/tones";
+import { flowCounts, roleChip } from "../lib/fleet";
+import { fmtAge, nowSec } from "../lib/derive";
+import { StatusPill } from "../components/atoms";
+import { RoleChip } from "../components/fleet/atoms";
+import { Eyebrow, Text } from "../components/primitives";
+import { FlowCapture } from "../components/fleet/FlowCapture";
+
+const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
+  autoresearch: { label: "Autoresearch", tone: "cyan" },
+  family: { label: "Family", tone: "violet" },
+  orchestrator: { label: "Orchestrator", tone: "sky" },
+  kanban: { label: "Kanban", tone: "amber" },
+};
+
+// worstTone → the hero mood (gradient + the big number colour).
+const HERO_ACCENT: Record<ToneName, string> = {
+  red: "var(--hc-red)", rose: "var(--hc-red)", amber: "var(--hc-amber)",
+  emerald: "var(--hc-emerald)", cyan: "var(--hc-cyan)", sky: "var(--hc-cyan)",
+  indigo: "var(--hc-cyan)", violet: "var(--hc-accent)", zinc: "var(--hc-accent)",
+};
+
+export function CommandHome({ density }: { density: Density }) {
+  const navigate = useNavigate();
+  const inbox = useDecisionInbox();
+  const health = useSystemHealth();
+  const workers = useHermesWorkers();
+  const digest = useHermesTodayDigest();
+  const board = useBoard();
+  const [surfaceFilter, setSurfaceFilter] = useState<InboxSurface | null>(null);
+  const now = board.data?.now ?? nowSec();
+
+  const tasks: BoardTask[] = useMemo(
+    () => board.data?.columns.flatMap((c) => c.tasks) ?? [],
+    [board.data],
+  );
+  const counts = useMemo(() => flowCounts(tasks), [tasks]);
+  const liveWorkers = workers.data?.workers ?? [];
+  const shippedToday = digest.data?.count ?? 0;
+
+  const settling = inbox.loading && inbox.items.length === 0;
+  const calm = inbox.summary.total === 0;
+  const heroTone: ToneName = settling ? "zinc" : calm ? "emerald" : inbox.worstTone;
+  const top = inbox.items[0];
+  const rest = (surfaceFilter ? inbox.items.filter((i) => i.surface === surfaceFilter) : inbox.items).slice(top && !surfaceFilter ? 1 : 0);
+
+  const chips: Array<{ id: InboxSurface | null; label: string; count: number }> = [
+    { id: null, label: "Alle", count: inbox.summary.total },
+    { id: "autoresearch", label: SURFACE.autoresearch.label, count: inbox.summary.autoresearch },
+    { id: "family", label: SURFACE.family.label, count: inbox.summary.family },
+    { id: "orchestrator", label: SURFACE.orchestrator.label, count: inbox.summary.orchestrator },
+    { id: "kanban", label: SURFACE.kanban.label, count: inbox.summary.kanban },
+  ];
+
+  return (
+    <div className={cn("space-y-5", density === "compact" && "space-y-4")}>
+      {/* ── COMMAND HERO ─────────────────────────────────────────────────────
+          Left: the state + the #1 decision (actionable). Right: the pulse rail
+          (fleet + today + health) — the whole situation in one surface. */}
+      <section
+        className="hc-hero grid gap-6 p-5 sm:p-7 lg:grid-cols-[1.55fr_1fr]"
+        style={{ "--hc-hero-accent": HERO_ACCENT[heroTone] } as React.CSSProperties}
+      >
+        <div className="min-w-0">
+          <div className="flex items-center gap-3">
+            <Eyebrow>Kommandozentrale</Eyebrow>
+            <StatusPill
+              tone={calm ? "emerald" : heroTone === "red" || heroTone === "rose" ? "red" : "amber"}
+              label={settling ? "lädt…" : calm ? "Alles ruhig" : "Aufmerksamkeit"}
+              dot={settling ? "idle" : calm ? "live" : heroTone === "red" || heroTone === "rose" ? "error" : "warn"}
+            />
+          </div>
+          <div className="hc-aurora-text hc-type-display mt-2 tabular-nums">{settling ? "—" : inbox.summary.total}</div>
+          <Text as="h1" variant="title" className="hc-hero-statement mt-1 text-[var(--hc-text)]">
+            {calm ? "Bereit. Nichts wartet auf dich." : "Was braucht mich gerade?"}
+          </Text>
+
+          {top && !settling ? (
+            <TopDecision item={top} onOpen={() => navigate(top.target)} />
+          ) : calm ? (
+            <p className="mt-4 max-w-md text-sm hc-soft">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
+          ) : null}
+        </div>
+
+        <PulseRail
+          health={health}
+          running={liveWorkers.length || counts.running}
+          inReview={counts.review}
+          blocked={counts.blocked}
+          shippedToday={shippedToday}
+          now={now}
+        />
+      </section>
+
+      {/* ── LIVE FLEET ──────────────────────────────────────────────────────── */}
+      <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/flow")} />
+
+      {/* ── THE QUEUE ───────────────────────────────────────────────────────── */}
+      {!calm && !settling ? (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Eyebrow>Entscheidungen</Eyebrow>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {chips.map((c) => (
+                <button
+                  key={c.id ?? "all"}
+                  type="button"
+                  aria-pressed={surfaceFilter === c.id}
+                  onClick={() => setSurfaceFilter(c.id)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition",
+                    surfaceFilter === c.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:border-white/20",
+                  )}
+                >
+                  {c.label}<span className="hc-mono opacity-70">{c.count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {rest.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-5 text-center text-sm hc-soft">Nichts weiter in dieser Ansicht.</p>
+          ) : (
+            <div className="space-y-2">
+              {rest.map((item) => (
+                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} />
+              ))}
+            </div>
+          )}
+        </section>
+      ) : null}
+
+      {inbox.sourceErrors.length ? (
+        <p className="text-xs text-amber-300/80">{inbox.sourceErrors.join(" · ")}</p>
+      ) : null}
+
+      <FlowCapture onCreated={(id) => navigate(`/control/flow?task=${encodeURIComponent(id)}`)} />
+    </div>
+  );
+}
+
+/** The #1 decision, promoted: surface + title + why + the one next action. */
+function TopDecision({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
+  const surface = SURFACE[item.surface];
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cn(
+        "hc-decision group mt-5 flex w-full flex-col gap-3 rounded-xl px-4 py-3.5 text-left transition sm:flex-row sm:items-start sm:gap-4",
+        severitySpine[item.tone],
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusPill tone={surface.tone} label={surface.label} />
+          <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">Als Erstes</span>
+        </div>
+        <p className="mt-1.5 line-clamp-2 text-base font-semibold leading-snug text-white">{item.title}</p>
+        <p className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
+      </div>
+      <span className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2.5 text-sm font-medium text-[var(--hc-accent-text)] transition group-hover:brightness-110 sm:mt-0.5 sm:w-auto sm:py-2">
+        {item.nextAction}<ArrowRight className="h-4 w-4" />
+      </span>
+    </button>
+  );
+}
+
+/** The pulse rail: fleet · today · health, stacked — the situation at a glance. */
+function PulseRail({ health, running, inReview, blocked, shippedToday, now }: {
+  health: ReturnType<typeof useSystemHealth>;
+  running: number; inReview: number; blocked: number; shippedToday: number; now: number;
+}) {
+  void now;
+  const overall = health.data?.overall ?? "offline";
+  const healthTone = !health.data ? "zinc" : overall === "healthy" ? "emerald" : overall === "degraded" ? "amber" : "red";
+  const subs = health.data?.subsystems;
+  const sysLabel: Array<[string, "healthy" | "degraded" | "offline" | undefined]> = [
+    ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
+  ];
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-[var(--hc-border)] bg-black/20 p-4 backdrop-blur-sm">
+      <div className="grid grid-cols-3 gap-3">
+        <RailStat label="Laufen" value={running} tone="cyan" dot={running > 0 ? "live" : "idle"} />
+        <RailStat label="Im Review" value={inReview} tone={inReview > 0 ? "amber" : "zinc"} dot={inReview > 0 ? "warn" : "idle"} />
+        <RailStat label="Blockiert" value={blocked} tone={blocked > 0 ? "red" : "zinc"} dot={blocked > 0 ? "error" : "idle"} />
+      </div>
+      <div className="flex items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/[.07] px-3 py-2">
+        <span className="text-xs font-medium text-emerald-100/90">Heute geliefert</span>
+        <span className="hc-mono text-lg font-semibold tabular-nums text-emerald-200">{shippedToday}</span>
+      </div>
+      <div className="mt-1 border-t border-white/8 pt-3">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">System</span>
+          <StatusPill tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} dot={!health.data ? "idle" : overall === "healthy" ? "live" : overall === "degraded" ? "warn" : "error"} />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {sysLabel.map(([label, st]) => (
+            <div key={label} className="flex items-center justify-between text-xs">
+              <span className="hc-soft">{label}</span>
+              <span className={cn("inline-flex items-center gap-1.5 hc-mono", st === "healthy" ? "text-emerald-300" : st === "degraded" ? "text-amber-300" : st === "offline" ? "text-red-300" : "hc-dim")}>
+                <span className={cn("h-1.5 w-1.5 rounded-full", st === "healthy" ? "bg-emerald-400" : st === "degraded" ? "bg-amber-400" : st === "offline" ? "bg-red-400" : "bg-zinc-500")} />
+                {st ?? "—"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RailStat({ label, value, tone, dot }: { label: string; value: number; tone: ToneName; dot: "live" | "warn" | "error" | "idle" }) {
+  void tone;
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[.02] px-2.5 py-2">
+      <div className="flex items-center gap-1.5">
+        <span className={cn("h-1.5 w-1.5 rounded-full", dot === "live" ? "bg-cyan-400" : dot === "warn" ? "bg-amber-400" : dot === "error" ? "bg-red-400" : "bg-zinc-600")} />
+        <span className="text-[10px] font-semibold uppercase tracking-wider hc-dim">{label}</span>
+      </div>
+      <div className="mt-1 hc-mono text-xl font-semibold tabular-nums text-white">{value}</div>
+    </div>
+  );
+}
+
+/** Live worker chips — what each agent is on right now. */
+function FleetStrip({ workers, loading, now, onOpen }: { workers: Worker[]; loading: boolean; now: number; onOpen: () => void }) {
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Eyebrow>Die Flotte arbeitet</Eyebrow>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+      </div>
+      {loading ? (
+        <div className="hc-skeleton h-16 w-full rounded-xl" />
+      ) : workers.length === 0 ? (
+        <div className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-4">
+          <InboxIcon className="h-4 w-4 hc-dim" />
+          <p className="text-sm hc-soft">Kein Worker läuft gerade. Erfasse einen Auftrag, und die Flotte nimmt ihn auf.</p>
+        </div>
+      ) : (
+        <div className="flex gap-3 overflow-x-auto pb-1">
+          {workers.map((w) => {
+            const role = roleChip(w.profile, null);
+            return (
+              <div key={w.run_id} className="hc-surface-card min-w-[15rem] max-w-[18rem] shrink-0 p-3">
+                <div className="flex items-center gap-2">
+                  <RoleChip role={role} />
+                  <span className="ml-auto inline-flex items-center gap-1.5 text-[0.68rem] hc-dim">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />♥ {fmtAge(w.last_heartbeat_at, now)}
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-white">{w.task_title}</p>
+                <p className="mt-1 hc-mono text-[0.66rem] hc-dim">{w.task_id} · seit {fmtAge(w.started_at, now)}</p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** A compact decision row — severity spine, surface, why, next action. */
+function DecisionRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
+  const surface = SURFACE[item.surface];
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cn("hc-decision flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left", severitySpine[item.tone])}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusPill tone={surface.tone} label={surface.label} />
+          <span className="truncate text-sm font-semibold text-white">{item.title}</span>
+        </div>
+        <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
+      </div>
+      <ChevronRight className="h-4 w-4 shrink-0 hc-dim" />
+    </button>
+  );
+}

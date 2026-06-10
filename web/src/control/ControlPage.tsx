@@ -7,7 +7,7 @@ import { useDecisionInbox, useHermesWorkers, useProposals } from "./hooks/useCon
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { RouteTransition } from "./components/primitives";
-import { InboxView } from "./views/InboxView";
+import { CommandHome } from "./views/CommandHome";
 
 // The Decision-Inbox is the /control landing → keep it eager. Every other tab is
 // lazy-loaded (its own chunk, fetched on first visit) so opening /control no
@@ -143,8 +143,8 @@ export default function ControlPage() {
         <RouteTransition pathname={active}>
           <Suspense fallback={<ControlViewFallback />}>
           <Routes location={location}>
-            <Route index element={<InboxView density={density.density} />} />
-            <Route path="inbox" element={<InboxView density={density.density} />} />
+            <Route index element={<CommandHome density={density.density} />} />
+            <Route path="inbox" element={<CommandHome density={density.density} />} />
             <Route path="overview" element={<OverviewView proposals={proposals.proposals} proposalsLoading={proposals.loading} proposalsError={proposals.error} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="pulse" element={<PulseView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
