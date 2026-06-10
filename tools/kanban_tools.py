@@ -197,14 +197,17 @@ def _connect(board: Optional[str] = None):
 #   - Rate-limited to one DB write per 60s per-process; runtime activity
 #     can tick on every chunk/tool result and we don't need that resolution.
 #   - No-op outside dispatcher-spawned worker context (no ``HERMES_KANBAN_TASK``).
-#   - No durable note on these auto-heartbeats; that's reserved for the
-#     explicit tool which carries a model-supplied note.
+#   - Phase A (progress): the runtime's activity description ("welches Tool
+#     läuft gerade") rides along as the heartbeat note so /workers/active
+#     can answer "macht gerade: X" — the explicit tool still carries
+#     model-supplied notes.
 
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
+_AUTO_HEARTBEAT_NOTE_MAX_CHARS = 200
 _auto_heartbeat_last_attempt: float = 0.0
 
 
-def heartbeat_current_worker_from_env() -> bool:
+def heartbeat_current_worker_from_env(note: Optional[str] = None) -> bool:
     """Best-effort: extend the kanban claim + bump board heartbeat for the
     current dispatcher-spawned worker, using identity from env vars.
 
@@ -249,7 +252,11 @@ def heartbeat_current_worker_from_env() -> bool:
             except (TypeError, ValueError):
                 run_id = None
             try:
-                kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
+                clipped = (
+                    str(note).strip()[:_AUTO_HEARTBEAT_NOTE_MAX_CHARS] or None
+                    if note is not None else None
+                )
+                kb.heartbeat_worker(conn, tid, note=clipped, expected_run_id=run_id)
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
         finally:

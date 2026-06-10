@@ -2703,7 +2703,7 @@ class AIAgent:
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
-                heartbeat_current_worker_from_env()
+                heartbeat_current_worker_from_env(note=desc)
             except Exception:
                 # Never let the bridge break the agent loop.  The function
                 # already swallows exceptions internally; this outer guard

@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { AlertTriangle, Eye, Lock, OctagonX, RotateCw, Send, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, Eye, Lock, OctagonX, RotateCw, ScrollText, Send, Zap } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
 import {
   STUCK_HEARTBEAT_S,
   fmtDur,
@@ -37,6 +38,60 @@ export type WorkerActionKey = "terminate" | "unlock" | "nudge" | "restart" | "di
 
 const ACTION_ORDER: WorkerActionKey[] = ["unlock", "nudge", "restart", "dispatch", "terminate"];
 
+interface TaskLogResponse {
+  task_id: string;
+  exists: boolean;
+  size_bytes: number;
+  content: string;
+  truncated: boolean;
+}
+
+const LOG_TAIL_BYTES = 16384;
+const LOG_POLL_MS = 4000;
+const LOG_MAX_LINES = 100;
+
+// A3: Live-Log-Tail über den existierenden GET /tasks/{id}/log — gepollt NUR
+// solange das Panel offen ist, letzte ~100 Zeilen, monospace.
+function WorkerLogTail({ taskId }: { taskId: string }) {
+  const [log, setLog] = useState<TaskLogResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await fetchJSON<TaskLogResponse>(
+          `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/log?tail=${LOG_TAIL_BYTES}`,
+        );
+        if (!cancelled) { setLog(data); setError(null); }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), LOG_POLL_MS);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [taskId]);
+
+  if (error) return <ToneCallout tone="red">{error}</ToneCallout>;
+  if (log === null) return <Text variant="label" className="hc-dim">…</Text>;
+  if (!log.exists || !log.content.trim()) {
+    return <Text variant="label" className="hc-dim">{de.worker.logEmpty}</Text>;
+  }
+  const lines = log.content.split("\n");
+  const tail = lines.slice(-LOG_MAX_LINES).join("\n");
+  return (
+    <div className="space-y-1">
+      {log.truncated || lines.length > LOG_MAX_LINES ? (
+        <Text variant="label" className="hc-dim">{de.worker.logTruncated}</Text>
+      ) : null}
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-[var(--hc-border)] bg-black/30 p-2 text-[0.7rem] leading-relaxed hc-soft">
+        {tail}
+      </pre>
+    </div>
+  );
+}
+
 function actionIcon(key: WorkerActionKey) {
   if (key === "unlock") return <Lock className="h-4 w-4" />;
   if (key === "restart") return <RotateCw className="h-4 w-4" />;
@@ -48,9 +103,17 @@ function actionIcon(key: WorkerActionKey) {
 export function WorkerCard({ worker, health, density, now, inspectLoading, onInspect, onAction, actionBusy }: Props) {
   // Welche Aktion gerade auf Bestätigung wartet (eine zur Zeit).
   const [confirming, setConfirming] = useState<WorkerActionKey | null>(null);
+  const [logOpen, setLogOpen] = useState(false);
   const inspect = worker.inspect ?? null;
   const remaining = workerRemaining(worker, now);
   const runtime = workerRuntime(worker, now);
+  // Phase A: Tätigkeits-Note + ehrliche ETA. Kein Fake-Prozent — der Balken
+  // ist elapsed÷p50 gedeckelt, jenseits p90 wird der Zustand benannt.
+  const note = worker.last_heartbeat_note ?? null;
+  const noteAge = worker.last_heartbeat_note_at ? Math.max(0, now - worker.last_heartbeat_note_at) : null;
+  const etaP50 = worker.eta_p50_seconds ?? null;
+  const etaP90 = worker.eta_p90_seconds ?? null;
+  const overP90 = etaP90 != null && runtime > etaP90;
   const hasHeartbeat = worker.last_heartbeat_at > 0;
   const heartbeatAge = workerHeartbeatAge(worker, now);
   const runaway = workerRunaway(worker, now);
@@ -80,6 +143,13 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
             ) : null}
           </div>
           <h3 className="line-clamp-2 text-base font-semibold leading-snug text-white">{worker.task_title}</h3>
+          {note ? (
+            <Text variant="label" className="hc-soft">
+              <span className="hc-eyebrow mr-1.5">{de.worker.doingNow}:</span>
+              {note}
+              {noteAge != null ? <span className="hc-dim"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
+            </Text>
+          ) : null}
         </div>
         <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
       </div>
@@ -90,6 +160,18 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         <Stat label={de.worker.remaining} value={remaining <= 0 ? "0s" : fmtDur(remaining)} tone={remaining <= 0 ? "amber" : undefined} />
         <Stat label="PID" value={worker.worker_pid ? String(worker.worker_pid) : "—"} />
       </div>
+
+      {/* Phase A: ehrliche ETA — elapsed ÷ p50, gedeckelt; > p90 = Amber. */}
+      {etaP50 != null && etaP50 > 0 ? (
+        <MeterBar
+          label={`${de.worker.etaLine(fmtDur(etaP50), fmtDur(runtime))}${overP90 ? ` · ${de.worker.etaLonger}` : ""}`}
+          value={Math.min(runtime, etaP50)}
+          max={etaP50}
+          tone={overP90 ? "amber" : "cyan"}
+        />
+      ) : (
+        <Text variant="label" className="hc-dim">{de.worker.etaNoData}</Text>
+      )}
 
       {/* Laufzeit-Budget: verbraucht/max — der Runaway-Blick auf einen Blick. */}
       {worker.max_runtime_seconds > 0 ? (
@@ -141,6 +223,9 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           <Button outlined size="sm" onClick={() => onInspect(worker.run_id)} disabled={inspectLoading} prefix={inspectLoading ? <Spinner /> : <Eye className="h-4 w-4" />}>
             {de.worker.actions.inspect}
           </Button>
+          <Button outlined size="sm" onClick={() => setLogOpen((v) => !v)} prefix={<ScrollText className="h-4 w-4" />}>
+            {logOpen ? de.worker.logHide : de.worker.logShow}
+          </Button>
           {onAction ? orderedActions.map((key) => (
             <Button
               key={key}
@@ -161,6 +246,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
           {confirming === "terminate" ? de.worker.terminateHint : confirming === "restart" ? de.worker.restartHint : de.worker.confirmHint}
         </Text>
       ) : null}
+      {logOpen ? <WorkerLogTail taskId={worker.task_id} /> : null}
     </article>
   );
 }

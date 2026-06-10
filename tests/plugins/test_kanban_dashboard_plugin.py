@@ -3737,3 +3737,39 @@ def test_patch_task_epic_id_validates_target(client):
     r2 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": eid})
     assert r2.status_code == 409
     assert "closed" in r2.json()["detail"]
+
+
+def test_workers_active_carries_note_and_eta(client):
+    """Phase A: /workers/active liefert die jüngste Heartbeat-Note + p50/p90
+    des Profils; ohne Historie bleiben die ETA-Felder ehrlich null."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="progressing")
+        with kb.write_txn(conn):
+            # ETA-Historie: 3 abgeschlossene coder-Runs à 120/240/600s
+            for dur in (120, 240, 600):
+                conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                    "started_at, ended_at) VALUES (?, 'coder', 'done', 'completed', ?, ?)",
+                    (t, now - 9000, now - 9000 + dur),
+                )
+            run_id = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, worker_pid) "
+                "VALUES (?, 'coder', 'running', ?, 4242)", (t, now - 60),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?",
+                (run_id, t),
+            )
+        assert kb.heartbeat_worker(conn, t, note="Edit: WorkerCard.tsx", expected_run_id=run_id)
+        assert kb.heartbeat_worker(conn, t, note="Bash: vitest run", expected_run_id=run_id)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/workers/active").json()
+    worker = next(w for w in data["workers"] if w["run_id"] == run_id)
+    assert worker["last_heartbeat_note"] == "Bash: vitest run"  # jüngste Note
+    assert worker["last_heartbeat_note_at"] is not None
+    assert worker["eta_p50_seconds"] == 240
+    assert worker["eta_p90_seconds"] == 600

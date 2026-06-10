@@ -6519,3 +6519,63 @@ def test_runs_issues_groups_by_profile_and_signature(kanban_home):
     # blocked ohne error nutzt die summary
     blocked = next(i for i in data["issues"] if i["outcomes"].get("blocked"))
     assert "Edit-risk blocked" in blocked["example_text"]
+
+
+# ---------------------------------------------------------------------------
+# Phase A (Programm 3): Heartbeat-Note + Dauer-Perzentile (ehrliche ETA)
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_worker_persists_note_as_event_payload(kanban_home):
+    """Die Activity-Note landet als heartbeat-Event-Payload am Run — das ist
+    die Quelle für last_heartbeat_note in /workers/active."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="busy")
+        with kb.write_txn(conn):
+            run_id = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at) "
+                "VALUES (?, 'coder', 'running', 1000)", (t,),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?",
+                (run_id, t),
+            )
+        assert kb.heartbeat_worker(conn, t, note="Bash: npm test", expected_run_id=run_id)
+        row = conn.execute(
+            "SELECT json_extract(payload, '$.note') AS note FROM task_events "
+            "WHERE task_id = ? AND kind = 'heartbeat' AND run_id = ? "
+            "ORDER BY id DESC LIMIT 1", (t, run_id),
+        ).fetchone()
+    assert row["note"] == "Bash: npm test"
+
+
+def test_run_duration_percentiles_per_profile_with_min_n(kanban_home):
+    """p50/p90 nur aus completed-Runs des Profils; unter min_n ehrlich None."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="timed")
+        with kb.write_txn(conn):
+            for dur in (100, 200, 300, 400, 1000):
+                conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                    "started_at, ended_at) VALUES (?, 'coder', 'done', 'completed', ?, ?)",
+                    (t, now - 5000, now - 5000 + dur),
+                )
+            # failed-Run desselben Profils zählt NICHT in die ETA
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at) VALUES (?, 'coder', 'done', 'crashed', ?, ?)",
+                (t, now - 5000, now - 5000 + 9999),
+            )
+            # dünnes Profil: nur 1 completed-Run
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at) VALUES (?, 'research', 'done', 'completed', ?, ?)",
+                (t, now - 5000, now - 4900),
+            )
+        stats = kb.run_duration_percentiles(conn, ["coder", "research", "verifier"])
+    assert stats["coder"]["p50"] == 300
+    assert stats["coder"]["p90"] == 1000
+    assert stats["coder"]["n"] == 5
+    assert stats["research"] == {"p50": None, "p90": None, "n": 1}
+    assert stats["verifier"] == {"p50": None, "p90": None, "n": 0}
