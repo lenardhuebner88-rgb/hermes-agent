@@ -130,6 +130,38 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_board_card_diagnostics_summary_omits_detail(client, monkeypatch):
+    """``card_diagnostics=summary`` drops the per-card structured diagnostics
+    list (the bulk of the /control poll payload) but keeps the compact
+    ``warnings`` badge; the default (``full``) still embeds the list for the
+    kanban dashboard drawer."""
+    task_id = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "Diagnose me"},
+    ).json()["task"]["id"]
+
+    # The rule engine needs a specific event history to fire; here we only test
+    # the payload-shaping branch, so stub a deterministic diagnostic.
+    mod = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    fake = {task_id: [{"kind": "test_diag", "severity": "warning", "count": 1}]}
+    monkeypatch.setattr(mod, "_compute_task_diagnostics", lambda *a, **k: fake)
+
+    def _card(url):
+        data = client.get(url).json()
+        for col in data["columns"]:
+            for c in col["tasks"]:
+                if c["id"] == task_id:
+                    return c
+        raise AssertionError(f"card {task_id} missing from {url}")
+
+    full = _card("/api/plugins/kanban/board")
+    assert full.get("diagnostics") == fake[task_id]
+    assert full.get("warnings", {}).get("count") == 1
+
+    summary = _card("/api/plugins/kanban/board?card_diagnostics=summary")
+    assert "diagnostics" not in summary  # detail dropped …
+    assert summary.get("warnings", {}).get("count") == 1  # … badge kept
+
+
 def test_create_task_park_lands_in_scheduled(client):
     # The dashboard "copy to Fleet" action sends triage=True + park=True so the
     # new task is parked in `scheduled` (Plan stage) instead of being

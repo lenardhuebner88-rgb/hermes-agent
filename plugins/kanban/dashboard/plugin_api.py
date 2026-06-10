@@ -921,6 +921,16 @@ def get_board(
     current_step_key: Optional[str] = Query(
         None, description="Restrict to tasks at this workflow step key",
     ),
+    card_diagnostics: str = Query(
+        "full",
+        description=(
+            "Per-card diagnostics payload: 'full' (default) embeds the whole "
+            "structured diagnostics list on each card; 'summary' omits it and "
+            "keeps only the compact 'warnings' badge (detail still available via "
+            "/tasks/:id). The /control board polls 'summary' since it renders "
+            "only the badge — trims the largest part of the 8 s poll payload."
+        ),
+    ),
 ):
     """Return the full board grouped by status column.
 
@@ -1005,10 +1015,12 @@ def get_board(
             d["progress"] = progress.get(t.id)  # None when the task has no children
             diags = diagnostics_per_task.get(t.id)
             if diags:
-                # Full list goes into the payload so the drawer can render
-                # without a second round-trip. The board-level badge only
-                # needs the summary.
-                d["diagnostics"] = diags
+                # The full list lets a drawer render without a second round-trip
+                # (the kanban plugin dashboard uses it). Callers that only render
+                # the badge pass ``card_diagnostics=summary`` to drop it — it is
+                # the bulk of the board payload — and fetch detail via /tasks/:id.
+                if card_diagnostics != "summary":
+                    d["diagnostics"] = diags
                 d["warnings"] = _warnings_summary_from_diagnostics(diags)
             col = t.status if t.status in columns else "todo"
             columns[col].append(d)

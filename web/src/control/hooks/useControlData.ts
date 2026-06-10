@@ -533,7 +533,11 @@ export function useHermesWorkers() {
 export function useBoard() {
   return usePolling<BoardResponse>(
     "kanban/board",
-    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board"), "kanban/board"),
+    // card_diagnostics=summary drops the per-card structured diagnostics list
+    // (the bulk of the 8 s payload); /control only renders the warnings badge,
+    // and the drawer fetches detail via /tasks/:id. The kanban plugin dashboard
+    // keeps the default (full).
+    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary"), "kanban/board"),
     8000,
   );
 }
