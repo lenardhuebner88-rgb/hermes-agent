@@ -10604,18 +10604,41 @@ def decision_queue(
             ).fetchone()
         return r[0] if r else None
 
+    # Blocked tasks feed two categories (review_rejected, sticky_blocked). Fetch
+    # the set ONCE and batch the latest-run verdict per task in a single
+    # window-function query, so neither category re-scans ``tasks`` nor issues a
+    # per-task ``task_runs`` lookup (was a double scan + N+1 over the blocked
+    # set on every 15s poll). Each step is fail-soft and independent.
+    blocked_tasks: list = []
+    latest_verdict: dict[str, Optional[str]] = {}
+    try:
+        blocked_tasks = conn.execute(
+            "SELECT id, title FROM tasks WHERE status = 'blocked'"
+        ).fetchall()
+    except Exception:
+        blocked_tasks = []
+    if blocked_tasks:
+        try:
+            ph = ",".join("?" for _ in blocked_tasks)
+            ids = [r["id"] for r in blocked_tasks]
+            for vr in conn.execute(
+                "SELECT task_id, verdict FROM ("
+                " SELECT task_id, verdict,"
+                " ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS rn"
+                f" FROM task_runs WHERE task_id IN ({ph})"
+                ") WHERE rn = 1",
+                ids,
+            ).fetchall():
+                latest_verdict[vr["task_id"]] = vr["verdict"]
+        except Exception:
+            latest_verdict = {}
+
     # 1) review_rejected — blocked task whose MOST RECENT run was a verifier
     #    REQUEST_CHANGES (B2 verdict). More specific than sticky_blocked.
     try:
-        for row in conn.execute(
-            "SELECT id, title FROM tasks WHERE status = 'blocked'"
-        ).fetchall():
-            verdict = conn.execute(
-                "SELECT verdict FROM task_runs WHERE task_id = ? "
-                "ORDER BY id DESC LIMIT 1",
-                (row["id"],),
-            ).fetchone()
-            if verdict and (verdict["verdict"] or "").upper() == "REQUEST_CHANGES":
+        for row in blocked_tasks:
+            verdict = latest_verdict.get(row["id"])
+            if verdict and verdict.upper() == "REQUEST_CHANGES":
                 _add(
                     "review_rejected", row["id"], row["title"],
                     "Verifier requested changes (REQUEST_CHANGES)",
@@ -10660,10 +10683,9 @@ def decision_queue(
         pass
 
     # 3) sticky_blocked — worker/operator kanban_block, not a review rejection.
+    #    Reuses the single blocked-task fetch above (no re-scan).
     try:
-        for row in conn.execute(
-            "SELECT id, title FROM tasks WHERE status = 'blocked'"
-        ).fetchall():
+        for row in blocked_tasks:
             if row["id"] in seen:
                 continue
             if _has_sticky_block(conn, row["id"]):
