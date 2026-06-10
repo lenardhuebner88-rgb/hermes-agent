@@ -2102,6 +2102,38 @@ def get_decision_queue(
         conn.close()
 
 
+@router.get("/epics")
+def list_epics_endpoint(
+    include_closed: bool = Query(True, description="Include closed epics"),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """N-E3: list durable epics with per-epic task/cost rollups (read-only)."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        epics = kanban_db.list_epics(conn, include_closed=include_closed)
+        return {"epics": epics, "count": len(epics)}
+    finally:
+        conn.close()
+
+
+@router.get("/epics/{epic_id}")
+def get_epic_endpoint(
+    epic_id: str,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """N-E3: one epic with its member tasks + rollup. 404 if absent."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        epic = kanban_db.get_epic(conn, epic_id)
+        if epic is None:
+            raise HTTPException(status_code=404, detail=f"epic {epic_id} not found")
+        return {"epic": epic}
+    finally:
+        conn.close()
+
+
 @router.get("/runs/summary")
 def get_runs_summary(
     since_hours: int = Query(24, ge=1, le=720),

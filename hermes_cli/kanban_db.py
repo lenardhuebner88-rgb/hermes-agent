@@ -879,6 +879,8 @@ class Task:
     # holds the task in place in ``recompute_ready`` until the wall clock
     # reaches it — native time-based scheduling without a separate cron.
     due_at: Optional[int] = None
+    # N-E3: durable epic this task belongs to. NULL = not part of an epic.
+    epic_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -969,6 +971,9 @@ class Task:
             ),
             due_at=(
                 row["due_at"] if "due_at" in keys else None
+            ),
+            epic_id=(
+                row["epic_id"] if "epic_id" in keys else None
             ),
         )
 
@@ -1171,7 +1176,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Earliest promotion time (unix epoch seconds). NULL = eligible
     -- immediately (legacy behaviour). recompute_ready holds a task in
     -- ``todo``/``blocked`` until the wall clock reaches a future due_at.
-    due_at               INTEGER
+    due_at               INTEGER,
+    -- N-E3: durable epic this task belongs to (FK-style pointer into the
+    -- ``epics`` table, no hard constraint). NULL = not part of an epic =
+    -- exactly the pre-E3 behaviour. Decompose propagates the triage root's
+    -- epic_id onto every child so a whole tree rolls up under one epic.
+    epic_id              TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1258,6 +1268,19 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
+);
+
+-- N-E3: durable epic — a goal that spans MULTIPLE task trees. Unlike a
+-- triage root (one tree) or ``--goal`` (a per-run loop flag) or ``tenant``
+-- (a free filter string), an epic is a first-class object tasks point at via
+-- ``tasks.epic_id``. Additive: a board with no epics behaves exactly as before.
+CREATE TABLE IF NOT EXISTS epics (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL,
+    body       TEXT,
+    status     TEXT NOT NULL DEFAULT 'open',
+    created_at INTEGER NOT NULL,
+    closed_at  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
@@ -1910,6 +1933,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # future.
         _add_column_if_missing(conn, "tasks", "due_at", "due_at INTEGER")
 
+    if "epic_id" not in cols:
+        # N-E3: durable epic pointer. NULL on every legacy row = not part of
+        # an epic = the exact pre-E3 behaviour. Decompose propagates a triage
+        # root's epic_id onto its children; everything else leaves it NULL.
+        _add_column_if_missing(conn, "tasks", "epic_id", "epic_id TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -1923,6 +1952,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
+    )
+    # N-E3: index the epic pointer for cheap per-epic task rollups.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_epic ON tasks(epic_id)"
     )
 
     # task_events gained a run_id column; back-fill it as NULL for
@@ -2326,6 +2359,7 @@ def create_task(
     goal_max_turns: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
+    epic_id: Optional[str] = None,
     board: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
@@ -2496,8 +2530,8 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, epic_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2521,6 +2555,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        epic_id,
                     ),
                 )
                 for pid in parents:
@@ -6195,7 +6230,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -6204,6 +6239,10 @@ def decompose_triage_task(
         if root_row["status"] != expected_root_status:
             return None
         tenant = root_row["tenant"]
+        # N-E3: children inherit the triage root's epic so a whole decomposed
+        # tree rolls up under one epic. NULL root epic_id (the common case) =
+        # children get NULL = pre-E3 behaviour, byte-identical.
+        root_epic_id = root_row["epic_id"] if "epic_id" in root_row.keys() else None
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
         # rather than throwaway scratch tmp dirs. A child dict can still
@@ -6243,8 +6282,8 @@ def decompose_triage_task(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
-                " acceptance_criteria) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " acceptance_criteria, epic_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -6257,6 +6296,7 @@ def decompose_triage_task(
                     now,
                     (author or "decomposer"),
                     child_ac,
+                    root_epic_id,
                 ),
             )
             _append_event(
@@ -10474,6 +10514,140 @@ def decision_queue(
         key=lambda r: (r["age_seconds"] is None, -(r["age_seconds"] or 0)),
     )
     return {"decisions": rows, "count": len(rows), "checked_at": now}
+
+
+# ---------------------------------------------------------------------------
+# Epics (N-E3) — durable goals spanning multiple task trees
+# ---------------------------------------------------------------------------
+
+def _new_epic_id() -> str:
+    """Generate a short epic id (``e_`` prefix, parallel to ``t_`` tasks)."""
+    return "e_" + secrets.token_hex(4)
+
+
+def create_epic(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body: Optional[str] = None,
+    epic_id: Optional[str] = None,
+) -> str:
+    """Create a durable epic and return its id.
+
+    An epic is a first-class grouping object that tasks point at via
+    ``tasks.epic_id`` — unlike ``--goal`` (a per-run loop flag) or ``tenant``
+    (a free filter string). Status starts ``open``; ``close_epic`` flips it.
+    """
+    if not title or not title.strip():
+        raise ValueError("title is required")
+    eid = epic_id or _new_epic_id()
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO epics (id, title, body, status, created_at) "
+            "VALUES (?, ?, ?, 'open', ?)",
+            (eid, title.strip(), body, now),
+        )
+    return eid
+
+
+def _epic_stats(conn: sqlite3.Connection, epic_id: str) -> dict:
+    """Per-epic rollup: task counts by terminal-ness + cost/token sums.
+
+    Read-only. Cost/tokens come from the same ``task_runs`` columns the K5a
+    cost observability uses; NULL contributions are treated as 0, and an epic
+    with no attributed cost reports ``cost_usd: None`` (never a crash)."""
+    total = open_count = done_count = 0
+    for row in conn.execute(
+        "SELECT status, COUNT(*) AS n FROM tasks WHERE epic_id = ? GROUP BY status",
+        (epic_id,),
+    ).fetchall():
+        n = int(row["n"])
+        total += n
+        if row["status"] in ("done", "archived"):
+            done_count += n
+        else:
+            open_count += n
+    agg = conn.execute(
+        "SELECT "
+        "  SUM(r.cost_usd)      AS cost_usd, "
+        "  SUM(r.input_tokens)  AS input_tokens, "
+        "  SUM(r.output_tokens) AS output_tokens "
+        "FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        "WHERE t.epic_id = ?",
+        (epic_id,),
+    ).fetchone()
+    return {
+        "task_count": total,
+        "open_tasks": open_count,
+        "done_tasks": done_count,
+        "cost_usd": agg["cost_usd"] if agg and agg["cost_usd"] is not None else None,
+        "input_tokens": int(agg["input_tokens"]) if agg and agg["input_tokens"] is not None else None,
+        "output_tokens": int(agg["output_tokens"]) if agg and agg["output_tokens"] is not None else None,
+    }
+
+
+def _epic_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    d = {
+        "id": row["id"],
+        "title": row["title"],
+        "body": row["body"],
+        "status": row["status"],
+        "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
+        "closed_at": int(row["closed_at"]) if row["closed_at"] is not None else None,
+    }
+    d.update(_epic_stats(conn, row["id"]))
+    return d
+
+
+def list_epics(
+    conn: sqlite3.Connection, *, include_closed: bool = True,
+) -> list[dict]:
+    """List epics (newest first) with per-epic task/cost rollups."""
+    if include_closed:
+        rows = conn.execute(
+            "SELECT * FROM epics ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM epics WHERE status = 'open' "
+            "ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+    return [_epic_dict(conn, r) for r in rows]
+
+
+def get_epic(conn: sqlite3.Connection, epic_id: str) -> Optional[dict]:
+    """Return one epic (with rollup + its task ids), or None if absent."""
+    row = conn.execute(
+        "SELECT * FROM epics WHERE id = ?", (epic_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    d = _epic_dict(conn, row)
+    d["tasks"] = [
+        {"id": t["id"], "title": t["title"], "status": t["status"]}
+        for t in conn.execute(
+            "SELECT id, title, status FROM tasks WHERE epic_id = ? "
+            "ORDER BY created_at ASC, id ASC",
+            (epic_id,),
+        ).fetchall()
+    ]
+    return d
+
+
+def close_epic(conn: sqlite3.Connection, epic_id: str) -> bool:
+    """Mark an epic ``closed``. Returns False if the epic doesn't exist.
+
+    Idempotent: closing an already-closed epic refreshes ``closed_at`` and
+    still returns True. Does NOT touch member tasks — closing an epic is an
+    organisational act, not a cancellation."""
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE epics SET status = 'closed', closed_at = ? WHERE id = ?",
+            (now, epic_id),
+        )
+        return cur.rowcount > 0
 
 
 def _to_epoch(val) -> Optional[int]:

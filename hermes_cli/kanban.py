@@ -85,6 +85,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
+        "epic_id": t.epic_id,
     }
 
 
@@ -378,6 +379,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           metavar="N", dest="goal_max_turns",
                           help="Turn budget for --goal workers (default 20). "
                                "Ignored without --goal.")
+    p_create.add_argument("--epic", default=None, dest="epic_id", metavar="EPIC_ID",
+                          help="Attach the task to a durable epic (see "
+                               "'hermes kanban epic'). On a --triage root the "
+                               "epic propagates to every decompose child.")
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",
@@ -1043,6 +1048,26 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_gc.add_argument("--log-retention-days", type=int, default=30,
                       help="Delete worker log files older than N days (default: 30)")
 
+    # --- epic (N-E3): durable goals spanning multiple task trees ---
+    p_epic = sub.add_parser(
+        "epic",
+        help="Manage durable epics (create | list | show | close)",
+    )
+    epic_sub = p_epic.add_subparsers(dest="epic_action")
+    e_create = epic_sub.add_parser("create", help="Create a new epic")
+    e_create.add_argument("title", help="Epic title")
+    e_create.add_argument("--body", default=None, help="Optional description")
+    e_create.add_argument("--json", action="store_true", help="Emit JSON output")
+    e_list = epic_sub.add_parser("list", aliases=["ls"], help="List epics")
+    e_list.add_argument("--open", action="store_true", dest="open_only",
+                        help="Only open epics")
+    e_list.add_argument("--json", action="store_true", help="Emit JSON output")
+    e_show = epic_sub.add_parser("show", help="Show an epic with its tasks + rollup")
+    e_show.add_argument("epic_id", help="Epic id")
+    e_show.add_argument("--json", action="store_true", help="Emit JSON output")
+    e_close = epic_sub.add_parser("close", help="Mark an epic closed")
+    e_close.add_argument("epic_id", help="Epic id")
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1163,6 +1188,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "specify":  _cmd_specify,
             "decompose":  _cmd_decompose,
             "gc":       _cmd_gc,
+            "epic":     _dispatch_epic,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1566,6 +1592,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            epic_id=getattr(args, "epic_id", None),
         )
         # Subscribe-on-create: route this task's terminal-state notifications
         # to every configured home channel (same target as the dashboard
@@ -1605,6 +1632,79 @@ def _cmd_create(args: argparse.Namespace) -> int:
             running, message = _check_dispatcher_presence()
             if not running and message:
                 print(f"\n⚠  {message}", file=sys.stderr)
+    return 0
+
+
+def _dispatch_epic(args: argparse.Namespace) -> int:
+    """Handle ``hermes kanban epic <create|list|show|close>`` (N-E3)."""
+    sub = getattr(args, "epic_action", None) or "list"
+    if sub == "create":
+        return _cmd_epic_create(args)
+    if sub in {"list", "ls"}:
+        return _cmd_epic_list(args)
+    if sub == "show":
+        return _cmd_epic_show(args)
+    if sub == "close":
+        return _cmd_epic_close(args)
+    print(f"kanban epic: unknown action {sub!r}", file=sys.stderr)
+    return 2
+
+
+def _cmd_epic_create(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        eid = kb.create_epic(conn, title=args.title, body=getattr(args, "body", None))
+        epic = kb.get_epic(conn, eid)
+    if getattr(args, "json", False):
+        print(json.dumps(epic, indent=2, ensure_ascii=False))
+    else:
+        print(f"Created epic {eid}  ({epic['title']})")
+    return 0
+
+
+def _cmd_epic_list(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        epics = kb.list_epics(conn, include_closed=not getattr(args, "open_only", False))
+    if getattr(args, "json", False):
+        print(json.dumps({"epics": epics, "count": len(epics)}, indent=2, ensure_ascii=False))
+        return 0
+    if not epics:
+        print("No epics.")
+        return 0
+    for e in epics:
+        cost = f"${e['cost_usd']:.2f}" if e.get("cost_usd") is not None else "—"
+        print(
+            f"{e['id']}  [{e['status']}]  {e['title']}  "
+            f"({e['done_tasks']}/{e['task_count']} done, {cost})"
+        )
+    return 0
+
+
+def _cmd_epic_show(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        epic = kb.get_epic(conn, args.epic_id)
+    if epic is None:
+        print(f"kanban epic: no such epic {args.epic_id!r}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(epic, indent=2, ensure_ascii=False))
+        return 0
+    cost = f"${epic['cost_usd']:.2f}" if epic.get("cost_usd") is not None else "—"
+    print(f"{epic['id']}  [{epic['status']}]  {epic['title']}")
+    if epic.get("body"):
+        print(f"  {epic['body']}")
+    print(f"  tasks: {epic['done_tasks']}/{epic['task_count']} done  ·  cost: {cost}")
+    for t in epic.get("tasks", []):
+        print(f"    {t['id']}  [{t['status']}]  {t['title']}")
+    return 0
+
+
+def _cmd_epic_close(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        ok = kb.close_epic(conn, args.epic_id)
+    if not ok:
+        print(f"kanban epic: no such epic {args.epic_id!r}", file=sys.stderr)
+        return 1
+    print(f"Closed epic {args.epic_id}")
     return 0
 
 

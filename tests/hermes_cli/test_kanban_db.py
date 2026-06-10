@@ -5762,3 +5762,120 @@ def test_e1_decision_queue_failsoft_on_corrupt_event_payload(kanban_home):
         result = kb.decision_queue(conn)
     # Still surfaces (fail-soft reason fallback), no exception.
     assert _kinds_for(t, result) == ["sticky_blocked"]
+
+
+# ---------------------------------------------------------------------------
+# E3 (N-E3): durable epics + tasks.epic_id + propagation
+# ---------------------------------------------------------------------------
+
+def test_e3_epic_id_column_and_table_migrate_idempotently(kanban_home):
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "epic_id" in cols
+        tables = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "epics" in tables
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols2 = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+        assert cols2.count("epic_id") == 1
+
+
+def test_e3_create_and_list_epic(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="Q3 reliability", body="close the loops")
+        assert eid.startswith("e_")
+        epics = kb.list_epics(conn)
+    assert len(epics) == 1
+    assert epics[0]["id"] == eid
+    assert epics[0]["title"] == "Q3 reliability"
+    assert epics[0]["status"] == "open"
+    assert epics[0]["task_count"] == 0
+
+
+def test_e3_create_task_with_epic_sets_column(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="epic")
+        t = kb.create_task(conn, title="member", assignee="coder", epic_id=eid)
+        task = kb.get_task(conn, t)
+        assert task.epic_id == eid
+
+
+def test_e3_task_without_epic_is_null(kanban_home):
+    """Regression guard: the common path leaves epic_id NULL (pre-E3)."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="loner", assignee="coder")
+        assert kb.get_task(conn, t).epic_id is None
+
+
+def test_e3_decompose_propagates_epic_to_children(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="epic")
+        root = kb.create_task(
+            conn, title="root", assignee="orchestrator",
+            triage=True, epic_id=eid,
+        )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[
+                {"title": "child A"},
+                {"title": "child B", "parents": [0]},
+            ],
+        )
+        assert child_ids is not None and len(child_ids) == 2
+        for cid in child_ids:
+            assert kb.get_task(conn, cid).epic_id == eid
+
+
+def test_e3_decompose_without_epic_leaves_children_null(kanban_home):
+    """Regression guard: a root with no epic → children stay NULL."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="root", assignee="orchestrator", triage=True,
+        )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "child A"}],
+        )
+        assert kb.get_task(conn, child_ids[0]).epic_id is None
+
+
+def test_e3_epic_stats_count_and_cost(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="epic")
+        t1 = kb.create_task(conn, title="t1", assignee="coder", epic_id=eid)
+        t2 = kb.create_task(conn, title="t2", assignee="coder", epic_id=eid)
+        # t1 completes, t2 stays open.
+        kb.claim_task(conn, t1)
+        kb.complete_task(conn, t1, result="done", summary="done")
+        # Attribute some cost to t2's run.
+        kb.claim_task(conn, t2)
+        conn.execute(
+            "UPDATE task_runs SET cost_usd = 0.5, input_tokens = 100, "
+            "output_tokens = 40 WHERE task_id = ?",
+            (t2,),
+        )
+        conn.commit()
+        epic = kb.get_epic(conn, eid)
+    assert epic["task_count"] == 2
+    assert epic["done_tasks"] == 1
+    assert epic["open_tasks"] == 1
+    assert epic["cost_usd"] == 0.5
+    assert epic["input_tokens"] == 100
+    assert {row["id"] for row in epic["tasks"]} == {t1, t2}
+
+
+def test_e3_close_epic(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="epic")
+        assert kb.close_epic(conn, eid) is True
+        assert kb.get_epic(conn, eid)["status"] == "closed"
+        assert kb.close_epic(conn, "e_ghost") is False
+
+
+def test_e3_get_missing_epic_returns_none(kanban_home):
+    with kb.connect() as conn:
+        assert kb.get_epic(conn, "e_nope") is None

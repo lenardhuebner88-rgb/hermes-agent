@@ -3343,3 +3343,36 @@ def test_decision_queue_surfaces_sticky_blocked(client):
     assert row["kind"] == "sticky_blocked"
     assert row["task_id"] == t
     assert row["suggested_command"] == f"hermes kanban unblock {t}"
+
+
+# ---------------------------------------------------------------------------
+# N-E3: GET /epics + /epics/{id}
+# ---------------------------------------------------------------------------
+
+
+def test_epics_list_empty(client):
+    r = client.get("/api/plugins/kanban/epics")
+    assert r.status_code == 200
+    assert r.json() == {"epics": [], "count": 0}
+
+
+def test_epics_list_and_show_with_rollup(client):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="Reliability")
+        t = kb.create_task(conn, title="member", assignee="coder", epic_id=eid)
+        kb.claim_task(conn, t)
+        kb.complete_task(conn, t, result="done", summary="done")
+    r = client.get("/api/plugins/kanban/epics")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    assert data["epics"][0]["id"] == eid
+    assert data["epics"][0]["done_tasks"] == 1
+
+    r2 = client.get(f"/api/plugins/kanban/epics/{eid}")
+    assert r2.status_code == 200
+    epic = r2.json()["epic"]
+    assert epic["task_count"] == 1
+    assert [x["id"] for x in epic["tasks"]] == [t]
+
+    assert client.get("/api/plugins/kanban/epics/e_missing").status_code == 404
