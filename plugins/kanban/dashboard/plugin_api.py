@@ -163,16 +163,22 @@ def _conn(board: Optional[str] = None):
     Every handler that mutates the DB goes through this so the plugin
     self-heals on a fresh install (no user-visible "no such table"
     error if somebody hits POST /tasks before GET /board).
-    ``init_db`` is idempotent.
+
+    Self-heal is delegated to :func:`kanban_db.connect`, whose first
+    connection to a given path runs ``SCHEMA_SQL`` + the additive
+    migration pass and then caches the path in ``_INITIALIZED_PATHS``
+    so subsequent connects are cheap. We deliberately do **not** call
+    :func:`kanban_db.init_db` here: it discards that cache to force a
+    re-migration on every call, which on the read-heavy dashboard poll
+    path (board 8s, workers 5s, decision-queue 15s, runs 20s) meant the
+    full schema + ~36 ``PRAGMA table_info`` migration pass re-ran on
+    every request. ``init_db`` stays the explicit force-migration entry
+    point for the CLI / DB upgrades, not the hot read path.
 
     ``board`` is the query-param slug (already normalised by
     :func:`_resolve_board`). When ``None`` the active board is used
     via the resolution chain (env var → ``current`` file → ``default``).
     """
-    try:
-        kanban_db.init_db(board=board)
-    except Exception as exc:
-        log.warning("kanban init_db failed: %s", exc)
     return kanban_db.connect(board=board)
 
 

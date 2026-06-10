@@ -1100,7 +1100,12 @@ export function useDecisionInbox(): DecisionInboxData {
         metrics: metrics.data,
         nowSec: orchestration.data?.checked_at ?? now,
       }),
-    [workers.data, results.data, proposals.proposals, orchestration.data, health.data, metrics.data, now],
+    // `now` is intentionally NOT a dependency: it is only a render-time fallback
+    // for a missing payload `checked_at`. Including it forced this 8-source
+    // aggregation to recompute on EVERY render — and ControlPage re-renders on
+    // the 5s workers/health/metrics poll cadence even when nothing changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [workers.data, results.data, proposals.proposals, orchestration.data, health.data, metrics.data],
   );
 
   const items = useMemo(
@@ -1112,7 +1117,8 @@ export function useDecisionInbox(): DecisionInboxData {
         interventions: snapshot.interventions,
         kanbanDecisions: kanbanDecisions.data?.decisions ?? [],
       }),
-    [proposals.proposals, backlog.data, snapshot.interventions, kanbanDecisions.data, now],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `now` is a render-time fallback only (see snapshot memo above)
+    [proposals.proposals, backlog.data, snapshot.interventions, kanbanDecisions.data],
   );
 
   const summary = useMemo(() => inboxSummary(items), [items]);
