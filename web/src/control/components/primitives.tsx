@@ -132,14 +132,17 @@ type HeaderProps = {
 
 function RegionHeader({ eyebrow, title, actions, titleVariant }: HeaderProps) {
   return (
-    <div className="flex items-start justify-between gap-3">
+    // Stack title over actions on phones — at ≥sm it is the original
+    // row (shrink-0 actions would otherwise squeeze the title into a
+    // word-per-line column on a 390 px screen).
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0">
         {eyebrow ? <Eyebrow>{eyebrow}</Eyebrow> : null}
         <Text as="h2" variant={titleVariant} className="text-[var(--hc-text)]">
           {title}
         </Text>
       </div>
-      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
     </div>
   );
 }
