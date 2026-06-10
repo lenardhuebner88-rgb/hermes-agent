@@ -45,6 +45,9 @@ const CronView = lazy(() =>
 const LanesView = lazy(() =>
   import("./views/LanesView").then((m) => ({ default: m.LanesView })),
 );
+const RunTimelineView = lazy(() =>
+  import("./views/RunTimelineView").then((m) => ({ default: m.RunTimelineView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -58,6 +61,9 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/lanes")) return "lanes";
+  // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
+  // Rail-Highlight bleibt dort, eigener Tab existiert bewusst nicht.
+  if (pathname.includes("/control/runs/")) return "workstreams";
   // Root /control (and the legacy /control/inbox) is the Decision-Inbox landing.
   return "inbox";
 }
@@ -163,6 +169,7 @@ export default function ControlPage() {
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
+            <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>

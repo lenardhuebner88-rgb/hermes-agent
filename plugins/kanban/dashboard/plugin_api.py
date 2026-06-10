@@ -2718,6 +2718,24 @@ def get_run_endpoint(
         conn.close()
 
 
+@router.get("/runs/{run_id}/timeline")
+def run_timeline_endpoint(
+    run_id: int,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """F3: flat per-run timeline — run frame + time-sorted events with
+    ``offset_seconds``/``delta_seconds``. Read-only; 404 when absent."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        tl = kanban_db.run_timeline(conn, run_id)
+        if tl is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        return tl
+    finally:
+        conn.close()
+
+
 @router.get("/runs/{run_id}/inspect")
 def inspect_run_endpoint(
     run_id: int,

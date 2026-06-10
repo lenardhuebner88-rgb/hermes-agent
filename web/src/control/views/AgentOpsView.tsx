@@ -152,6 +152,12 @@ function RecentResultRow({ result, now }: { result: KanbanResult; now: number })
       <div className="flex flex-wrap items-center gap-2">
         <StatusPill tone="emerald" label="Done" dot="ready" />
         <span className="hc-mono text-xs hc-soft">{fmtDur(result.duration_seconds)} · vor {fmtAge(result.ended_at, now)}</span>
+        <a
+          href={`/control/runs/${result.run_id}`}
+          className="ml-auto inline-flex items-center text-xs hc-dim underline-offset-2 hover:text-white hover:underline"
+        >
+          Timeline
+        </a>
       </div>
       <h3 className="mt-2 line-clamp-2 text-sm font-semibold text-white">{result.task_title}</h3>
       {result.summary_preview || result.summary ? (

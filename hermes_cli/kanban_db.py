@@ -12292,6 +12292,108 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> Optional[Run]:
     return Run.from_row(row) if row else None
 
 
+def run_timeline(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    max_events: int = 500,
+) -> Optional[dict]:
+    """F3 (night-sprint): flat per-run timeline — events sorted with deltas.
+
+    Read-only over existing data (no schema change): the run row frames the
+    timeline (synthetic ``run_started`` / ``run_ended`` items), run-scoped
+    ``task_events`` (``run_id`` match) fill it, and legacy/task-scoped events
+    with ``run_id IS NULL`` are included when they fall inside the run's
+    time window so pre-migration runs still get a usable trace.
+
+    Each item carries ``offset_seconds`` (from run start) and
+    ``delta_seconds`` (gap to the previous item) so the UI can render
+    relative time bars without re-deriving anything. Returns None when the
+    run does not exist. Events are capped at ``max_events`` (oldest first;
+    ``truncated`` flags a cap hit).
+    """
+    run = conn.execute(
+        "SELECT * FROM task_runs WHERE id = ?", (int(run_id),),
+    ).fetchone()
+    if run is None:
+        return None
+    started = int(run["started_at"]) if run["started_at"] is not None else None
+    ended = int(run["ended_at"]) if run["ended_at"] is not None else None
+    window_end = ended if ended is not None else int(time.time())
+
+    rows = conn.execute(
+        "SELECT id, kind, payload, created_at, run_id FROM task_events "
+        "WHERE task_id = ? AND (run_id = ? OR (run_id IS NULL "
+        "      AND created_at >= ? AND created_at <= ?)) "
+        "ORDER BY created_at ASC, id ASC LIMIT ?",
+        (
+            run["task_id"], int(run_id),
+            (started or 0) - 1, window_end + 1,
+            int(max_events) + 1,
+        ),
+    ).fetchall()
+    truncated = len(rows) > max_events
+    rows = rows[:max_events]
+
+    items: list[dict] = []
+    if started is not None:
+        items.append({
+            "kind": "run_started",
+            "at": started,
+            "source": "run",
+            "payload": {"profile": run["profile"], "status": run["status"]},
+        })
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"]) if r["payload"] else None
+            if not isinstance(payload, (dict, list)):
+                payload = None
+        except (ValueError, TypeError):
+            payload = None
+        items.append({
+            "kind": r["kind"],
+            "at": int(r["created_at"]) if r["created_at"] is not None else started or 0,
+            "source": "event" if r["run_id"] is not None else "task",
+            "payload": payload,
+        })
+    if ended is not None:
+        items.append({
+            "kind": "run_ended",
+            "at": ended,
+            "source": "run",
+            "payload": {
+                "status": run["status"],
+                "outcome": run["outcome"],
+                "error": run["error"],
+            },
+        })
+    items.sort(key=lambda it: it["at"])
+
+    prev: Optional[int] = None
+    for it in items:
+        it["offset_seconds"] = (it["at"] - started) if started is not None else None
+        it["delta_seconds"] = (it["at"] - prev) if prev is not None else 0
+        prev = it["at"]
+
+    return {
+        "run": {
+            "id": int(run["id"]),
+            "task_id": run["task_id"],
+            "profile": run["profile"],
+            "status": run["status"],
+            "outcome": run["outcome"],
+            "error": run["error"],
+            "summary": run["summary"],
+            "started_at": started,
+            "ended_at": ended,
+            "duration_seconds": (window_end - started) if started is not None else None,
+        },
+        "items": items,
+        "count": len(items),
+        "truncated": truncated,
+    }
+
+
 def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     """Return the most recent run regardless of outcome (active or closed)."""
     row = conn.execute(
