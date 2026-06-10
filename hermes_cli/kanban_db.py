@@ -7987,13 +7987,31 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     #    step lands in ``done`` (never re-enters ``ready``), so there is no
     #    respawn-loop risk. Non-workflow tasks are unaffected (byte-identical).
     if not row["workflow_template_id"]:
-        cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
-        if conn.execute(
-            "SELECT id FROM task_runs "
-            "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ?",
-            (task_id, cutoff),
-        ).fetchone():
-            return "recent_success"
+        # K3 exemption: a verifier REQUEST_CHANGES on the latest run
+        # invalidates "recent success" — the review already happened and
+        # demanded a fix run. The task only re-enters ``ready`` through an
+        # explicit operator/CLI decision (unblock), so deferring here would
+        # silently stall the requested retry for the full success window
+        # (the CommandHome inline-resolve reported ok while nothing spawned).
+        latest_verdict = conn.execute(
+            "SELECT verdict FROM task_runs "
+            "WHERE task_id = ? AND ended_at IS NOT NULL "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        rejected = bool(
+            latest_verdict
+            and latest_verdict["verdict"]
+            and str(latest_verdict["verdict"]).upper() == "REQUEST_CHANGES"
+        )
+        if not rejected:
+            cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
+            if conn.execute(
+                "SELECT id FROM task_runs "
+                "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ?",
+                (task_id, cutoff),
+            ).fetchone():
+                return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW

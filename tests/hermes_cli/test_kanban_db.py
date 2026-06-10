@@ -2477,6 +2477,41 @@ def test_respawn_guard_recent_success(kanban_home):
     assert reason == "recent_success"
 
 
+def test_respawn_guard_rejected_verdict_allows_fix_run(kanban_home):
+    """K3 regression: a verifier REQUEST_CHANGES on the latest run invalidates
+    recent_success — the review happened and DEMANDED a fix run. Without this
+    the CommandHome inline-resolve (unblock + tick) silently stalls for the
+    full success window. An APPROVED verdict keeps the guard."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="rejected-task", assignee="alice")
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+            "VALUES (?, 'alice', 'review', 'completed', ?, ?)",
+            (t, now - 240, now - 180),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, verdict, started_at, ended_at) "
+            "VALUES (?, 'verifier', 'done', 'completed', 'REQUEST_CHANGES', ?, ?)",
+            (t, now - 120, now - 60),
+        )
+        assert kb.check_respawn_guard(conn, t) is None
+
+        # Control: APPROVED on the latest run keeps recent_success.
+        t2 = kb.create_task(conn, title="approved-task", assignee="alice")
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+            "VALUES (?, 'alice', 'review', 'completed', ?, ?)",
+            (t2, now - 240, now - 180),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, verdict, started_at, ended_at) "
+            "VALUES (?, 'verifier', 'done', 'completed', 'APPROVED', ?, ?)",
+            (t2, now - 120, now - 60),
+        )
+        assert kb.check_respawn_guard(conn, t2) == "recent_success"
+
+
 def test_respawn_guard_stale_success_not_guarded(kanban_home):
     """A completed run outside the guard window does not block re-spawn."""
     with kb.connect() as conn:
