@@ -39,6 +39,13 @@ export const de = {
     epicProgress: (done: number, total: number) => `${done}/${total} geliefert`,
     epicNoTasks: "noch keine Tasks",
     epicNoTokens: "noch kein Token-Burn",
+    // F4: Kosten heute/Fenster + Top-Profile nach Kosten.
+    costToday: "Kosten heute",
+    costWindow: (days: number) => `Kosten · ${days} Tage`,
+    topProfiles: "Top-Profile nach Kosten",
+    topProfilesHint: "7 Tage rollierend · echte $ getrennt vom ≈ API-Äquivalent (Subscription) · Tokens",
+    costRuns: (n: number) => `${n} Runs`,
+    costNoData: "Noch keine Kosten-Stamps im Fenster.",
   },
   runSummary: {
     eyebrow: "Lauf-Bilanz · Wurzeln",

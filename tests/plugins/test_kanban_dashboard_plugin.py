@@ -559,11 +559,15 @@ def test_runs_summary_empty_window(client):
 
 
 def _insert_run(conn, task_id, *, profile, outcome, started_at, ended_at,
-                verdict=None, cost=None):
+                verdict=None, cost=None, tokens_in=None, tokens_out=None,
+                metadata=None):
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, "
-        "started_at, ended_at, verdict, cost_usd) VALUES (?,?,?,?,?,?,?,?)",
-        (task_id, profile, "done", outcome, started_at, ended_at, verdict, cost),
+        "started_at, ended_at, verdict, cost_usd, input_tokens, "
+        "output_tokens, metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (task_id, profile, "done", outcome, started_at, ended_at, verdict,
+         cost, tokens_in, tokens_out,
+         json.dumps(metadata) if metadata is not None else None),
     )
 
 
@@ -644,6 +648,57 @@ def test_runs_daily_series(client):
     assert data["series"][0]["done_tasks"] == 0
     assert data["series"][0]["cost_usd"] is None
     assert data["series"][0]["cycle_time_p50_seconds"] is None
+
+
+def test_runs_costs_today_window_and_profiles(client):
+    """F4: Kosten heute vs. Fenster + Top-Profile; Subscription-Runs zählen
+    über metadata.cost_usd_equivalent, ungestempelte (Verifier-)Runs als 0."""
+    now = int(time.time())
+    yesterday = now - 26 * 3600
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="costly work")
+        with kb.write_txn(conn):
+            # API-Lane heute: echte Dollar + Tokens.
+            _insert_run(conn, t, profile="coder", outcome="completed",
+                        started_at=now - 600, ended_at=now,
+                        cost=0.25, tokens_in=1000, tokens_out=200)
+            # Subscription-Lane heute: ehrliche $0 + Äquivalent in Metadata.
+            _insert_run(conn, t, profile="premium", outcome="completed",
+                        started_at=now - 500, ended_at=now,
+                        cost=0.0, tokens_in=5000, tokens_out=900,
+                        metadata={"billing_mode": "subscription_included",
+                                  "cost_usd_equivalent": 1.5})
+            # Verifier ohne Stamps: zählt als Run, kostet nichts.
+            _insert_run(conn, t, profile="verifier", outcome="completed",
+                        started_at=now - 400, ended_at=now)
+            # Gestern (im Fenster, nicht heute).
+            _insert_run(conn, t, profile="coder", outcome="completed",
+                        started_at=yesterday - 300, ended_at=yesterday,
+                        cost=0.05, tokens_in=400, tokens_out=80)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/costs?days=7").json()
+    assert data["days"] == 7
+    assert data["today"]["cost_usd"] == 0.25
+    assert data["today"]["cost_usd_equivalent"] == 1.5
+    assert data["today"]["runs"] == 3
+    assert data["window"]["cost_usd"] == 0.3
+    assert data["window"]["input_tokens"] == 6400
+    by_profile = {p["profile"]: p for p in data["profiles"]}
+    assert by_profile["coder"]["cost_usd"] == 0.3
+    assert by_profile["coder"]["runs"] == 2
+    assert by_profile["premium"]["cost_usd"] == 0.0
+    assert by_profile["premium"]["cost_usd_equivalent"] == 1.5
+    assert by_profile["verifier"]["cost_usd"] is None
+    assert by_profile["verifier"]["runs"] == 1
+    # Sortierung: höchster Burn (Dollar + Äquivalent) zuerst.
+    assert data["profiles"][0]["profile"] == "premium"
+    assert data["profiles"][1]["profile"] == "coder"
+    # Fenster-Schnitt: days=1 sieht den gestrigen Run nicht mehr.
+    narrow = client.get("/api/plugins/kanban/runs/costs?days=1").json()
+    assert narrow["window"]["cost_usd"] == 0.25
 
 
 # ---------------------------------------------------------------------------

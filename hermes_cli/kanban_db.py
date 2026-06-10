@@ -11048,6 +11048,99 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
     return {"days": days, "now": now, "series": series}
 
 
+def _empty_cost_bucket() -> dict:
+    return {
+        "runs": 0,
+        "cost_usd": None,
+        "cost_usd_equivalent": None,
+        "input_tokens": None,
+        "output_tokens": None,
+    }
+
+
+def _cost_bucket_add(bucket: dict, *, cost, equiv, tokens_in, tokens_out) -> None:
+    bucket["runs"] += 1
+    if cost is not None:
+        bucket["cost_usd"] = round((bucket["cost_usd"] or 0.0) + float(cost), 6)
+    if equiv is not None:
+        bucket["cost_usd_equivalent"] = round(
+            (bucket["cost_usd_equivalent"] or 0.0) + float(equiv), 6
+        )
+    if tokens_in is not None:
+        bucket["input_tokens"] = (bucket["input_tokens"] or 0) + int(tokens_in)
+    if tokens_out is not None:
+        bucket["output_tokens"] = (bucket["output_tokens"] or 0) + int(tokens_out)
+
+
+def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
+    """F4 (Statistik): Kosten-Sicht — heute + N-Tage-Fenster gesamt und pro
+    Profil. Liest ausschließlich gestempelte ``task_runs``-Spalten plus
+    ``metadata.cost_usd_equivalent`` (K17: Subscription-Runs tragen ehrliche
+    $0 in ``cost_usd``, das API-Äquivalent steht in der Metadata).
+    Doppelzählung verhindert das Stamping selbst (K17-Guard stempelt im
+    geteilten Worker-Log nur den jüngsten claude-cli-Run); ungestempelte
+    Runs — etwa der Review-Gate-Verifier — zählen hier schlicht 0."""
+    days = max(1, min(90, int(days)))
+    now = int(time.time())
+    today = _dt.date.fromtimestamp(now)
+    today_start = int(time.mktime(today.timetuple()))
+    window_start = int(
+        time.mktime((today - _dt.timedelta(days=days - 1)).timetuple())
+    )
+
+    totals_today = _empty_cost_bucket()
+    totals_window = _empty_cost_bucket()
+    profiles: dict[str, dict] = {}
+
+    for row in conn.execute(
+        "SELECT profile, ended_at, cost_usd, input_tokens, output_tokens, metadata "
+        "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ?",
+        (window_start,),
+    ).fetchall():
+        equiv = None
+        if row["metadata"]:
+            try:
+                meta = json.loads(row["metadata"])
+                raw = meta.get("cost_usd_equivalent") if isinstance(meta, dict) else None
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                    equiv = float(raw)
+            except (ValueError, TypeError):
+                pass
+        kwargs = {
+            "cost": row["cost_usd"],
+            "equiv": equiv,
+            "tokens_in": row["input_tokens"],
+            "tokens_out": row["output_tokens"],
+        }
+        _cost_bucket_add(totals_window, **kwargs)
+        if int(row["ended_at"]) >= today_start:
+            _cost_bucket_add(totals_today, **kwargs)
+        profile = (row["profile"] or "").strip() or "(ohne profil)"
+        bucket = profiles.setdefault(profile, _empty_cost_bucket())
+        _cost_bucket_add(bucket, **kwargs)
+
+    def _burn(b: dict) -> float:
+        return (b["cost_usd"] or 0.0) + (b["cost_usd_equivalent"] or 0.0)
+
+    profile_rows = [
+        {"profile": name, **bucket} for name, bucket in profiles.items()
+    ]
+    profile_rows.sort(
+        key=lambda p: (
+            -_burn(p),
+            -((p["input_tokens"] or 0) + (p["output_tokens"] or 0)),
+            p["profile"],
+        )
+    )
+    return {
+        "days": days,
+        "now": now,
+        "today": totals_today,
+        "window": totals_window,
+        "profiles": profile_rows,
+    }
+
+
 def _decision_event_reason(payload) -> Optional[str]:
     """Pull a human ``reason`` string out of a task_events payload, fail-soft."""
     if payload is None:
