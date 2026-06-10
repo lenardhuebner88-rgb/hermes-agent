@@ -1293,12 +1293,23 @@ CREATE TABLE IF NOT EXISTS epics (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
+-- Serves dispatch_once's per-tick ready-pull: WHERE status='ready' ... ORDER BY
+-- priority DESC, created_at ASC. The DESC/ASC directions match the query so the
+-- ORDER BY is answered straight from the index (no TEMP B-TREE sort each tick).
+CREATE INDEX IF NOT EXISTS idx_tasks_ready_order     ON tasks(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
+-- idx_runs_started: the budget preflight SUMs tokens/cost over a started_at>=?
+-- 24h window per tick (was a full SCAN of task_runs). The ended_at companion
+-- (idx_runs_task_ended) can't live here: ended_at is absent on legacy task_runs
+-- until _rebuild_drifted_tables recreates the table, and a CREATE INDEX over a
+-- missing column aborts executescript. It is created in
+-- _migrate_add_optional_columns after the rebuild instead.
+CREATE INDEX IF NOT EXISTS idx_runs_started          ON task_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
@@ -2103,6 +2114,20 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     _rebuild_drifted_tables(conn)
 
+    # idx_runs_task_ended: serves the respawn guard's "latest run per task
+    # ORDER BY ended_at DESC LIMIT 1" straight from the index (was a TEMP
+    # B-TREE sort on top of idx_runs_task). Created here, after the rebuild,
+    # rather than in SCHEMA_SQL: ended_at is absent on a legacy task_runs until
+    # _rebuild_drifted_tables recreates it, so a CREATE INDEX in executescript
+    # would abort init. By this point every task_runs (fresh or rebuilt) has
+    # the column; IF NOT EXISTS makes it a no-op on re-init and on tables the
+    # rebuild already indexed via _REBUILD_SPECS.
+    if runs_table_exists:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_task_ended "
+            "ON task_runs(task_id, ended_at)"
+        )
+
 
 # Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or, for
 # ``kanban_notify_subs``, a nullable ``TEXT last_event_id``). The current
@@ -2143,10 +2168,17 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        " error TEXT)",
+        # input_tokens/output_tokens/cost_usd/verdict are appended to fresh DBs
+        # by the additive run_cols migration; mirror them here in the same order
+        # so a rebuilt legacy task_runs stays byte-identical to fresh and does
+        # not silently drop the budget columns (dispatcher) / verdict (review).
+        " error TEXT, input_tokens INTEGER, output_tokens INTEGER,"
+        " cost_usd REAL, verdict TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
+            "CREATE INDEX idx_runs_started ON task_runs(started_at)",
+            "CREATE INDEX idx_runs_task_ended ON task_runs(task_id, ended_at)",
         ),
     ),
     "kanban_notify_subs": (

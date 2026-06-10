@@ -595,7 +595,7 @@ _8 tables. Source of truth: `hermes_cli/kanban_db.py` (`SCHEMA_SQL`)._
 
 | Table | Columns |
 |---|---|
-| `tasks` | `id`, `title`, `body`, `assignee`, `status`, `priority`, `created_by`, `created_at`, `started_at`, `completed_at`, `workspace_kind`, `workspace_path`, `branch_name`, `claim_lock`, `claim_expires`, `tenant`, `result`, `idempotency_key`, `consecutive_failures`, `decompose_failed`, `worker_pid`, `last_failure_error`, `max_runtime_seconds`, `last_heartbeat_at`, `current_run_id`, `workflow_template_id`, `current_step_key`, `skills`, `model_override`, `max_retries`, `max_iterations`, `continuation_count`, `max_continuations`, `last_continuation_reason`, `goal_mode`, `goal_max_turns`, `session_id`, `due_at`, `epic_id` |
+| `tasks` | `id`, `title`, `body`, `assignee`, `status`, `priority`, `created_by`, `created_at`, `started_at`, `completed_at`, `workspace_kind`, `workspace_path`, `branch_name`, `claim_lock`, `claim_expires`, `tenant`, `result`, `idempotency_key`, `consecutive_failures`, `decompose_failed`, `worker_pid`, `last_failure_error`, `max_runtime_seconds`, `last_heartbeat_at`, `current_run_id`, `workflow_template_id`, `current_step_key`, `skills`, `model_override`, `max_retries`, `max_iterations`, `continuation_count`, `max_continuations`, `last_continuation_reason`, `goal_mode`, `goal_max_turns`, `session_id`, `due_at`, `epic_id`, `kind` |
 | `task_links` | `parent_id`, `child_id` |
 | `task_comments` | `id`, `task_id`, `author`, `body`, `created_at` |
 | `task_events` | `id`, `task_id`, `run_id`, `kind`, `payload`, `created_at` |
@@ -703,7 +703,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``epics`` table, no hard constraint). NULL = not part of an epic =
     -- exactly the pre-E3 behaviour. Decompose propagates the triage root's
     -- epic_id onto every child so a whole tree rolls up under one epic.
-    epic_id              TEXT
+    epic_id              TEXT,
+    -- Optional coarse work classification stamped by the decomposer or CLI.
+    -- NULL = unknown/unspecified.
+    kind                 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -807,12 +810,23 @@ CREATE TABLE IF NOT EXISTS epics (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
+-- Serves dispatch_once's per-tick ready-pull: WHERE status='ready' ... ORDER BY
+-- priority DESC, created_at ASC. The DESC/ASC directions match the query so the
+-- ORDER BY is answered straight from the index (no TEMP B-TREE sort each tick).
+CREATE INDEX IF NOT EXISTS idx_tasks_ready_order     ON tasks(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
+-- idx_runs_started: the budget preflight SUMs tokens/cost over a started_at>=?
+-- 24h window per tick (was a full SCAN of task_runs). The ended_at companion
+-- (idx_runs_task_ended) can't live here: ended_at is absent on legacy task_runs
+-- until _rebuild_drifted_tables recreates the table, and a CREATE INDEX over a
+-- missing column aborts executescript. It is created in
+-- _migrate_add_optional_columns after the rebuild instead.
+CREATE INDEX IF NOT EXISTS idx_runs_started          ON task_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 ```
