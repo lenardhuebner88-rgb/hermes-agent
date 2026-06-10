@@ -2500,6 +2500,27 @@ def get_runs_daily(
         conn.close()
 
 
+@router.get("/runs/issues")
+def get_runs_issues(
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=200),
+    board: Optional[str] = Query(None),
+):
+    """F6: recurring failures grouped by (profile, normalized error
+    signature) over failed/blocked runs of the last ``days`` days. Read-only —
+    no auto-task creation, no AI clustering.
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_issues(conn, days=days, limit=limit)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/costs")
 def get_runs_costs(
     days: int = Query(7, ge=1, le=90),

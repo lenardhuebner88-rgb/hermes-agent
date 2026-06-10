@@ -6455,3 +6455,67 @@ def test_scores_name_created_query_uses_index(kanban_home):
             )
         )
     assert "idx_scores_name_created" in plan
+
+
+# ---------------------------------------------------------------------------
+# F6 (night-sprint): Issue-Gruppierung über Fehler-Signaturen
+# ---------------------------------------------------------------------------
+
+
+def test_issue_signature_normalisation_cases():
+    """Mind. 5 Fälle: PIDs/Zähler/IDs/Hex maskiert, Whitespace kollabiert,
+    erste nicht-leere Zeile zählt, leerer Text wird ehrlich benannt."""
+    sig = kb._issue_signature
+    # 1+2: gleiche PID-Fehlerklasse → identische Signatur trotz anderer PID
+    assert sig("pid 4053999 exited with code 1") == "pid N exited with code N"
+    assert sig("pid 12 exited with code 1") == "pid N exited with code N"
+    # 3: Iterations-Zähler maskiert
+    assert sig("Iteration budget exhausted (60/60) — task could not complete") \
+        == "Iteration budget exhausted (N/N) — task could not complete"
+    # 4: Task-IDs maskiert
+    assert sig("worker for t_82c04f63 vanished") == "worker for t_… vanished"
+    # 5: lange Hex-IDs maskiert
+    assert sig("session 0123456789abcdef crashed") == "session … crashed"
+    # 6: Mehrzeiler → erste nicht-leere Zeile, Whitespace kollabiert
+    assert sig("\n\n  Error:   boom   \nTraceback ...") == "Error: boom"
+    # 7: leer/None
+    assert sig("") == "(kein Fehlertext)"
+    assert sig(None) == "(kein Fehlertext)"
+
+
+def test_runs_issues_groups_by_profile_and_signature(kanban_home):
+    """Gleicher Fehlertyp + gleiches Profil = ein Issue mit Zähler; blocked
+    fällt auf summary zurück; Beispiel-Run ist das jüngste Auftreten."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="flaky")
+        with kb.write_txn(conn):
+            def run(profile, outcome, started, error=None, summary=None):
+                return conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                    "started_at, ended_at, error, summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (t, profile, "done", outcome, started, started + 10, error, summary),
+                ).lastrowid
+            run("coder", "crashed", now - 500, error="pid 111 exited with code 1")
+            newest = run("coder", "crashed", now - 100, error="pid 222 exited with code 1")
+            run("research", "crashed", now - 300, error="pid 333 exited with code 1")
+            run("coder", "blocked", now - 200, error="  ",
+                summary="Edit-risk blocked by open overlapping session")
+            # außerhalb des Fensters → unsichtbar
+            run("coder", "crashed", now - 40 * 86400, error="pid 9 exited with code 1")
+        data = kb.runs_issues(conn, days=30)
+    assert data["total_failed_runs"] == 4
+    assert data["group_count"] == 3
+    top = data["issues"][0]
+    assert top["profile"] == "coder"
+    assert top["signature"] == "pid N exited with code N"
+    assert top["count"] == 2
+    assert top["outcomes"] == {"crashed": 2}
+    assert top["example_run_id"] == newest  # jüngstes Auftreten als Beispiel
+    assert top["last_seen"] == now - 100
+    # research-PID-Crash ist ein EIGENES Issue (Profil gehört zum Schlüssel)
+    profiles = {(i["profile"], i["signature"]) for i in data["issues"]}
+    assert ("research", "pid N exited with code N") in profiles
+    # blocked ohne error nutzt die summary
+    blocked = next(i for i in data["issues"] if i["outcomes"].get("blocked"))
+    assert "Edit-risk blocked" in blocked["example_text"]

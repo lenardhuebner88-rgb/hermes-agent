@@ -11222,6 +11222,88 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     }
 
 
+# F6 (night-sprint): Issue-Gruppierung — gleicher Fehlertyp + gleiches Profil
+# = ein Issue. blocked zählt mit (sein Grund steht in summary, nicht error).
+_ISSUE_OUTCOMES = _RELIABILITY_FAIL_OUTCOMES + ("blocked",)
+
+
+def _issue_signature(text: Optional[str]) -> str:
+    """Normalisierte Fehler-Signatur: erste nicht-leere Zeile, volatile Teile
+    (PIDs, Zähler, Task-/Run-IDs, Zeitangaben) maskiert, Whitespace kollabiert.
+    Regelbasiert und bewusst grob — kein KI-Clustering (OUT of scope)."""
+    first = next(
+        (ln.strip() for ln in (text or "").splitlines() if ln.strip()), ""
+    )
+    if not first:
+        return "(kein Fehlertext)"
+    sig = first[:240]
+    sig = re.sub(r"\bt_[0-9a-f]{6,}\b", "t_…", sig)
+    sig = re.sub(r"\b[0-9a-f]{12,}\b", "…", sig)
+    sig = re.sub(r"\d+", "N", sig)
+    sig = re.sub(r"\s+", " ", sig)
+    return sig.strip()
+
+
+def runs_issues(
+    conn: sqlite3.Connection, *, days: int = 30, limit: int = 50,
+) -> dict:
+    """F6: wiederkehrende Fehler gruppieren — failed/blocked-Runs der letzten
+    *days* Tage, Gruppenschlüssel = (Profil, Fehler-Signatur). Rein lesend,
+    keine Auto-Tasks. Fehlertext = ``COALESCE(error, summary)`` (blocked legt
+    seinen Grund in summary ab)."""
+    days = max(1, min(365, int(days)))
+    limit = max(1, min(200, int(limit)))
+    now = int(time.time())
+    window_start = now - days * 86400
+    placeholders = ",".join("?" for _ in _ISSUE_OUTCOMES)
+    groups: dict[tuple[str, str], dict] = {}
+    total_runs = 0
+    for row in conn.execute(
+        f"SELECT id, task_id, profile, outcome, started_at, "
+        f"COALESCE(NULLIF(TRIM(error), ''), summary) AS reason "
+        f"FROM task_runs WHERE outcome IN ({placeholders}) AND started_at >= ?",
+        (*_ISSUE_OUTCOMES, window_start),
+    ).fetchall():
+        total_runs += 1
+        profile = (row["profile"] or "").strip() or "(ohne profil)"
+        sig = _issue_signature(row["reason"])
+        g = groups.setdefault((profile, sig), {
+            "signature": sig,
+            "profile": profile,
+            "count": 0,
+            "first_seen": int(row["started_at"]),
+            "last_seen": int(row["started_at"]),
+            "outcomes": {},
+            "example_run_id": int(row["id"]),
+            "example_task_id": row["task_id"],
+            "example_text": (row["reason"] or "").strip()[:500],
+        })
+        g["count"] += 1
+        outcome = (row["outcome"] or "").strip()
+        g["outcomes"][outcome] = g["outcomes"].get(outcome, 0) + 1
+        at = int(row["started_at"])
+        g["first_seen"] = min(g["first_seen"], at)
+        if at >= g["last_seen"]:
+            # jüngstes Auftreten gewinnt auch das Beispiel — der Operator
+            # springt vom Issue in den frischesten Run.
+            g["last_seen"] = at
+            g["example_run_id"] = int(row["id"])
+            g["example_task_id"] = row["task_id"]
+            g["example_text"] = (row["reason"] or "").strip()[:500]
+    issues = sorted(
+        groups.values(), key=lambda g: (-g["count"], -g["last_seen"]),
+    )
+    truncated = len(issues) > limit
+    return {
+        "days": days,
+        "now": now,
+        "total_failed_runs": total_runs,
+        "group_count": len(issues),
+        "truncated": truncated,
+        "issues": issues[:limit],
+    }
+
+
 def _decision_event_reason(payload) -> Optional[str]:
     """Pull a human ``reason`` string out of a task_events payload, fail-soft."""
     if payload is None:

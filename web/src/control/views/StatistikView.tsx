@@ -262,6 +262,13 @@ export function StatistikView() {
                   minN={reliability.data?.min_n ?? 5}
                 />
               )}
+              {/* F6: Absprung ins Issue-Board (Detail-Seite der Statistik). */}
+              <a
+                href="/control/issues"
+                className="mt-3 inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5"
+              >
+                {de.stats.issuesLink}
+              </a>
             </FleetPanel>
           </div>
 
