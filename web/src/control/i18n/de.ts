@@ -46,6 +46,8 @@ export const de = {
     topProfilesHint: "7 Tage rollierend · echte $ getrennt vom ≈ API-Äquivalent (Subscription) · Tokens",
     costRuns: (n: number) => `${n} Runs`,
     costNoData: "Noch keine Kosten-Stamps im Fenster.",
+    // F6: Absprung zum Issue-Board.
+    issuesLink: "Issues — wiederkehrende Fehler →",
   },
   runSummary: {
     eyebrow: "Lauf-Bilanz · Wurzeln",
