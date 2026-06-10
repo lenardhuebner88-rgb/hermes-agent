@@ -476,7 +476,99 @@ def test_runs_summary_empty_window(client):
     assert data["completed_roots"] == 0
     assert data["roots"] == []
     assert data["total_cost_usd"] is None
-    assert data["cycle_time_p50_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (Statistik): /runs/reliability + /runs/daily
+# ---------------------------------------------------------------------------
+
+
+def _insert_run(conn, task_id, *, profile, outcome, started_at, ended_at,
+                verdict=None, cost=None):
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, outcome, "
+        "started_at, ended_at, verdict, cost_usd) VALUES (?,?,?,?,?,?,?,?)",
+        (task_id, profile, "done", outcome, started_at, ended_at, verdict, cost),
+    )
+
+
+def test_runs_reliability_per_profile(client):
+    """Outcome-Raten pro Profil + Verdict-Zuordnung auf den GEPRÜFTEN Run:
+    das Verdict steht auf dem Verifier-Run, gezählt wird es beim Profil des
+    jüngsten zuvor beendeten verdict-freien Runs derselben Task."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t1 = kb.create_task(conn, title="work 1")
+        t2 = kb.create_task(conn, title="work 2")
+        with kb.write_txn(conn):
+            # coder: 2 completed, 1 crashed (3 runs, 2 tasks → 1 retry)
+            _insert_run(conn, t1, profile="coder", outcome="crashed", started_at=now - 4000, ended_at=now - 3900)
+            _insert_run(conn, t1, profile="coder", outcome="completed", started_at=now - 3800, ended_at=now - 3600)
+            _insert_run(conn, t2, profile="coder", outcome="completed", started_at=now - 3000, ended_at=now - 2800)
+            # verifier judges t1 (APPROVED) and t2 (REQUEST_CHANGES) — the
+            # verdicts must be attributed to coder, not verifier.
+            _insert_run(conn, t1, profile="verifier", outcome="completed", started_at=now - 3500, ended_at=now - 3400, verdict="APPROVED")
+            _insert_run(conn, t2, profile="verifier", outcome="completed", started_at=now - 2700, ended_at=now - 2600, verdict="REQUEST_CHANGES")
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/reliability?since_hours=24&min_n=2").json()
+    assert data["min_n"] == 2
+    by_profile = {p["profile"]: p for p in data["profiles"]}
+    coder = by_profile["coder"]
+    assert coder["runs"] == 3
+    assert coder["outcomes"]["completed"] == 2
+    assert coder["outcomes"]["crashed"] == 1
+    assert coder["retries"] == 1
+    assert coder["judged"] == 2
+    assert coder["approved"] == 1 and coder["rejected"] == 1
+    assert coder["approve_rate"] == 0.5
+    assert coder["low_sample"] is False
+    verifier = by_profile["verifier"]
+    assert verifier["judged"] == 0  # verdicts never count for the verifier itself
+    # min-n-Gate: unter der Schwelle keine approve_rate-Behauptung.
+    data_strict = client.get("/api/plugins/kanban/runs/reliability?since_hours=24&min_n=5").json()
+    coder_strict = {p["profile"]: p for p in data_strict["profiles"]}["coder"]
+    assert coder_strict["approve_rate"] is None
+    assert coder_strict["low_sample"] is True
+
+
+def test_runs_daily_series(client):
+    """Tages-Zeitreihe: durchgehende Achse, Roots/Tasks/Kosten/Outcomes pro Tag."""
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="ship it", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "build", "assignee": "coder", "parents": []}],
+            author="decomposer",
+        )
+        (a,) = child_ids
+        kb.complete_task(conn, a, summary="done")
+        kb.complete_task(conn, root, summary="done")
+        with kb.write_txn(conn):
+            _insert_run(conn, a, profile="coder", outcome="completed", started_at=now - 600, ended_at=now - 300, cost=0.25)
+            _insert_run(conn, a, profile="coder", outcome="crashed", started_at=now - 900, ended_at=now - 800, cost=0.05)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/daily?days=7").json()
+    assert data["days"] == 7
+    assert len(data["series"]) == 7  # auch leere Tage (durchgehende Achse)
+    today = data["series"][-1]
+    assert today["done_roots"] == 1     # nur der Root zählt als Lieferung
+    assert today["done_tasks"] == 2     # Root + Subtask
+    # complete_task legt selbst synthetische completed-Runs an → >= statt ==.
+    assert today["runs_completed"] >= 1
+    assert today["runs_failed"] == 1
+    assert today["cost_usd"] == 0.3
+    assert today["cycle_time_p50_seconds"] is not None
+    # leere Tage sind ehrlich leer
+    assert data["series"][0]["done_tasks"] == 0
+    assert data["series"][0]["cost_usd"] is None
+    assert data["series"][0]["cycle_time_p50_seconds"] is None
 
 
 # ---------------------------------------------------------------------------

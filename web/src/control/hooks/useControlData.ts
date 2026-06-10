@@ -15,6 +15,8 @@ import {
   RecentResultsResponseSchema,
   ReviewVerdictsResponseSchema,
   RunSummaryResponseSchema,
+  ReliabilityResponseSchema,
+  RunsDailyResponseSchema,
   DecisionQueueResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
@@ -26,7 +28,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, TaskDetailResponse, DecisionQueueResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, TaskDetailResponse, DecisionQueueResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -837,6 +839,33 @@ export function useHermesRunSummary() {
       "runs/summary",
     ),
     20000,
+  );
+}
+
+// Phase 3 (Statistik): Verlässlichkeit pro Profil (7d + 30d-Baseline) und die
+// Tages-Zeitreihe für die Charts. Beides langsam gepollt — Aggregate ändern
+// sich im Minutentakt, nicht im Sekundentakt.
+export function useHermesReliability() {
+  return usePolling<ReliabilityResponse>(
+    "runs/reliability",
+    async () => parseOrThrow(
+      ReliabilityResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/reliability?since_hours=168&baseline_hours=720&min_n=5"),
+      "runs/reliability",
+    ),
+    60000,
+  );
+}
+
+export function useHermesRunsDaily() {
+  return usePolling<RunsDailyResponse>(
+    "runs/daily",
+    async () => parseOrThrow(
+      RunsDailyResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/daily?days=30"),
+      "runs/daily",
+    ),
+    60000,
   );
 }
 

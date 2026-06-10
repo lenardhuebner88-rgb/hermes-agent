@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import {
   useBoard,
   useDecisionInbox,
+  useHermesRunsDaily,
   useHermesTodayDigest,
   useHermesWorkers,
   useSystemHealth,
@@ -32,6 +33,7 @@ import { fmtAge, nowSec } from "../lib/derive";
 import { StatusPill } from "../components/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { Eyebrow, Text } from "../components/primitives";
+import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 
 const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
@@ -122,6 +124,9 @@ export function CommandHome({ density }: { density: Density }) {
 
       {/* ── LIVE FLEET ──────────────────────────────────────────────────────── */}
       <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/flow")} />
+
+      {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
+      <StatsPulse onOpen={() => navigate("/control/statistik")} />
 
       {/* ── THE QUEUE ───────────────────────────────────────────────────────── */}
       {!calm && !settling ? (
@@ -306,5 +311,34 @@ function DecisionRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) 
       </div>
       <ChevronRight className="h-4 w-4 shrink-0 hc-dim" />
     </button>
+  );
+}
+
+/** Zwei Mini-Sparklines (14 Tage Durchsatz + Token-Burn) als Brücke in den
+ *  Statistik-Tab. Teilt den /runs/daily-Poll mit der StatistikView über den
+ *  dedupli­zierenden pollingStore — kein zusätzlicher Request. */
+function StatsPulse({ onOpen }: { onOpen: () => void }) {
+  const daily = useHermesRunsDaily();
+  const series = (daily.data?.series ?? []).slice(-14);
+  if (!series.length || !series.some((p) => p.done_tasks > 0 || (p.output_tokens ?? 0) > 0)) return null;
+  const fmtTokens = (v: number) =>
+    v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)} M` : v >= 1_000 ? `${Math.round(v / 1_000)} k` : String(v);
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Eyebrow>Statistik-Puls · 14 Tage</Eyebrow>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="hc-surface-card p-3">
+          <Text variant="label" className="hc-dim">Geliefert (Roots/Tag)</Text>
+          <DayBars points={series.map((p) => ({ label: p.date.slice(5), value: p.done_roots }))} />
+        </div>
+        <div className="hc-surface-card p-3">
+          <Text variant="label" className="hc-dim">Token-Burn (out/Tag)</Text>
+          <Sparkline points={series.map((p) => ({ label: p.date.slice(5), value: p.output_tokens ?? 0 }))} stroke="var(--hc-accent-2)" valueFmt={fmtTokens} />
+        </div>
+      </div>
+    </section>
   );
 }

@@ -77,6 +77,7 @@ import os
 import re
 import secrets
 import shutil
+import datetime as _dt
 import sqlite3
 import subprocess
 import sys
@@ -10523,6 +10524,227 @@ def runs_summary(
         "cycle_time_p90_seconds": _nearest_rank_percentile(cycle_times, 90),
         "roots": roots[: max(0, int(max_roots))],
     }
+
+
+# Outcomes, die als "fehlgeschlagen" in die Verlässlichkeits-Rate eingehen.
+_RELIABILITY_FAIL_OUTCOMES = (
+    "crashed", "timed_out", "spawn_failed", "gave_up", "iteration_budget_exhausted",
+)
+
+
+def _reliability_window(conn: sqlite3.Connection, *, window_start: int, min_n: int) -> list[dict]:
+    """Per-Profil-Verlässlichkeit über ein Zeitfenster (beendete Runs).
+
+    Drei Signal-Familien je Profil:
+      * Outcome-Raten der eigenen Runs (completed vs. crash/timeout/spawn-fail …),
+      * Retry-Quote (Runs über dem ersten Versuch derselben Task),
+      * Verifier-Urteile, dem GEPRÜFTEN Run zugeordnet: ``task_runs.verdict``
+        steht auf dem Verifier-Run; das geprüfte Profil ist der jüngste zuvor
+        beendete Run derselben Task, der selbst kein Verdict trägt.
+
+    ``min_n`` spiegelt das roster-stats-Damping: Profile unter der Schwelle
+    werden mitgeliefert, aber als ``low_sample`` markiert (die UI dämpft).
+    """
+    rows = conn.execute(
+        "SELECT id, task_id, profile, outcome, started_at, ended_at, verdict "
+        "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ? "
+        "ORDER BY ended_at ASC",
+        (window_start,),
+    ).fetchall()
+
+    stats: dict[str, dict] = {}
+
+    def _bucket(profile: Optional[str]) -> dict:
+        key = profile or "unbekannt"
+        b = stats.get(key)
+        if b is None:
+            b = {
+                "profile": key,
+                "runs": 0,
+                "completed": 0,
+                "failed": 0,
+                "outcomes": {},
+                "tasks": set(),
+                "judged": 0,
+                "approved": 0,
+                "rejected": 0,
+            }
+            stats[key] = b
+        return b
+
+    for r in rows:
+        b = _bucket(r["profile"])
+        b["runs"] += 1
+        b["tasks"].add(r["task_id"])
+        outcome = (r["outcome"] or "unknown").strip() or "unknown"
+        b["outcomes"][outcome] = b["outcomes"].get(outcome, 0) + 1
+        if outcome == "completed":
+            b["completed"] += 1
+        elif outcome in _RELIABILITY_FAIL_OUTCOMES:
+            b["failed"] += 1
+
+    # Verdict-Zuordnung: für jeden Verifier-Run im Fenster den jüngsten zuvor
+    # beendeten verdienst-freien Run derselben Task suchen (auch außerhalb des
+    # Fensters, damit ein früher Coder-Run nicht aus der Zuordnung fällt).
+    for r in rows:
+        verdict = (r["verdict"] or "").strip().upper()
+        if not verdict:
+            continue
+        judged = conn.execute(
+            "SELECT profile FROM task_runs "
+            "WHERE task_id = ? AND id != ? AND ended_at IS NOT NULL "
+            "AND ended_at <= ? AND (verdict IS NULL OR verdict = '') "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (r["task_id"], r["id"], r["started_at"] or r["ended_at"]),
+        ).fetchone()
+        if judged is None:
+            continue
+        b = _bucket(judged["profile"])
+        b["judged"] += 1
+        if verdict == "APPROVED":
+            b["approved"] += 1
+        elif verdict == "REQUEST_CHANGES":
+            b["rejected"] += 1
+
+    out: list[dict] = []
+    for b in stats.values():
+        runs = b["runs"]
+        task_count = len(b["tasks"])
+        retries = max(0, runs - task_count)
+        judged = b["judged"]
+        out.append({
+            "profile": b["profile"],
+            "runs": runs,
+            "tasks": task_count,
+            "outcomes": dict(sorted(b["outcomes"].items())),
+            "completed_rate": round(b["completed"] / runs, 4) if runs else None,
+            "failed_rate": round(b["failed"] / runs, 4) if runs else None,
+            "retries": retries,
+            "retry_rate": round(retries / runs, 4) if runs else None,
+            "judged": judged,
+            "approved": b["approved"],
+            "rejected": b["rejected"],
+            # Approve-Rate nur mit genug Urteilen — sonst None (min-n-Gate).
+            "approve_rate": round(b["approved"] / judged, 4) if judged >= min_n else None,
+            "low_sample": runs < min_n,
+        })
+    out.sort(key=lambda p: (-p["runs"], p["profile"]))
+    return out
+
+
+def runs_reliability(
+    conn: sqlite3.Connection, *, since_hours: int = 168,
+    baseline_hours: int = 720, min_n: int = 5,
+) -> dict:
+    """Verlässlichkeit pro Profil: aktuelles Fenster (default 7 d) plus
+    30-d-Baseline zum Vergleich. Operator-Vertrag 2026-06-10 (Phase 3)."""
+    now = int(time.time())
+    since_hours = max(1, int(since_hours))
+    baseline_hours = max(since_hours, int(baseline_hours))
+    min_n = max(1, int(min_n))
+    return {
+        "since_hours": since_hours,
+        "baseline_hours": baseline_hours,
+        "min_n": min_n,
+        "now": now,
+        "profiles": _reliability_window(
+            conn, window_start=now - since_hours * 3600, min_n=min_n,
+        ),
+        "baseline": _reliability_window(
+            conn, window_start=now - baseline_hours * 3600, min_n=min_n,
+        ),
+    }
+
+
+def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
+    """Tages-Zeitreihe für die Statistik-Charts: Durchsatz (gelieferte Roots +
+    Tasks), Kosten-Burn und Run-Ausgänge pro lokalem Kalendertag. Leere Tage
+    werden mitgeliefert (durchgehende Achse). Read-only, eine Hand voll
+    Aggregat-Queries — kein N+1."""
+    days = max(1, min(365, int(days)))
+    now = int(time.time())
+    today = _dt.date.fromtimestamp(now)
+    start_day = today - _dt.timedelta(days=days - 1)
+    window_start = int(time.mktime(start_day.timetuple()))
+
+    buckets: dict[str, dict] = {}
+    for i in range(days):
+        day = start_day + _dt.timedelta(days=i)
+        buckets[day.isoformat()] = {
+            "date": day.isoformat(),
+            "done_roots": 0,
+            "done_tasks": 0,
+            # Dollar-Kosten sind auf einer Subscription-Flotte meist ehrliche
+            # 0.0 (billing_mode=subscription_included) — Tokens sind die
+            # belastbare Burn-Metrik und laufen deshalb separat mit.
+            "cost_usd": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "runs_completed": 0,
+            "runs_failed": 0,
+            "cycle_times": [],
+        }
+
+    def _day_key(ts: int) -> Optional[str]:
+        try:
+            key = _dt.date.fromtimestamp(int(ts)).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+        return key if key in buckets else None
+
+    # Tasks: geliefert (Roots = Senken, gleiche Definition wie runs_summary).
+    interior = {
+        r["parent_id"]
+        for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
+    }
+    for row in conn.execute(
+        "SELECT id, created_at, completed_at FROM tasks "
+        "WHERE completed_at IS NOT NULL AND completed_at >= ?",
+        (window_start,),
+    ).fetchall():
+        key = _day_key(row["completed_at"])
+        if key is None:
+            continue
+        b = buckets[key]
+        b["done_tasks"] += 1
+        if row["id"] not in interior:
+            b["done_roots"] += 1
+            if row["created_at"] is not None:
+                delta = int(row["completed_at"]) - int(row["created_at"])
+                if delta >= 0:
+                    b["cycle_times"].append(delta)
+
+    # Runs: Ausgänge + Kosten + Token-Burn.
+    for row in conn.execute(
+        "SELECT ended_at, outcome, cost_usd, input_tokens, output_tokens "
+        "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ?",
+        (window_start,),
+    ).fetchall():
+        key = _day_key(row["ended_at"])
+        if key is None:
+            continue
+        b = buckets[key]
+        outcome = (row["outcome"] or "").strip()
+        if outcome == "completed":
+            b["runs_completed"] += 1
+        elif outcome in _RELIABILITY_FAIL_OUTCOMES:
+            b["runs_failed"] += 1
+        if row["cost_usd"] is not None:
+            b["cost_usd"] = (b["cost_usd"] or 0.0) + float(row["cost_usd"])
+        if row["input_tokens"] is not None:
+            b["input_tokens"] = (b["input_tokens"] or 0) + int(row["input_tokens"])
+        if row["output_tokens"] is not None:
+            b["output_tokens"] = (b["output_tokens"] or 0) + int(row["output_tokens"])
+
+    series = []
+    for key in sorted(buckets):
+        b = buckets[key]
+        cycle_times = sorted(b.pop("cycle_times"))
+        b["cycle_time_p50_seconds"] = _nearest_rank_percentile(cycle_times, 50)
+        if b["cost_usd"] is not None:
+            b["cost_usd"] = round(b["cost_usd"], 6)
+        series.append(b)
+    return {"days": days, "now": now, "series": series}
 
 
 def _decision_event_reason(payload) -> Optional[str]:

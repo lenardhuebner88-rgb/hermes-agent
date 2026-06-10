@@ -2202,6 +2202,51 @@ def get_runs_summary(
         conn.close()
 
 
+@router.get("/runs/reliability")
+def get_runs_reliability(
+    since_hours: int = Query(168, ge=1, le=24 * 90),
+    baseline_hours: int = Query(720, ge=1, le=24 * 180),
+    min_n: int = Query(5, ge=1, le=100),
+    board: Optional[str] = Query(None),
+):
+    """Phase 3 (Statistik): per-profile reliability — outcome rates, retry
+    quote and verifier verdicts attributed to the judged run — over a rolling
+    window (default 7 d) plus a 30 d baseline. ``min_n`` mirrors the
+    roster-stats damping (approve_rate is None below the threshold).
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_reliability(
+            conn, since_hours=since_hours, baseline_hours=baseline_hours, min_n=min_n,
+        )
+    finally:
+        conn.close()
+
+
+@router.get("/runs/daily")
+def get_runs_daily(
+    days: int = Query(30, ge=1, le=365),
+    board: Optional[str] = Query(None),
+):
+    """Phase 3 (Statistik): daily time series — delivered roots/tasks,
+    cycle-time p50, cost burn and run outcomes per local calendar day.
+    Empty days are included so charts get a continuous axis.
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_daily(conn, days=days)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),

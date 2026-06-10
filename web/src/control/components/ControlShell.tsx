@@ -1,19 +1,21 @@
-import { Activity, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "autoresearch" | "backlog" | "orchestrator" | "crons";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons";
 
-// The daily spine — radically slimmed from 10 tabs to 3. Start (the Command
-// cockpit: needs-me + fleet + health, absorbs Übersicht/Puls), Flow (the live
-// work board), Autoresearch (the self-improvement console). Everything else is
-// a re-slice of these and lives in the "Mehr" overflow (moreTabs) below.
+// The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
+// health), Flow (the live work board, absorbs the fleet), Statistik (charts:
+// throughput / burn / cycle-time / reliability), Autoresearch (the
+// self-improvement console). Everything else is a re-slice of these and
+// lives in the "Mehr" overflow (moreTabs) below.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
+  { id: "statistik", label: de.tabs.statistik, mobileLabel: "Stats", path: "/control/statistik", icon: ChartSpline },
   { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
 ];
 

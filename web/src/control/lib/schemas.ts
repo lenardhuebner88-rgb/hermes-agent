@@ -721,6 +721,53 @@ export const RunSummaryResponseSchema = z.object({
 export type RunSummaryRoot = z.infer<typeof RunSummaryRootSchema>;
 export type RunSummaryResponse = z.infer<typeof RunSummaryResponseSchema>;
 
+// Phase 3 (Statistik): per-Profil-Verlässlichkeit + Tages-Zeitreihe.
+const ReliabilityProfileSchema = z.object({
+  profile: z.string().catch("unbekannt"),
+  runs: z.coerce.number().catch(0),
+  tasks: z.coerce.number().catch(0),
+  outcomes: z.record(z.string(), z.coerce.number()).catch({}),
+  completed_rate: nullableNumber,
+  failed_rate: nullableNumber,
+  retries: z.coerce.number().catch(0),
+  retry_rate: nullableNumber,
+  judged: z.coerce.number().catch(0),
+  approved: z.coerce.number().catch(0),
+  rejected: z.coerce.number().catch(0),
+  // null = unter dem min-n-Gate (roster-stats damping) — keine Behauptung.
+  approve_rate: nullableNumber,
+  low_sample: z.boolean().catch(false),
+});
+export const ReliabilityResponseSchema = z.object({
+  since_hours: z.coerce.number().catch(168),
+  baseline_hours: z.coerce.number().catch(720),
+  min_n: z.coerce.number().catch(5),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  profiles: z.array(ReliabilityProfileSchema).catch([]),
+  baseline: z.array(ReliabilityProfileSchema).catch([]),
+});
+export type ReliabilityProfile = z.infer<typeof ReliabilityProfileSchema>;
+export type ReliabilityResponse = z.infer<typeof ReliabilityResponseSchema>;
+
+const RunsDailyPointSchema = z.object({
+  date: z.string().catch(""),
+  done_roots: z.coerce.number().catch(0),
+  done_tasks: z.coerce.number().catch(0),
+  cost_usd: nullableNumber,
+  input_tokens: nullableNumber,
+  output_tokens: nullableNumber,
+  runs_completed: z.coerce.number().catch(0),
+  runs_failed: z.coerce.number().catch(0),
+  cycle_time_p50_seconds: nullableNumber,
+});
+export const RunsDailyResponseSchema = z.object({
+  days: z.coerce.number().catch(30),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  series: z.array(RunsDailyPointSchema).catch([]),
+});
+export type RunsDailyPoint = z.infer<typeof RunsDailyPointSchema>;
+export type RunsDailyResponse = z.infer<typeof RunsDailyResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

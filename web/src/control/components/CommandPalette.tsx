@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Bot, FlaskConical, GitBranch, Inbox, LayoutDashboard, Search } from "lucide-react";
+import { Activity, ArrowRight, Bot, FlaskConical, GitBranch, Inbox, LayoutDashboard, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KEYMAP } from "../lib/keymap";
 import type { Worker } from "../lib/types";
@@ -45,6 +45,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
       { id: "nav-overview", group: "Navigation", label: "Übersicht", hint: "/control/overview", icon: <LayoutDashboard className="h-4 w-4" />, action: () => onNavigate("/control/overview") },
       { id: "nav-workstreams", group: "Navigation", label: "Arbeitsströme", hint: "/control/workstreams", icon: <GitBranch className="h-4 w-4" />, action: () => onNavigate("/control/workstreams") },
       { id: "nav-flow-workers", group: "Navigation", label: "Worker (Flow)", hint: "/control/flow", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/flow") },
+      { id: "nav-statistik", group: "Navigation", label: "Statistik", hint: "/control/statistik", icon: <Activity className="h-4 w-4" />, action: () => onNavigate("/control/statistik") },
       { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
     ];
     const more = secondary.map(([label, path]) => ({ id: `more-${path}`, group: "Mehr", label, hint: path, icon: <ArrowRight className="h-4 w-4" />, action: () => onNavigate(path) }));

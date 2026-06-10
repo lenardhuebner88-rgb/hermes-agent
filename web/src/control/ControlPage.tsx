@@ -25,6 +25,9 @@ const AgentOpsView = lazy(() =>
 const FlowView = lazy(() =>
   import("./views/FlowView").then((m) => ({ default: m.FlowView })),
 );
+const StatistikView = lazy(() =>
+  import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
+);
 const AutoresearchView = lazy(() =>
   import("./views/AutoresearchView").then((m) => ({ default: m.AutoresearchView })),
 );
@@ -46,6 +49,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/workstreams")) return "workstreams";
   // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
   if (pathname.includes("/control/flow")) return "flow";
+  if (pathname.includes("/control/statistik")) return "statistik";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
@@ -60,6 +64,7 @@ const tabPath: Record<ControlTab, string> = {
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
   flow: "/control/flow",
+  statistik: "/control/statistik",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
@@ -113,7 +118,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", t: "statistik", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -146,6 +151,7 @@ export default function ControlPage() {
             <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
             {/* hermes wurde in Flow absorbiert (Phase 2) */}
             <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
+            <Route path="statistik" element={<StatistikView />} />
             <Route path="flow" element={<FlowView />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
