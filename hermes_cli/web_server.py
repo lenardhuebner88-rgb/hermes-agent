@@ -9302,7 +9302,26 @@ def mount_spa(application: FastAPI):
                 css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
         return Response(content=css, media_type="text/css")
 
-    application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+    # Hashed asset filenames are content-addressed (Vite emits
+    # ``index-<hash>.js`` / ``index-<hash>.css`` etc.), so a successful asset
+    # response can be cached immutably for a year. This removes the per-visit
+    # revalidation round-trip and cold-cache re-download of the large JS bundle
+    # — the biggest backend lever on perceived /control load time. Guarded to
+    # 200s so a 404/redirect is never cached as immutable.
+    class _ImmutableStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope):
+            response = await super().get_response(path, scope)
+            if response.status_code == 200:
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            return response
+
+    application.mount(
+        "/assets",
+        _ImmutableStaticFiles(directory=WEB_DIST / "assets"),
+        name="assets",
+    )
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):

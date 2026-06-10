@@ -1,10 +1,13 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ComponentType,
+  type LazyExoticComponent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -66,24 +69,28 @@ import { AuthWidget } from "@/components/AuthWidget";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-import ConfigPage from "@/pages/ConfigPage";
-import DocsPage from "@/pages/DocsPage";
-import EnvPage from "@/pages/EnvPage";
-import SessionsPage from "@/pages/SessionsPage";
-import LogsPage from "@/pages/LogsPage";
-import AnalyticsPage from "@/pages/AnalyticsPage";
-import ModelsPage from "@/pages/ModelsPage";
-import CronPage from "@/pages/CronPage";
-import ProfilesPage from "@/pages/ProfilesPage";
-import SkillsPage from "@/pages/SkillsPage";
-import PluginsPage from "@/pages/PluginsPage";
-import McpPage from "@/pages/McpPage";
-import PairingPage from "@/pages/PairingPage";
-import ChannelsPage from "@/pages/ChannelsPage";
-import WebhooksPage from "@/pages/WebhooksPage";
-import SystemPage from "@/pages/SystemPage";
-import ChatPage from "@/pages/ChatPage";
-import ControlPage from "@/control/ControlPage";
+// Route pages are lazy-loaded (code-split): the initial bundle for any landing
+// — including /control — ships only the shell + shared vendor, and each page
+// downloads as its own chunk on first navigation. Previously all ~18 pages were
+// imported statically into one ~2.4 MB bundle, paid for on every page load.
+const ConfigPage = lazy(() => import("@/pages/ConfigPage"));
+const DocsPage = lazy(() => import("@/pages/DocsPage"));
+const EnvPage = lazy(() => import("@/pages/EnvPage"));
+const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
+const LogsPage = lazy(() => import("@/pages/LogsPage"));
+const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
+const ModelsPage = lazy(() => import("@/pages/ModelsPage"));
+const CronPage = lazy(() => import("@/pages/CronPage"));
+const ProfilesPage = lazy(() => import("@/pages/ProfilesPage"));
+const SkillsPage = lazy(() => import("@/pages/SkillsPage"));
+const PluginsPage = lazy(() => import("@/pages/PluginsPage"));
+const McpPage = lazy(() => import("@/pages/McpPage"));
+const PairingPage = lazy(() => import("@/pages/PairingPage"));
+const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
+const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
+const SystemPage = lazy(() => import("@/pages/SystemPage"));
+const ChatPage = lazy(() => import("@/pages/ChatPage"));
+const ControlPage = lazy(() => import("@/control/ControlPage"));
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -107,6 +114,20 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
   return <Navigate to="/sessions" replace />;
 }
 
+// Suspense fallback while a lazy-loaded route chunk downloads (first visit only;
+// browser caches the chunk afterwards).
+function RouteLoadingFallback() {
+  return (
+    <div
+      className="flex min-h-0 min-w-0 flex-1 items-center justify-center py-16"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <Spinner />
+    </div>
+  );
+}
+
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -123,7 +144,11 @@ const CHAT_NAV_ITEM: NavItem = {
  * Routing still owns the URL so /chat deep-links, browser back/forward,
  * and nav highlight keep working.
  */
-const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
+// Built-in route components are a mix of eager local components (RootRedirect,
+// ChatRouteSink) and lazy-loaded pages — both are valid JSX element types.
+type RouteComponent = ComponentType | LazyExoticComponent<ComponentType>;
+
+const BUILTIN_ROUTES_CORE: Record<string, RouteComponent> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
@@ -278,7 +303,7 @@ function partitionSidebarNav(
 }
 
 function buildRoutes(
-  builtinRoutes: Record<string, ComponentType>,
+  builtinRoutes: Record<string, RouteComponent>,
   manifests: PluginManifest[],
 ): Array<{
   key: string;
@@ -374,6 +399,15 @@ export default function App() {
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
+
+  // Keep the heavy embedded terminal (xterm + WebGL + 4 addons) out of the
+  // initial load: only mount ChatPage once the user has actually opened /chat
+  // at least once. After the first visit it stays mounted (hidden when away)
+  // so the PTY / WebSocket / terminal session still persists across navigation.
+  const [hasVisitedChat, setHasVisitedChat] = useState(false);
+  useEffect(() => {
+    if (isChatRoute) setHasVisitedChat(true);
+  }, [isChatRoute]);
 
   // `dashboard.show_token_analytics` gates the Analytics nav item.  The
   // page itself remains reachable by URL (it renders an explanation when
@@ -729,20 +763,23 @@ export default function App() {
                     "min-h-0 flex flex-1 flex-col",
                 )}
               >
-                <Routes>
-                  {routes.map(({ key, path, element }) => (
-                    <Route key={key} path={path} element={element} />
-                  ))}
-                  <Route
-                    path="*"
-                    element={
-                      <UnknownRouteFallback pluginsLoading={pluginsLoading} />
-                    }
-                  />
-                </Routes>
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <Routes>
+                    {routes.map(({ key, path, element }) => (
+                      <Route key={key} path={path} element={element} />
+                    ))}
+                    <Route
+                      path="*"
+                      element={
+                        <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                      }
+                    />
+                  </Routes>
+                </Suspense>
 
                 {embeddedChat &&
                   !chatOverriddenByPlugin &&
+                  hasVisitedChat &&
                   (pluginsLoading ? (
                     isChatRoute ? (
                       <div
@@ -765,7 +802,24 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatPage isActive={isChatRoute} />
+                      <Suspense
+                        fallback={
+                          isChatRoute ? (
+                            <div
+                              className="flex min-h-0 min-w-0 flex-1 items-center justify-center"
+                              aria-busy="true"
+                              aria-live="polite"
+                            >
+                              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                <Spinner />
+                                <span>Loading chat…</span>
+                              </div>
+                            </div>
+                          ) : null
+                        }
+                      >
+                        <ChatPage isActive={isChatRoute} />
+                      </Suspense>
                     </div>
                   ))}
               </div>

@@ -1,21 +1,47 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
 import { useDecisionInbox, useHermesWorkers, useProposals } from "./hooks/useControlData";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { RouteTransition } from "./components/primitives";
-import { OverviewView } from "./views/OverviewView";
 import { InboxView } from "./views/InboxView";
-import { PulseView } from "./views/PulseView";
-import { AgentOpsView } from "./views/AgentOpsView";
-import { HermesFleet } from "./views/HermesFleet";
-import { FlowView } from "./views/FlowView";
-import { AutoresearchView } from "./views/AutoresearchView";
-import { BacklogView } from "./views/BacklogView";
-import { OrchestratorBacklogView } from "./views/OrchestratorBacklogView";
-import { CronView } from "./views/CronView";
+
+// The Decision-Inbox is the /control landing → keep it eager. Every other tab is
+// lazy-loaded (its own chunk, fetched on first visit) so opening /control no
+// longer ships all 10 views up front — FlowView + AutoresearchView are the
+// fattest, and most visits never open them.
+const OverviewView = lazy(() =>
+  import("./views/OverviewView").then((m) => ({ default: m.OverviewView })),
+);
+const PulseView = lazy(() =>
+  import("./views/PulseView").then((m) => ({ default: m.PulseView })),
+);
+const AgentOpsView = lazy(() =>
+  import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
+);
+const HermesFleet = lazy(() =>
+  import("./views/HermesFleet").then((m) => ({ default: m.HermesFleet })),
+);
+const FlowView = lazy(() =>
+  import("./views/FlowView").then((m) => ({ default: m.FlowView })),
+);
+const AutoresearchView = lazy(() =>
+  import("./views/AutoresearchView").then((m) => ({ default: m.AutoresearchView })),
+);
+const BacklogView = lazy(() =>
+  import("./views/BacklogView").then((m) => ({ default: m.BacklogView })),
+);
+const OrchestratorBacklogView = lazy(() =>
+  import("./views/OrchestratorBacklogView").then((m) => ({
+    default: m.OrchestratorBacklogView,
+  })),
+);
+const CronView = lazy(() =>
+  import("./views/CronView").then((m) => ({ default: m.CronView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -43,6 +69,20 @@ const tabPath: Record<ControlTab, string> = {
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
 };
+
+// Shown briefly while a lazy-loaded control view chunk downloads (first visit
+// of that tab only; the browser caches it afterwards).
+function ControlViewFallback() {
+  return (
+    <div
+      className="flex items-center justify-center py-16"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <Spinner />
+    </div>
+  );
+}
 
 export default function ControlPage() {
   const density = useDensity();
@@ -101,6 +141,7 @@ export default function ControlPage() {
         onOpenCommand={() => setPaletteOpen(true)}
       >
         <RouteTransition pathname={active}>
+          <Suspense fallback={<ControlViewFallback />}>
           <Routes location={location}>
             <Route index element={<InboxView density={density.density} />} />
             <Route path="inbox" element={<InboxView density={density.density} />} />
@@ -115,6 +156,7 @@ export default function ControlPage() {
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
+          </Suspense>
         </RouteTransition>
       </ControlShell>
       <CommandPalette
