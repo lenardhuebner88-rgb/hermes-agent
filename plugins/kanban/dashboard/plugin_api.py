@@ -36,6 +36,7 @@ the port.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -47,7 +48,7 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -912,6 +913,8 @@ def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
 
 @router.get("/board")
 def get_board(
+    request: Request,
+    response: Response,
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -929,6 +932,16 @@ def get_board(
             "keeps only the compact 'warnings' badge (detail still available via "
             "/tasks/:id). The /control board polls 'summary' since it renders "
             "only the badge — trims the largest part of the 8 s poll payload."
+        ),
+    ),
+    card_body: str = Query(
+        "full",
+        description=(
+            "Per-card long-text payload: 'full' (default) keeps the task's "
+            "body and result on each card; 'none' drops both (the /control "
+            "board never renders them — its card schema strips the fields — "
+            "and detail views fetch /tasks/:id). On a ~300-card board body "
+            "alone is well over half the poll payload."
         ),
     ),
 ):
@@ -1038,6 +1051,11 @@ def get_board(
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
             d = _task_dict(t, latest_summary=preview)
+            if card_body == "none":
+                # The /control poller renders neither field on a card —
+                # body alone dominates the payload on real boards.
+                d.pop("body", None)
+                d.pop("result", None)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -1075,15 +1093,48 @@ def get_board(
             )
         ]
 
-        return {
+        payload = {
             "columns": [
                 {"name": name, "tasks": columns[name]} for name in columns.keys()
             ],
             "tenants": tenants,
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
-            "now": int(time.time()),
         }
+        # Conditional GET: a weak ETag over the content WITHOUT the volatile
+        # wall-clock fields — "now" and each card's derived "age" change every
+        # second and would defeat caching. Both derive from timestamps that
+        # ARE hashed (created/started/completed_at), so excluding them never
+        # masks a real change. Diagnostics stay IN the hash on purpose: some
+        # rules are time-driven and must invalidate when they flip. The SPA
+        # polls every 8 s; on an idle board the browser's If-None-Match
+        # revalidation turns a ~1 MB transfer into a 304. no-cache (NOT
+        # no-store) = the browser keeps the body but revalidates every time.
+        etag_basis = {
+            **payload,
+            "columns": [
+                {
+                    "name": col["name"],
+                    "tasks": [
+                        {k: v for k, v in t.items() if k != "age"}
+                        for t in col["tasks"]
+                    ],
+                }
+                for col in payload["columns"]
+            ],
+        }
+        etag = 'W/"' + hashlib.sha256(
+            json.dumps(etag_basis, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()[:32] + '"'
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "private, no-cache"
+        if request.headers.get("if-none-match") == etag:
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+            )
+        payload["now"] = int(time.time())
+        return payload
     finally:
         conn.close()
 

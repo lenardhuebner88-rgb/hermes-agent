@@ -535,11 +535,13 @@ export function useHermesWorkers() {
 export function useBoard() {
   return usePolling<BoardResponse>(
     "kanban/board",
-    // card_diagnostics=summary drops the per-card structured diagnostics list
-    // (the bulk of the 8 s payload); /control only renders the warnings badge,
-    // and the drawer fetches detail via /tasks/:id. The kanban plugin dashboard
-    // keeps the default (full).
-    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary"), "kanban/board"),
+    // card_diagnostics=summary drops the per-card structured diagnostics list,
+    // card_body=none drops body+result (BoardTaskSchema strips both anyway —
+    // together they dominate the 8 s payload on real boards); the drawer
+    // fetches detail via /tasks/:id. The kanban plugin dashboard keeps the
+    // defaults (full). The server also sends an ETag, so an unchanged board
+    // revalidates as a 304 instead of re-transferring.
+    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"), "kanban/board"),
     8000,
   );
 }

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,80 @@ def test_board_card_diagnostics_summary_omits_detail(client, monkeypatch):
     summary = _card("/api/plugins/kanban/board?card_diagnostics=summary")
     assert "diagnostics" not in summary  # detail dropped …
     assert summary.get("warnings", {}).get("count") == 1  # … badge kept
+
+
+def test_board_card_body_none_omits_long_text(client):
+    """``card_body=none`` drops body+result per card (the /control poller's
+    schema strips both anyway — body dominates real-board payloads); the
+    default (``full``) keeps them for the kanban dashboard."""
+    task_id = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Trim me", "body": "a long body " * 50},
+    ).json()["task"]["id"]
+
+    def _card(url):
+        data = client.get(url).json()
+        for col in data["columns"]:
+            for c in col["tasks"]:
+                if c["id"] == task_id:
+                    return c
+        raise AssertionError(f"card {task_id} missing from {url}")
+
+    full = _card("/api/plugins/kanban/board")
+    assert full.get("body", "").startswith("a long body")
+    assert "result" in full
+
+    trimmed = _card("/api/plugins/kanban/board?card_body=none")
+    assert "body" not in trimmed
+    assert "result" not in trimmed
+    # Card identity + the fields the /control board renders survive.
+    assert trimmed["title"] == "Trim me"
+    assert "latest_summary" in trimmed
+    assert "root_id" in trimmed
+
+
+def test_board_etag_304_roundtrip(client):
+    """The board sends a weak ETag (computed without the per-second ``now``)
+    and answers an If-None-Match revalidation with 304 while the board is
+    unchanged; any mutation changes the ETag again."""
+    client.post("/api/plugins/kanban/tasks", json={"title": "etag probe"})
+
+    r1 = client.get("/api/plugins/kanban/board")
+    assert r1.status_code == 200
+    etag = r1.headers.get("etag")
+    assert etag and etag.startswith('W/"')
+    assert r1.headers.get("cache-control") == "private, no-cache"
+    assert "now" in r1.json()
+
+    # Unchanged board → 304, no body — even when the wall clock moved on
+    # (per-card "age" is derived from hashed timestamps and excluded from
+    # the ETag basis; otherwise the tag would change every second).
+    r2 = client.get(
+        "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+    )
+    assert r2.status_code == 304
+    assert r2.headers.get("etag") == etag
+
+    with unittest.mock.patch.object(
+        kb, "task_age",
+        return_value={
+            "created_age_seconds": 99999,
+            "started_age_seconds": None,
+            "time_to_complete_seconds": None,
+        },
+    ):
+        r2b = client.get(
+            "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+        )
+    assert r2b.status_code == 304
+
+    # A mutation (new task) invalidates the tag.
+    client.post("/api/plugins/kanban/tasks", json={"title": "etag buster"})
+    r3 = client.get(
+        "/api/plugins/kanban/board", headers={"If-None-Match": etag},
+    )
+    assert r3.status_code == 200
+    assert r3.headers.get("etag") != etag
 
 
 def test_create_task_park_lands_in_scheduled(client):
