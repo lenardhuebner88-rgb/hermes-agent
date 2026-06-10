@@ -11301,6 +11301,36 @@ def close_epic(conn: sqlite3.Connection, epic_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def set_task_epic(
+    conn: sqlite3.Connection, task_id: str, epic_id: Optional[str],
+) -> bool:
+    """Attach a task to an epic, or detach it (``epic_id=None``).
+
+    Returns False if the task doesn't exist. Attaching validates the target:
+    the epic must exist and be ``open`` (ValueError otherwise) — detaching is
+    always allowed, even from a since-closed epic.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT epic_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if epic_id is not None:
+            epic = conn.execute(
+                "SELECT status FROM epics WHERE id = ?", (epic_id,)
+            ).fetchone()
+            if epic is None:
+                raise ValueError(f"epic {epic_id} not found")
+            if epic["status"] != "open":
+                raise ValueError(f"epic {epic_id} is closed; reopen or pick an open epic")
+        conn.execute(
+            "UPDATE tasks SET epic_id = ? WHERE id = ?", (epic_id, task_id)
+        )
+        _append_event(conn, task_id, "epic_changed", {"epic_id": epic_id})
+        return True
+
+
 def _to_epoch(val) -> Optional[int]:
     """Normalise a timestamp to unix epoch seconds.
 

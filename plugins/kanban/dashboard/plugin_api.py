@@ -1579,6 +1579,9 @@ class UpdateTaskBody(BaseModel):
     # complete --summary ... --metadata ...``.
     summary: Optional[FreeText] = None
     metadata: Optional[dict] = None
+    # Epic membership: explicit null detaches; absent leaves it untouched
+    # (distinguished via model_fields_set in the handler).
+    epic_id: Optional[ShortText] = None
 
 
 @router.patch("/tasks/{task_id}")
@@ -1597,6 +1600,15 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     conn, task_id, payload.assignee or None,
                 )
             except RuntimeError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+            if not ok:
+                raise HTTPException(status_code=404, detail="task not found")
+
+        # --- epic membership -----------------------------------------------
+        if "epic_id" in payload.model_fields_set:
+            try:
+                ok = kanban_db.set_task_epic(conn, task_id, payload.epic_id or None)
+            except ValueError as e:
                 raise HTTPException(status_code=409, detail=str(e))
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
@@ -2230,6 +2242,45 @@ def get_epic_endpoint(
         if epic is None:
             raise HTTPException(status_code=404, detail=f"epic {epic_id} not found")
         return {"epic": epic}
+    finally:
+        conn.close()
+
+
+class CreateEpicBody(BaseModel):
+    title: ShortText
+    body: Optional[FreeText] = None
+
+
+@router.post("/epics")
+def create_epic_endpoint(
+    payload: CreateEpicBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Create a durable epic from the board (UI parity with ``kanban epic create``)."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            eid = kanban_db.create_epic(conn, title=payload.title, body=payload.body)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"epic": kanban_db.get_epic(conn, eid)}
+    finally:
+        conn.close()
+
+
+@router.post("/epics/{epic_id}/close")
+def close_epic_endpoint(
+    epic_id: str,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Close an epic (organisational act — member tasks stay untouched)."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if not kanban_db.close_epic(conn, epic_id):
+            raise HTTPException(status_code=404, detail=f"epic {epic_id} not found")
+        return {"epic": kanban_db.get_epic(conn, epic_id)}
     finally:
         conn.close()
 

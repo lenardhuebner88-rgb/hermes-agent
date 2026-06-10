@@ -3611,3 +3611,74 @@ def test_epics_list_and_show_with_rollup(client):
     assert [x["id"] for x in epic["tasks"]] == [t]
 
     assert client.get("/api/plugins/kanban/epics/e_missing").status_code == 404
+
+
+def test_epic_create_endpoint(client):
+    r = client.post("/api/plugins/kanban/epics", json={"title": "Board epic"})
+    assert r.status_code == 200
+    epic = r.json()["epic"]
+    assert epic["id"].startswith("e_")
+    assert epic["title"] == "Board epic"
+    assert epic["status"] == "open"
+    assert epic["task_count"] == 0
+    # Body is optional but passed through.
+    r2 = client.post(
+        "/api/plugins/kanban/epics",
+        json={"title": "With body", "body": "longer intent"},
+    )
+    assert r2.json()["epic"]["body"] == "longer intent"
+    # Empty title → 400, not a 500.
+    assert client.post("/api/plugins/kanban/epics", json={"title": "  "}).status_code == 400
+
+
+def test_epic_close_endpoint(client):
+    eid = client.post(
+        "/api/plugins/kanban/epics", json={"title": "to close"},
+    ).json()["epic"]["id"]
+    r = client.post(f"/api/plugins/kanban/epics/{eid}/close")
+    assert r.status_code == 200
+    assert r.json()["epic"]["status"] == "closed"
+    assert client.post("/api/plugins/kanban/epics/e_missing/close").status_code == 404
+
+
+def test_patch_task_epic_id_assign_and_detach(client):
+    eid = client.post(
+        "/api/plugins/kanban/epics", json={"title": "target"},
+    ).json()["epic"]["id"]
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="chain root", assignee="coder")
+
+    # Attach.
+    r = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": eid})
+    assert r.status_code == 200
+    assert r.json()["task"]["epic_id"] == eid
+    # Rollup sees the member.
+    assert client.get(
+        f"/api/plugins/kanban/epics/{eid}",
+    ).json()["epic"]["task_count"] == 1
+
+    # Absent epic_id leaves membership untouched (no accidental detach).
+    r2 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"priority": 1})
+    assert r2.json()["task"]["epic_id"] == eid
+
+    # Explicit null detaches.
+    r3 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": None})
+    assert r3.status_code == 200
+    assert r3.json()["task"]["epic_id"] is None
+
+
+def test_patch_task_epic_id_validates_target(client):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="task", assignee="coder")
+    # Unknown epic → 409 with the db-layer message.
+    r = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": "e_ghost"})
+    assert r.status_code == 409
+    assert "not found" in r.json()["detail"]
+    # Closed epic → 409.
+    eid = client.post(
+        "/api/plugins/kanban/epics", json={"title": "closed"},
+    ).json()["epic"]["id"]
+    client.post(f"/api/plugins/kanban/epics/{eid}/close")
+    r2 = client.patch(f"/api/plugins/kanban/tasks/{t}", json={"epic_id": eid})
+    assert r2.status_code == 409
+    assert "closed" in r2.json()["detail"]

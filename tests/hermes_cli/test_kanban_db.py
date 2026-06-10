@@ -6211,6 +6211,47 @@ def test_e3_get_missing_epic_returns_none(kanban_home):
         assert kb.get_epic(conn, "e_nope") is None
 
 
+def test_e3_set_task_epic_attach_and_detach(kanban_home):
+    with kb.connect() as conn:
+        eid = kb.create_epic(conn, title="epic")
+        t = kb.create_task(conn, title="late member", assignee="coder")
+        assert kb.set_task_epic(conn, t, eid) is True
+        assert kb.get_task(conn, t).epic_id == eid
+        # Detach (explicit None) always works.
+        assert kb.set_task_epic(conn, t, None) is True
+        assert kb.get_task(conn, t).epic_id is None
+        # Both moves leave an audit event.
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+                (t,),
+            )
+        ]
+        assert kinds.count("epic_changed") == 2
+
+
+def test_e3_set_task_epic_validates_target(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="member", assignee="coder")
+        # Unknown task → False, no crash.
+        assert kb.set_task_epic(conn, "t_ghost", None) is False
+        # Unknown epic → ValueError.
+        with pytest.raises(ValueError, match="not found"):
+            kb.set_task_epic(conn, t, "e_ghost")
+        # Closed epic → ValueError on attach …
+        eid = kb.create_epic(conn, title="done epic")
+        kb.close_epic(conn, eid)
+        with pytest.raises(ValueError, match="closed"):
+            kb.set_task_epic(conn, t, eid)
+        assert kb.get_task(conn, t).epic_id is None
+        # … but detaching from a since-closed epic is allowed.
+        eid2 = kb.create_epic(conn, title="open then closed")
+        kb.set_task_epic(conn, t, eid2)
+        kb.close_epic(conn, eid2)
+        assert kb.set_task_epic(conn, t, None) is True
+        assert kb.get_task(conn, t).epic_id is None
+
+
 # ---------------------------------------------------------------------------
 # C1 (N-C1): daily budget gate in dispatch preflight (off by default)
 # ---------------------------------------------------------------------------
