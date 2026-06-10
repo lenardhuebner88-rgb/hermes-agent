@@ -317,6 +317,52 @@ def _build_roster() -> tuple[list[dict], set[str]]:
     return roster, valid
 
 
+def _format_pct(value: float) -> str:
+    return f"{int(round(value))}%"
+
+
+def _format_compact_count(value: int) -> str:
+    if abs(value) < 1000:
+        return str(value)
+    compact = value / 1000.0
+    text = f"{compact:.1f}".rstrip("0").rstrip(".")
+    return f"{text}k"
+
+
+def _format_profile_outcome_stats(stats: dict) -> str:
+    parts = [
+        f"done {_format_pct(float(stats['done_pct']))}",
+        f"blocked {_format_pct(float(stats['blocked_pct']))}",
+        f"timeout {_format_pct(float(stats['timeout_pct']))}",
+    ]
+    avg_tokens = stats.get("avg_tokens")
+    if avg_tokens is not None:
+        parts.append(f"Ø {_format_compact_count(int(avg_tokens))} tok")
+    avg_runtime = stats.get("avg_runtime_s")
+    if avg_runtime is not None:
+        parts.append(f"Ø {int(avg_runtime)}s")
+    approved_pct = stats.get("approved_pct")
+    if approved_pct is not None:
+        parts.append(f"approved {_format_pct(float(approved_pct))}")
+    return " · ".join(parts)
+
+
+def _enrich_roster_with_outcome_stats(conn, roster: list[dict]) -> None:
+    if not roster:
+        return
+    try:
+        stats_by_profile = kb.profile_outcome_stats(conn)
+    except Exception as exc:
+        logger.debug("decompose: profile outcome stats unavailable: %s", exc)
+        return
+    if not stats_by_profile:
+        return
+    for entry in roster:
+        stats = stats_by_profile.get(entry["name"])
+        if stats:
+            entry["stats"] = stats
+
+
 def _format_roster(roster: list[dict]) -> str:
     if not roster:
         return "  (no profiles installed — decomposer cannot route work)"
@@ -324,6 +370,9 @@ def _format_roster(roster: list[dict]) -> str:
     for entry in roster:
         tag = "" if entry["has_description"] else " ⚠ undescribed"
         lines.append(f"  - {entry['name']}{tag}: {entry['description']}")
+        stats = entry.get("stats")
+        if stats:
+            lines.append(f"    stats: {_format_profile_outcome_stats(stats)}")
     return "\n".join(lines)
 
 
@@ -977,6 +1026,11 @@ def decompose_task(
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     auto_promote = bool(kanban_cfg.get("auto_promote_children", True))
     roster, valid_names = _build_roster()
+    try:
+        with kb.connect_closing() as conn:
+            _enrich_roster_with_outcome_stats(conn, roster)
+    except Exception as exc:
+        logger.debug("decompose: profile outcome stats connection failed: %s", exc)
 
     try:
         from agent.auxiliary_client import (  # type: ignore
@@ -1364,6 +1418,11 @@ def plan_and_document(
     orchestrator = _resolve_orchestrator_profile(cfg)
     default_assignee = _resolve_default_assignee(cfg)
     roster, valid_names = _build_roster()
+    try:
+        with kb.connect_closing() as conn:
+            _enrich_roster_with_outcome_stats(conn, roster)
+    except Exception as exc:
+        logger.debug("flow-plan: profile outcome stats connection failed: %s", exc)
 
     try:
         from agent.auxiliary_client import (  # type: ignore

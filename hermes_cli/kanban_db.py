@@ -10237,6 +10237,95 @@ def task_runs_cost_usd_sum(
         return None
 
 
+def profile_outcome_stats(
+    conn: sqlite3.Connection, *, last_n: int = 50
+) -> dict[str, dict]:
+    """Return recent per-profile outcome aggregates for decomposer context.
+
+    Read-only and fail-soft: older DBs may not have D1/B2/K5a columns yet, and
+    the decomposer must keep working with the exact old roster when that
+    happens.
+    """
+    window = int(last_n)
+    if window <= 0:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    profile,
+                    outcome,
+                    verdict,
+                    CASE
+                        WHEN input_tokens IS NULL AND output_tokens IS NULL
+                            THEN NULL
+                        ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                    END AS token_sum,
+                    CASE
+                        WHEN started_at IS NOT NULL AND ended_at IS NOT NULL
+                            THEN ended_at - started_at
+                        ELSE NULL
+                    END AS runtime_s,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY profile
+                        ORDER BY started_at DESC, id DESC
+                    ) AS rn
+                FROM task_runs
+                WHERE profile IS NOT NULL AND outcome IS NOT NULL
+            ),
+            windowed AS (
+                SELECT * FROM ranked WHERE rn <= ?
+            )
+            SELECT
+                profile,
+                COUNT(*) AS runs,
+                AVG(CASE WHEN outcome = 'completed' THEN 1.0 ELSE 0.0 END) * 100.0
+                    AS done_pct,
+                AVG(CASE WHEN outcome = 'blocked' THEN 1.0 ELSE 0.0 END) * 100.0
+                    AS blocked_pct,
+                AVG(CASE WHEN outcome = 'timed_out' THEN 1.0 ELSE 0.0 END) * 100.0
+                    AS timeout_pct,
+                AVG(token_sum) AS avg_tokens,
+                AVG(runtime_s) AS avg_runtime_s,
+                CASE
+                    WHEN SUM(CASE WHEN verdict IS NOT NULL THEN 1 ELSE 0 END) = 0
+                        THEN NULL
+                    ELSE
+                        SUM(CASE WHEN verdict = 'APPROVED' THEN 1.0 ELSE 0.0 END)
+                        * 100.0
+                        / SUM(CASE WHEN verdict IS NOT NULL THEN 1.0 ELSE 0.0 END)
+                END AS approved_pct
+            FROM windowed
+            GROUP BY profile
+            """,
+            (window,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+
+    stats: dict[str, dict] = {}
+    for row in rows:
+        avg_tokens = row["avg_tokens"]
+        avg_runtime = row["avg_runtime_s"]
+        stats[row["profile"]] = {
+            "runs": int(row["runs"]),
+            "done_pct": float(row["done_pct"] or 0.0),
+            "blocked_pct": float(row["blocked_pct"] or 0.0),
+            "timeout_pct": float(row["timeout_pct"] or 0.0),
+            "avg_tokens": (
+                int(round(float(avg_tokens))) if avg_tokens is not None else None
+            ),
+            "avg_runtime_s": (
+                int(round(float(avg_runtime))) if avg_runtime is not None else None
+            ),
+            "approved_pct": (
+                float(row["approved_pct"]) if row["approved_pct"] is not None else None
+            ),
+        }
+    return stats
+
+
 def board_stats(conn: sqlite3.Connection) -> dict:
     """Per-status + per-assignee counts, plus the oldest ``ready`` age in
     seconds (the clearest staleness signal for a router or HUD).

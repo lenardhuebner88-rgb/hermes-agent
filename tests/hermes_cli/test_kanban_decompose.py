@@ -8,6 +8,7 @@ and the assignee-fallback logic.
 from __future__ import annotations
 
 import json as jsonlib
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -72,6 +73,76 @@ def _patch_list_profiles(names: list[str]):
         patch("hermes_cli.profiles.profile_exists", side_effect=lambda x: x in names),
         patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0] if names else "default"),
     ]
+
+
+def test_empty_history_keeps_roster_byte_identical(kanban_home):
+    patches = _patch_list_profiles(["coder", "researcher"])
+    for p in patches:
+        p.start()
+    try:
+        roster, valid = decomp._build_roster()
+        with kb.connect() as conn:
+            decomp._enrich_roster_with_outcome_stats(conn, roster)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert valid == {"coder", "researcher"}
+    assert decomp._format_roster(roster) == (
+        "  - coder: desc for coder\n"
+        "  - researcher: desc for researcher"
+    )
+
+
+def test_profile_stats_db_error_keeps_roster_byte_identical(kanban_home):
+    patches = _patch_list_profiles(["coder", "researcher"])
+    for p in patches:
+        p.start()
+    try:
+        roster, _valid = decomp._build_roster()
+        conn = sqlite3.connect(":memory:")
+        try:
+            assert kb.profile_outcome_stats(conn) == {}
+            decomp._enrich_roster_with_outcome_stats(conn, roster)
+        finally:
+            conn.close()
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert decomp._format_roster(roster) == (
+        "  - coder: desc for coder\n"
+        "  - researcher: desc for researcher"
+    )
+
+
+def test_roster_with_history_adds_stats_only_for_seen_profile(kanban_home):
+    with kb.connect() as conn:
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
+            "outcome, input_tokens, output_tokens, verdict) "
+            "VALUES ('t_seen', 'coder', 'done', 1700000000, 1700000290, "
+            "'completed', 40000, 1000, 'APPROVED')"
+        )
+        conn.commit()
+
+    patches = _patch_list_profiles(["coder", "researcher"])
+    for p in patches:
+        p.start()
+    try:
+        roster, _valid = decomp._build_roster()
+        with kb.connect() as conn:
+            decomp._enrich_roster_with_outcome_stats(conn, roster)
+    finally:
+        for p in patches:
+            p.stop()
+
+    rendered = decomp._format_roster(roster)
+    assert rendered == (
+        "  - coder: desc for coder\n"
+        "    stats: done 100% · blocked 0% · timeout 0% · Ø 41k tok · Ø 290s · approved 100%\n"
+        "  - researcher: desc for researcher"
+    )
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):

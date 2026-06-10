@@ -179,6 +179,121 @@ def test_k5a_end_run_leaves_cost_null_without_usage(kanban_home):
         assert kb.task_runs_cost_usd_sum(conn, task_id=tid) is None
 
 
+def _insert_profile_outcome_run(
+    conn,
+    *,
+    profile: str,
+    outcome: str,
+    started_at: int,
+    runtime_s: int = 10,
+    input_tokens: int | None = 100,
+    output_tokens: int | None = 0,
+    verdict: str | None = None,
+):
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
+        "outcome, input_tokens, output_tokens, verdict) "
+        "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)",
+        (
+            f"t_{profile}_{started_at}_{outcome}",
+            profile,
+            started_at,
+            started_at + runtime_s,
+            outcome,
+            input_tokens,
+            output_tokens,
+            verdict,
+        ),
+    )
+
+
+def test_profile_outcome_stats_fails_soft_when_task_runs_absent():
+    conn = sqlite3.connect(":memory:")
+    assert kb.profile_outcome_stats(conn) == {}
+
+
+def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
+    with kb.connect() as conn:
+        base = 1_700_000_000
+        for i in range(8):
+            _insert_profile_outcome_run(
+                conn,
+                profile="coder",
+                outcome="completed",
+                started_at=base + i,
+                runtime_s=20,
+                input_tokens=70,
+                output_tokens=30,
+                verdict="APPROVED" if i < 3 else None,
+            )
+        _insert_profile_outcome_run(
+            conn,
+            profile="coder",
+            outcome="blocked",
+            started_at=base + 8,
+            runtime_s=20,
+            input_tokens=70,
+            output_tokens=30,
+            verdict="REQUEST_CHANGES",
+        )
+        _insert_profile_outcome_run(
+            conn,
+            profile="coder",
+            outcome="timed_out",
+            started_at=base + 9,
+            runtime_s=20,
+            input_tokens=70,
+            output_tokens=30,
+        )
+        conn.commit()
+
+        stats = kb.profile_outcome_stats(conn)["coder"]
+
+    assert stats["runs"] == 10
+    assert stats["done_pct"] == pytest.approx(80.0)
+    assert stats["blocked_pct"] == pytest.approx(10.0)
+    assert stats["timeout_pct"] == pytest.approx(10.0)
+    assert stats["avg_tokens"] == 100
+    assert stats["avg_runtime_s"] == 20
+    assert stats["approved_pct"] == pytest.approx(75.0)
+
+
+def test_profile_outcome_stats_last_n_is_per_profile_window(kanban_home):
+    with kb.connect() as conn:
+        base = 1_700_001_000
+        for i in range(2):
+            _insert_profile_outcome_run(
+                conn,
+                profile="coder",
+                outcome="completed",
+                started_at=base + i,
+            )
+        for i, outcome in enumerate(["blocked", "timed_out", "timed_out"], start=2):
+            _insert_profile_outcome_run(
+                conn,
+                profile="coder",
+                outcome=outcome,
+                started_at=base + i,
+            )
+        for i in range(3):
+            _insert_profile_outcome_run(
+                conn,
+                profile="researcher",
+                outcome="completed",
+                started_at=base + i,
+            )
+        conn.commit()
+
+        stats = kb.profile_outcome_stats(conn, last_n=3)
+
+    assert stats["coder"]["runs"] == 3
+    assert stats["coder"]["done_pct"] == pytest.approx(0.0)
+    assert stats["coder"]["blocked_pct"] == pytest.approx(100.0 / 3.0)
+    assert stats["coder"]["timeout_pct"] == pytest.approx(200.0 / 3.0)
+    assert stats["researcher"]["runs"] == 3
+    assert stats["researcher"]["done_pct"] == pytest.approx(100.0)
+
+
 def _write_state_session(
     home, session_id, *,
     input_tokens=None, output_tokens=None,
