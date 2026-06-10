@@ -66,6 +66,11 @@ export const WorkerSchema = z.object({
   run_outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
   block_reason: z.string().nullable().optional(),
   inspect: RunInspectSchema.nullable().optional(),
+  // Phase A (Fortschritt): Tätigkeits-Note + ehrliche ETA (p50/p90).
+  last_heartbeat_note: z.string().nullable().catch(null),
+  last_heartbeat_note_at: z.coerce.number().nullable().catch(null),
+  eta_p50_seconds: z.coerce.number().nullable().catch(null),
+  eta_p90_seconds: z.coerce.number().nullable().catch(null),
 });
 
 export const WorkersResponseSchema = z.object({

@@ -11244,6 +11244,43 @@ def _issue_signature(text: Optional[str]) -> str:
     return sig.strip()
 
 
+# Phase A (Programm 3): ehrliche ETA — Dauer-Perzentile abgeschlossener Runs
+# pro Profil. Dünne Historie (< min_n) liefert None, das Frontend zeigt "—".
+def run_duration_percentiles(
+    conn: sqlite3.Connection, profiles: list[str], *,
+    days: int = 30, min_n: int = 3,
+) -> dict[str, dict]:
+    """p50/p90 der Laufzeiten (ended_at-started_at) aller completed-Runs der
+    letzten *days* Tage, je Profil aus *profiles*. Eine Aggregat-Query."""
+    out: dict[str, dict] = {}
+    wanted = sorted({(p or "").strip() for p in profiles if (p or "").strip()})
+    if not wanted:
+        return out
+    placeholders = ",".join("?" for _ in wanted)
+    window_start = int(time.time()) - max(1, int(days)) * 86400
+    durations: dict[str, list[int]] = {p: [] for p in wanted}
+    for row in conn.execute(
+        f"SELECT profile, started_at, ended_at FROM task_runs "
+        f"WHERE outcome = 'completed' AND ended_at IS NOT NULL "
+        f"  AND profile IN ({placeholders}) AND started_at >= ?",
+        (*wanted, window_start),
+    ).fetchall():
+        delta = int(row["ended_at"]) - int(row["started_at"])
+        if delta >= 0:
+            durations[(row["profile"] or "").strip()].append(delta)
+    for profile, vals in durations.items():
+        vals.sort()
+        if len(vals) < max(1, int(min_n)):
+            out[profile] = {"p50": None, "p90": None, "n": len(vals)}
+        else:
+            out[profile] = {
+                "p50": _nearest_rank_percentile(vals, 50),
+                "p90": _nearest_rank_percentile(vals, 90),
+                "n": len(vals),
+            }
+    return out
+
+
 def runs_issues(
     conn: sqlite3.Connection, *, days: int = 30, limit: int = 50,
 ) -> dict:

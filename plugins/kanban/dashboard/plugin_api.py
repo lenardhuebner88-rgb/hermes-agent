@@ -2166,8 +2166,35 @@ def list_active_workers(
             ORDER BY r.started_at ASC
             """,
         ).fetchall()
-        workers = [
-            {
+        # Phase A (progress): latest heartbeat note per run (one grouped
+        # query, no N+1) + duration percentiles per profile for the honest
+        # ETA ("üblich ~8 min · läuft 5 min" instead of a fake percent).
+        notes: dict[int, dict] = {}
+        run_ids = [int(row["run_id"]) for row in rows]
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            # MAX(id) statt MAX(created_at): Heartbeats derselben Sekunde
+            # (Tool-Wechsel) brauchen einen deterministischen Tiebreaker.
+            for n in conn.execute(
+                f"SELECT e.run_id, json_extract(e.payload, '$.note') AS note, "
+                f"       e.created_at AS at "
+                f"FROM task_events e JOIN ("
+                f"  SELECT MAX(id) AS id FROM task_events "
+                f"  WHERE kind = 'heartbeat' AND run_id IN ({placeholders}) "
+                f"    AND json_extract(payload, '$.note') IS NOT NULL "
+                f"  GROUP BY run_id"
+                f") m ON m.id = e.id",
+                run_ids,
+            ).fetchall():
+                notes[int(n["run_id"])] = {"note": n["note"], "at": n["at"]}
+        eta = kanban_db.run_duration_percentiles(
+            conn, [row["profile"] for row in rows],
+        )
+        workers = []
+        for row in rows:
+            note = notes.get(int(row["run_id"]), {})
+            prof_eta = eta.get((row["profile"] or "").strip(), {})
+            workers.append({
                 "run_id": row["run_id"],
                 "task_id": row["task_id"],
                 "task_title": row["task_title"],
@@ -2186,9 +2213,11 @@ def list_active_workers(
                 "run_status": row["run_status"],
                 "run_outcome": row["run_outcome"],
                 "block_reason": row["block_reason"],
-            }
-            for row in rows
-        ]
+                "last_heartbeat_note": note.get("note"),
+                "last_heartbeat_note_at": note.get("at"),
+                "eta_p50_seconds": prof_eta.get("p50"),
+                "eta_p90_seconds": prof_eta.get("p90"),
+            })
         return {"workers": workers, "count": len(workers), "checked_at": int(time.time())}
     finally:
         conn.close()

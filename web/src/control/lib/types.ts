@@ -44,6 +44,12 @@ export interface Worker {
   run_outcome: RunOutcome | null;
   block_reason?: string | null;
   inspect?: RunInspect | null;
+  /** Phase A (Fortschritt): jüngste Heartbeat-Note („macht gerade: X"). */
+  last_heartbeat_note?: string | null;
+  last_heartbeat_note_at?: number | null;
+  /** Phase A: ehrliche ETA — p50/p90 abgeschlossener Runs des Profils. */
+  eta_p50_seconds?: number | null;
+  eta_p90_seconds?: number | null;
 }
 
 export interface WorkersResponse {
