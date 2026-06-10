@@ -6369,3 +6369,89 @@ def test_c1_budget_held_surfaces_in_decision_queue(
         kb.dispatch_once(conn, spawn_fn=lambda t, ws: None, daily_token_cap_per_profile=1000)
         result = kb.decision_queue(conn)
     assert "budget_held" in _kinds_for(ta, result)
+
+
+# ---------------------------------------------------------------------------
+# F5 (night-sprint): scores-Tabelle + Review-Verdicts als Eval-Baseline
+# ---------------------------------------------------------------------------
+
+
+def _insert_bare_run(conn, task_id, *, started_at, ended_at=None, verdict=None):
+    cur = conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, verdict) "
+        "VALUES (?, 'coder', 'done', ?, ?, ?)",
+        (task_id, started_at, ended_at, verdict),
+    )
+    return cur.lastrowid
+
+
+def test_set_run_verdict_records_binary_score(kanban_home):
+    """APPROVED→1.0 / REQUEST_CHANGES→0.0 landen automatisch in scores;
+    erneutes Verdict auf demselben Run erzeugt keine zweite Zeile."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="judged work")
+        with kb.write_txn(conn):
+            r_ok = _insert_bare_run(conn, t, started_at=1000, ended_at=1300)
+            r_bad = _insert_bare_run(conn, t, started_at=2000, ended_at=2300)
+            kb._set_run_verdict(conn, r_ok, "APPROVED")
+            kb._set_run_verdict(conn, r_bad, "REQUEST_CHANGES")
+            kb._set_run_verdict(conn, r_ok, "APPROVED")  # idempotent
+        rows = conn.execute(
+            "SELECT run_id, task_id, name, value, value_type, source "
+            "FROM scores ORDER BY run_id",
+        ).fetchall()
+    assert [(r["run_id"], r["value"]) for r in rows] == [(r_ok, 1.0), (r_bad, 0.0)]
+    for r in rows:
+        assert r["task_id"] == t
+        assert r["name"] == "review_verdict"
+        assert r["value_type"] == "binary"
+        assert r["source"] == "review_gate"
+
+
+def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
+    """Score-Spiegelung darf einen Abschluss nie brechen (Legacy-DB ohne
+    scores-Tabelle): Verdict bleibt gesetzt, kein Raise."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="legacy")
+        with kb.write_txn(conn):
+            r = _insert_bare_run(conn, t, started_at=1000)
+            conn.execute("DROP TABLE scores")
+            kb._set_run_verdict(conn, r, "APPROVED")
+        row = conn.execute(
+            "SELECT verdict FROM task_runs WHERE id = ?", (r,)
+        ).fetchone()
+    assert row["verdict"] == "APPROVED"
+
+
+def test_backfill_verdict_scores_idempotent_with_run_timestamps(kanban_home):
+    """Backfill spiegelt historische Verdicts mit Run-Endzeit als created_at,
+    überspringt verdictlose Runs und ist wiederholbar (0 beim 2. Lauf)."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="history")
+        with kb.write_txn(conn):
+            r1 = _insert_bare_run(conn, t, started_at=1000, ended_at=1500, verdict="APPROVED")
+            r2 = _insert_bare_run(conn, t, started_at=2000, ended_at=None, verdict="REQUEST_CHANGES")
+            _insert_bare_run(conn, t, started_at=3000, ended_at=3100)  # kein Verdict
+        assert kb.backfill_verdict_scores(conn) == 2
+        assert kb.backfill_verdict_scores(conn) == 0  # idempotent
+        rows = {
+            r["run_id"]: r for r in conn.execute(
+                "SELECT run_id, value, created_at FROM scores",
+            ).fetchall()
+        }
+    assert rows[r1]["value"] == 1.0 and rows[r1]["created_at"] == 1500
+    # ohne ended_at fällt der Zeitstempel ehrlich auf started_at zurück
+    assert rows[r2]["value"] == 0.0 and rows[r2]["created_at"] == 2000
+
+
+def test_scores_name_created_query_uses_index(kanban_home):
+    """Trend-Queries (name + Zeitfenster) laufen über idx_scores_name_created —
+    der Index ist die <200ms@10k-Garantie, deterministischer als Timing."""
+    with kb.connect() as conn:
+        plan = " ".join(
+            row[3] for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT AVG(value) FROM scores "
+                "WHERE name = 'review_verdict' AND created_at >= 0",
+            )
+        )
+    assert "idx_scores_name_created" in plan
