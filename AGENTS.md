@@ -280,6 +280,10 @@ hermes-agent/
 └── tests/                # Pytest suite (~17k tests across ~900 files as of May 2026)
 ```
 
+> Agent orientation map (how backend, /control dashboard, and the Kanban dispatch
+> lifecycle connect — with auto-generated tab/endpoint/schema/config tables): see
+> `ARCHITECTURE.md` (refresh: `python3 scripts/gen_architecture_doc.py`).
+
 **User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys only).
 **Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
 `gateway.log` when running the gateway. Profile-aware via `get_hermes_home()`.
