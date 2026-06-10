@@ -4563,6 +4563,80 @@ def _review_gate_should_apply(
     return assignee in cfg["code_roles"]
 
 
+# B1 (N-B1): machine-readable diff snapshot captured at the review handoff.
+# Feeds the verifier's caller-grep duty (A2) and any later regression check.
+# Strictly fail-soft: no git workspace, a vanished workspace, or any git error
+# yields an empty snapshot — never an exception that could block the handoff.
+_DIFF_SNAPSHOT_FILE_CAP = 200      # max changed_files entries
+_DIFF_SNAPSHOT_STAT_CAP = 4000     # max diff_stat characters
+
+
+def _capture_review_diff_snapshot(
+    conn: sqlite3.Connection, task_id: str
+) -> dict:
+    """Best-effort ``{changed_files, diff_stat}`` for *task_id*'s workspace.
+
+    Runs ``git status --porcelain`` + ``git diff --stat`` in the task's
+    ``workspace_path`` (the worktree/dir the worker just used) so the review
+    handoff records WHAT changed. Returns ``{}`` when there is no workspace, it
+    is not a git work tree, or git errors/times out. Never raises — the review
+    handoff must not depend on git being present or healthy.
+    """
+    try:
+        row = conn.execute(
+            "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row:
+        return {}
+    ws = row["workspace_path"]
+    if not ws or not os.path.isdir(ws):
+        return {}
+
+    def _git(*args: str) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", ws, *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout or ""
+
+    # Gate on "is this even a git work tree?" so a plain scratch dir → {}.
+    inside = _git("rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.strip() != "true":
+        return {}
+
+    snapshot: dict = {}
+    porcelain = _git("status", "--porcelain")
+    if porcelain:
+        changed: list = []
+        for line in porcelain.splitlines():
+            # Porcelain v1: "XY <path>" or "XY <old> -> <new>" for renames.
+            entry = line[3:] if len(line) > 3 else line.strip()
+            if " -> " in entry:
+                entry = entry.split(" -> ", 1)[1]
+            entry = entry.strip().strip('"')
+            if entry:
+                changed.append(entry)
+            if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
+                break
+        if changed:
+            snapshot["changed_files"] = changed
+    stat = _git("diff", "--stat")
+    if stat and stat.strip():
+        snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
+    return snapshot
+
+
 def _submit_for_review(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4581,6 +4655,15 @@ def _submit_for_review(
     and does NOT clean up the scratch workspace (the verifier inspects it; a
     REQUEST_CHANGES keeps it for the follow-up fix).
     """
+    # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
+    # must not run under the txn). Empty dict when no/non-git workspace.
+    diff_snapshot = _capture_review_diff_snapshot(conn, task_id)
+    if diff_snapshot:
+        run_metadata = {**metadata, **diff_snapshot} if isinstance(
+            metadata, dict
+        ) else dict(diff_snapshot)
+    else:
+        run_metadata = metadata
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -4619,14 +4702,14 @@ def _submit_for_review(
             conn, task_id,
             outcome="completed", status="review",
             summary=summary if summary is not None else result,
-            metadata=metadata,
+            metadata=run_metadata,
         )
-        if run_id is None and (summary or metadata or result):
+        if run_id is None and (summary or run_metadata or result):
             run_id = _synthesize_ended_run(
                 conn, task_id,
                 outcome="completed",
                 summary=summary if summary is not None else result,
-                metadata=metadata,
+                metadata=run_metadata,
             )
         ev_summary = (summary if summary is not None else result) or ""
         ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
@@ -4645,6 +4728,10 @@ def _submit_for_review(
                 ]
                 if cleaned_artifacts:
                     payload["artifacts"] = cleaned_artifacts
+        # B1: additive — surfaces the changed-files snapshot to the verifier
+        # context (A2) and the dashboard. Absent when no git workspace.
+        if diff_snapshot:
+            payload.update(diff_snapshot)
         _append_event(
             conn, task_id, "submitted_for_review", payload, run_id=run_id,
         )

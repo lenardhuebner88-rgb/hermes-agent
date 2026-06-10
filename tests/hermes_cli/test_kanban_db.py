@@ -5292,4 +5292,151 @@ def test_needs_revision_fix_task_is_deterministic_idempotent_and_keeps_source_bl
         assert events[0].payload["created"] is True
 
 
+# ---------------------------------------------------------------------------
+# B1 (N-B1): diff snapshot captured at the review handoff
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil  # noqa: E402
+
+_GIT = _shutil.which("git")
+requires_git = pytest.mark.skipif(_GIT is None, reason="git not installed")
+
+
+def _init_git_repo_with_changes(path: Path) -> None:
+    """Init a git repo at *path* with one committed file modified + one
+    untracked file, so ``status --porcelain`` and ``diff --stat`` both report."""
+    import subprocess
+
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    run("init")
+    (path / "tracked.py").write_text("original = 1\n", encoding="utf-8")
+    run("add", "tracked.py")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base")
+    # Modify the tracked file (→ diff --stat) and add an untracked one (→ porcelain).
+    (path / "tracked.py").write_text("original = 2\n", encoding="utf-8")
+    (path / "untracked.py").write_text("brand_new = True\n", encoding="utf-8")
+
+
+@requires_git
+def test_b1_capture_diff_snapshot_git_workspace(kanban_home, tmp_path):
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="b1", workspace_kind="dir", workspace_path=str(repo)
+        )
+        snap = kb._capture_review_diff_snapshot(conn, tid)
+    assert set(snap.get("changed_files", [])) == {"tracked.py", "untracked.py"}
+    assert "tracked.py" in snap.get("diff_stat", "")
+
+
+def test_b1_capture_diff_snapshot_non_git_scratch(kanban_home, tmp_path):
+    """A plain (non-git) workspace yields an empty snapshot, never a crash."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "file.txt").write_text("hi", encoding="utf-8")
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="b1", workspace_kind="dir", workspace_path=str(scratch)
+        )
+        snap = kb._capture_review_diff_snapshot(conn, tid)
+    assert snap == {}
+
+
+def test_b1_capture_diff_snapshot_missing_workspace(kanban_home, tmp_path):
+    """workspace_path pointing at a vanished directory → empty, no crash."""
+    gone = tmp_path / "gone"
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="b1", workspace_kind="dir", workspace_path=str(gone)
+        )
+        snap = kb._capture_review_diff_snapshot(conn, tid)
+    assert snap == {}
+
+
+def test_b1_capture_diff_snapshot_no_workspace(kanban_home):
+    """A scratch task with no workspace_path → empty snapshot."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="b1")
+        snap = kb._capture_review_diff_snapshot(conn, tid)
+    assert snap == {}
+
+
+@requires_git
+def test_b1_submit_for_review_event_and_metadata_carry_snapshot(
+    kanban_home, tmp_path
+):
+    import json
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="b1", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        ok = kb._submit_for_review(
+            conn, tid, result="done", summary="all done",
+            metadata={"artifacts": ["tracked.py"]}, verified_cards=[],
+            expected_run_id=None,
+        )
+        assert ok is True
+        ev = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == "submitted_for_review"
+        ]
+        assert len(ev) == 1
+        payload = ev[0].payload
+        # Additive snapshot keys present...
+        assert set(payload["changed_files"]) == {"tracked.py", "untracked.py"}
+        assert "tracked.py" in payload["diff_stat"]
+        # ...and the pre-existing keys are untouched (byte-identical contract).
+        assert payload["result_len"] == len("done")
+        assert payload["summary"] == "all done"
+        assert payload["artifacts"] == ["tracked.py"]
+        # Snapshot also rides the run metadata.
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        md = json.loads(row["metadata"])
+        assert set(md["changed_files"]) == {"tracked.py", "untracked.py"}
+
+
+def test_b1_submit_for_review_non_git_payload_has_no_snapshot_keys(
+    kanban_home, tmp_path
+):
+    """Regression guard: with no git workspace, the event payload carries NONE
+    of the new keys — the pre-B1 shape is preserved exactly."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="b1", assignee="coder",
+            workspace_kind="dir", workspace_path=str(scratch),
+            initial_status="running",
+        )
+        kb._submit_for_review(
+            conn, tid, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+        ev = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == "submitted_for_review"
+        ]
+        assert len(ev) == 1
+        assert "changed_files" not in ev[0].payload
+        assert "diff_stat" not in ev[0].payload
+
+
 
