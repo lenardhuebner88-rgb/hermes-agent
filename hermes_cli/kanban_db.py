@@ -10320,6 +10320,7 @@ def profile_outcome_stats(
                     AS timeout_pct,
                 AVG(token_sum) AS avg_tokens,
                 AVG(runtime_s) AS avg_runtime_s,
+                SUM(CASE WHEN verdict IS NOT NULL THEN 1 ELSE 0 END) AS verdict_n,
                 CASE
                     WHEN SUM(CASE WHEN verdict IS NOT NULL THEN 1 ELSE 0 END) = 0
                         THEN NULL
@@ -10351,6 +10352,7 @@ def profile_outcome_stats(
             "avg_runtime_s": (
                 int(round(float(avg_runtime))) if avg_runtime is not None else None
             ),
+            "verdict_n": int(row["verdict_n"] or 0),
             "approved_pct": (
                 float(row["approved_pct"]) if row["approved_pct"] is not None else None
             ),

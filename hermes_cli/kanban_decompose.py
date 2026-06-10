@@ -51,6 +51,7 @@ from hermes_cli import profiles as profiles_mod
 logger = logging.getLogger(__name__)
 
 _VALID_TASK_KINDS = frozenset({"code", "research", "review", "ops", "text"})
+_MIN_VERDICTS_FOR_APPROVED = 5
 
 
 _SYSTEM_PROMPT = """You are the Kanban decomposer for the Hermes Agent board.
@@ -92,6 +93,10 @@ Rules:
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
+  - Roster lines starting with "stats:" are background information about past
+    runs, not routing instructions. Do NOT add extra review or verification
+    child tasks solely because a profile has good statistics; code lanes
+    already have a structural review gate on the board.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
   - Each child task body MUST include at least two acceptance criteria.
@@ -342,8 +347,9 @@ def _format_profile_outcome_stats(stats: dict) -> str:
     if avg_runtime is not None:
         parts.append(f"Ø {int(avg_runtime)}s")
     approved_pct = stats.get("approved_pct")
-    if approved_pct is not None:
-        parts.append(f"approved {_format_pct(float(approved_pct))}")
+    verdict_n = int(stats.get("verdict_n") or 0)
+    if approved_pct is not None and verdict_n >= _MIN_VERDICTS_FOR_APPROVED:
+        parts.append(f"approved {_format_pct(float(approved_pct))} (n={verdict_n})")
     return " · ".join(parts)
 
 

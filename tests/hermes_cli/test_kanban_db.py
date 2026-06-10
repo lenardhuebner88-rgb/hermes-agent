@@ -255,6 +255,7 @@ def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
     assert stats["timeout_pct"] == pytest.approx(10.0)
     assert stats["avg_tokens"] == 100
     assert stats["avg_runtime_s"] == 20
+    assert stats["verdict_n"] == 4
     assert stats["approved_pct"] == pytest.approx(75.0)
 
 

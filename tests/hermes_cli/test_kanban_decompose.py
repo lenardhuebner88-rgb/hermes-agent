@@ -140,9 +140,35 @@ def test_roster_with_history_adds_stats_only_for_seen_profile(kanban_home):
     rendered = decomp._format_roster(roster)
     assert rendered == (
         "  - coder: desc for coder\n"
-        "    stats: done 100% · blocked 0% · timeout 0% · Ø 41k tok · Ø 290s · approved 100%\n"
+        "    stats: done 100% · blocked 0% · timeout 0% · Ø 41k tok · Ø 290s\n"
         "  - researcher: desc for researcher"
     )
+
+
+def test_profile_stats_suppress_approved_until_min_verdicts():
+    rendered = decomp._format_profile_outcome_stats({
+        "done_pct": 100.0,
+        "blocked_pct": 0.0,
+        "timeout_pct": 0.0,
+        "avg_tokens": 41000,
+        "avg_runtime_s": 290,
+        "approved_pct": 100.0,
+        "verdict_n": 4,
+    })
+
+    assert rendered == "done 100% · blocked 0% · timeout 0% · Ø 41k tok · Ø 290s"
+
+
+def test_profile_stats_show_approved_with_sample_size_after_min_verdicts():
+    rendered = decomp._format_profile_outcome_stats({
+        "done_pct": 80.0,
+        "blocked_pct": 10.0,
+        "timeout_pct": 10.0,
+        "approved_pct": 92.0,
+        "verdict_n": 12,
+    })
+
+    assert rendered == "done 80% · blocked 10% · timeout 10% · approved 92% (n=12)"
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):
@@ -529,6 +555,14 @@ def test_decompose_prompt_documents_optional_kind():
     assert '"kind"' in prompt
     assert "code|research|review|ops|text" in prompt
     assert "null if unsure" in prompt
+
+
+def test_decompose_prompt_frames_roster_stats_as_background():
+    prompt = decomp._SYSTEM_PROMPT
+    assert "stats:" in prompt
+    assert "background information about past" in prompt
+    assert "not routing instructions" in prompt
+    assert "structural review gate" in prompt
 
 
 def test_worker_scope_contract_validator_rejects_broad_allowed_tools():
