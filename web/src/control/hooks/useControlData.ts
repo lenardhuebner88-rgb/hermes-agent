@@ -17,6 +17,7 @@ import {
   RunSummaryResponseSchema,
   ReliabilityResponseSchema,
   RunsDailyResponseSchema,
+  RunsCostsResponseSchema,
   DecisionQueueResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
@@ -29,7 +30,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -992,6 +993,20 @@ export function useHermesRunsDaily() {
       RunsDailyResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/daily?days=30"),
       "runs/daily",
+    ),
+    60000,
+  );
+}
+
+// F4 (Statistik): Kosten heute/7 Tage + Top-Profile — gleiche langsame
+// Poll-Kadenz wie die übrigen Aggregate.
+export function useHermesRunsCosts() {
+  return usePolling<RunsCostsResponse>(
+    "runs/costs",
+    async () => parseOrThrow(
+      RunsCostsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/costs?days=7"),
+      "runs/costs",
     ),
     60000,
   );

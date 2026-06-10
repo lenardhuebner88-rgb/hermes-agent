@@ -797,6 +797,30 @@ export const RunsDailyResponseSchema = z.object({
 export type RunsDailyPoint = z.infer<typeof RunsDailyPointSchema>;
 export type RunsDailyResponse = z.infer<typeof RunsDailyResponseSchema>;
 
+// F4 (Statistik): Kosten heute/Fenster + Top-Profile (vom Backend nach Burn
+// sortiert). cost_usd = echte $ (Subscription-Lanes ehrliche 0, K17),
+// cost_usd_equivalent = API-Äquivalent aus der Run-Metadata — getrennt halten.
+const CostBucketSchema = z.object({
+  runs: z.coerce.number().catch(0),
+  cost_usd: nullableNumber,
+  cost_usd_equivalent: nullableNumber,
+  input_tokens: nullableNumber,
+  output_tokens: nullableNumber,
+});
+const CostProfileRowSchema = CostBucketSchema.extend({
+  profile: z.string().catch("unbekannt"),
+});
+export const RunsCostsResponseSchema = z.object({
+  days: z.coerce.number().catch(7),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  today: CostBucketSchema,
+  window: CostBucketSchema,
+  profiles: z.array(CostProfileRowSchema).catch([]),
+});
+export type CostBucket = z.infer<typeof CostBucketSchema>;
+export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
+export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

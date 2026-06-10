@@ -15,10 +15,11 @@ import { profileLabel } from "../lib/tones";
 import {
   useEpics,
   useHermesReliability,
+  useHermesRunsCosts,
   useHermesRunsDaily,
   useHermesRunSummary,
 } from "../hooks/useControlData";
-import type { Epic, ReliabilityProfile, RunsDailyPoint } from "../lib/schemas";
+import type { CostBucket, Epic, ReliabilityProfile, RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
 import { SkeletonCard } from "../components/primitives";
@@ -29,6 +30,13 @@ import { DayBars, RateBar, Sparkline, type SeriesPoint } from "../components/cha
 const fmtUsd = (v: number) => `$ ${v.toFixed(2)}`;
 const fmtPct = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)} %`);
 const dayLabel = (iso: string) => iso.slice(5); // MM-DD reicht im Tooltip
+
+// F4: echte $ zuerst, das Subscription-API-Äquivalent klar als ≈ daneben —
+// nie addieren (ehrliche $0 der Max-Abo-Lanes bleiben sichtbar ehrlich).
+const fmtCostPair = (b: CostBucket) => {
+  const real = fmtUsd(b.cost_usd ?? 0);
+  return b.cost_usd_equivalent != null ? `${real} · ≈ ${fmtUsd(b.cost_usd_equivalent)}` : real;
+};
 
 function points(series: RunsDailyPoint[], pick: (p: RunsDailyPoint) => number | null): SeriesPoint[] {
   return series.map((p) => ({ label: dayLabel(p.date), value: pick(p) ?? 0 }));
@@ -64,6 +72,39 @@ function EpicRows({ epics }: { epics: Epic[] }) {
         );
       })}
     </ul>
+  );
+}
+
+// F4: Kosten heute / Fenster + Top-Profile nach Kosten (Backend sortiert nach
+// Burn = $ + Äquivalent). Exportiert für den Render-Test.
+export function CostBreakdownPanel({ data }: { data: RunsCostsResponse | null }) {
+  if (!data) return <SkeletonCard rows={3} />;
+  const top = data.profiles.slice(0, 6);
+  return (
+    <FleetPanel eyebrow={de.stats.topProfiles} meta={de.stats.topProfilesHint}>
+      <div className="grid grid-cols-2 gap-2">
+        <FleetPod label={de.stats.costToday} value={fmtCostPair(data.today)} />
+        <FleetPod label={de.stats.costWindow(data.days)} value={fmtCostPair(data.window)} />
+      </div>
+      {top.length ? (
+        <ul className="mt-3 space-y-1.5">
+          {top.map((p) => {
+            const tokens = (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
+            return (
+              <li key={p.profile} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2.5 py-2">
+                <span className="min-w-0 flex-1 basis-32 truncate text-[0.84rem] font-medium text-white">{profileLabel[p.profile] ?? p.profile}</span>
+                <span className="hc-mono w-16 shrink-0 text-[0.72rem] hc-dim">{de.stats.costRuns(p.runs)}</span>
+                <span className="hc-mono w-16 shrink-0 text-[0.72rem] text-white">{p.cost_usd != null ? fmtUsd(p.cost_usd) : "—"}</span>
+                <span className="hc-mono w-20 shrink-0 text-[0.72rem] hc-soft">{p.cost_usd_equivalent != null ? `≈ ${fmtUsd(p.cost_usd_equivalent)}` : ""}</span>
+                <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{tokens > 0 ? fmtTokens(tokens) : "—"}</span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="mt-3 hc-type-label hc-dim">{de.stats.costNoData}</p>
+      )}
+    </FleetPanel>
   );
 }
 
@@ -129,6 +170,7 @@ export function StatistikView() {
   const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
   const summary = useHermesRunSummary();
+  const costs = useHermesRunsCosts();
   const epics = useEpics();
   const now = nowSec();
   const openEpics = useMemo(() => (epics.data?.epics ?? []).filter((e) => e.status === "open"), [epics.data]);
@@ -156,7 +198,7 @@ export function StatistikView() {
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <FleetPod label={de.stats.podToday} value={loadingFirst ? "—" : (today?.done_roots ?? 0)} />
           <FleetPod label={de.stats.podCycleP50} value={summary.data?.cycle_time_p50_seconds != null ? fmtDur(summary.data.cycle_time_p50_seconds) : "—"} />
-          <FleetPod label={de.stats.podCost} value={summary.data?.total_cost_usd != null ? fmtUsd(summary.data.total_cost_usd) : "—"} />
+          <FleetPod label={de.stats.costToday} value={costs.data ? fmtCostPair(costs.data.today) : summary.data?.total_cost_usd != null ? fmtUsd(summary.data.total_cost_usd) : "—"} />
           <FleetPod label={de.stats.podTokens} value={today?.output_tokens != null ? fmtTokens(today.output_tokens) : "—"} />
         </div>
       </Hero>
@@ -184,18 +226,21 @@ export function StatistikView() {
               <Sparkline points={points(series, (p) => p.done_tasks)} stroke="var(--hc-cyan)" />
             </FleetPanel>
 
-            <FleetPanel eyebrow={de.stats.costs} meta={de.stats.costsHint}>
-              {hasCost ? (
-                <DayBars points={costSeries} color="var(--hc-amber)" valueFmt={(v) => fmtUsd(v)} />
-              ) : null}
-              <p className="mt-2 hc-type-label hc-soft">{de.stats.costNote}</p>
-              {hasTokens ? (
-                <>
-                  <p className="mt-3 hc-type-label hc-dim">{de.stats.tokensLine}</p>
-                  <Sparkline points={points(series, (p) => p.output_tokens)} stroke="var(--hc-accent-2)" valueFmt={(v) => fmtTokens(v)} />
-                </>
-              ) : null}
-            </FleetPanel>
+            <div className="space-y-3">
+              <FleetPanel eyebrow={de.stats.costs} meta={de.stats.costsHint}>
+                {hasCost ? (
+                  <DayBars points={costSeries} color="var(--hc-amber)" valueFmt={(v) => fmtUsd(v)} />
+                ) : null}
+                <p className="mt-2 hc-type-label hc-soft">{de.stats.costNote}</p>
+                {hasTokens ? (
+                  <>
+                    <p className="mt-3 hc-type-label hc-dim">{de.stats.tokensLine}</p>
+                    <Sparkline points={points(series, (p) => p.output_tokens)} stroke="var(--hc-accent-2)" valueFmt={(v) => fmtTokens(v)} />
+                  </>
+                ) : null}
+              </FleetPanel>
+              {costs.error ? <ToneCallout tone="red">{costs.error}</ToneCallout> : <CostBreakdownPanel data={costs.data ?? null} />}
+            </div>
           </div>
 
           <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">

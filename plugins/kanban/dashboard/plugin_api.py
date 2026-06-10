@@ -2500,6 +2500,27 @@ def get_runs_daily(
         conn.close()
 
 
+@router.get("/runs/costs")
+def get_runs_costs(
+    days: int = Query(7, ge=1, le=90),
+    board: Optional[str] = Query(None),
+):
+    """F4 (Statistik): cost view — today + rolling window totals and a
+    per-profile breakdown over the window. Reads only stamped task_runs
+    columns plus ``metadata.cost_usd_equivalent`` (K17 subscription lanes
+    carry an honest $0 in ``cost_usd``).
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_costs(conn, days=days)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),
