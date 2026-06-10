@@ -220,3 +220,52 @@ def test_done_cleans_up_workspace(kanban_home, monkeypatch):
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="done")  # gate-off → terminal
     assert calls == [tid]
+
+
+# ---------------------------------------------------------------------------
+# CLI verb parity (K13): `hermes kanban complete` in worker context must hit
+# the same gate as the in-process kanban_complete tool. Regression for the
+# 2026-06-10 live finding: a claude-CLI premium worker completed via the CLI
+# verb and bypassed the verifier (went straight to 'done').
+# ---------------------------------------------------------------------------
+
+def _cli_complete(task_id):
+    """Invoke the real CLI handler the claude-CLI lifecycle bridge uses."""
+    import argparse
+
+    from hermes_cli import kanban as kanban_cli
+
+    args = argparse.Namespace(
+        task_ids=[task_id], summary="impl done", metadata=None, result=None,
+    )
+    return kanban_cli._cmd_complete(args)
+
+
+def test_cli_complete_worker_context_routes_to_review(
+    kanban_home, gate_on, monkeypatch
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="premium")
+        kb.claim_task(conn, tid)
+        run_id = kb._current_run_id(conn, tid)
+    assert run_id is not None
+    # The task-id-in-env worker contract set by the spawn paths.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    assert _cli_complete(tid) == 0
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "review"
+
+
+def test_cli_complete_operator_context_stays_direct_done(
+    kanban_home, gate_on, monkeypatch
+):
+    """No worker env → operator completion keeps the direct done path."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="premium")
+        kb.claim_task(conn, tid)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    assert _cli_complete(tid) == 0
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "done"

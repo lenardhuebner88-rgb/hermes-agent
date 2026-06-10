@@ -2327,12 +2327,20 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            # Worker-context completions (the claude-CLI lifecycle bridge
+            # reports back via this verb) must hit the same review gate as the
+            # in-process kanban_complete tool — otherwise a claude-cli worker
+            # in a code-bearing role (e.g. premium) bypasses the verifier.
+            # Operator CLI completions (no HERMES_KANBAN_TASK/RUN_ID env)
+            # keep the direct 'done' path by design.
+            worker_run_id = _worker_run_id_for(tid)
             if not kb.complete_task(
                 conn, tid,
                 result=args.result,
                 summary=summary,
                 metadata=metadata,
-                expected_run_id=_worker_run_id_for(tid),
+                expected_run_id=worker_run_id,
+                review_gate=worker_run_id is not None,
             ):
                 failed.append(tid)
                 print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
