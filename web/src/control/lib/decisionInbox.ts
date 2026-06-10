@@ -7,7 +7,7 @@
 // Unit-tested in decisionInbox.test.ts so the cross-surface ranking can't silently drift.
 
 import type { Proposal, ToneName } from "./types";
-import type { BacklogItem } from "./schemas";
+import type { BacklogItem, KanbanDecision, KanbanDecisionKind } from "./schemas";
 import { getProposalSeverity, isActionable } from "./autoresearch";
 import {
   FO_REASON_LABELS,
@@ -19,7 +19,7 @@ import {
 } from "./foBacklog";
 import type { AgentOpsIntervention } from "./agentOps";
 
-export type InboxSurface = "autoresearch" | "family" | "orchestrator";
+export type InboxSurface = "autoresearch" | "family" | "orchestrator" | "kanban";
 
 export interface InboxItem {
   key: string;
@@ -37,10 +37,32 @@ export interface InboxSummary {
   autoresearch: number;
   family: number;
   orchestrator: number;
+  kanban: number;
 }
 
 const SEVERITY_WEIGHT: Record<string, number> = { critical: 95, high: 80, medium: 55, low: 40 };
-const SURFACE_ORDER: Record<InboxSurface, number> = { autoresearch: 0, family: 1, orchestrator: 2 };
+const SURFACE_ORDER: Record<InboxSurface, number> = { autoresearch: 0, family: 1, orchestrator: 2, kanban: 3 };
+
+// Kanban decision kinds → inbox weight + tone. A verifier rejection or a hard
+// block needs an operator now (red/amber, high weight); a held/advisory state
+// is lower-urgency (cyan). Unknown kinds (coerced by the schema) land mid-low.
+const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneName }> = {
+  review_rejected: { weight: 86, tone: "red" },
+  budget_held: { weight: 78, tone: "amber" },
+  sticky_blocked: { weight: 75, tone: "amber" },
+  role_fit_held: { weight: 55, tone: "cyan" },
+  decompose_failed: { weight: 52, tone: "cyan" },
+  stranded_by_stuck_parent: { weight: 50, tone: "cyan" },
+};
+
+const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
+  review_rejected: "Verifier: Änderungen gefordert",
+  budget_held: "Budget-Limit erreicht",
+  sticky_blocked: "Blockiert — Unblock nötig",
+  role_fit_held: "Rolle passt nicht",
+  decompose_failed: "Decompose fehlgeschlagen",
+  stranded_by_stuck_parent: "Wartet auf blockierten Vorgänger",
+};
 
 // Interventions that merely SUMMARIZE a surface already enumerated per-item above
 // would double-count the inbox total: `open-proposals` is one row saying "5 offen"
@@ -80,6 +102,7 @@ export function buildDecisionInbox(input: {
   foItems: BacklogItem[];
   foNowSec: number;
   interventions: AgentOpsIntervention[];
+  kanbanDecisions?: KanbanDecision[];
 }): InboxItem[] {
   const items: InboxItem[] = [];
 
@@ -139,6 +162,26 @@ export function buildDecisionInbox(input: {
     });
   }
 
+  // 4) Kanban — consolidated decision queue from the gateway (E1). Each row is
+  //    already one operator decision; map kind → weight/tone and deep-link to
+  //    the task in the backlog tab. suggested_command rides along as a copy-hint.
+  for (const d of input.kanbanDecisions ?? []) {
+    if (!d.task_id) continue;
+    const meta = KANBAN_KIND_META[d.kind] ?? { weight: 50, tone: "cyan" as ToneName };
+    const label = KANBAN_KIND_LABELS[d.kind] ?? d.kind;
+    items.push({
+      key: `kanban:${d.kind}:${d.task_id}`,
+      surface: "kanban",
+      title: d.title || d.task_id,
+      why: [label, d.reason].filter(Boolean).join(" · "),
+      nextAction: d.suggested_command || "Im Board entscheiden",
+      tone: meta.tone,
+      // Deep-link to the task in the Board/backlog tab (reads ?focus).
+      target: `/control/backlog?focus=${encodeURIComponent(d.task_id)}`,
+      weight: meta.weight,
+    });
+  }
+
   return items.sort(
     (a, b) =>
       b.weight - a.weight ||
@@ -153,5 +196,6 @@ export function inboxSummary(items: InboxItem[]): InboxSummary {
     autoresearch: items.filter((i) => i.surface === "autoresearch").length,
     family: items.filter((i) => i.surface === "family").length,
     orchestrator: items.filter((i) => i.surface === "orchestrator").length,
+    kanban: items.filter((i) => i.surface === "kanban").length,
   };
 }

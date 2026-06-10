@@ -24,6 +24,7 @@ const SURFACE_META: Record<InboxSurface, { label: string; tone: ToneName }> = {
   autoresearch: { label: de.inbox.surfaceAutoresearch, tone: "cyan" },
   family: { label: de.inbox.surfaceFamily, tone: "violet" },
   orchestrator: { label: de.inbox.surfaceOrchestrator, tone: "sky" },
+  kanban: { label: de.inbox.surfaceKanban, tone: "amber" },
 };
 
 // worstTone → the hero's mood (gradient accent + the big number's colour).
@@ -51,6 +52,7 @@ export function InboxView({ density }: { density: Density }) {
     { id: "autoresearch", label: SURFACE_META.autoresearch.label, count: summary.autoresearch },
     { id: "family", label: SURFACE_META.family.label, count: summary.family },
     { id: "orchestrator", label: SURFACE_META.orchestrator.label, count: summary.orchestrator },
+    { id: "kanban", label: SURFACE_META.kanban.label, count: summary.kanban },
   ];
 
   return (

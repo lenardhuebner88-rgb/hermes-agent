@@ -15,6 +15,7 @@ import {
   RecentResultsResponseSchema,
   ReviewVerdictsResponseSchema,
   RunSummaryResponseSchema,
+  DecisionQueueResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
@@ -25,7 +26,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, TaskDetailResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, TaskDetailResponse, DecisionQueueResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1061,6 +1062,21 @@ const INBOX_TONE_RANK: Record<ToneName, number> = {
   red: 5, rose: 5, amber: 4, cyan: 2, sky: 2, indigo: 2, violet: 2, emerald: 1, zinc: 0,
 };
 
+// N-E1/E2: the consolidated kanban decision queue (sticky_blocked, review_rejected,
+// role_fit_held, budget_held, decompose_failed, stranded_by_stuck_parent).
+// 404/error → the Inbox simply renders without a Kanban section (no crash).
+export function useKanbanDecisionQueue() {
+  return usePolling<DecisionQueueResponse>(
+    "kanban/decision-queue",
+    async () => parseOrThrow(
+      DecisionQueueResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/decision-queue"),
+      "kanban/decision-queue",
+    ),
+    15000,
+  );
+}
+
 export function useDecisionInbox(): DecisionInboxData {
   const proposals = useProposals();
   const backlog = useBacklog();
@@ -1069,6 +1085,7 @@ export function useDecisionInbox(): DecisionInboxData {
   const health = useSystemHealth();
   const metrics = useMetricsLite();
   const orchestration = useOrchestrationBacklog();
+  const kanbanDecisions = useKanbanDecisionQueue();
   const now = nowSec();
 
   const snapshot = useMemo(
@@ -1093,8 +1110,9 @@ export function useDecisionInbox(): DecisionInboxData {
         foItems: backlog.data?.items ?? [],
         foNowSec: backlog.data?.checked_at ?? now,
         interventions: snapshot.interventions,
+        kanbanDecisions: kanbanDecisions.data?.decisions ?? [],
       }),
-    [proposals.proposals, backlog.data, snapshot.interventions, now],
+    [proposals.proposals, backlog.data, snapshot.interventions, kanbanDecisions.data, now],
   );
 
   const summary = useMemo(() => inboxSummary(items), [items]);

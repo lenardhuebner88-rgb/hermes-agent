@@ -196,6 +196,35 @@ export const RecentResultsResponseSchema = z.object({
   outcome: z.string().catch("completed"),
 });
 
+// N-E1/E2: consolidated kanban decision queue. Each row is one operator
+// decision. Unknown `kind`s coerce to "sticky_blocked" so a backend that grows
+// a new decision kind degrades gracefully instead of dropping the whole list.
+export const KanbanDecisionKindSchema = z
+  .enum([
+    "review_rejected",
+    "budget_held",
+    "role_fit_held",
+    "sticky_blocked",
+    "decompose_failed",
+    "stranded_by_stuck_parent",
+  ])
+  .catch("sticky_blocked");
+
+export const KanbanDecisionSchema = z.object({
+  kind: KanbanDecisionKindSchema,
+  task_id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  reason: z.string().catch(""),
+  age_seconds: z.coerce.number().nullable().catch(null),
+  suggested_command: z.string().nullable().catch(null),
+});
+
+export const DecisionQueueResponseSchema = z.object({
+  decisions: z.array(KanbanDecisionSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+});
+
 export const ReviewVerdictsResponseSchema = z.object({
   reviews: z.array(KanbanReviewSchema).catch([]),
   count: z.coerce.number().catch(0),
@@ -661,6 +690,9 @@ export const TaskDetailResponseSchema = z.object({
 export type TaskRun = z.infer<typeof TaskRunSchema>;
 export type TaskEvent = z.infer<typeof TaskEventSchema>;
 export type TaskDetailResponse = z.infer<typeof TaskDetailResponseSchema>;
+export type KanbanDecision = z.infer<typeof KanbanDecisionSchema>;
+export type KanbanDecisionKind = z.infer<typeof KanbanDecisionKindSchema>;
+export type DecisionQueueResponse = z.infer<typeof DecisionQueueResponseSchema>;
 
 // K7: root-grouped run summary (throughput / cost / cycle-time + recent roots).
 const RunSummaryRootSchema = z.object({

@@ -120,7 +120,7 @@ describe("buildDecisionInbox", () => {
     });
     const summary = inboxSummary(items);
     // 2 proposals + 1 real orchestrator summary = 3, NOT 4.
-    expect(summary).toEqual({ total: 3, autoresearch: 2, family: 0, orchestrator: 1 });
+    expect(summary).toEqual({ total: 3, autoresearch: 2, family: 0, orchestrator: 1, kanban: 0 });
     expect(items.some((i) => i.key === "orch:open-proposals")).toBe(false);
     expect(items.some((i) => i.key === "orch:blocked-items")).toBe(true);
   });
@@ -149,6 +149,58 @@ describe("inboxSummary", () => {
         interventions: [intervention({ id: "iv1" })],
       }),
     );
-    expect(summary).toEqual({ total: 4, autoresearch: 2, family: 1, orchestrator: 1 });
+    expect(summary).toEqual({ total: 4, autoresearch: 2, family: 1, orchestrator: 1, kanban: 0 });
+  });
+
+  it("counts the kanban surface", () => {
+    const summary = inboxSummary(
+      buildDecisionInbox({
+        proposals: [],
+        foItems: [],
+        foNowSec: NOW,
+        interventions: [],
+        kanbanDecisions: [
+          { kind: "review_rejected", task_id: "t1", title: "T1", reason: "RC", age_seconds: 10, suggested_command: "hermes kanban show t1" },
+          { kind: "sticky_blocked", task_id: "t2", title: "T2", reason: "stuck", age_seconds: 99, suggested_command: "hermes kanban unblock t2" },
+        ],
+      }),
+    );
+    expect(summary).toEqual({ total: 2, autoresearch: 0, family: 0, orchestrator: 0, kanban: 2 });
+  });
+});
+
+describe("buildDecisionInbox — kanban surface", () => {
+  it("folds kanban decisions, ranks review_rejected above sticky, deep-links + carries the command", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "sticky_blocked", task_id: "t2", title: "Blocked one", reason: "needs eyes", age_seconds: 99, suggested_command: "hermes kanban unblock t2" },
+        { kind: "review_rejected", task_id: "t1", title: "Rejected one", reason: "missing tests", age_seconds: 10, suggested_command: "hermes kanban show t1" },
+      ],
+    });
+    expect(items.map((i) => i.surface)).toEqual(["kanban", "kanban"]);
+    // review_rejected (86) outranks sticky_blocked (75)
+    expect(items[0].title).toBe("Rejected one");
+    expect(items[0].target).toBe("/control/backlog?focus=t1");
+    expect(items[0].nextAction).toBe("hermes kanban show t1");
+    expect(items[0].why).toContain("missing tests");
+  });
+
+  it("ignores rows without a task_id and tolerates an absent kanban source", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "sticky_blocked", task_id: "", title: "no id", reason: "x", age_seconds: null, suggested_command: null },
+      ],
+    });
+    expect(items).toEqual([]);
+    // Absent kanbanDecisions entirely → no crash, empty.
+    expect(buildDecisionInbox({ proposals: [], foItems: [], foNowSec: NOW, interventions: [] })).toEqual([]);
   });
 });
