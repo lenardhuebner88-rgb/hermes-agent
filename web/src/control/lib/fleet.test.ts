@@ -237,7 +237,7 @@ describe("usesFlowCaptureEndpoint", () => {
 });
 
 // ── Ketten-Modell + Projekt-Achse (Phase 2, Operator-Vertrag 2026-06-10) ────
-import { buildChains, projectKey, projectLabel, projectOptions, UNSORTED_PROJECT, type ChainTaskLite } from "./fleet";
+import { buildChains, groupChainsByEpic, projectKey, projectLabel, projectOptions, UNSORTED_PROJECT, type ChainTaskLite } from "./fleet";
 
 function task(over: Partial<ChainTaskLite> & { id: string; status: TaskStatus }): ChainTaskLite {
   return { title: over.id, priority: 0, ...over };
@@ -310,6 +310,32 @@ describe("buildChains", () => {
     ];
     const chain = buildChains(tasks).active[0];
     expect(chain.members.map((m) => m.id)).toEqual(["c", "a", "d", "root"]);
+  });
+});
+
+describe("groupChainsByEpic", () => {
+  it("groups by epicId in chain order and puts Ohne Epic last", () => {
+    const tasks: ChainTaskLite[] = [
+      // none-Kette ist die dringendste (running) — "Ohne Epic" muss trotzdem ans Ende.
+      task({ id: "n", status: "todo", root_id: "n" }), task({ id: "n1", status: "running", root_id: "n" }),
+      task({ id: "a", status: "todo", root_id: "a", epic_id: "e_1" }), task({ id: "a1", status: "review", root_id: "a", epic_id: "e_1" }),
+      task({ id: "b", status: "todo", root_id: "b", epic_id: "e_2" }), task({ id: "b1", status: "blocked", root_id: "b", epic_id: "e_2" }),
+      task({ id: "c", status: "todo", root_id: "c", epic_id: "e_1" }), task({ id: "c1", status: "todo", root_id: "c", epic_id: "e_1" }),
+    ];
+    const groups = groupChainsByEpic(buildChains(tasks).active);
+    expect(groups.map((g) => g.epicId)).toEqual(["e_1", "e_2", null]);
+    expect(groups[0].chains.map((c) => c.rootId)).toEqual(["a", "c"]);
+    expect(groups[2].chains.map((c) => c.rootId)).toEqual(["n"]);
+  });
+
+  it("returns no Ohne-Epic group when every chain has an epic", () => {
+    const tasks: ChainTaskLite[] = [
+      task({ id: "a", status: "todo", root_id: "a", epic_id: "e_1" }),
+      task({ id: "a1", status: "todo", root_id: "a", epic_id: "e_1" }),
+    ];
+    const groups = groupChainsByEpic(buildChains(tasks).active);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].epicId).toBe("e_1");
   });
 });
 

@@ -180,6 +180,12 @@ export const de = {
     workersEmptyTitle: "Kein Worker aktiv",
     workersEmptyDesc: "Sobald der Dispatcher einen Lauf startet, erscheint er hier mit Laufzeit-Budget und Runaway-Wache.",
     epicBadge: (id: string) => `Epic ${id}`,
+    // Epic-Gruppierung (Toggle, default aus) + Epic-Header im Ketten-Board.
+    epicGroupToggle: "Nach Epic gruppieren",
+    epicGroupNone: "Ohne Epic",
+    epicGroupProgress: (done: number, total: number) => `${done}/${total} geliefert`,
+    epicGroupTokens: (label: string) => `Token-Burn ${label}`,
+    epicGroupNoTokens: "noch kein Token-Burn",
   },
   pulse: {
     eyebrow: "Puls",

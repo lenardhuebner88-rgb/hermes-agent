@@ -15,12 +15,13 @@ import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge, freshness, workerHealth, workerSortRank } from "../lib/derive";
+import { fmtAge, fmtTokens, freshness, workerHealth, workerSortRank } from "../lib/derive";
 import {
   FLEET_STAGES,
   STAGE_META,
   buildChains,
   flowCounts,
+  groupChainsByEpic,
   projectKey,
   projectLabel,
   projectOptions,
@@ -34,6 +35,7 @@ import { getFlowSubtaskStatusExplanation } from "../lib/flowStatus";
 import { getHeldFlowDispatchGuard, type HeldFlowDispatchGuard } from "../lib/flowDispatchGuard";
 import {
   useBoard,
+  useEpics,
   useFlowRelease,
   useHermesBlockedCompletions,
   useHermesRecentResults,
@@ -44,7 +46,7 @@ import {
   useTaskDetail,
 } from "../hooks/useControlData";
 import type { BoardTask, TaskStatus } from "../lib/types";
-import type { TaskDetailResponse } from "../lib/schemas";
+import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
@@ -526,8 +528,9 @@ function ChainStagePills({ chain }: { chain: ChainModel<BoardTask> }) {
   );
 }
 
-function ChainCard({ chain, expanded, onToggle, selectedId, onSelect, now, renderTask }: {
-  chain: ChainModel<BoardTask>; expanded: boolean; onToggle: () => void;
+function ChainCard({ chain, epicTitle, onEpicClick, expanded, onToggle, selectedId, onSelect, now, renderTask }: {
+  chain: ChainModel<BoardTask>; epicTitle?: string | null; onEpicClick?: (epicId: string) => void;
+  expanded: boolean; onToggle: () => void;
   selectedId: string | null; onSelect: (id: string) => void; now: number;
   renderTask: (task: BoardTask) => React.ReactNode;
 }) {
@@ -547,7 +550,16 @@ function ChainCard({ chain, expanded, onToggle, selectedId, onSelect, now, rende
         <div className="flex items-center gap-2">
           <span className="hc-mono text-[0.7rem] hc-dim">{chain.rootId}</span>
           <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.66rem] hc-soft">{projectLabel(chain.tenant)}</span>
-          {chain.epicId ? <span className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2 py-0.5 text-[0.66rem] text-indigo-200">{de.flow.epicBadge(chain.epicId)}</span> : null}
+          {chain.epicId ? (
+            <button
+              type="button"
+              title={de.flow.epicGroupToggle}
+              onClick={(e) => { e.stopPropagation(); onEpicClick?.(chain.epicId!); }}
+              className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2 py-0.5 text-[0.66rem] text-indigo-200 transition hover:bg-indigo-400/20"
+            >
+              {de.flow.epicBadge(epicTitle || chain.epicId)}
+            </button>
+          ) : null}
           <span className="ml-auto inline-flex items-center gap-1 text-[0.7rem] hc-soft">
             {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             {expanded ? de.flow.chainCollapse : de.flow.chainExpand}
@@ -589,6 +601,26 @@ function ChainCard({ chain, expanded, onToggle, selectedId, onSelect, now, rende
         </div>
       ) : null}
     </article>
+  );
+}
+
+// Epic-Gruppen-Header (Gruppier-Toggle): Titel statt roher ID, Fortschritt +
+// Token-Burn aus dem GET /epics-Rollup — board-weit, nicht nur die gefilterte
+// Sicht. Ohne Rollup (Epics-Endpoint down) degradiert er auf die rohe ID.
+function EpicGroupHeader({ epicId, epic }: { epicId: string | null; epic?: Epic }) {
+  const tokens = epic ? (epic.input_tokens ?? 0) + (epic.output_tokens ?? 0) : 0;
+  return (
+    <div id={epicId ? `epic-group-${epicId}` : undefined} className="flex scroll-mt-4 flex-wrap items-center gap-2">
+      <span className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2.5 py-0.5 text-[0.72rem] font-medium text-indigo-200">
+        {epicId ? (epic?.title || epicId) : de.flow.epicGroupNone}
+      </span>
+      {epic ? (
+        <>
+          <span className="hc-mono text-[0.68rem] hc-soft">{de.flow.epicGroupProgress(epic.done_tasks, epic.task_count)}</span>
+          <span className="hc-mono text-[0.68rem] hc-dim">{tokens > 0 ? de.flow.epicGroupTokens(fmtTokens(tokens)) : de.flow.epicGroupNoTokens}</span>
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -679,6 +711,20 @@ export function FlowView() {
   const [expandedRoot, setExpandedRoot] = useState<string | null>(null);
   // Ohne manuelle Wahl ist die dringendste Kette aufgeklappt.
   const effectiveExpanded = expandedRoot ?? chainBoard.active[0]?.rootId ?? null;
+
+  // Epic-Gruppierung (Toggle, default AUS — das Board sieht aus wie immer).
+  const epics = useEpics();
+  const [groupByEpic, setGroupByEpic] = useState(false);
+  const epicsById = useMemo(() => new Map((epics.data?.epics ?? []).map((e) => [e.id, e])), [epics.data]);
+  const epicGroups = useMemo(
+    () => (groupByEpic ? groupChainsByEpic(chainBoard.active) : null),
+    [groupByEpic, chainBoard.active],
+  );
+  // Badge-Klick: Gruppierung an + zur Epic-Gruppe scrollen (nach dem Re-Render).
+  const onEpicBadgeClick = useCallback((epicId: string) => {
+    setGroupByEpic(true);
+    window.setTimeout(() => document.getElementById(`epic-group-${epicId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }, []);
 
   // Worker-Strip (Fleet-Absorption): Live-Läufe mit Laufzeit-Budget + Aktionen.
   const { inspectByRun, errorByRun, loadingRun, inspect } = useRunInspect();
@@ -953,24 +999,65 @@ export function FlowView() {
                 {/* Aktive Ketten — die primäre Einheit des Boards */}
                 {chainBoard.active.length ? (
                   <section>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Eyebrow>{de.flow.chainsHeading}</Eyebrow>
                       <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{chainBoard.active.length}</span>
+                      <button
+                        type="button"
+                        aria-pressed={groupByEpic}
+                        onClick={() => setGroupByEpic((v) => !v)}
+                        className={cn(
+                          "ml-auto inline-flex min-h-8 items-center rounded-full border px-2.5 text-xs transition",
+                          groupByEpic
+                            ? "border-indigo-400/40 bg-indigo-400/10 text-indigo-200"
+                            : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
+                        )}
+                      >
+                        {de.flow.epicGroupToggle}
+                      </button>
                     </div>
-                    <div className="mt-2 space-y-2.5">
-                      {chainBoard.active.map((chain) => (
-                        <ChainCard
-                          key={chain.rootId}
-                          chain={chain}
-                          expanded={effectiveExpanded === chain.rootId}
-                          onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
-                          selectedId={selectedId}
-                          onSelect={selectTask}
-                          now={now}
-                          renderTask={renderTaskCard}
-                        />
-                      ))}
-                    </div>
+                    {epicGroups ? (
+                      <div className="mt-2 space-y-4">
+                        {epicGroups.map((group) => (
+                          <div key={group.epicId ?? "none"}>
+                            <EpicGroupHeader epicId={group.epicId} epic={group.epicId ? epicsById.get(group.epicId) : undefined} />
+                            <div className="mt-2 space-y-2.5">
+                              {group.chains.map((chain) => (
+                                <ChainCard
+                                  key={chain.rootId}
+                                  chain={chain}
+                                  epicTitle={chain.epicId ? epicsById.get(chain.epicId)?.title ?? null : null}
+                                  onEpicClick={onEpicBadgeClick}
+                                  expanded={effectiveExpanded === chain.rootId}
+                                  onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
+                                  selectedId={selectedId}
+                                  onSelect={selectTask}
+                                  now={now}
+                                  renderTask={renderTaskCard}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-2 space-y-2.5">
+                        {chainBoard.active.map((chain) => (
+                          <ChainCard
+                            key={chain.rootId}
+                            chain={chain}
+                            epicTitle={chain.epicId ? epicsById.get(chain.epicId)?.title ?? null : null}
+                            onEpicClick={onEpicBadgeClick}
+                            expanded={effectiveExpanded === chain.rootId}
+                            onToggle={() => setExpandedRoot(effectiveExpanded === chain.rootId ? "" : chain.rootId)}
+                            selectedId={selectedId}
+                            onSelect={selectTask}
+                            now={now}
+                            renderTask={renderTaskCard}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </section>
                 ) : null}
 

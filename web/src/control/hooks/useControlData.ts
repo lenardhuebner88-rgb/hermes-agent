@@ -21,6 +21,7 @@ import {
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
+  EpicsResponseSchema,
   TaskDetailResponseSchema,
   RunInspectSchema,
   SystemHealthResponseSchema,
@@ -28,7 +29,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, TaskDetailResponse, DecisionQueueResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -543,6 +544,17 @@ export function useBoard() {
     // revalidates as a 304 instead of re-transferring.
     async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"), "kanban/board"),
     8000,
+  );
+}
+
+// Epics (Vorhaben-Ebene): Rollup pro Epic für die Flow-Gruppierung und die
+// Statistik-Kompaktübersicht. 15s — Epics ändern sich selten; ein Fehler hier
+// darf das Board nie blanken (die Gruppierung degradiert auf rohe IDs).
+export function useEpics() {
+  return usePolling<EpicsResponse>(
+    "kanban/epics",
+    async () => parseOrThrow(EpicsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/epics"), "kanban/epics"),
+    15000,
   );
 }
 

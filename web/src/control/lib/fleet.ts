@@ -526,3 +526,34 @@ export function buildChains<T extends ChainTaskLite>(tasks: T[]): ChainBoard<T> 
 
   return { active, done, singles, doneSingles };
 }
+
+// ── Epic-Gruppierung (Toggle im Flow-Board) ─────────────────────────────────
+
+export interface EpicChainGroup<T extends ChainTaskLite> {
+  /** null = "Ohne Epic"-Gruppe. */
+  epicId: string | null;
+  chains: ChainModel<T>[];
+}
+
+/**
+ * Gruppiert Ketten nach Epic. Die Gruppen-Reihenfolge folgt der ersten
+ * (= dringendsten) Kette je Epic; "Ohne Epic" steht immer zuletzt.
+ */
+export function groupChainsByEpic<T extends ChainTaskLite>(
+  chains: ChainModel<T>[],
+): EpicChainGroup<T>[] {
+  const byEpic = new Map<string | null, ChainModel<T>[]>();
+  for (const chain of chains) {
+    const key = chain.epicId ?? null;
+    const list = byEpic.get(key);
+    if (list) list.push(chain);
+    else byEpic.set(key, [chain]);
+  }
+  const groups: EpicChainGroup<T>[] = [];
+  for (const [epicId, list] of byEpic) {
+    if (epicId !== null) groups.push({ epicId, chains: list });
+  }
+  const none = byEpic.get(null);
+  if (none) groups.push({ epicId: null, chains: none });
+  return groups;
+}

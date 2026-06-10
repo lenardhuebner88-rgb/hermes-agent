@@ -173,6 +173,10 @@ export function fmtDur(sec: number): string {
 
 export const fmtMB = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
 
+/** Token-Mengen kompakt: "1.2 M" / "57 k" / "985". */
+export const fmtTokens = (v: number) =>
+  v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)} M` : v >= 1_000 ? `${Math.round(v / 1_000)} k` : String(v);
+
 /* ── Datenfrische (E1) ─────────────────────────────────────────────────── */
 /**
  * Frische einer Polling-Quelle. `stale` heißt: die Quelle wurde länger als das
