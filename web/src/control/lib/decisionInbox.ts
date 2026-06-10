@@ -30,6 +30,10 @@ export interface InboxItem {
   tone: ToneName;
   target: string;
   weight: number;
+  /** K3: nur für `review_rejected` gesetzt — schaltet den Inline-Resolve
+   *  ("Fix-Lauf starten": unblock → ready + Dispatcher-Tick) am CommandHome
+   *  frei. Alle anderen Kinds lösen weiter über den Deep-Link auf. */
+  fixTaskId?: string;
 }
 
 export interface InboxSummary {
@@ -179,6 +183,10 @@ export function buildDecisionInbox(input: {
       // Deep-link to the task in the Board/backlog tab (reads ?focus).
       target: `/control/backlog?focus=${encodeURIComponent(d.task_id)}`,
       weight: meta.weight,
+      // K3: a verifier rejection has ONE dominant resolution (fix run by the
+      // owning coder — the retry sees the verifier feedback in its
+      // worker_context), so it earns the inline action.
+      ...(d.kind === "review_rejected" ? { fixTaskId: d.task_id } : {}),
     });
   }
 

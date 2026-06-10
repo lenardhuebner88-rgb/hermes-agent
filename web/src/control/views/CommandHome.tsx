@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import {
   useBoard,
   useDecisionInbox,
+  useFixRedispatch,
   useHermesRunsDaily,
   useHermesTodayDigest,
   useHermesWorkers,
@@ -58,6 +59,7 @@ export function CommandHome({ density }: { density: Density }) {
   const digest = useHermesTodayDigest();
   const board = useBoard();
   const [surfaceFilter, setSurfaceFilter] = useState<InboxSurface | null>(null);
+  const fix = useFixRedispatch();
   const now = board.data?.now ?? nowSec();
 
   const tasks: BoardTask[] = useMemo(
@@ -106,7 +108,7 @@ export function CommandHome({ density }: { density: Density }) {
           </Text>
 
           {top && !settling ? (
-            <TopDecision item={top} onOpen={() => navigate(top.target)} />
+            <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} />
           ) : calm ? (
             <p className="mt-4 max-w-md text-sm hc-soft">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
           ) : null}
@@ -155,7 +157,7 @@ export function CommandHome({ density }: { density: Density }) {
           ) : (
             <div className="space-y-2">
               {rest.map((item) => (
-                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} />
+                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} fix={fix} />
               ))}
             </div>
           )}
@@ -171,30 +173,78 @@ export function CommandHome({ density }: { density: Density }) {
   );
 }
 
-/** The #1 decision, promoted: surface + title + why + the one next action. */
-function TopDecision({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
+/** The #1 decision, promoted: surface + title + why + the one next action.
+ *  (Wrapper ist ein div, nicht ein button — der K3-Inline-Resolve braucht
+ *  einen ECHTEN zweiten Button, und button-in-button ist invalides HTML.) */
+function TopDecision({ item, onOpen, fix }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch> }) {
   const surface = SURFACE[item.surface];
   return (
-    <button
-      type="button"
-      onClick={onOpen}
+    <div
       className={cn(
         "hc-decision group mt-5 flex w-full flex-col gap-3 rounded-xl px-4 py-3.5 text-left transition sm:flex-row sm:items-start sm:gap-4",
         severitySpine[item.tone],
       )}
     >
-      <div className="min-w-0 flex-1">
+      <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill tone={surface.tone} label={surface.label} />
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">Als Erstes</span>
         </div>
         <p className="mt-1.5 line-clamp-2 text-base font-semibold leading-snug text-white">{item.title}</p>
         <p className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
-      </div>
-      <span className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2.5 text-sm font-medium text-[var(--hc-accent-text)] transition group-hover:brightness-110 sm:mt-0.5 sm:w-auto sm:py-2">
-        {item.nextAction}<ArrowRight className="h-4 w-4" />
+      </button>
+      <span className="flex shrink-0 flex-col items-stretch gap-2 sm:mt-0.5 sm:items-end">
+        {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+        <button
+          type="button"
+          onClick={onOpen}
+          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-2.5 text-sm font-medium text-[var(--hc-accent-text)] transition group-hover:brightness-110 sm:w-auto sm:py-2"
+        >
+          {item.nextAction}<ArrowRight className="h-4 w-4" />
+        </button>
       </span>
-    </button>
+    </div>
+  );
+}
+
+/** K3: confirm-gated Inline-Resolve für eine Verifier-Ablehnung — erster Klick
+ *  scharfschalten, zweiter Klick löst PATCH ready + Dispatcher-Tick aus.
+ *  Gleiches Zwei-Schritt-Muster wie die Fleet-Worker-Aktionen. */
+function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<typeof useFixRedispatch> }) {
+  const [arming, setArming] = useState(false);
+  const busy = fix.busyId === taskId;
+  const done = !!fix.doneIds[taskId];
+  const err = fix.errorById[taskId];
+  if (done) {
+    return (
+      <span className="inline-flex items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">
+        Fix-Lauf gestartet
+      </span>
+    );
+  }
+  return (
+    <span className="flex flex-col items-stretch gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!arming) { setArming(true); return; }
+          setArming(false);
+          void fix.run(taskId);
+        }}
+        onBlur={() => setArming(false)}
+        className={cn(
+          "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60",
+          arming
+            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+            : "border-[var(--hc-border-strong)] bg-[var(--hc-surface-2,rgba(255,255,255,0.04))] text-[var(--hc-text)] hover:border-[var(--hc-accent-border)]",
+        )}
+      >
+        {busy ? "startet…" : arming ? "Sicher? Erneut klicken" : "Fix-Lauf starten"}
+      </button>
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
+    </span>
   );
 }
 
@@ -294,23 +344,22 @@ function FleetStrip({ workers, loading, now, onOpen }: { workers: Worker[]; load
 }
 
 /** A compact decision row — severity spine, surface, why, next action. */
-function DecisionRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
+function DecisionRow({ item, onOpen, fix }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch> }) {
   const surface = SURFACE[item.surface];
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={cn("hc-decision flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left", severitySpine[item.tone])}
-    >
-      <div className="min-w-0 flex-1">
+    <div className={cn("hc-decision flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left", severitySpine[item.tone])}>
+      <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill tone={surface.tone} label={surface.label} />
           <span className="truncate text-sm font-semibold text-white">{item.title}</span>
         </div>
         <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
-      </div>
-      <ChevronRight className="h-4 w-4 shrink-0 hc-dim" />
-    </button>
+      </button>
+      {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+      <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="shrink-0">
+        <ChevronRight className="h-4 w-4 hc-dim" />
+      </button>
+    </div>
   );
 }
 

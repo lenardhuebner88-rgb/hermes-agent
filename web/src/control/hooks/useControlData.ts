@@ -597,6 +597,46 @@ export function useTaskAction(onDone?: () => void | Promise<void>) {
   return { busyId, errorById, run, clearError };
 }
 
+// K3: Inline-Resolve für eine Verifier-Ablehnung (review_rejected) direkt am
+// CommandHome — die EINE dominante Auflösung: Task entblocken (PATCH ready;
+// der Server mappt das auf unblock_task) + ein Dispatcher-Tick, damit der
+// Fix-Lauf sofort startet statt auf den nächsten Gateway-Tick zu warten.
+// Der Coder-Retry sieht das Verifier-Feedback automatisch im worker_context.
+// `doneIds` hält erfolgreich gestartete Tasks fest, bis der Decision-Queue-Poll
+// die Zeile von selbst fallen lässt.
+export function useFixRedispatch() {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [doneIds, setDoneIds] = useState<Record<string, boolean>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (taskId: string) => {
+    setBusyId(taskId);
+    setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    try {
+      await fetchJSON<{ task?: unknown }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
+        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "ready" }) },
+      );
+      // run_id ist für action=dispatch irrelevant (reiner Tick, kein Run-Bezug)
+      // — 0 als Platzhalter, wie der Endpoint es erlaubt.
+      await fetchJSON<{ ok?: boolean; detail?: string }>(
+        "/api/plugins/kanban/workers/0/action",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dispatch", confirm: true, reason: "Fix-Lauf nach Verifier-Ablehnung (CommandHome)" }) },
+      );
+      if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+  return { busyId, doneIds, errorById, run };
+}
+
 // fetchJSON throws `Error("409: {\"detail\":\"…\"}")` — pull out the human detail.
 function extractDetail(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);

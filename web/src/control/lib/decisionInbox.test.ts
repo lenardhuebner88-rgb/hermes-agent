@@ -187,6 +187,9 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[0].target).toBe("/control/backlog?focus=t1");
     expect(items[0].nextAction).toBe("hermes kanban show t1");
     expect(items[0].why).toContain("missing tests");
+    // K3: nur review_rejected trägt den Inline-Resolve-Anker.
+    expect(items[0].fixTaskId).toBe("t1");
+    expect(items[1].fixTaskId).toBeUndefined();
   });
 
   it("ignores rows without a task_id and tolerates an absent kanban source", () => {
