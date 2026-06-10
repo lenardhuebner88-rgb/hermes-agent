@@ -33,6 +33,12 @@ export const de = {
     recent: "Letzte Lieferungen",
     loadError: "Statistik konnte nicht geladen werden.",
     empty: "Noch keine Daten — sobald Runs laufen, füllt sich die Statistik.",
+    // Epic-Kompaktübersicht (eine Zeile pro offenem Epic).
+    epics: "Offene Epics",
+    epicsHint: "Fortschritt + Token-Burn pro Vorhaben · aus dem Live-Rollup",
+    epicProgress: (done: number, total: number) => `${done}/${total} geliefert`,
+    epicNoTasks: "noch keine Tasks",
+    epicNoTokens: "noch kein Token-Burn",
   },
   runSummary: {
     eyebrow: "Lauf-Bilanz · Wurzeln",

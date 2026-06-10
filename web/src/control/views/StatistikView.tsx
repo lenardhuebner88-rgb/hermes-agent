@@ -10,14 +10,15 @@
  */
 import { useMemo } from "react";
 import { de } from "../i18n/de";
-import { fmtDur, nowSec } from "../lib/derive";
+import { fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
 import {
+  useEpics,
   useHermesReliability,
   useHermesRunsDaily,
   useHermesRunSummary,
 } from "../hooks/useControlData";
-import type { ReliabilityProfile, RunsDailyPoint } from "../lib/schemas";
+import type { Epic, ReliabilityProfile, RunsDailyPoint } from "../lib/schemas";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
 import { SkeletonCard } from "../components/primitives";
@@ -27,8 +28,6 @@ import { DayBars, RateBar, Sparkline, type SeriesPoint } from "../components/cha
 
 const fmtUsd = (v: number) => `$ ${v.toFixed(2)}`;
 const fmtPct = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)} %`);
-const fmtTokens = (v: number) =>
-  v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)} M` : v >= 1_000 ? `${Math.round(v / 1_000)} k` : String(v);
 const dayLabel = (iso: string) => iso.slice(5); // MM-DD reicht im Tooltip
 
 function points(series: RunsDailyPoint[], pick: (p: RunsDailyPoint) => number | null): SeriesPoint[] {
@@ -39,6 +38,33 @@ function points(series: RunsDailyPoint[], pick: (p: RunsDailyPoint) => number | 
 function completedDelta(current: ReliabilityProfile, baseline: ReliabilityProfile | undefined): number | null {
   if (!baseline || current.completed_rate == null || baseline.completed_rate == null) return null;
   return Math.round((current.completed_rate - baseline.completed_rate) * 100);
+}
+
+// Epic-Kompaktübersicht: eine Zeile pro OFFENEM Epic — Fortschritt (done/total,
+// RateBar wiederverwendet) + Token-Burn + ggf. gemessene $. Bewusst keine neuen
+// Diagrammtypen (Grill-Entscheid 2); die Anlage/Zuordnung lebt im Flow-Board.
+function EpicRows({ epics }: { epics: Epic[] }) {
+  return (
+    <ul className="space-y-1.5">
+      {epics.map((e) => {
+        const tokens = (e.input_tokens ?? 0) + (e.output_tokens ?? 0);
+        const rate = e.task_count > 0 ? e.done_tasks / e.task_count : null;
+        return (
+          <li key={e.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2.5 py-2">
+            <span className="min-w-0 flex-1 basis-40 truncate text-[0.84rem] font-medium text-white">{e.title || e.id}</span>
+            <span className="hc-mono w-24 shrink-0 text-[0.72rem] hc-soft">
+              {e.task_count > 0 ? de.stats.epicProgress(e.done_tasks, e.task_count) : de.stats.epicNoTasks}
+            </span>
+            <div className="w-20 shrink-0"><RateBar rate={rate} /></div>
+            <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">
+              {tokens > 0 ? fmtTokens(tokens) : de.stats.epicNoTokens}
+              {e.cost_usd != null && e.cost_usd > 0 ? ` · ${fmtUsd(e.cost_usd)}` : ""}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 function ReliabilityTable({ profiles, baseline, minN }: {
@@ -103,7 +129,9 @@ export function StatistikView() {
   const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
   const summary = useHermesRunSummary();
+  const epics = useEpics();
   const now = nowSec();
+  const openEpics = useMemo(() => (epics.data?.epics ?? []).filter((e) => e.status === "open"), [epics.data]);
 
   const series = useMemo(() => daily.data?.series ?? [], [daily.data]);
   const last7 = series.slice(-7);
@@ -134,6 +162,14 @@ export function StatistikView() {
       </Hero>
 
       {daily.error ? <ToneCallout tone="red">{de.stats.loadError}<br />{daily.error}</ToneCallout> : null}
+
+      {/* Offene Epics — die Vorhaben-Ebene über den Tages-Charts. Nur gezeigt,
+          wenn es offene Epics gibt (kein Rauschen für den Nicht-Nutzer). */}
+      {openEpics.length ? (
+        <FleetPanel eyebrow={de.stats.epics} meta={de.stats.epicsHint}>
+          {epics.error ? <ToneCallout tone="red">{epics.error}</ToneCallout> : <EpicRows epics={openEpics} />}
+        </FleetPanel>
+      ) : null}
 
       {loadingFirst ? (
         <div className="grid gap-3 lg:grid-cols-2"><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>
