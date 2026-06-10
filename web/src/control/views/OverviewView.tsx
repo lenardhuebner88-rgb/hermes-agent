@@ -13,7 +13,8 @@ import { SystemHealthStrip } from "../components/SystemHealthStrip";
 import { ProvenanceStrip } from "../components/ProvenanceStrip";
 import { FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { toneClasses } from "../lib/tones";
-import { Card, Disclosure, Eyebrow, Panel, Skeleton, SkeletonCard, Stat, Text } from "../components/primitives";
+import { Hero } from "../components/Hero";
+import { Card, Disclosure, Panel, Skeleton, SkeletonCard, Stat, Text } from "../components/primitives";
 
 type Focus = "hermes" | "proposals" | "warnings" | null;
 
@@ -101,20 +102,17 @@ export function OverviewView({ proposals, proposalsLoading, proposalsError, prop
       )}
       <ProvenanceStrip data={provenance.data} error={provenance.error} />
 
-      {/* Hero: ein-Satz-Lagebild + Diagnose-Kopie */}
-      <Card surface="raised" className="p-5 sm:p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <Eyebrow>System nominal</Eyebrow>
-            <Text as="h2" variant="title" className="mt-2 text-[var(--hc-text)]">{title}</Text>
-            <Text className="mt-2 max-w-2xl hc-soft">Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen.</Text>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button outlined size="sm" onClick={copyDiagnostics} className="gap-2">{copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}{copied ? de.overview.copied : de.overview.copyDiagnostics}</Button>
-            <StatusPill tone={allCalm ? "emerald" : "amber"} label={allCalm ? "Ruhig" : "Aufmerksamkeit"} dot={allCalm ? "live" : "warn"} size="md" />
-          </div>
-        </div>
-      </Card>
+      {/* Hero: ein-Satz-Lagebild + Diagnose-Kopie, auf dem geteilten Primitive. */}
+      <Hero
+        eyebrow={de.tabs.overview}
+        title={title}
+        subtitle="Hermes-Worker und Autoresearch laufen hier in einer Sicht zusammen."
+        tone={allCalm ? "emerald" : "amber"}
+        status={{ label: allCalm ? "Ruhig" : "Aufmerksamkeit", tone: allCalm ? "emerald" : "amber", dot: allCalm ? "live" : "warn" }}
+        action={
+          <Button outlined size="sm" onClick={copyDiagnostics} className="gap-2">{copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}{copied ? de.overview.copied : de.overview.copyDiagnostics}</Button>
+        }
+      />
 
       {inboxCounts.total > 0 ? (
         <button type="button" onClick={() => navigate("/control/inbox")} className="flex w-full items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[.07] px-4 py-3 text-left transition hover:bg-amber-500/[.12]">

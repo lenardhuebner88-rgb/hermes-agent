@@ -1,12 +1,12 @@
 import { useMemo } from "react";
 import { AlertTriangle, Bot, Check, Clock, RotateCcw, SkipForward } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { cn } from "@/lib/utils";
 import { useCronObservability, useHermesRecentResults } from "../hooks/useControlData";
 import { buildPulse, groupPulseByDay, summarizePulse, type PulseEvent, type PulseKind } from "../lib/pulse";
 import { fmtAge, fmtClockTime, freshness, nowSec } from "../lib/derive";
 import { TONE_HEX } from "../lib/tones";
 import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
+import { Hero } from "../components/Hero";
 import { SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
 import type { Proposal } from "../lib/types";
@@ -60,21 +60,19 @@ export function PulseView({ proposals, proposalsLastUpdated }: Props) {
 
   return (
     <div className="space-y-5">
-      <FleetPanel
+      <Hero
         eyebrow={de.pulse.eyebrow}
-        meta={
-          <span className={cn(fresh.stale ? "text-amber-200" : undefined)} title={fresh.stale ? de.pulse.stalePaused : undefined}>
-            {error ? de.pulse.sourceError : fresh.stale ? de.pulse.staleWarn(fresh.label.replace("vor ", "")) : fresh.label}
-          </span>
-        }
+        title={de.pulse.title}
+        subtitle={de.pulse.subtitle(WINDOW_HOURS)}
+        tone={summary.cronErrors > 0 ? "amber" : "cyan"}
+        status={{
+          label: error ? de.pulse.sourceError : fresh.stale ? de.pulse.staleWarn(fresh.label.replace("vor ", "")) : fresh.label,
+          tone: error || fresh.stale ? "amber" : "emerald",
+          dot: error ? "error" : fresh.stale ? "warn" : "live",
+        }}
       >
-        <div>
-          <h2 className="text-2xl font-semibold tracking-normal text-white sm:text-3xl">{de.pulse.title}</h2>
-          <p className="mt-2 max-w-2xl hc-soft">{de.pulse.subtitle(WINDOW_HOURS)}</p>
-        </div>
-
         {/* Tally: eine ehrliche Zeile darüber, was die Maschine geleistet hat. */}
-        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <FleetPod label={de.pulse.statRuns} value={summary.runs} dot={summary.runs > 0 ? "live" : "idle"} />
           <FleetPod label={de.pulse.statApplied} value={summary.applied} dot={summary.applied > 0 ? "ready" : "idle"} />
           {summary.reverted > 0 ? <FleetPod label={de.pulse.statReverted} value={summary.reverted} dot="warn" /> : null}
@@ -85,7 +83,7 @@ export function PulseView({ proposals, proposalsLastUpdated }: Props) {
             dot={summary.cronErrors > 0 ? "error" : "live"}
           />
         </div>
-      </FleetPanel>
+      </Hero>
 
       {loading ? (
         <SkeletonCard rows={4} />

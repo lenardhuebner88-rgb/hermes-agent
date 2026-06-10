@@ -23,6 +23,7 @@ import { RunSummaryTile } from "../components/RunSummaryTile";
 import { HermesBlockedCard } from "../components/HermesBlockedCard";
 import { HermesReviewCard } from "../components/HermesReviewCard";
 import { ToneCallout } from "../components/atoms";
+import { Hero } from "../components/Hero";
 import { SkeletonCard, Text } from "../components/primitives";
 import { FleetPod, FleetPanel, FleetEmptyState } from "../components/fleet/atoms";
 import { FleetResultCard } from "../components/fleet/FleetResultCard";
@@ -101,23 +102,25 @@ export function HermesFleet({ density }: { density: Density }) {
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="hc-type-title text-white">{de.fleet.title}</h1>
-        <span className="hc-mono text-sm hc-dim">{de.fleet.subtitle}</span>
-      </div>
-
-      {/* KPI pods */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <FleetPod label={de.fleet.podActiveRuns} dot="live" value={board.loading && board.data == null ? "—" : activeRuns} />
-        <FleetPod
-          label={de.fleet.podWorkers}
-          value={workersLoadingFirst ? "—" : (workers.data?.count ?? list.length)}
-          suffix={roster.data != null ? `/ ${roster.data}` : undefined}
-        />
-        <FleetPod label={de.fleet.podInReview} dot="warn" value={reviewsLoadingFirst && !board.data ? "—" : reviewCount} />
-        <FleetPod label={de.fleet.podDoneToday} value={digestLoadingFirst ? "—" : (digest.data?.count ?? 0)} />
-      </div>
+      {/* Header — unified Hero with the KPI pods as its body. */}
+      <Hero
+        eyebrow={de.tabs.hermes}
+        title={de.fleet.title}
+        subtitle={de.fleet.subtitle}
+        tone={reviewCount > 0 ? "amber" : activeRuns > 0 ? "cyan" : "violet"}
+        density={density}
+      >
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <FleetPod label={de.fleet.podActiveRuns} dot="live" value={board.loading && board.data == null ? "—" : activeRuns} />
+          <FleetPod
+            label={de.fleet.podWorkers}
+            value={workersLoadingFirst ? "—" : (workers.data?.count ?? list.length)}
+            suffix={roster.data != null ? `/ ${roster.data}` : undefined}
+          />
+          <FleetPod label={de.fleet.podInReview} dot="warn" value={reviewsLoadingFirst && !board.data ? "—" : reviewCount} />
+          <FleetPod label={de.fleet.podDoneToday} value={digestLoadingFirst ? "—" : (digest.data?.count ?? 0)} />
+        </div>
+      </Hero>
 
       {/* Pipeline — real stage mechanics (Ziel 2) */}
       {board.error ? <ToneCallout tone="red">Board konnte nicht geladen werden.<br />{board.error}</ToneCallout> : null}
