@@ -1322,8 +1322,13 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     # clauses added after the 5-run E2E audit: (1) allowed_tools is advisory not
     # a hard allowlist, (2) scratch is deleted on complete — preserve via
     # artifacts=[...], (3) the turn is not over without a terminal kanban call,
-    # (4) clarify is a dead-end, use kanban_block. Still guards against bloat.
-    assert 1_500 < len(KANBAN_GUIDANCE) < 5_120, (
+    # (4) clarify is a dead-end, use kanban_block.
+    # Bumped 5_120 -> 6_144 for the worker-contract deliverable clauses added in
+    # 606070539 / bafaf1f90 (post your end RESULT as a Markdown comment first,
+    # then a structured --metadata handoff with residual_risk) — the ceiling was
+    # left stale by those commits, so the shared gate had been red. Still guards
+    # against bloat.
+    assert 1_500 < len(KANBAN_GUIDANCE) < 6_144, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars — too short (missing?) or too long"
     )
 
