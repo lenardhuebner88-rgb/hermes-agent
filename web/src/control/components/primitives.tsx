@@ -266,6 +266,10 @@ export function Disclosure({ summary, children, defaultOpen = false, open, onTog
   const isControlled = open !== undefined && onToggle !== undefined;
   const [internalOpen, setInternalOpen] = useState(open ?? defaultOpen);
   useEffect(() => {
+    // Deliberate prop→state sync mirroring native <details open=…>: when the
+    // uncontrolled hint flips, re-seed internal state. Safe (guarded, runs only
+    // on the hint change), so opt out of the cascading-render heuristic.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!isControlled && open !== undefined) setInternalOpen(open);
   }, [open, isControlled]);
   const isOpen = isControlled ? (open as boolean) : internalOpen;
