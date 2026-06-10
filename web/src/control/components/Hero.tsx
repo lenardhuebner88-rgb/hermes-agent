@@ -75,7 +75,8 @@ export function Hero({
         <div className="min-w-0 sm:max-w-[34rem]">
           <Eyebrow>{eyebrow}</Eyebrow>
           {count != null ? (
-            <div className="hc-aurora-text hc-type-display mt-1.5 font-mono tabular-nums">{count}</div>
+            // The signature: an oversized aurora number in the editorial serif.
+            <div className="hc-aurora-text hc-type-display mt-1.5 tabular-nums">{count}</div>
           ) : null}
           {countHint != null ? (
             <Text variant="label" className="mt-1 hc-soft">{countHint}</Text>
@@ -83,7 +84,7 @@ export function Hero({
           <Text
             as="h1"
             variant="title"
-            className={cn("line-clamp-2 text-[var(--hc-text)]", hasNumber ? "mt-2" : "mt-1")}
+            className={cn("hc-hero-statement line-clamp-2 text-[var(--hc-text)]", hasNumber ? "mt-2" : "mt-1")}
           >
             {title}
           </Text>

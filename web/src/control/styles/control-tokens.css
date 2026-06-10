@@ -1,38 +1,46 @@
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+/* Aurora Observatory — a night-sky command cockpit.
+   Geist (UI/body) + Geist Mono (data) + Fraunces (editorial display serif, the
+   signature voice on heroes; opsz makes it more dramatic at large sizes). */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&display=swap");
 
 [data-control] {
-  --hc-bg: #0d0d0f;
-  --hc-rail: #0f0f0f;
-  --hc-panel: #111111;
-  --hc-panel-2: #141414;
-  --hc-panel-active: #1a1a1a;
-  --hc-panel-card: #161b22;
-  --hc-border: #1e1e1e;
-  --hc-border-strong: #2a2a2a;
-  --hc-text: #f0f0f0;
-  --hc-text-soft: #9ca3af;
-  --hc-text-dim: #6b7280;
-  /* ── Aurora Violet accent identity ────────────────────────────────────
-     The brand: a violet → indigo → cyan aurora. Var names that callers
-     already use (--hc-accent / -text / -wash / -border) keep working; the
-     values are upgraded and new ones (-strong, -2, -glow, gradients) are
-     added on top. Violet = accent/interaction only — never a status warn. */
-  --hc-accent:        #8b5cf6;
-  --hc-accent-strong: #a78bfa;
-  --hc-accent-text:   #ddd6fe;
-  --hc-accent-wash:   rgba(139,92,246,.14);
-  --hc-accent-border: rgba(139,92,246,.34);
-  --hc-accent-glow:   0 0 0 1px rgba(139,92,246,.35), 0 0 20px rgba(139,92,246,.28);
-  --hc-accent-2:      #22d3ee;
-  --hc-aurora:      linear-gradient(115deg,#8b5cf6 0%,#6366f1 42%,#22d3ee 100%);
-  --hc-aurora-soft: linear-gradient(115deg,rgba(139,92,246,.20),rgba(99,102,241,.14) 45%,rgba(34,211,238,.12));
-  --hc-page-bloom:  radial-gradient(120% 90% at 0% -10%, rgba(139,92,246,.10) 0%, transparent 55%);
-  --hc-emerald: #22c55e;
-  --hc-cyan: #22d3ee;
-  --hc-amber: #f59e0b;
-  --hc-red: #ef4444;
-  --hc-zinc: #52525b;
-  --hc-font-sans: "Geist", "Geist Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* ── Night-ink base ───────────────────────────────────────────────────────
+     A cool, blue-black "observatory" field — NOT flat neutral black. The slight
+     indigo cast is what separates premium-at-night from clinical-gray. */
+  --hc-bg:           #07080e;
+  --hc-bg-2:         #0a0c14;
+  --hc-rail:         #090a12;
+  --hc-panel:        #10131e;
+  --hc-panel-2:      #141826;
+  --hc-panel-active: #1b2134;
+  --hc-panel-card:   #11141f;
+  --hc-border:       #20243a;
+  --hc-border-strong:#2c3350;
+  --hc-text:         #eef0fb;
+  --hc-text-soft:    #98a0bb;
+  --hc-text-dim:     #626a86;
+  /* ── Aurora accent identity ───────────────────────────────────────────────
+     Violet → indigo → cyan. Now the environmental light of the room, not just
+     a number tint. Names callers use (--hc-accent / -text / -wash / -border)
+     keep working. Violet = accent/interaction only — never a status warn. */
+  --hc-accent:        #9b7bff;
+  --hc-accent-strong: #b9a3ff;
+  --hc-accent-text:   #e4ddff;
+  --hc-accent-wash:   rgba(155,123,255,.15);
+  --hc-accent-border: rgba(155,123,255,.38);
+  --hc-accent-glow:   0 0 0 1px rgba(155,123,255,.40), 0 0 28px rgba(124,92,246,.34);
+  --hc-accent-2:      #34dafe;
+  --hc-aurora:      linear-gradient(118deg,#b366ff 0%,#7c6cff 38%,#34dafe 100%);
+  --hc-aurora-soft: linear-gradient(118deg,rgba(179,102,255,.22),rgba(124,108,255,.15) 45%,rgba(52,218,254,.13));
+  --hc-page-bloom:  radial-gradient(120% 90% at 0% -10%, rgba(155,123,255,.12) 0%, transparent 55%);
+  /* Luminous status hues, tuned to sit in the night palette. */
+  --hc-emerald: #34d399;
+  --hc-cyan:    #34dafe;
+  --hc-amber:   #fbbf24;
+  --hc-red:     #fb6f86;
+  --hc-zinc:    #5b6486;
+  --hc-font-sans: "Geist", "Geist Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --hc-font-display: "Fraunces", "Geist", Georgia, "Times New Roman", serif;
   --agent-atlas: #14b8a6;
   --agent-forge: #f97316;
   --agent-pixel: #d946ef;
@@ -40,13 +48,16 @@
   --agent-spark: #ec4899;
   --agent-james: #10b981;
   --hc-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --hc-radius: .5rem;
-  /* Elevation ladder — depth via shadow, consumed by .hc-surface-* below. */
-  --hc-elev-1: 0 1px 0 rgba(255,255,255,.03) inset, 0 4px 18px rgba(0,0,0,.30);
-  --hc-elev-2: 0 1px 0 rgba(255,255,255,.04) inset, 0 12px 40px rgba(0,0,0,.44);
-  /* Named type scale — size / weight / tracking. Utilities: .hc-type-* below. */
-  --hc-type-display:  40px; --hc-type-display-w: 700; --hc-type-display-ls: -.03em;
-  --hc-type-title:    28px; --hc-type-title-w:   650; --hc-type-title-ls:   -.02em;
+  --hc-radius: .625rem;
+  /* Film grain — one tiny inline-SVG noise tile, reused as a soft overlay so the
+     dark surfaces read as material, not flat digital paint. */
+  --hc-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  /* Elevation ladder — real material: a top light-edge + layered ambient shadow. */
+  --hc-elev-1: inset 0 1px 0 rgba(255,255,255,.05), 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.7);
+  --hc-elev-2: inset 0 1px 0 rgba(255,255,255,.07), 0 2px 5px rgba(0,0,0,.45), 0 28px 64px -26px rgba(0,0,0,.8);
+  /* Named type scale — bolder, more editorial. Display rides the serif. */
+  --hc-type-display:  46px; --hc-type-display-w: 600; --hc-type-display-ls: -.022em;
+  --hc-type-title:    30px; --hc-type-title-w:   640; --hc-type-title-ls:   -.018em;
   --hc-type-subtitle: 18px; --hc-type-subtitle-w: 600; --hc-type-subtitle-ls: -.01em;
   --hc-type-body:     14px; --hc-type-body-w:    400;
   --hc-type-label:    12px; --hc-type-label-w:   500; --hc-type-label-ls:  .01em;
@@ -55,6 +66,7 @@
   font-family: var(--hc-font-sans);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
+  color-scheme: dark;
 }
 
 [data-control] * { box-sizing: border-box; }
@@ -63,13 +75,42 @@
 [data-control] .hc-mono { font-family: var(--hc-font-mono); }
 
 .hc-page {
+  position: relative;
+  isolation: isolate;
   min-height: calc(100dvh - 7rem);
   margin: -0.5rem -0.75rem 0;
-  /* Aurora bloom drifting in from the top-left, over the base gradient —
-     gives the cockpit atmosphere without competing with content. */
+  /* The observatory field: aurora light pooling from the top corners, a cool
+     indigo horizon, and a soft vignette that focuses the eye on the content. */
   background:
-    var(--hc-page-bloom),
-    linear-gradient(180deg, #0d0d0f 0%, #0a0a0d 100%);
+    radial-gradient(115% 78% at 6% -12%, rgba(179,102,255,.20), transparent 50%),
+    radial-gradient(85% 62% at 100% -6%, rgba(52,218,254,.11), transparent 48%),
+    radial-gradient(120% 105% at 50% 118%, rgba(124,108,255,.08), transparent 55%),
+    radial-gradient(135% 120% at 50% 38%, transparent 58%, rgba(0,0,0,.5)),
+    linear-gradient(180deg, #0a0c16 0%, #06070d 100%);
+}
+/* Film grain — sits behind the content (z-index:-1, contained by isolation),
+   never intercepts clicks, lifts the flat dark into material. */
+.hc-page::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background-image: var(--hc-grain);
+  background-size: 160px 160px;
+  opacity: .05;
+  mix-blend-mode: overlay;
+}
+/* A single slow-drifting aurora orb — the only ambient motion; the room
+   breathes. Motion-safe, and content stays static (screenshot-safe). */
+.hc-page::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  left: -10%; top: -8%; width: 50%; height: 60%;
+  background: radial-gradient(circle at 30% 30%, rgba(155,123,255,.16), transparent 62%);
+  filter: blur(40px);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hc-page::after { animation: hc-drift 26s ease-in-out infinite alternate; }
+}
+@keyframes hc-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); opacity: .9; }
+  to   { transform: translate3d(8%, 6%, 0) scale(1.15); opacity: 1; }
 }
 
 /* ── Surface-depth ladder ─────────────────────────────────────────────────
@@ -81,24 +122,34 @@
 .hc-surface-panel {
   border: 1px solid var(--hc-border);
   border-radius: var(--hc-radius);
-  background: var(--hc-panel);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.014), transparent 42%),
+    var(--hc-panel);
 }
 .hc-surface-panel2 {
   border: 1px solid var(--hc-border);
   border-radius: var(--hc-radius);
-  background: var(--hc-panel-2);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.016), transparent 42%),
+    var(--hc-panel-2);
 }
 .hc-surface-card,
 .hc-card {
   border: 1px solid var(--hc-border);
   border-radius: var(--hc-radius);
-  background: color-mix(in srgb, var(--hc-panel-card) 94%, transparent);
+  /* Material: a faint top-down sheen over the card fill, lifted by the
+     light-edge + ambient shadow ladder so it reads as a physical surface. */
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.022), transparent 38%),
+    color-mix(in srgb, var(--hc-panel-card) 96%, transparent);
   box-shadow: var(--hc-elev-1);
 }
 .hc-surface-raised {
   border: 1px solid var(--hc-border-strong);
   border-radius: calc(var(--hc-radius) * 1.5);
-  background: linear-gradient(180deg, var(--hc-panel-2) 0%, var(--hc-panel) 100%);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.03), transparent 32%),
+    linear-gradient(180deg, var(--hc-panel-2) 0%, var(--hc-panel) 100%);
   box-shadow: var(--hc-elev-2);
 }
 
@@ -109,8 +160,13 @@
    Six named steps. Components render a step via .hc-type-* (see <Text>),
    never ad-hoc font-size. ONE breakpoint bumps display+title at ≥1024px —
    no per-component responsive sizing anywhere downstream. */
-.hc-type-display  { font-size: var(--hc-type-display);  font-weight: var(--hc-type-display-w);  letter-spacing: var(--hc-type-display-ls);  line-height: 1.02; }
+/* Display rides the editorial serif (Fraunces) with optical sizing — the
+   signature voice on hero numbers + statements. opsz makes it more dramatic
+   (higher contrast) as it scales up. */
+.hc-type-display  { font-family: var(--hc-font-display); font-optical-sizing: auto; font-size: var(--hc-type-display);  font-weight: var(--hc-type-display-w);  letter-spacing: var(--hc-type-display-ls);  line-height: 1.0; }
 .hc-type-title    { font-size: var(--hc-type-title);    font-weight: var(--hc-type-title-w);    letter-spacing: var(--hc-type-title-ls);    line-height: 1.1; }
+/* The hero's editorial line — the one sentence that gives the tab its voice. */
+.hc-hero-statement { font-family: var(--hc-font-display); font-optical-sizing: auto; font-weight: 600; letter-spacing: -.015em; line-height: 1.04; }
 .hc-type-subtitle { font-size: var(--hc-type-subtitle); font-weight: var(--hc-type-subtitle-w); letter-spacing: var(--hc-type-subtitle-ls); line-height: 1.25; }
 .hc-type-body     { font-size: var(--hc-type-body);     font-weight: var(--hc-type-body-w);     line-height: 1.5; }
 .hc-type-label    { font-size: var(--hc-type-label);    font-weight: var(--hc-type-label-w);    letter-spacing: var(--hc-type-label-ls);    line-height: 1.35; }
@@ -135,14 +191,18 @@
 }
 
 @media (min-width: 1024px) {
-  .hc-type-display { font-size: 48px; }
-  .hc-type-title   { font-size: 32px; }
+  .hc-type-display { font-size: 58px; }
+  .hc-type-title   { font-size: 37px; }
 }
 /* Labelled action buttons: the upstream Button sets line-height:0 for single-line
    icon alignment, so a wrapped label collapses its lines on top of each other
    (jumbled text in narrow/compact layouts). Keep these labels on one line. */
 .hc-hit { min-height: 44px; white-space: nowrap; letter-spacing: 0; }
 .hc-tab { min-height: 60px; }
+
+/* Active nav surface — the aurora glow that makes the current tab read as lit
+   from within (rail + desktop tabs). The frame feels alive, not painted. */
+.hc-nav-active { box-shadow: var(--hc-accent-glow); }
 
 .hc-led { box-shadow: 0 0 6px currentColor; }
 .hc-led-live { color: var(--hc-emerald); animation: hc-pulse 2s ease-in-out infinite; }
@@ -167,13 +227,27 @@
    (emerald = calm, amber/red = attention); defaults to the brand accent. */
 .hc-hero {
   position: relative;
+  isolation: isolate;
   border: 1px solid var(--hc-border-strong);
-  border-radius: calc(var(--hc-radius) * 1.75);
+  border-radius: calc(var(--hc-radius) * 2);
   background:
-    radial-gradient(130% 150% at 0% 0%, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 16%, transparent) 0%, transparent 56%),
+    radial-gradient(130% 150% at 0% 0%, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 18%, transparent) 0%, transparent 54%),
+    linear-gradient(180deg, rgba(255,255,255,.035), transparent 26%),
     linear-gradient(180deg, var(--hc-panel-2) 0%, var(--hc-panel) 100%);
-  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 10px 44px rgba(0,0,0,.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    0 2px 6px rgba(0,0,0,.4),
+    0 34px 80px -30px rgba(0,0,0,.85);
   overflow: hidden;
+}
+/* The focal glow: a soft aurora orb in the hero's upper-right — the luminous
+   element the eye is meant to land on. Tone-driven, decorative, click-through. */
+.hc-hero::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  right: -8%; top: -55%; width: 46%; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--hc-hero-accent, var(--hc-accent)) 42%, transparent), transparent 66%);
+  filter: blur(34px);
+  opacity: .85;
 }
 .hc-hero::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
@@ -182,7 +256,7 @@
   background: var(--hc-aurora);
 }
 .hc-hero[style*="--hc-hero-accent"]::before {
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--hc-hero-accent) 72%, transparent) 45%, transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--hc-hero-accent) 78%, transparent) 45%, transparent);
 }
 
 /* The single headline number: oversized, tabular, tone inherited from color. */

@@ -114,7 +114,7 @@ function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, onNavigate 
         const Icon = tab.icon;
         const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone);
         return (
-          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft", active === tab.id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
+          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
             <Icon className="h-4 w-4" />{tab.label}
             {badge ? <span className={cn("hc-badge", badge.cls)}>{badge.count}</span> : null}
           </button>
@@ -168,7 +168,7 @@ function TabButton({ tab, active, badge, onClick }: { tab: (typeof tabs)[number]
 function RailButton({ tab, active, badge, onClick }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void }) {
   const Icon = tab.icon;
   return (
-    <button type="button" title={tab.label} aria-label={tab.label} onClick={onClick} className={cn("relative grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft", active && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
+    <button type="button" title={tab.label} aria-label={tab.label} onClick={onClick} className={cn("relative grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft transition", active && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
       <Icon className="h-5 w-5" />
       {badge ? <span className={cn("hc-badge absolute -right-1 -top-1", badge.cls)}>{badge.count}</span> : null}
     </button>
