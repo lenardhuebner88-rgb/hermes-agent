@@ -1884,6 +1884,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "goal_max_turns", "goal_max_turns INTEGER"
         )
 
+    if "acceptance_criteria" not in cols:
+        # A1 (N-A1): JSON array of the structured acceptance criteria parsed
+        # from a child's decompose-generated body (normalized via
+        # plan_compiler's AcceptanceCriterion schema). NULL on every task that
+        # has none — the pre-A1 behaviour for all existing rows.
+        _add_column_if_missing(
+            conn, "tasks", "acceptance_criteria", "acceptance_criteria TEXT"
+        )
+
     if "session_id" not in cols:
         # Originating agent/chat session id, populated when the task is
         # created from within an agent loop that propagated
@@ -6004,6 +6013,56 @@ def specify_triage_task(
     return True
 
 
+# A1 (N-A1): bullet line carries an acceptance criterion when it names a stable
+# ``AC-<id>`` token — the form the decomposer prompt asks for. Conservative on
+# purpose: a body with no AC ids yields no criteria (NULL) rather than scooping
+# up unrelated bullets.
+_AC_BULLET_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+_AC_ID_RE = re.compile(r"\bAC-\w+", re.IGNORECASE)
+
+
+def _parse_acceptance_criteria(body: Optional[str]) -> Optional[str]:
+    """Parse ``AC-…`` bullets from a decompose-generated *body* into a JSON
+    array, normalized through plan_compiler's ``AcceptanceCriterion`` schema.
+
+    Returns the JSON string, or ``None`` when the body is empty, carries no
+    recognizable AC bullets, or anything fails — strictly fail-soft so a parse
+    miss never aborts a decomposition (the body itself is unchanged regardless).
+    """
+    if not isinstance(body, str) or not body.strip():
+        return None
+    try:
+        bullets: list[str] = []
+        for raw in body.splitlines():
+            m = _AC_BULLET_RE.match(raw.strip())
+            if not m:
+                continue
+            text = m.group(1).strip()
+            if text and _AC_ID_RE.search(text):
+                bullets.append(text)
+        if not bullets:
+            return None
+        # Reuse (do NOT fork) the PlanSpec normalizer: free-form strings pass
+        # through as-is, dict items validate against the rich schema, invalid
+        # ones are dropped into ``findings`` (which we intentionally discard —
+        # a malformed criterion must not block the decomposition).
+        from hermes_cli.plan_compiler import _normalize_acceptance_criteria
+
+        findings: list[str] = []
+        normalized = _normalize_acceptance_criteria(bullets, findings)
+        out: list = []
+        for item in normalized:
+            if isinstance(item, str):
+                out.append(item)
+            else:  # AcceptanceCriterion -> plain dict for JSON storage
+                out.append(item.model_dump())
+        if not out:
+            return None
+        return json.dumps(out, ensure_ascii=False)
+    except Exception:
+        return None
+
+
 def decompose_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6163,11 +6222,17 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
+            # A1: parse structured acceptance criteria from the child's body.
+            # Fail-soft → NULL; the body is stored verbatim either way.
+            child_ac = _parse_acceptance_criteria(
+                body if isinstance(body, str) else None
+            )
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, "
+                " acceptance_criteria) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -6179,6 +6244,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    child_ac,
                 ),
             )
             _append_event(

@@ -5527,4 +5527,58 @@ def test_b2_metadata_verdict_field_is_untouched(kanban_home):
         assert json.loads(row["metadata"])["verdict"] == "free-form-note"
 
 
+# ---------------------------------------------------------------------------
+# A1 (N-A1): acceptance-criteria column + body parser
+# ---------------------------------------------------------------------------
+
+def test_a1_acceptance_criteria_column_present_and_migrate_idempotently(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "acceptance_criteria" in cols
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols2 = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+        assert cols2.count("acceptance_criteria") == 1
+
+
+def test_a1_parse_extracts_ac_bullets():
+    import json
+    body = (
+        "Goal: ship it.\n"
+        "- AC-1: endpoint returns 200 — verification: curl\n"
+        "* AC-2: row persisted — done_signal: row present\n"
+        "- a non-AC bullet that should be ignored\n"
+    )
+    raw = kb._parse_acceptance_criteria(body)
+    parsed = json.loads(raw)
+    assert len(parsed) == 2
+    assert "AC-1" in parsed[0]
+    assert "AC-2" in parsed[1]
+
+
+def test_a1_parse_none_for_empty_or_missing():
+    assert kb._parse_acceptance_criteria(None) is None
+    assert kb._parse_acceptance_criteria("") is None
+    assert kb._parse_acceptance_criteria("   \n  ") is None
+
+
+def test_a1_parse_none_when_no_ac_ids():
+    body = (
+        "Just prose.\n"
+        "- implement the feature\n"
+        "- tests run\n"
+        "- documentation updated\n"
+    )
+    assert kb._parse_acceptance_criteria(body) is None
+
+
+def test_a1_parse_numbered_bullets():
+    import json
+    body = "1. AC-1: works — verification: test\n2) AC-2: persists\n"
+    parsed = json.loads(kb._parse_acceptance_criteria(body))
+    assert len(parsed) == 2
+
+
 

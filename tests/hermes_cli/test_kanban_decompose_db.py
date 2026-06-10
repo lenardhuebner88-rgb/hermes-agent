@@ -228,3 +228,76 @@ def test_decompose_per_child_workspace_override(kanban_home):
         inh = kb.get_task(conn, child_ids[1])
     assert over.workspace_path == "/other/repo"
     assert inh.workspace_path == proj
+
+
+# ---------------------------------------------------------------------------
+# A1 (N-A1): structured acceptance criteria parsed + persisted at decompose
+# ---------------------------------------------------------------------------
+
+def _acceptance_json(conn, tid):
+    row = conn.execute(
+        "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+    ).fetchone()
+    return row["acceptance_criteria"] if row else None
+
+
+def test_a1_decompose_persists_acceptance_criteria(kanban_home):
+    import json
+    body_with_acs = (
+        "Build the widget endpoint.\n\n"
+        "Acceptance criteria:\n"
+        "- AC-1: GET /widget returns 200 — verification: curl, "
+        "done_signal: HTTP 200 body\n"
+        "- AC-2: a widget row is persisted — verification: SELECT count, "
+        "done_signal: row present\n"
+    )
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="widget")
+        child_ids = kb.decompose_triage_task(
+            conn, tid, root_assignee="orchestrator",
+            children=[
+                {"title": "build", "body": body_with_acs, "assignee": "coder",
+                 "parents": []},
+                {"title": "no-acs", "body": "just do it, no criteria here",
+                 "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        # Child 0 had AC bullets → column carries them as a JSON list.
+        raw = _acceptance_json(conn, child_ids[0])
+        assert raw is not None
+        parsed = json.loads(raw)
+        assert len(parsed) == 2
+        assert any("AC-1" in str(item) for item in parsed)
+        assert any("AC-2" in str(item) for item in parsed)
+        # Child 1 had no AC ids → NULL (pre-A1 behaviour).
+        assert _acceptance_json(conn, child_ids[1]) is None
+
+
+def test_a1_decompose_body_preserved_verbatim(kanban_home):
+    """Regression: parsing ACs must not mutate the stored body."""
+    body = (
+        "Do the thing.\n"
+        "- AC-1: it works — verification: test, done_signal: green\n"
+    )
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="x")
+        child_ids = kb.decompose_triage_task(
+            conn, tid, root_assignee="orch",
+            children=[{"title": "c", "body": body, "parents": []}],
+            author="d",
+        )
+        assert kb.get_task(conn, child_ids[0]).body == body
+
+
+def test_a1_decompose_no_body_is_null(kanban_home):
+    """A child with no body → acceptance_criteria NULL, no crash."""
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="x")
+        child_ids = kb.decompose_triage_task(
+            conn, tid, root_assignee="orch",
+            children=[{"title": "bodyless", "parents": []}],
+            author="d",
+        )
+        assert _acceptance_json(conn, child_ids[0]) is None
