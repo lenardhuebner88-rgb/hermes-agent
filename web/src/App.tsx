@@ -398,6 +398,8 @@ export default function App() {
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
+  // fork: /control owns its full shell — hide the upstream nav chrome on this route
+  const isControlRoute = pathname.startsWith("/control");
   const embeddedChat = isDashboardEmbeddedChatEnabled();
 
   // Keep the heavy embedded terminal (xterm + WebGL + 4 addons) out of the
@@ -518,7 +520,7 @@ export default function App() {
       <Backdrop />
       <PluginSlot name="backdrop" />
 
-      <header
+      {!isControlRoute && <header
         className={cn(
           "lg:hidden fixed top-0 left-0 right-0 z-40 min-h-14",
           "flex items-center gap-2 px-4 py-2",
@@ -549,9 +551,9 @@ export default function App() {
         >
           {t.app.brand}
         </Typography>
-      </header>
+      </header>}
 
-      {mobileOpen && (
+      {!isControlRoute && mobileOpen && (
         <Button
           ghost
           aria-label={t.app.closeNavigation}
@@ -565,9 +567,9 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-14 lg:pt-0">
+      <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", !isControlRoute && "pt-14 lg:pt-0")}>
         <div className="flex min-h-0 min-w-0 flex-1">
-          <aside
+          {!isControlRoute && <aside
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
@@ -740,7 +742,7 @@ export default function App() {
               <AuthWidget />
               <SidebarFooter status={sidebarStatus} />
             </div>
-          </aside>
+          </aside>}
 
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
             <div

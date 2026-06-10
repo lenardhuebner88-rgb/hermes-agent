@@ -74,7 +74,7 @@ function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, onN
         <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} onNavigate={onNavigate} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl lg:left-64">
+      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
         <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} />)}
         </div>
