@@ -5439,4 +5439,92 @@ def test_b1_submit_for_review_non_git_payload_has_no_snapshot_keys(
         assert "diff_stat" not in ev[0].payload
 
 
+# ---------------------------------------------------------------------------
+# B2 (N-B2): structured verdict column on task_runs (review lane only)
+# ---------------------------------------------------------------------------
+
+def _latest_run_verdict(conn, task_id):
+    row = conn.execute(
+        "SELECT verdict FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["verdict"] if row else None
+
+
+def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
+    """task_runs gains a ``verdict`` column; re-running the additive migration
+    is a no-op (idempotent, no duplicate-column crash)."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
+        assert "verdict" in cols
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols2 = [r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")]
+        assert cols2.count("verdict") == 1
+
+
+def test_b2_approved_verdict_on_review_complete(kanban_home):
+    """A verifier completing a task it reviewed → verdict APPROVED."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ok = kb.complete_task(conn, t, result="lgtm", summary="lgtm")
+        assert ok is True
+        assert _latest_run_verdict(conn, t) == "APPROVED"
+
+
+def test_b2_request_changes_verdict_on_review_block(kanban_home):
+    """A verifier blocking a task it reviewed → verdict REQUEST_CHANGES."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ok = kb.block_task(conn, t, reason="missing tests")
+        assert ok is True
+        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+
+
+def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
+    """An ordinary coder completion leaves task_runs.verdict NULL."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="code", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.complete_task(conn, t, result="done", summary="done")
+        assert _latest_run_verdict(conn, t) is None
+
+
+def test_b2_non_review_block_leaves_verdict_null(kanban_home):
+    """An ordinary block (coder hit a wall) leaves task_runs.verdict NULL."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="code", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="stuck")
+        assert _latest_run_verdict(conn, t) is None
+
+
+def test_b2_metadata_verdict_field_is_untouched(kanban_home):
+    """Back-compat: an existing metadata['verdict'] free-form value is NOT
+    promoted into the new column, and stays intact on the run metadata."""
+    import json
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="code", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.complete_task(
+            conn, t, result="done", summary="done",
+            metadata={"verdict": "free-form-note"},
+        )
+        # Column stays NULL (non-review run)...
+        assert _latest_run_verdict(conn, t) is None
+        # ...and the metadata key is preserved verbatim.
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert json.loads(row["metadata"])["verdict"] == "free-form-note"
+
+
 

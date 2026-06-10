@@ -1958,6 +1958,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "task_runs", "cost_usd", "cost_usd REAL"
             )
+        # B2 (N-B2): machine-readable review verdict. NULL on every non-review
+        # run; the review lane writes 'APPROVED' (complete) / 'REQUEST_CHANGES'
+        # (block). Distinct from metadata['verdict'] which stays untouched.
+        if "verdict" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "verdict", "verdict TEXT"
+            )
 
     notify_table_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
@@ -4529,6 +4536,26 @@ def _run_originated_from_review(
     return row is not None
 
 
+def _set_run_verdict(
+    conn: sqlite3.Connection, run_id: Optional[int], verdict: str
+) -> None:
+    """Persist the structured review *verdict* on *run_id* (B2).
+
+    Fail-soft: a missing column (pre-migration legacy DB) or any SQL error is
+    swallowed — recording the verdict must never break a completion/block. Call
+    inside the caller's write txn so it shares the transaction.
+    """
+    if run_id is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE task_runs SET verdict = ? WHERE id = ?",
+            (verdict, int(run_id)),
+        )
+    except sqlite3.Error:
+        pass
+
+
 def _review_gate_should_apply(
     conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int]
 ) -> bool:
@@ -5127,6 +5154,11 @@ def complete_task(
                 summary=summary if summary is not None else result,
                 metadata=metadata,
             )
+        # B2: an APPROVED verdict is the verifier completing the task it
+        # reviewed. Only the review lane writes it (anti-loop discriminator);
+        # ordinary coder completions leave task_runs.verdict NULL.
+        if _run_originated_from_review(conn, task_id, run_id):
+            _set_run_verdict(conn, run_id, "APPROVED")
         # Carry the handoff summary in the event payload so gateway
         # notifiers and dashboard WS consumers can render it without a
         # second SQL round-trip. First line only, 400 char cap — the
@@ -5745,6 +5777,11 @@ def block_task(
                 outcome="blocked",
                 summary=reason,
             )
+        # B2: a REQUEST_CHANGES verdict is the verifier rejecting the task it
+        # reviewed. Only the review lane writes it; ordinary blocks (a coder
+        # hitting a wall) leave task_runs.verdict NULL.
+        if _run_originated_from_review(conn, task_id, run_id):
+            _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
         return True
 
