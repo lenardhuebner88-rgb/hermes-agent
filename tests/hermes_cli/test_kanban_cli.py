@@ -167,6 +167,15 @@ def test_run_slash_json_output(kanban_home):
     assert payload["status"] == "ready"
 
 
+def test_run_slash_create_with_kind_sets_column(kanban_home):
+    out = kc.run_slash("create 'classified task' --kind code --json")
+    payload = json.loads(out)
+    assert payload["kind"] == "code"
+    with kb.connect() as conn:
+        task = kb.get_task(conn, payload["id"])
+    assert task.kind == "code"
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")

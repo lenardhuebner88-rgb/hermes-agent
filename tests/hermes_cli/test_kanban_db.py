@@ -42,6 +42,27 @@ def test_init_db_is_idempotent(kanban_home):
     assert tasks[0].title == "persisted"
 
 
+def test_task_kind_column_migration_is_idempotent(kanban_home):
+    with kb.connect() as conn:
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+    assert cols.count("kind") == 1
+
+
+def test_create_task_persists_optional_kind(kanban_home):
+    with kb.connect() as conn:
+        code_id = kb.create_task(conn, title="code task", kind="code")
+        plain_id = kb.create_task(conn, title="plain task")
+        rows = conn.execute(
+            "SELECT id, kind FROM tasks WHERE id IN (?, ?)",
+            (code_id, plain_id),
+        ).fetchall()
+    by_id = {row["id"]: row["kind"] for row in rows}
+    assert by_id[code_id] == "code"
+    assert by_id[plain_id] is None
+
+
 def test_init_creates_expected_tables(kanban_home):
     with kb.connect() as conn:
         rows = conn.execute(

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name, get_profile_dir, seed_profile_skills
 from hermes_cli.scoped_auto_commit import create_scoped_local_commit
@@ -86,6 +87,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
         "epic_id": t.epic_id,
+        "kind": t.kind,
     }
 
 
@@ -383,6 +385,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Attach the task to a durable epic (see "
                                "'hermes kanban epic'). On a --triage root the "
                                "epic propagates to every decompose child.")
+    p_create.add_argument("--kind", default=None, dest="kind", metavar="KIND",
+                          choices=sorted(_VALID_TASK_KINDS),
+                          help="Optional task kind: code, research, review, ops, or text.")
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",
@@ -1593,6 +1598,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
             epic_id=getattr(args, "epic_id", None),
+            kind=getattr(args, "kind", None),
         )
         # Subscribe-on-create: route this task's terminal-state notifications
         # to every configured home channel (same target as the dashboard

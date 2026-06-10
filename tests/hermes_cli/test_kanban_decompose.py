@@ -292,6 +292,51 @@ def test_decompose_unknown_assignee_falls_back_to_default(kanban_home):
     assert child.assignee == "fallback"
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("code", "code"),
+        (" CODE ", "code"),
+        ("research", "research"),
+        ("made-up", None),
+        ("", None),
+        (None, None),
+        (123, None),
+    ],
+)
+def test_normalize_kind_choice(raw, expected):
+    assert decomp._normalize_kind_choice(
+        raw,
+        valid_kinds=decomp._VALID_TASK_KINDS,
+    ) == expected
+
+
+def test_children_from_parsed_normalizes_optional_kind(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="classify", triage=True)
+        task = kb.get_task(conn, tid)
+
+    parsed = {
+        "fanout": True,
+        "tasks": [
+            {"title": "valid", "assignee": "writer", "kind": "CODE"},
+            {"title": "invalid", "assignee": "writer", "kind": "garbage"},
+            {"title": "missing", "assignee": "writer"},
+        ],
+    }
+
+    children, err = decomp._children_from_parsed(
+        parsed,
+        task,
+        valid_names={"writer"},
+        default_assignee="writer",
+    )
+
+    assert err is None
+    assert children is not None
+    assert [child["kind"] for child in children] == ["code", None, None]
+
+
 def test_decompose_handles_malformed_llm_json(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
@@ -406,6 +451,13 @@ def test_decompose_prompt_requires_verifiable_acceptance_criteria():
     assert "AC-" in prompt
     assert "verification" in prompt.lower()
     assert "done_signal" in prompt
+
+
+def test_decompose_prompt_documents_optional_kind():
+    prompt = decomp._SYSTEM_PROMPT
+    assert '"kind"' in prompt
+    assert "code|research|review|ops|text" in prompt
+    assert "null if unsure" in prompt
 
 
 def test_worker_scope_contract_validator_rejects_broad_allowed_tools():

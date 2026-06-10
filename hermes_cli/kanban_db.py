@@ -881,6 +881,8 @@ class Task:
     due_at: Optional[int] = None
     # N-E3: durable epic this task belongs to. NULL = not part of an epic.
     epic_id: Optional[str] = None
+    # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
+    kind: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -974,6 +976,9 @@ class Task:
             ),
             epic_id=(
                 row["epic_id"] if "epic_id" in keys else None
+            ),
+            kind=(
+                row["kind"] if "kind" in keys else None
             ),
         )
 
@@ -1181,7 +1186,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``epics`` table, no hard constraint). NULL = not part of an epic =
     -- exactly the pre-E3 behaviour. Decompose propagates the triage root's
     -- epic_id onto every child so a whole tree rolls up under one epic.
-    epic_id              TEXT
+    epic_id              TEXT,
+    -- Optional coarse work classification stamped by the decomposer or CLI.
+    -- NULL = unknown/unspecified.
+    kind                 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1939,6 +1947,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # root's epic_id onto its children; everything else leaves it NULL.
         _add_column_if_missing(conn, "tasks", "epic_id", "epic_id TEXT")
 
+    if "kind" not in cols:
+        _add_column_if_missing(conn, "tasks", "kind", "kind TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -2360,6 +2371,7 @@ def create_task(
     initial_status: str = "running",
     session_id: Optional[str] = None,
     epic_id: Optional[str] = None,
+    kind: Optional[str] = None,
     board: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
@@ -2530,8 +2542,8 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
-                        goal_mode, goal_max_turns, session_id, epic_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, epic_id, kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2556,6 +2568,7 @@ def create_task(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                         epic_id,
+                        kind,
                     ),
                 )
                 for pid in parents:
@@ -6134,6 +6147,7 @@ def decompose_triage_task(
             "title": "...",
             "body": "...",                     # optional
             "assignee": "profile-name",        # optional, None -> default fallback
+            "kind": "code",                    # optional, None -> unknown
             "parents": [0, 2],                 # indices into this same children list
         }
 
@@ -6261,6 +6275,7 @@ def decompose_triage_task(
             title = child["title"].strip()
             body = child.get("body")
             assignee = _canonical_assignee(child.get("assignee"))
+            kind = child.get("kind")
             # Per-child override wins; otherwise inherit the root's
             # workspace. A child that sets workspace_kind without a path
             # falls back to the root path only when kinds match (so a
@@ -6282,8 +6297,8 @@ def decompose_triage_task(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
-                " acceptance_criteria, epic_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " acceptance_criteria, epic_id, kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -6297,6 +6312,7 @@ def decompose_triage_task(
                     (author or "decomposer"),
                     child_ac,
                     root_epic_id,
+                    kind,
                 ),
             )
             _append_event(

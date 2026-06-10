@@ -50,6 +50,8 @@ from hermes_cli import profiles as profiles_mod
 
 logger = logging.getLogger(__name__)
 
+_VALID_TASK_KINDS = frozenset({"code", "research", "review", "ops", "text"})
+
 
 _SYSTEM_PROMPT = """You are the Kanban decomposer for the Hermes Agent board.
 
@@ -72,6 +74,7 @@ Output a single JSON object with this exact shape:
         "title": "<concrete task title, imperative voice, <= 80 chars>",
         "body":  "<detailed spec for the worker on this child task>",
         "assignee": "<profile name from the roster, or null for default>",
+        "kind": "code|research|review|ops|text, or null if unsure",
         "parents": [<int>, ...]
       },
       ...
@@ -143,7 +146,8 @@ return:
     "rationale": "<one sentence>",
     "title": "<tightened title>",
     "body":  "<concrete spec for a single worker>",
-    "assignee": "<profile name from the roster, or null for default>"
+    "assignee": "<profile name from the roster, or null for default>",
+    "kind": "code|research|review|ops|text, or null if unsure"
   }
 
 In that case the task stays as one work item, just with a tightened spec and
@@ -823,6 +827,19 @@ def _normalize_assignee_choice(
     return chosen
 
 
+def _normalize_kind_choice(
+    kind: object,
+    *,
+    valid_kinds: frozenset[str],
+) -> Optional[str]:
+    if not isinstance(kind, str) or not kind.strip():
+        return None
+    chosen = kind.strip().lower()
+    if chosen not in valid_kinds:
+        return None
+    return chosen
+
+
 def _children_from_parsed(
     parsed: dict,
     task: "kb.Task",
@@ -861,6 +878,10 @@ def _children_from_parsed(
             default_assignee=default_assignee,
             valid_names=valid_names,
         )
+        kind = _normalize_kind_choice(
+            entry.get("kind"),
+            valid_kinds=_VALID_TASK_KINDS,
+        )
         if (
             isinstance(assignee, str)
             and assignee.strip()
@@ -880,6 +901,7 @@ def _children_from_parsed(
             "title": title.strip()[:200],
             "body": body.strip(),
             "assignee": chosen,
+            "kind": kind,
             "parents": clean_parents,
         }
         children.append(_ensure_worker_scope_contract(child, parent_task=task))
