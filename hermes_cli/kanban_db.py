@@ -9989,9 +9989,15 @@ def _default_spawn(
                         "it for the assignee profile.",
                         task.id, sk, env.get("HERMES_HOME") or "~/.hermes",
                     )
+    cmd.append("chat")
+    # Per-task model override (T4 / WI-6 fix). `-m/--model` is BOTH a
+    # top-level and a chat-subparser flag, each defaulting to None. Placing
+    # `-m` BEFORE `chat` let the chat subparser's default=None clobber the
+    # top-level value in the single shared namespace, so the override never
+    # reached the worker. It must come AFTER `chat` so argparse routes it to
+    # the chat subparser (same reasoning as `--max-turns` below).
     if task.model_override:
         cmd.extend(["-m", task.model_override])
-    cmd.append("chat")
     # Per-task iteration-budget override routed through the top-precedence
     # CLI-arg path: `--max-turns N` maps to HermesCLI(max_turns=N), which
     # wins over the profile's agent.max_turns (cli.py:3053) — unlike the

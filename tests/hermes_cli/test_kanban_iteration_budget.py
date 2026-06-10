@@ -319,19 +319,12 @@ def test_worker_cmd_passes_max_turns_flag(kanban_home, monkeypatch):
     assert "--max-turns" not in captured["cmd"]
 
 
-@pytest.mark.xfail(
-    reason="WI-6: dispatcher places `-m <model_override>` BEFORE `chat`, but "
-    "`--model` is also a chat-subparser flag (default=None) so the subparser "
-    "default clobbers the top-level value -> per-task model_override never "
-    "reaches the worker. Same bug-class as the max_iterations shadow. Fix = put "
-    "`-m` after `chat` (see opus48-hardening-followup-plan-20260528.md WI-6); "
-    "then remove this xfail.",
-    strict=True,
-)
 def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
-    """End-to-end repro: parse the dispatcher's worker argv with the REAL
-    top-level parser and assert the per-task model override survives. Currently
-    RED (argparse yields model=None); flips to XPASS once WI-6 lands.
+    """End-to-end repro for the T4 / WI-6 fix: parse the dispatcher's worker
+    argv with the REAL top-level parser and assert the per-task model override
+    survives. Was RED while `-m` sat before `chat` (the chat subparser's
+    default=None clobbered the top-level value); green now that `-m` is placed
+    after `chat`.
     """
     captured: dict[str, object] = {}
 
@@ -357,9 +350,15 @@ def test_worker_cmd_model_override_reaches_parser(kanban_home, monkeypatch):
     with kb.connect() as conn:
         tid = kb.create_task(
             conn, title="model-override", assignee="coder",
-            model_override="gpt-5.5-codex",
+        )
+        # model_override has no create_task kwarg — it's an escalation field
+        # set on the row directly (mirrors how the dispatcher reads it).
+        conn.execute(
+            "UPDATE tasks SET model_override = ? WHERE id = ?",
+            ("gpt-5.5-codex", tid),
         )
         task = kb.get_task(conn, tid)
+    assert task.model_override == "gpt-5.5-codex"
     kb._default_spawn(task, "/tmp/ws", board="default")
 
     # Reconstruct the argv argparse actually sees: drop the executable (cmd[0])
