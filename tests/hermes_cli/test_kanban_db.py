@@ -5879,3 +5879,122 @@ def test_e3_close_epic(kanban_home):
 def test_e3_get_missing_epic_returns_none(kanban_home):
     with kb.connect() as conn:
         assert kb.get_epic(conn, "e_nope") is None
+
+
+# ---------------------------------------------------------------------------
+# C1 (N-C1): daily budget gate in dispatch preflight (off by default)
+# ---------------------------------------------------------------------------
+
+def _seed_run(conn, task_id, *, profile, tokens=0, cost=None, age_seconds=10):
+    """Insert a synthetic ended run with token/cost accounting for budget tests."""
+    started = int(time.time()) - age_seconds
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
+        "outcome, input_tokens, output_tokens, cost_usd) "
+        "VALUES (?, ?, 'done', ?, ?, 'completed', ?, 0, ?)",
+        (task_id, profile, started, started, tokens, cost),
+    )
+    conn.commit()
+
+
+def test_c1_caps_off_is_byte_identical(kanban_home, all_assignees_spawnable):
+    """Caps unset (the live default) → no hold even with heavy prior usage."""
+    spawns = []
+    with kb.connect() as conn:
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        _seed_run(conn, prior, profile="alice", tokens=10_000_000)
+        t = kb.create_task(conn, title="ready", assignee="alice")
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, ws: spawns.append(task.id))
+        assert res.budget_held == []
+        assert t in spawns
+        assert kb.get_task(conn, t).status == "running"
+
+
+def test_c1_token_cap_holds_only_over_budget_profile(
+    kanban_home, all_assignees_spawnable
+):
+    spawns = []
+    with kb.connect() as conn:
+        # alice has blown her token budget; bob has not.
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        _seed_run(conn, prior, profile="alice", tokens=5000)
+        ta = kb.create_task(conn, title="alice task", assignee="alice")
+        tb = kb.create_task(conn, title="bob task", assignee="bob")
+        res = kb.dispatch_once(
+            conn, spawn_fn=lambda task, ws: spawns.append(task.id),
+            daily_token_cap_per_profile=1000,
+        )
+        held_ids = [x[0] for x in res.budget_held]
+        assert ta in held_ids and tb not in held_ids
+        assert ta not in spawns and tb in spawns
+        assert kb.get_task(conn, ta).status == "ready"  # held, not blocked
+        # Exactly one budget_held event.
+        n = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'budget_held'",
+            (ta,),
+        ).fetchone()[0]
+        assert n == 1
+
+
+def test_c1_token_cap_event_deduped_across_ticks(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        _seed_run(conn, prior, profile="alice", tokens=5000)
+        ta = kb.create_task(conn, title="alice task", assignee="alice")
+        kb.dispatch_once(conn, spawn_fn=lambda t, ws: None, daily_token_cap_per_profile=1000)
+        kb.dispatch_once(conn, spawn_fn=lambda t, ws: None, daily_token_cap_per_profile=1000)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'budget_held'",
+            (ta,),
+        ).fetchone()[0]
+        assert n == 1
+
+
+def test_c1_cost_cap_holds_board_wide(kanban_home, all_assignees_spawnable):
+    spawns = []
+    with kb.connect() as conn:
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        _seed_run(conn, prior, profile="alice", cost=2.50)
+        ta = kb.create_task(conn, title="alice task", assignee="alice")
+        tb = kb.create_task(conn, title="bob task", assignee="bob")
+        res = kb.dispatch_once(
+            conn, spawn_fn=lambda task, ws: spawns.append(task.id),
+            daily_cost_cap_usd=1.0,
+        )
+        held_ids = {x[0] for x in res.budget_held}
+        assert {ta, tb} <= held_ids  # board-wide hold (prior is held too)
+        assert spawns == []
+
+
+def test_c1_null_tokens_count_as_zero(kanban_home, all_assignees_spawnable):
+    spawns = []
+    with kb.connect() as conn:
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        # A run with NULL tokens contributes 0 → under any positive cap.
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome) "
+            "VALUES (?, 'alice', 'done', ?, ?, 'completed')",
+            (prior, int(time.time()) - 5, int(time.time()) - 5),
+        )
+        conn.commit()
+        t = kb.create_task(conn, title="ready", assignee="alice")
+        res = kb.dispatch_once(
+            conn, spawn_fn=lambda task, ws: spawns.append(task.id),
+            daily_token_cap_per_profile=1000,
+        )
+        assert res.budget_held == []
+        assert t in spawns
+
+
+def test_c1_budget_held_surfaces_in_decision_queue(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        prior = kb.create_task(conn, title="prior", assignee="alice")
+        _seed_run(conn, prior, profile="alice", tokens=5000)
+        ta = kb.create_task(conn, title="alice task", assignee="alice")
+        kb.dispatch_once(conn, spawn_fn=lambda t, ws: None, daily_token_cap_per_profile=1000)
+        result = kb.decision_queue(conn)
+    assert "budget_held" in _kinds_for(ta, result)

@@ -6701,6 +6701,15 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    budget_held: list[tuple[str, str, str]] = field(default_factory=list)
+    """C1 (N-C1): ready tasks HELD this tick because a daily budget cap is hit,
+    as ``(task_id, assignee, reason)`` triples. Two causes: the assignee's
+    rolling-24h token usage reached ``kanban.daily_token_cap_per_profile`` (only
+    that profile is held), or the board's rolling-24h cost reached
+    ``kanban.daily_cost_cap_usd`` (every assigned ready task is held). The task
+    stays in ``ready`` (advisory, re-evaluated each tick), NOT blocked. Caps
+    default OFF (None) → this bucket is always empty → byte-identical to the
+    pre-C1 dispatcher. Surfaces in the decision-queue as a ``budget_held`` row."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -8467,6 +8476,8 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    daily_token_cap_per_profile: Optional[int] = None,
+    daily_cost_cap_usd: Optional[float] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -8580,6 +8591,48 @@ def dispatch_once(
             "GROUP BY assignee"
         ):
             _per_profile_running[prow["assignee"]] = int(prow["n"])
+
+    # C1 (N-C1) budget gate preflight. Caps default OFF (None) → both branches
+    # are skipped, ``_budget_capped_profiles`` stays empty and
+    # ``_global_cost_exceeded`` stays False → the loop below is byte-identical
+    # to the pre-C1 dispatcher. When a cap IS set, aggregate the rolling-24h
+    # spend from task_runs ONCE here (cheap, indexed on started_at-era columns)
+    # so the per-row check is a set/bool lookup. K16 lesson: the subscription
+    # fleet runs at $0 so tokens-per-profile is the real signal; $ catches
+    # metered/OpenRouter. NULL token/cost values count as 0 (fail-soft).
+    _token_cap = daily_token_cap_per_profile if (
+        isinstance(daily_token_cap_per_profile, int)
+        and daily_token_cap_per_profile > 0
+    ) else None
+    _cost_cap = daily_cost_cap_usd if (
+        isinstance(daily_cost_cap_usd, (int, float))
+        and not isinstance(daily_cost_cap_usd, bool)
+        and daily_cost_cap_usd > 0
+    ) else None
+    _budget_capped_profiles: set[str] = set()
+    _global_cost_exceeded = False
+    if (_token_cap is not None or _cost_cap is not None) and ready_rows:
+        _budget_window_start = int(time.time()) - 86400
+        if _token_cap is not None:
+            for brow in conn.execute(
+                "SELECT profile, "
+                "COALESCE(SUM(COALESCE(input_tokens, 0) + "
+                "              COALESCE(output_tokens, 0)), 0) AS tok "
+                "FROM task_runs WHERE started_at >= ? AND profile IS NOT NULL "
+                "GROUP BY profile",
+                (_budget_window_start,),
+            ):
+                if int(brow["tok"]) >= _token_cap:
+                    _budget_capped_profiles.add(brow["profile"])
+        if _cost_cap is not None:
+            _total_cost = conn.execute(
+                "SELECT COALESCE(SUM(COALESCE(cost_usd, 0)), 0) "
+                "FROM task_runs WHERE started_at >= ?",
+                (_budget_window_start,),
+            ).fetchone()[0]
+            if float(_total_cost or 0) >= _cost_cap:
+                _global_cost_exceeded = True
+
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -8754,6 +8807,38 @@ def dispatch_once(
                     (row["id"], row_assignee, current)
                 )
                 continue
+        # C1 (N-C1) budget hold: a daily cap is hit. Board-wide $ cap holds
+        # every assigned ready task; per-profile token cap holds only that
+        # profile's tasks. The task stays in ``ready`` (advisory hold, like the
+        # role-fit hold above), and we emit ONE deduped ``budget_held`` event
+        # (F2 pattern: skip if the task's most recent event is already
+        # ``budget_held``) so the decision-queue shows it without flooding the
+        # timeline. Caps OFF → this block never fires.
+        if _global_cost_exceeded or row_assignee in _budget_capped_profiles:
+            if _global_cost_exceeded:
+                budget_reason = (
+                    f"daily cost cap ${_cost_cap:.2f} reached "
+                    "(rolling 24h, board-wide hold)"
+                )
+            else:
+                budget_reason = (
+                    f"daily token cap {_token_cap} reached for profile "
+                    f"{row_assignee} (rolling 24h)"
+                )
+            result.budget_held.append((row["id"], row_assignee, budget_reason))
+            if not dry_run:
+                latest = conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if latest is None or latest["kind"] != "budget_held":
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "budget_held",
+                            {"reason": budget_reason},
+                        )
+            continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic
         # blocker (quota / auth). The guard defers the spawn this tick so

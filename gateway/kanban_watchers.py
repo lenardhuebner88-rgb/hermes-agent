@@ -1521,6 +1521,60 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # Read C1 budget caps (N-C1). Both default OFF (None) — the dispatcher
+        # never holds on budget unless the operator sets a positive value, so
+        # this is purely opt-in and the no-cap path is byte-identical to before.
+        # kanban.daily_token_cap_per_profile: rolling-24h token ceiling per
+        # profile (the subscription fleet runs at $0 so tokens are the signal).
+        # kanban.daily_cost_cap_usd: rolling-24h board-wide $ ceiling (metered).
+        raw_token_cap = kanban_cfg.get("daily_token_cap_per_profile", None)
+        daily_token_cap_per_profile = None
+        if raw_token_cap is not None:
+            try:
+                daily_token_cap_per_profile = int(raw_token_cap)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.daily_token_cap_per_profile=%r; ignoring",
+                    raw_token_cap,
+                )
+                daily_token_cap_per_profile = None
+            else:
+                if daily_token_cap_per_profile < 1:
+                    logger.warning(
+                        "kanban dispatcher: kanban.daily_token_cap_per_profile=%r is below 1; ignoring",
+                        raw_token_cap,
+                    )
+                    daily_token_cap_per_profile = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: daily_token_cap_per_profile=%d",
+                        daily_token_cap_per_profile,
+                    )
+
+        raw_cost_cap = kanban_cfg.get("daily_cost_cap_usd", None)
+        daily_cost_cap_usd = None
+        if raw_cost_cap is not None:
+            try:
+                daily_cost_cap_usd = float(raw_cost_cap)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.daily_cost_cap_usd=%r; ignoring",
+                    raw_cost_cap,
+                )
+                daily_cost_cap_usd = None
+            else:
+                if daily_cost_cap_usd <= 0:
+                    logger.warning(
+                        "kanban dispatcher: kanban.daily_cost_cap_usd=%r is not positive; ignoring",
+                        raw_cost_cap,
+                    )
+                    daily_cost_cap_usd = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: daily_cost_cap_usd=%.2f",
+                        daily_cost_cap_usd,
+                    )
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1614,6 +1668,8 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    daily_token_cap_per_profile=daily_token_cap_per_profile,
+                    daily_cost_cap_usd=daily_cost_cap_usd,
                 )
                 # Poll Mission-Control for any in-flight OpenClaw dispatches on
                 # this board and close their kanban tasks to done/blocked. Runs

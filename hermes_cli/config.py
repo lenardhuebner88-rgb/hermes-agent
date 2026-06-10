@@ -2108,6 +2108,21 @@ DEFAULT_CONFIG = {
         # otherwise saturate one profile's local model / API quota /
         # browser pool while leaving other profiles idle.
         "max_in_progress_per_profile": None,
+        # C1 budget gate (N-C1). Both OFF by default (None) — the dispatcher
+        # never holds a task on budget unless the operator sets a positive
+        # value, so the no-cap path is byte-identical to the pre-C1 dispatcher.
+        # daily_token_cap_per_profile: when set, a profile whose rolling-24h
+        # token usage (input+output, summed from task_runs) reaches the cap has
+        # its ready tasks held this tick (only that profile). The subscription
+        # fleet runs at $0, so tokens — not dollars — are the real throttle
+        # signal (K16). daily_cost_cap_usd: when set, once the board's
+        # rolling-24h cost reaches the cap NO task is claimed board-wide —
+        # catches metered / OpenRouter spend. A held task is left in `ready`
+        # (advisory, re-evaluated each tick) and surfaces in the decision-queue
+        # as a `budget_held` row; it is never auto-blocked. Setting real cap
+        # values is an operator decision.
+        "daily_token_cap_per_profile": None,
+        "daily_cost_cap_usd": None,
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or
