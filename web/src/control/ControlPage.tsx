@@ -42,6 +42,9 @@ const OrchestratorBacklogView = lazy(() =>
 const CronView = lazy(() =>
   import("./views/CronView").then((m) => ({ default: m.CronView })),
 );
+const LanesView = lazy(() =>
+  import("./views/LanesView").then((m) => ({ default: m.LanesView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -54,6 +57,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
+  if (pathname.includes("/control/lanes")) return "lanes";
   // Root /control (and the legacy /control/inbox) is the Decision-Inbox landing.
   return "inbox";
 }
@@ -69,6 +73,7 @@ const tabPath: Record<ControlTab, string> = {
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
+  lanes: "/control/lanes",
 };
 
 // Shown briefly while a lazy-loaded control view chunk downloads (first visit
@@ -157,6 +162,7 @@ export default function ControlPage() {
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
+            <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>

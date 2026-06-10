@@ -1292,6 +1292,23 @@ CREATE TABLE IF NOT EXISTS epics (
     closed_at  INTEGER
 );
 
+-- F1 (night-sprint): lane presets — named profile→(worker_runtime, model)
+-- mappings stored in the board DB so the dispatcher hot-reads the ACTIVE lane
+-- at every spawn (no gateway restart). ``profiles`` is a JSON object:
+--   {"<profile>": {"worker_runtime": "hermes"|"claude-cli", "model": "<id>"}}
+-- Precedence at spawn time: task.model_override > active lane > profile
+-- config.yaml default. Additive: no rows / no active row = exact pre-lane
+-- behavior.
+CREATE TABLE IF NOT EXISTS lanes (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    profiles   TEXT NOT NULL DEFAULT '{}',
+    active     INTEGER NOT NULL DEFAULT 0,
+    builtin    INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 -- Serves dispatch_once's per-tick ready-pull: WHERE status='ready' ... ORDER BY
@@ -9719,6 +9736,7 @@ def _spawn_claude_worker(
     *,
     env: dict,
     board: Optional[str] = None,
+    lane_model: Optional[str] = None,
 ) -> Optional[int]:
     """Fire-and-forget ``claude -p <prompt>`` subprocess for a claude-CLI worker.
 
@@ -9788,10 +9806,16 @@ def _spawn_claude_worker(
         "--disallowedTools", "WebFetch,WebSearch",
         "--output-format", "json",
     ]
-    # Model routing: per-task override > per-profile default (claude_model) >
-    # subscription default (omit --model). A profile can default to a fast/cheap
-    # tier (e.g. claude-fable-5) while hard tasks escalate via model_override.
-    worker_model = task.model_override or _claude_profile_model(env.get("HERMES_HOME"))
+    # Model routing: per-task override > active lane (F1) > per-profile default
+    # (claude_model) > subscription default (omit --model). A profile can default
+    # to a fast/cheap tier (e.g. claude-fable-5) while hard tasks escalate via
+    # model_override; the lane sits between the two as the operator-switchable
+    # fleet-wide preset.
+    worker_model = (
+        task.model_override
+        or lane_model
+        or _claude_profile_model(env.get("HERMES_HOME"))
+    )
     if worker_model:
         cmd.extend(["--model", worker_model])
 
@@ -9933,12 +9957,26 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    # Lane hot-read (F1): the active lane may pin this profile's runtime and
+    # model for THIS spawn. Fail-soft — a broken lanes table yields None and
+    # the pre-lane behavior below is untouched.
+    lane_entry = _active_lane_entry_for_profile(profile_arg, board=board)
+    lane_runtime = (lane_entry or {}).get("worker_runtime")
+    lane_model = (lane_entry or {}).get("model")
+
     # Early branch for claude-CLI worker profiles: launch the `claude` CLI
-    # instead of `hermes -p <profile> chat`. Fail-soft — a broken profile
-    # config can never divert the default path (see _is_claude_cli_profile).
-    # The hermes path below stays byte-identical.
-    if _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME")):
-        return _spawn_claude_worker(task, workspace, env=env, board=board)
+    # instead of `hermes -p <profile> chat`. The lane's worker_runtime (when
+    # set) overrides the profile-config seam in BOTH directions; otherwise
+    # fail-soft config check as before — a broken profile config can never
+    # divert the default path (see _is_claude_cli_profile). The hermes path
+    # below stays byte-identical for unmapped profiles.
+    if lane_runtime == "claude-cli" or (
+        lane_runtime is None
+        and _is_claude_cli_profile(profile_arg, env.get("HERMES_HOME"))
+    ):
+        return _spawn_claude_worker(
+            task, workspace, env=env, board=board, lane_model=lane_model,
+        )
 
     cmd = [
         *_resolve_hermes_argv(),
@@ -9996,8 +10034,11 @@ def _default_spawn(
     # top-level value in the single shared namespace, so the override never
     # reached the worker. It must come AFTER `chat` so argparse routes it to
     # the chat subparser (same reasoning as `--max-turns` below).
-    if task.model_override:
-        cmd.extend(["-m", task.model_override])
+    # Lane (F1) sits below the per-task override: override > lane > profile
+    # config default (no -m flag at all).
+    hermes_model = task.model_override or lane_model
+    if hermes_model:
+        cmd.extend(["-m", hermes_model])
     # Per-task iteration-budget override routed through the top-precedence
     # CLI-arg path: `--max-turns N` maps to HermesCLI(max_turns=N), which
     # wins over the profile's agent.max_turns (cli.py:3053) — unlike the
@@ -11452,6 +11493,338 @@ def task_age(task: Task) -> dict:
         "started_age_seconds": age_since_started,
         "time_to_complete_seconds": time_to_complete,
     }
+
+
+# ---------------------------------------------------------------------------
+# Lanes (night-sprint F1) — switchable profile→(runtime, model) presets
+# ---------------------------------------------------------------------------
+#
+# A lane is a named preset mapping profile names to a worker runtime
+# ("hermes" | "claude-cli") and an optional model id. Exactly one lane may be
+# active; the dispatcher hot-reads the active lane from the board DB at every
+# spawn (same per-spawn freshness as _is_claude_cli_profile /
+# _claude_profile_model), so switching lanes needs NO gateway restart.
+#
+# Spawn-time precedence (documented + tested):
+#   task.model_override            (per-task escalation, highest)
+#   > active lane entry            (this section)
+#   > profile config.yaml default  (worker_runtime / claude_model / model)
+#
+# A profile absent from the active lane falls through to its config default;
+# no lanes / no active lane = exact pre-lane behavior.
+
+LANE_RUNTIMES = ("hermes", "claude-cli")
+
+# Static fallback rosters for the first-start seed (from the signed
+# night-sprint plan). ensure_lane_seeds prefers the LIVE profile configs for
+# api-standard so activating it is behavior-neutral; these values are the
+# fallback when a profile config is unreadable (e.g. test fixtures).
+_LANE_SEED_API_STANDARD = {
+    "coder": {"worker_runtime": "hermes", "model": "gpt-5.5"},
+    "reviewer": {"worker_runtime": "hermes", "model": "kimi-for-coding"},
+    "critic": {"worker_runtime": "hermes", "model": "qwen3.7-max"},
+    "research": {"worker_runtime": "hermes", "model": "kimi-k2.6"},
+    "verifier": {"worker_runtime": "hermes", "model": "gpt-5.5"},
+    "coder-claude": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
+    "premium": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+}
+_LANE_SEED_MAX_ABO = {
+    "coder": {"worker_runtime": "claude-cli", "model": None},
+    "reviewer": {"worker_runtime": "claude-cli", "model": None},
+    "critic": {"worker_runtime": "claude-cli", "model": None},
+    "research": {"worker_runtime": "claude-cli", "model": None},
+    "verifier": {"worker_runtime": "claude-cli", "model": None},
+    "coder-claude": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
+    "premium": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+}
+
+
+def _new_lane_id() -> str:
+    """Generate a short lane id (``lane_`` prefix, parallel to ``e_`` epics)."""
+    return "lane_" + secrets.token_hex(4)
+
+
+def _normalize_lane_profiles(profiles) -> dict:
+    """Validate + normalize a lane ``profiles`` mapping.
+
+    Returns ``{profile: {"worker_runtime": <str|None>, "model": <str|None>}}``.
+    Raises ValueError on structurally invalid input (non-dict, unknown
+    runtime). Empty-string models normalize to None (= profile default).
+    """
+    if profiles is None:
+        return {}
+    if not isinstance(profiles, dict):
+        raise ValueError("profiles must be an object of {profile: {worker_runtime, model}}")
+    out: dict = {}
+    for prof, entry in profiles.items():
+        if not isinstance(prof, str) or not prof.strip():
+            raise ValueError("profile names must be non-empty strings")
+        if entry is None:
+            entry = {}
+        if not isinstance(entry, dict):
+            raise ValueError(f"lane entry for {prof!r} must be an object")
+        runtime = entry.get("worker_runtime")
+        if runtime is not None:
+            if not isinstance(runtime, str) or runtime.strip() not in LANE_RUNTIMES:
+                raise ValueError(
+                    f"worker_runtime for {prof!r} must be one of {LANE_RUNTIMES}"
+                )
+            runtime = runtime.strip()
+        model = entry.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError(f"model for {prof!r} must be a string")
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        out[prof.strip()] = {"worker_runtime": runtime, "model": model}
+    return out
+
+
+def _lane_dict(row: sqlite3.Row) -> dict:
+    try:
+        profiles = json.loads(row["profiles"] or "{}")
+        if not isinstance(profiles, dict):
+            profiles = {}
+    except (ValueError, TypeError):
+        profiles = {}
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "profiles": profiles,
+        "active": bool(row["active"]),
+        "builtin": bool(row["builtin"]),
+        "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
+        "updated_at": int(row["updated_at"]) if row["updated_at"] is not None else None,
+    }
+
+
+def _seed_api_standard_profiles() -> dict:
+    """Roster for the ``api-standard`` seed: live profile configs, with the
+    plan's static values as fallback per profile (fail-soft)."""
+    roster = dict(_LANE_SEED_API_STANDARD)
+    try:
+        from hermes_cli.profiles import resolve_profile_env
+        import yaml
+        for prof in list(roster.keys()):
+            try:
+                home = resolve_profile_env(prof)
+                cfg_path = os.path.join(home, "config.yaml")
+                if not os.path.isfile(cfg_path):
+                    continue
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+                if not isinstance(cfg, dict):
+                    continue
+                if cfg.get("worker_runtime") == "claude-cli":
+                    model = cfg.get("claude_model")
+                    roster[prof] = {
+                        "worker_runtime": "claude-cli",
+                        "model": model.strip() if isinstance(model, str) and model.strip() else None,
+                    }
+                else:
+                    model_cfg = cfg.get("model")
+                    default = model_cfg.get("default") if isinstance(model_cfg, dict) else None
+                    roster[prof] = {
+                        "worker_runtime": "hermes",
+                        "model": default.strip() if isinstance(default, str) and default.strip() else roster[prof]["model"],
+                    }
+            except Exception:
+                continue  # keep the static fallback for this profile
+    except Exception:
+        pass
+    return roster
+
+
+def ensure_lane_seeds(conn: sqlite3.Connection) -> bool:
+    """Seed the two first-start presets if the lanes table is empty.
+
+    ``api-standard`` (today's roster, seeded ACTIVE so activation is
+    behavior-neutral) and ``max-abo`` (claude-cli subscription lane).
+    Returns True if seeding happened. Idempotent.
+    """
+    n = conn.execute("SELECT COUNT(*) AS n FROM lanes").fetchone()["n"]
+    if int(n) > 0:
+        return False
+    now = int(time.time())
+    with write_txn(conn):
+        # Re-check inside the txn — another process may have seeded between
+        # the count above and acquiring the write lock.
+        n = conn.execute("SELECT COUNT(*) AS n FROM lanes").fetchone()["n"]
+        if int(n) > 0:
+            return False
+        conn.execute(
+            "INSERT INTO lanes (id, name, profiles, active, builtin, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, 1, ?, ?)",
+            (_new_lane_id(), "api-standard",
+             json.dumps(_seed_api_standard_profiles()), now, now),
+        )
+        conn.execute(
+            "INSERT INTO lanes (id, name, profiles, active, builtin, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, 1, ?, ?)",
+            (_new_lane_id(), "max-abo",
+             json.dumps(_LANE_SEED_MAX_ABO), now, now),
+        )
+    return True
+
+
+def list_lanes(conn: sqlite3.Connection) -> list[dict]:
+    """List all lanes (seeding the defaults on first contact)."""
+    ensure_lane_seeds(conn)
+    rows = conn.execute(
+        "SELECT * FROM lanes ORDER BY created_at ASC, name ASC"
+    ).fetchall()
+    return [_lane_dict(r) for r in rows]
+
+
+def get_active_lane(conn: sqlite3.Connection) -> Optional[dict]:
+    """Return the active lane, or None (= pure config-default behavior)."""
+    row = conn.execute(
+        "SELECT * FROM lanes WHERE active = 1 ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    return _lane_dict(row) if row is not None else None
+
+
+def create_lane(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    profiles=None,
+) -> dict:
+    """Create a lane preset (inactive). Raises ValueError on bad input."""
+    if not name or not name.strip():
+        raise ValueError("name is required")
+    norm = _normalize_lane_profiles(profiles)
+    lane_id = _new_lane_id()
+    now = int(time.time())
+    with write_txn(conn):
+        existing = conn.execute(
+            "SELECT 1 FROM lanes WHERE name = ?", (name.strip(),)
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(f"lane name {name.strip()!r} already exists")
+        conn.execute(
+            "INSERT INTO lanes (id, name, profiles, active, builtin, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, 0, ?, ?)",
+            (lane_id, name.strip(), json.dumps(norm), now, now),
+        )
+    row = conn.execute("SELECT * FROM lanes WHERE id = ?", (lane_id,)).fetchone()
+    return _lane_dict(row)
+
+
+def update_lane(
+    conn: sqlite3.Connection,
+    lane_id: str,
+    *,
+    name: Optional[str] = None,
+    profiles=None,
+) -> Optional[dict]:
+    """Update name and/or profiles of a lane. Returns the lane or None."""
+    sets: list[str] = []
+    params: list = []
+    if name is not None:
+        if not name.strip():
+            raise ValueError("name must be non-empty")
+        sets.append("name = ?")
+        params.append(name.strip())
+    if profiles is not None:
+        sets.append("profiles = ?")
+        params.append(json.dumps(_normalize_lane_profiles(profiles)))
+    if not sets:
+        row = conn.execute("SELECT * FROM lanes WHERE id = ?", (lane_id,)).fetchone()
+        return _lane_dict(row) if row is not None else None
+    sets.append("updated_at = ?")
+    params.append(int(time.time()))
+    params.append(lane_id)
+    with write_txn(conn):
+        if name is not None:
+            clash = conn.execute(
+                "SELECT 1 FROM lanes WHERE name = ? AND id != ?",
+                (name.strip(), lane_id),
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(f"lane name {name.strip()!r} already exists")
+        cur = conn.execute(
+            f"UPDATE lanes SET {', '.join(sets)} WHERE id = ?", params
+        )
+        if cur.rowcount == 0:
+            return None
+    row = conn.execute("SELECT * FROM lanes WHERE id = ?", (lane_id,)).fetchone()
+    return _lane_dict(row) if row is not None else None
+
+
+def delete_lane(conn: sqlite3.Connection, lane_id: str) -> bool:
+    """Delete a lane. The ACTIVE lane is not deletable (ValueError)."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT active FROM lanes WHERE id = ?", (lane_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if int(row["active"]):
+            raise ValueError("the active lane cannot be deleted — activate another lane first")
+        conn.execute("DELETE FROM lanes WHERE id = ?", (lane_id,))
+    return True
+
+
+def activate_lane(conn: sqlite3.Connection, lane_id: str) -> Optional[dict]:
+    """Make ``lane_id`` the single active lane. Returns it, or None if absent.
+
+    Takes effect for every spawn AFTER the commit — the dispatcher re-reads
+    the active lane per spawn (no gateway restart).
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT id FROM lanes WHERE id = ?", (lane_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        now = int(time.time())
+        conn.execute("UPDATE lanes SET active = 0 WHERE active = 1")
+        conn.execute(
+            "UPDATE lanes SET active = 1, updated_at = ? WHERE id = ?",
+            (now, lane_id),
+        )
+    out = conn.execute("SELECT * FROM lanes WHERE id = ?", (lane_id,)).fetchone()
+    return _lane_dict(out) if out is not None else None
+
+
+def _active_lane_entry_for_profile(
+    profile_arg: str,
+    *,
+    board: Optional[str] = None,
+) -> Optional[dict]:
+    """Hot-read the active lane's entry for ``profile_arg`` at spawn time.
+
+    Opens its own short-lived connection (the spawn helpers don't receive the
+    dispatcher's). Fail-soft like _is_claude_cli_profile: ANY error returns
+    None so a broken lanes table can never block dispatching. Returns
+    ``{"worker_runtime": <str|None>, "model": <str|None>}`` or None when the
+    profile is not mapped / no lane is active.
+    """
+    try:
+        conn = connect(board=board)
+        try:
+            row = conn.execute(
+                "SELECT profiles FROM lanes WHERE active = 1 LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        profiles = json.loads(row["profiles"] or "{}")
+        if not isinstance(profiles, dict):
+            return None
+        entry = profiles.get(profile_arg)
+        if not isinstance(entry, dict):
+            return None
+        runtime = entry.get("worker_runtime")
+        if runtime not in LANE_RUNTIMES:
+            runtime = None
+        model = entry.get("model")
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        if runtime is None and model is None:
+            return None
+        return {"worker_runtime": runtime, "model": model}
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
