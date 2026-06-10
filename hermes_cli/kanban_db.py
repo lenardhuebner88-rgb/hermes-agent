@@ -3574,13 +3574,16 @@ def backfill_run_costs(
             # final result JSON from the per-task worker log instead.
             if _is_claude_cli_runtime(profile):
                 task_id = row["task_id"]
-                latest = conn.execute(
-                    "SELECT MAX(id) FROM task_runs WHERE task_id = ?",
-                    (task_id,),
-                ).fetchone()
-                if not latest or latest[0] != run_id:
-                    # The per-task log only proves the LAST run's result —
-                    # never stamp an older run from a newer run's JSON.
+                newer = conn.execute(
+                    "SELECT profile FROM task_runs WHERE task_id = ? AND id > ?",
+                    (task_id, run_id),
+                ).fetchall()
+                if any(_is_claude_cli_runtime(r["profile"]) for r in newer):
+                    # The per-task log only proves the LAST claude-cli run's
+                    # result — never stamp an older run from a newer run's
+                    # JSON. Non-cli runs (the review-gate verifier appends
+                    # to the same log) never write a result line and must
+                    # not shadow the worker run here.
                     continue
                 result = _parse_claude_cli_result(
                     worker_logs_dir(board=board) / f"{task_id}.log"

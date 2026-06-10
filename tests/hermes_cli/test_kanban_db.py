@@ -685,6 +685,36 @@ def test_k17_backfill_claude_cli_skips_stale_run(kanban_home, monkeypatch):
         assert rows[old_run]["cost_usd"] is None
 
 
+def test_k17_backfill_claude_cli_stamps_despite_later_verifier_run(kanban_home, monkeypatch):
+    """K17 regression (review-gate): the verifier opens a NEWER run on the same
+    task after the claude-cli worker run — that run must not shadow the worker
+    run out of the backfill. Only a newer claude-cli run owns the log's last
+    result JSON; non-cli runs (verifier, hermes-runtime) never write one."""
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="cli-gated", assignee="coder-claude")
+        worker_run = _insert_ended_run(conn, tid, profile="coder-claude", metadata=None)
+        verifier_run = _insert_ended_run(
+            conn, tid, profile="verifier",
+            metadata={"verdict": "APPROVED"},
+        )
+        _write_claude_result_log(tid, output_tokens=77)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        rows = {
+            r["id"]: r for r in conn.execute(
+                "SELECT id, output_tokens, cost_usd FROM task_runs "
+                "WHERE task_id = ?",
+                (tid,),
+            )
+        }
+        assert rows[worker_run]["output_tokens"] == 77
+        assert rows[worker_run]["cost_usd"] == pytest.approx(0.0)
+        # The verifier run has no claude session — untouched.
+        assert rows[verifier_run]["cost_usd"] is None
+
+
 def test_k17_backfill_non_claude_profile_unaffected(kanban_home, monkeypatch):
     """K17 regression: a non-claude-cli run without worker_session_id keeps
     the legacy skip behavior even when a stray log file exists."""
