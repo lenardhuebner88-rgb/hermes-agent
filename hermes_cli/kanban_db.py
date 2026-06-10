@@ -1309,6 +1309,23 @@ CREATE TABLE IF NOT EXISTS lanes (
     updated_at INTEGER NOT NULL
 );
 
+-- F5 (night-sprint): eval scores — one row per measured quality signal on a
+-- run/task. Review-gate verdicts land here automatically via
+-- ``_record_verdict_score`` (name='review_verdict', value 1.0=APPROVED /
+-- 0.0=REQUEST_CHANGES, value_type='binary', source='review_gate'); future
+-- eval sources append their own names. Write-only at runtime — no read path
+-- depends on it, so the table is purely additive.
+CREATE TABLE IF NOT EXISTS scores (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER,
+    task_id    TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    value      REAL,
+    value_type TEXT NOT NULL DEFAULT 'numeric',
+    source     TEXT,
+    created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 -- Serves dispatch_once's per-tick ready-pull: WHERE status='ready' ... ORDER BY
@@ -1330,6 +1347,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_runs_started          ON task_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_scores_run            ON scores(run_id);
+CREATE INDEX IF NOT EXISTS idx_scores_task           ON scores(task_id);
+CREATE INDEX IF NOT EXISTS idx_scores_name_created   ON scores(name, created_at);
 """
 
 
@@ -4825,6 +4845,67 @@ def _set_run_verdict(
         )
     except sqlite3.Error:
         pass
+    _record_verdict_score(conn, run_id, verdict)
+
+
+# F5: verdict → score mapping. Binary on purpose — trends need numbers.
+_VERDICT_SCORE_VALUES = {"APPROVED": 1.0, "REQUEST_CHANGES": 0.0}
+
+
+def _record_verdict_score(
+    conn: sqlite3.Connection, run_id: Optional[int], verdict: str,
+    *, created_at: Optional[int] = None,
+) -> bool:
+    """F5: mirror a review verdict into ``scores`` (eval baseline).
+
+    Fail-soft like :func:`_set_run_verdict` and idempotent per run — a
+    re-judged run keeps its first score row. Shares the caller's txn.
+    """
+    if run_id is None:
+        return False
+    value = _VERDICT_SCORE_VALUES.get(verdict)
+    if value is None:
+        return False
+    try:
+        run = conn.execute(
+            "SELECT task_id FROM task_runs WHERE id = ?", (int(run_id),)
+        ).fetchone()
+        if run is None:
+            return False
+        exists = conn.execute(
+            "SELECT 1 FROM scores WHERE run_id = ? AND name = 'review_verdict' LIMIT 1",
+            (int(run_id),),
+        ).fetchone()
+        if exists is not None:
+            return False
+        conn.execute(
+            "INSERT INTO scores (run_id, task_id, name, value, value_type, source, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                int(run_id), run["task_id"], "review_verdict", value,
+                "binary", "review_gate",
+                int(created_at) if created_at is not None else int(time.time()),
+            ),
+        )
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def backfill_verdict_scores(conn: sqlite3.Connection) -> int:
+    """F5 one-time (idempotent): mirror pre-existing ``task_runs.verdict``
+    rows into ``scores`` so the eval baseline starts with history. Score
+    timestamps take the run's end (fallback start) so trends stay honest."""
+    rows = conn.execute(
+        "SELECT id, verdict, COALESCE(ended_at, started_at) AS at FROM task_runs "
+        "WHERE verdict IN ('APPROVED', 'REQUEST_CHANGES')",
+    ).fetchall()
+    inserted = 0
+    with write_txn(conn):
+        for r in rows:
+            if _record_verdict_score(conn, r["id"], r["verdict"], created_at=r["at"]):
+                inserted += 1
+    return inserted
 
 
 def _review_gate_should_apply(
