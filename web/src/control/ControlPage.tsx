@@ -51,6 +51,9 @@ const RunTimelineView = lazy(() =>
 const IssuesView = lazy(() =>
   import("./views/IssuesView").then((m) => ({ default: m.IssuesView })),
 );
+const ResearchView = lazy(() =>
+  import("./views/ResearchView").then((m) => ({ default: m.ResearchView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -64,6 +67,8 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/lanes")) return "lanes";
+  if (pathname.includes("/control/research")) return "research";
+  if (pathname.includes("/control/bibliothek")) return "bibliothek";
   // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
   // Rail-Highlight bleibt dort, eigener Tab existiert bewusst nicht.
   if (pathname.includes("/control/runs/")) return "workstreams";
@@ -85,6 +90,8 @@ const tabPath: Record<ControlTab, string> = {
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
   lanes: "/control/lanes",
+  research: "/control/research",
+  bibliothek: "/control/bibliothek",
 };
 
 // Shown briefly while a lazy-loaded control view chunk downloads (first visit
@@ -176,6 +183,7 @@ export default function ControlPage() {
             <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
+            <Route path="research" element={<ResearchView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>

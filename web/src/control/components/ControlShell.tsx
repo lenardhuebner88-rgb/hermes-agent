@@ -1,11 +1,11 @@
-import { Activity, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, SearchCheck, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { ToneName } from "../lib/types";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -31,6 +31,9 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
+  // Programm 3: Recherche (Wissen beauftragen). Bibliothek folgt in Phase D
+  // (Route existiert erst dann — Link erst mit View).
+  { label: "Recherche", path: "/control/research", icon: SearchCheck },
 ];
 
 const secondaryNav = [
