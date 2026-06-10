@@ -1358,6 +1358,103 @@ class GatewayKanbanWatchersMixin:
                     path, exc,
                 )
 
+    async def _kanban_alerts_watcher(self) -> None:
+        """F2 (night-sprint): push-Alerting — one tick every 5 min (config).
+
+        Evaluates the rules in :mod:`gateway.kanban_alerts` (run failed/
+        blocked, error rate, daily cost) against the board DB and pushes
+        qualifying alerts to a Discord channel. Opt-in: ``kanban.alerts.
+        enabled`` defaults to False, so gateways whose config has no alerts
+        block (research etc.) stay silent. Discord only — Telegram ist ab.
+
+        Same lifecycle pattern as ``_kanban_dispatcher_watcher``: config read
+        once at boot, SQLite work in ``asyncio.to_thread``, per-tick failures
+        never kill the loop, sliced sleep for snappy shutdown.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban alerts: config loader unavailable; disabled")
+            return
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning("kanban alerts: cannot load config (%s); disabled", exc)
+            return
+        try:
+            from gateway.kanban_alerts import (
+                evaluate_alerts as _evaluate_alerts,
+                load_alerts_config as _load_alerts_config,
+                new_alert_state as _new_alert_state,
+            )
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("kanban alerts: engine not importable; disabled")
+            return
+
+        acfg = _load_alerts_config(cfg)
+        if not acfg["enabled"]:
+            logger.info("kanban alerts: disabled (kanban.alerts.enabled not set)")
+            return
+        if not acfg["channel_id"]:
+            logger.warning(
+                "kanban alerts: enabled but no channel (kanban.alerts.channel_id "
+                "or kanban.reporting_channel_id) — disabled",
+            )
+            return
+        logger.info(
+            "kanban alerts: enabled — interval=%ss cooldown=%ss channel=%s",
+            acfg["interval_seconds"], acfg["cooldown_seconds"], acfg["channel_id"],
+        )
+
+        from gateway.config import Platform as _Platform
+
+        state = _new_alert_state()
+        await asyncio.sleep(10)  # let adapters connect before the first tick
+        while self._running:
+            try:
+                def _tick():
+                    conn = _kb.connect()
+                    try:
+                        return _evaluate_alerts(conn, acfg, state)
+                    finally:
+                        conn.close()
+
+                alerts = await asyncio.to_thread(_tick)
+                if alerts:
+                    adapter = self.adapters.get(_Platform.DISCORD)
+                    if adapter is None:
+                        logger.warning(
+                            "kanban alerts: discord adapter unavailable; "
+                            "%d alert(s) dropped", len(alerts),
+                        )
+                    else:
+                        metadata = (
+                            {"thread_id": acfg["thread_id"]}
+                            if acfg["thread_id"] else None
+                        )
+                        for alert in alerts:
+                            try:
+                                await adapter.send(
+                                    acfg["channel_id"], alert["text"],
+                                    metadata=metadata,
+                                )
+                                logger.info(
+                                    "kanban alerts: sent %s alert to %s",
+                                    alert["rule"], acfg["channel_id"],
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "kanban alerts: send failed for rule %s: %s",
+                                    alert["rule"], exc,
+                                )
+            except Exception as exc:
+                logger.warning("kanban alerts: tick failed: %s", exc)
+            slept = 0.0
+            while self._running and slept < acfg["interval_seconds"]:
+                await asyncio.sleep(1.0)
+                slept += 1.0
+
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
 
