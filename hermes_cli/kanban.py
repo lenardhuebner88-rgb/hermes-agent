@@ -1846,6 +1846,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
                     "worker_pid": r.worker_pid,
                     "started_at": r.started_at,
                     "ended_at": r.ended_at,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "cost_usd": r.cost_usd,
                 }
                 for r in runs
             ],
@@ -3118,6 +3121,11 @@ def _cmd_runs(args: argparse.Namespace) -> int:
                 "ended_at": r.ended_at, "summary": r.summary,
                 "error": r.error, "metadata": r.metadata,
                 "worker_pid": r.worker_pid, "step_key": r.step_key,
+                # K5a/K17: die gestempelten Kosten-Spalten gehören in die
+                # Anzeige — sonst wirkt das CLI "älter" als die DB.
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cost_usd": r.cost_usd,
             } for r in runs
         ], indent=2, ensure_ascii=False))
         return 0

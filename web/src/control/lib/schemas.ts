@@ -29,6 +29,9 @@ export const RunInspectSchema = z.object({
   create_time: z.coerce.number().optional(),
   cmdline: z.array(z.string()).optional(),
   alive: z.boolean().catch(false),
+  // alive=false trägt eine Backend-Begründung (z.B. "no worker_pid recorded"
+  // bei claude-cli-Lanes) — die UI zeigt sie statt irreführender Null-Meter.
+  reason: z.string().nullable().catch(null),
 }).transform((v) => ({
   cpu_percent: v.cpu_percent,
   rss: v.rss ?? v.memory_info?.rss ?? 0,
@@ -38,6 +41,7 @@ export const RunInspectSchema = z.object({
   create_time: v.create_time,
   cmdline: v.cmdline,
   alive: v.alive,
+  reason: v.reason,
 }));
 
 export const WorkerSchema = z.object({
@@ -51,7 +55,8 @@ export const WorkerSchema = z.object({
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("running"),
   task_assignee: z.string().catch("hermes"),
   profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic", "verifier"]).catch("default"),
-  worker_pid: z.coerce.number().catch(0),
+  // claude-cli-Lanes laufen ohne greifbaren Prozess — pid bleibt dort ehrlich null.
+  worker_pid: z.coerce.number().nullable().catch(null),
   started_at: z.coerce.number().catch(0),
   claim_lock: z.string().catch(""),
   claim_expires: z.coerce.number().catch(0),

@@ -366,6 +366,7 @@ export const de = {
   worker: {
     runtime: "Laufzeit", heartbeat: "Heartbeat", remaining: "Rest-Zeit", process: "Prozess",
     runtimeBudget: "Laufzeit-Budget",
+    inspectUnavailable: "Prozess nicht inspizierbar",
     actions: { inspect: "Inspect", details: "Details", dispatch: "Dispatch", nudge: "Anstoßen", unlock: "Lock lösen", restart: "Neu starten", terminate: "Beenden", confirm: "Bestätigen", cancel: "Abbrechen" },
     stuckReason: (age: string) => `Heartbeat ${age} alt oder Claim abgelaufen`,
     expiredReason: "Claim-TTL abgelaufen (kein Heartbeat getrackt)",

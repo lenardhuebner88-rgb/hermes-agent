@@ -22,6 +22,8 @@ export interface RunInspect {
   create_time?: number;
   cmdline?: string[];
   alive: boolean;
+  /** Backend-Begründung bei alive=false (z.B. "no worker_pid recorded"). */
+  reason?: string | null;
 }
 
 export interface Worker {
@@ -31,7 +33,8 @@ export interface Worker {
   task_status: TaskStatus;
   task_assignee: string;
   profile: WorkerProfile;
-  worker_pid: number;
+  /** null bei claude-cli-Lanes ohne greifbaren Prozess (PID nicht erfasst). */
+  worker_pid: number | null;
   started_at: number;
   claim_lock: string;
   claim_expires: number;

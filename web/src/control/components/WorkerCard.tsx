@@ -88,7 +88,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         <Stat label={de.worker.runtime} value={fmtDur(runtime)} />
         <Stat label={de.worker.heartbeat} value={hasHeartbeat ? fmtDur(heartbeatAge) : "—"} tone={hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S ? "amber" : undefined} />
         <Stat label={de.worker.remaining} value={remaining <= 0 ? "0s" : fmtDur(remaining)} tone={remaining <= 0 ? "amber" : undefined} />
-        <Stat label="PID" value={String(worker.worker_pid || "-")} />
+        <Stat label="PID" value={worker.worker_pid ? String(worker.worker_pid) : "—"} />
       </div>
 
       {/* Laufzeit-Budget: verbraucht/max — der Runaway-Blick auf einen Blick. */}
@@ -102,11 +102,17 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       ) : null}
 
       {inspect ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <MeterBar label="CPU" value={inspect.cpu_percent} max={100} tone={inspect.cpu_percent > 80 ? "amber" : "cyan"} />
-          <MeterBar label="RAM" value={inspect.rss / 1048576} max={2048} tone={inspect.rss > 1536 * 1048576 ? "amber" : "cyan"} />
-          <Text variant="label" className="hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</Text>
-        </div>
+        inspect.alive ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MeterBar label="CPU" value={inspect.cpu_percent} max={100} tone={inspect.cpu_percent > 80 ? "amber" : "cyan"} />
+            <MeterBar label="RAM" value={inspect.rss / 1048576} max={2048} tone={inspect.rss > 1536 * 1048576 ? "amber" : "cyan"} />
+            <Text variant="label" className="hc-soft sm:col-span-2">{de.worker.process}: {inspect.status} · {fmtMB(inspect.rss)} · {inspect.num_threads} Threads · {inspect.num_fds} FDs</Text>
+          </div>
+        ) : (
+          // Kein greifbarer Prozess (z.B. claude-cli ohne erfasste PID):
+          // ehrliche Begründung statt irreführender 0-Meter.
+          <Text variant="label" className="hc-soft">{de.worker.inspectUnavailable}{inspect.reason ? ` — ${inspect.reason}` : ""}</Text>
+        )
       ) : null}
 
       {runaway.level !== "none" ? (
