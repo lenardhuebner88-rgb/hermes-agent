@@ -11344,6 +11344,59 @@ def runs_issues(
     }
 
 
+# Phase F (Programm 3): Triage-Leiste — Tasks, die noch eine Operator-Aktion
+# brauchen. Anders als runs_issues (Muster-Sicht, 30d) ist das die Akut-Sicht:
+# jüngster Fehl-Run pro Task, nur Tasks die NICHT längst wieder laufen/fertig
+# sind.
+_TRIAGE_ACTIONABLE_STATUSES = ("blocked", "ready", "todo", "scheduled")
+
+
+def runs_failures(
+    conn: sqlite3.Connection, *, hours: int = 48, limit: int = 30,
+) -> dict:
+    """Jüngster failed/blocked-Run pro Task der letzten *hours* Stunden,
+    beschränkt auf Tasks in noch handlungsbedürftigem Status. Read-only."""
+    hours = max(1, min(24 * 14, int(hours)))
+    limit = max(1, min(100, int(limit)))
+    now = int(time.time())
+    window_start = now - hours * 3600
+    placeholders = ",".join("?" for _ in _ISSUE_OUTCOMES)
+    status_ph = ",".join("?" for _ in _TRIAGE_ACTIONABLE_STATUSES)
+    by_task: dict[str, dict] = {}
+    for row in conn.execute(
+        f"SELECT r.id AS run_id, r.task_id, r.profile, r.outcome, r.ended_at, "
+        f"       COALESCE(NULLIF(TRIM(r.error), ''), r.summary) AS reason, "
+        f"       t.title, t.status AS task_status, t.assignee, t.model_override "
+        f"FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        f"WHERE r.outcome IN ({placeholders}) AND r.ended_at IS NOT NULL "
+        f"  AND r.ended_at >= ? AND t.status IN ({status_ph}) "
+        f"ORDER BY r.ended_at DESC",
+        (*_ISSUE_OUTCOMES, window_start, *_TRIAGE_ACTIONABLE_STATUSES),
+    ).fetchall():
+        if row["task_id"] in by_task:
+            continue  # neuester Run gewinnt (DESC-Order)
+        by_task[row["task_id"]] = {
+            "run_id": int(row["run_id"]),
+            "task_id": row["task_id"],
+            "title": row["title"],
+            "profile": (row["profile"] or "").strip() or None,
+            "assignee": row["assignee"],
+            "outcome": (row["outcome"] or "").strip(),
+            "reason": (row["reason"] or "").strip()[:500] or None,
+            "ended_at": int(row["ended_at"]),
+            "task_status": row["task_status"],
+            "model_override": row["model_override"],
+        }
+    failures = sorted(by_task.values(), key=lambda f: -f["ended_at"])
+    return {
+        "hours": hours,
+        "now": now,
+        "count": len(failures),
+        "truncated": len(failures) > limit,
+        "failures": failures[:limit],
+    }
+
+
 def _decision_event_reason(payload) -> Optional[str]:
     """Pull a human ``reason`` string out of a task_events payload, fail-soft."""
     if payload is None:

@@ -6579,3 +6579,37 @@ def test_run_duration_percentiles_per_profile_with_min_n(kanban_home):
     assert stats["coder"]["n"] == 5
     assert stats["research"] == {"p50": None, "p90": None, "n": 1}
     assert stats["verifier"] == {"p50": None, "p90": None, "n": 0}
+
+
+def test_runs_failures_dedupes_per_task_and_filters_recovered(kanban_home):
+    """Phase F: jüngster Fehl-Run pro Task; bereits fertige/laufende Tasks
+    erscheinen nicht mehr in der Triage."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        t_open = kb.create_task(conn, title="kaputt und wartet")
+        t_done = kb.create_task(conn, title="kaputt aber erledigt")
+        kb.block_task(conn, t_open, reason="worker crashed")
+        with kb.write_txn(conn):
+            # beide Crash-Runs enden NACH dem block_task-eigenen blocked-Run,
+            # damit "jüngster Run gewinnt" über die pid-Runs läuft
+            for started, ended, err in (
+                (now - 7200, now + 60, "pid 1 exited with code 1"),
+                (now - 3600, now + 120, "pid 2 exited with code 1"),
+            ):
+                conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                    "started_at, ended_at, error) VALUES (?, 'coder', 'done', 'crashed', ?, ?, ?)",
+                    (t_open, started, ended, err),
+                )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at, error) VALUES (?, 'coder', 'done', 'crashed', ?, ?, 'x')",
+                (t_done, now - 1800, now - 1700),
+            )
+        kb.complete_task(conn, t_done, summary="doch geschafft")
+        data = kb.runs_failures(conn, hours=48)
+    assert data["count"] == 1  # t_done ist raus (status done), t_open dedupliziert
+    f = data["failures"][0]
+    assert f["task_id"] == t_open
+    assert f["reason"] == "pid 2 exited with code 1"  # jüngster Run gewinnt
+    assert f["task_status"] == "blocked"
