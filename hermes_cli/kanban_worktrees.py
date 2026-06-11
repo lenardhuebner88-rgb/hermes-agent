@@ -634,7 +634,18 @@ def integrate_chain(
         out.update(extra)
         return out
 
-    lock_path = repo_root / WORKTREES_DIRNAME / WORKTREES_NAMESPACE / ".integrator.lock"
+    # Lock lives in the repo's .git dir: never visible in `git status`,
+    # never blocks the empty-namespace rmdir tidy in remove_worktree, and
+    # exactly one location per repo regardless of worktree layout.
+    try:
+        lock_path = (
+            Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
+            / "hermes-kanban-integrator.lock"
+        )
+    except (WorktreeError, subprocess.SubprocessError, OSError):
+        lock_path = (
+            repo_root / WORKTREES_DIRNAME / WORKTREES_NAMESPACE / ".integrator.lock"
+        )
     with _PROCESS_LOCK:
         try:
             lock = _acquire_file_lock(lock_path)
