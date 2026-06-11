@@ -154,14 +154,19 @@ export function FlowCapture({ onCreated }: { onCreated?: (taskId: string) => voi
           Portal: inline säße der FAB im Hero-Stacking-Context (.hc-hero hat
           isolation:isolate) und sein z-40 wäre gegen Nav/Overlays Glückssache. */}
       {createPortal(
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label={de.flow.capture.fabAria}
-          className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom,0px))] right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-lg shadow-black/40 backdrop-blur transition active:scale-95 sm:hidden"
-        >
-          <Plus className="h-6 w-6" />
-        </button>,
+        // data-control-Wrapper (display:contents): außerhalb des Token-Scopes
+        // (Portal an body) wären die --hc-accent-*-Farben des FABs unaufgelöst;
+        // direkt am Button würde [data-control] min-height/background setzen.
+        <div data-control className="contents">
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label={de.flow.capture.fabAria}
+            className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom,0px))] right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-lg shadow-black/40 backdrop-blur transition active:scale-95 sm:hidden"
+          >
+            <Plus className="h-6 w-6" />
+          </button>
+        </div>,
         document.body,
       )}
       {open ? <CaptureSheet onClose={() => setOpen(false)} onCreated={created} /> : null}

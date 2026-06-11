@@ -31,6 +31,12 @@ export function Overlay({ onClose, ariaLabel, children }: { onClose: () => void;
   }, []);
 
   return createPortal(
+    // data-control + display:contents: das Portal hängt an document.body, also
+    // AUSSERHALB des [data-control]-Scopes, der alle --hc-*-Tokens (+ Daylight-
+    // Remaps) trägt — ohne Scope rendert das Sheet transparent/farblos.
+    // display:contents, weil [data-control] selbst min-height/background setzt
+    // und als echte Box das Layout kaputt machen würde; so vererbt es nur.
+    <div data-control className="contents">
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={onClose} role="presentation">
       <div
         role="dialog"
@@ -41,6 +47,7 @@ export function Overlay({ onClose, ariaLabel, children }: { onClose: () => void;
       >
         {children}
       </div>
+    </div>
     </div>,
     document.body,
   );

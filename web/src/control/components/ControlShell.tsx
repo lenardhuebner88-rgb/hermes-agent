@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
+import { Overlay } from "./Overlay";
 
 export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek";
 
@@ -97,6 +98,11 @@ export function ControlShell(props: Props) {
 }
 
 function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+  // "Mehr" lebt auf Mobile als 5. Bottom-Tab + Bottom-Sheet (Audit 2026-06-11,
+  // M3 Variante A) — das Header-Dropdown ist dort zu hoch und schloss sich beim
+  // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreActive = !tabs.some((tab) => tab.id === active);
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -106,11 +112,33 @@ function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, lib
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
-        <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
+        <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length + 1}, minmax(0, 1fr))` }}>
           {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+          <button type="button" onClick={() => setMoreOpen(true)} aria-label="Mehr" aria-expanded={moreOpen} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", moreActive && "text-[var(--hc-accent-text)]")}>
+            <MoreHorizontal className="h-5 w-5" />
+            <span className="max-w-full truncate px-0.5">Mehr</span>
+          </button>
         </div>
       </nav>
+      {moreOpen ? <MoreSheet onClose={() => setMoreOpen(false)} /> : null}
     </div>
+  );
+}
+
+/** Mobiles "Mehr": Bottom-Sheet über den Overlay-Portal-Wrapper — scrollbar,
+ *  Scroll-Lock, große Tap-Flächen; gruppiert wie das Desktop-Dropdown. */
+function MoreSheet({ onClose }: { onClose: () => void }) {
+  const renderItem = (item: { label: string; path: string; icon: React.ComponentType<{ className?: string }> }) => {
+    const Icon = item.icon;
+    return <Link key={item.path} to={item.path} onClick={onClose} className="flex min-h-11 items-center gap-2.5 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>;
+  };
+  return (
+    <Overlay onClose={onClose} ariaLabel="Mehr">
+      <p className="hc-eyebrow">Ansichten</p>
+      <div className="mt-2 grid gap-0.5">{moreTabs.map(renderItem)}</div>
+      <p className="hc-eyebrow mt-4">System</p>
+      <div className="mt-2 grid gap-0.5">{secondaryNav.map(renderItem)}</div>
+    </Overlay>
   );
 }
 
@@ -156,7 +184,8 @@ function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, libraryUnre
 }
 
 function CommandButton({ buttonRef, onOpen }: { buttonRef?: React.RefObject<HTMLButtonElement | null>; onOpen: () => void }) {
-  return <button ref={buttonRef} type="button" className="hc-hit inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5" onClick={onOpen}><Command className="h-4 w-4" />⌘K</button>;
+  // Auf Touch-Phones ist ein "⌘K"-Hint bedeutungslos — Button erst ab sm zeigen.
+  return <button ref={buttonRef} type="button" className="hc-hit hidden items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5 sm:inline-flex" onClick={onOpen}><Command className="h-4 w-4" />⌘K</button>;
 }
 
 function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
@@ -185,9 +214,11 @@ function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
 function MoreNav() {
   const menu = useDismissibleMenu<HTMLDetailsElement>();
   return (
-    <details ref={menu.ref} open={menu.open} onToggle={(event) => menu.setOpen(event.currentTarget.open)} className="group relative">
+    // hidden lg:block: unter lg übernimmt der "Mehr"-Bottom-Tab (MoreSheet);
+    // max-h + overflow: auch kleine Desktop-Fenster erreichen alle Einträge.
+    <details ref={menu.ref} open={menu.open} onToggle={(event) => menu.setOpen(event.currentTarget.open)} className="group relative hidden lg:block">
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
-      <div className="absolute right-0 top-12 z-50 hidden w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
+      <div className="absolute right-0 top-12 z-50 hidden max-h-[70dvh] w-56 overflow-y-auto overscroll-contain rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
         {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
         <div className="my-1.5 border-t border-[var(--hc-border)]" />
         {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
