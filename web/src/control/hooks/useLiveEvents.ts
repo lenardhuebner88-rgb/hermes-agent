@@ -88,33 +88,39 @@ export function useLiveEvents(): void {
       }
       keys.forEach((key) => void refresh(key));
     };
+    // connect() hat async-Fenster (boardLoader/buildWsUrl), in denen ein
+    // zweiter Aufruf (visibilitychange, Reconnect-Timer) den socketRef-Check
+    // schon passiert hätte → Doppel-Socket, der erste leakt. Das Flag macht
+    // connect() single-flight (Codex-Review-Befund).
+    let connecting = false;
     const connect = async () => {
-      if (stopped || document.hidden || socketRef.current) return;
-      // since=0 würde die gesamte Event-Historie in 200er-Batches nachspielen
-      // und Live-Updates beim ersten Connect deutlich verzögern. Ohne bekannten
-      // Cursor daher erst das Board laden: Store-Snapshot, falls eine View ihn
-      // schon hält, sonst one-shot Fetch (latest_event_id=0 auf leerem Board
-      // ist danach ehrlich).
-      if (cursorRef.current === 0) {
-        const snapshot = getSnapshot<BoardResponse>("kanban/board")?.data;
-        if (snapshot != null) {
-          cursorRef.current = snapshot.latest_event_id ?? 0;
-        } else {
-          try {
-            const board = await boardLoader();
-            if (stopped || document.hidden || socketRef.current) return;
-            cursorRef.current = board.latest_event_id ?? 0;
-          } catch {
-            scheduleReconnect();
-            return;
-          }
-        }
-      } else {
-        cursorRef.current = Math.max(cursorRef.current, currentCursor());
-      }
+      if (stopped || document.hidden || socketRef.current || connecting) return;
+      connecting = true;
       try {
+        // since=0 würde die gesamte Event-Historie in 200er-Batches nachspielen
+        // und Live-Updates beim ersten Connect deutlich verzögern. Ohne bekannten
+        // Cursor daher erst das Board laden: Store-Snapshot, falls eine View ihn
+        // schon hält, sonst one-shot Fetch (latest_event_id=0 auf leerem Board
+        // ist danach ehrlich).
+        if (cursorRef.current === 0) {
+          const snapshot = getSnapshot<BoardResponse>("kanban/board")?.data;
+          if (snapshot != null) {
+            cursorRef.current = snapshot.latest_event_id ?? 0;
+          } else {
+            try {
+              const board = await boardLoader();
+              if (stopped || document.hidden || socketRef.current) return;
+              cursorRef.current = board.latest_event_id ?? 0;
+            } catch {
+              scheduleReconnect();
+              return;
+            }
+          }
+        } else {
+          cursorRef.current = Math.max(cursorRef.current, currentCursor());
+        }
         const url = await buildWsUrl("/api/plugins/kanban/events", { since: String(cursorRef.current) });
-        if (stopped || document.hidden) return;
+        if (stopped || document.hidden || socketRef.current) return;
         const ws = new WebSocket(url);
         socketRef.current = ws;
         ws.onopen = () => {
@@ -131,6 +137,8 @@ export function useLiveEvents(): void {
         };
       } catch {
         scheduleReconnect();
+      } finally {
+        connecting = false;
       }
     };
     const onVisibility = () => {
