@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { subscribe, refresh, parseStructuredError, _resetPollingStore } from "./pollingStore";
+import { subscribe, refresh, parseStructuredError, setIntervalScale, _resetPollingStore } from "./pollingStore";
 
 beforeEach(() => {
   _resetPollingStore();
@@ -105,6 +105,25 @@ describe("pollingStore", () => {
     expect(loader).toHaveBeenCalledTimes(1);
     await refresh("k");
     expect(loader).toHaveBeenCalledTimes(2);
+  });
+
+  it("setIntervalScale stretches the cadence and restores it on reset", async () => {
+    const loader = vi.fn().mockResolvedValue(1);
+    subscribe("k", loader, 1000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0); // first tick
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    setIntervalScale("k", 5);
+    await vi.advanceTimersByTimeAsync(1000); // next tick still at 1× (scale applies after it)
+    expect(loader).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(4000); // 5×: nothing at 1s..4s
+    expect(loader).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1000); // 5000ms reached
+    expect(loader).toHaveBeenCalledTimes(3);
+
+    setIntervalScale("k", 1); // reset reschedules at normal cadence immediately
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loader).toHaveBeenCalledTimes(4);
   });
 
   it("does not notify listeners when a poll returns an identical JSON payload", async () => {

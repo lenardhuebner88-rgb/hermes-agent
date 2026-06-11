@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { buildWsUrl } from "@/lib/api";
-import { getSnapshot, refresh } from "./pollingStore";
+import { getSnapshot, refresh, setIntervalScale } from "./pollingStore";
 import { boardLoader } from "./useControlData";
 import type { BoardResponse } from "../lib/types";
 
@@ -43,6 +43,16 @@ export function refreshKeysForLiveEvent(event: KanbanLiveEvent): string[] {
 
 function currentCursor(): number {
   return getSnapshot<BoardResponse>("kanban/board")?.data?.latest_event_id ?? 0;
+}
+
+// Adaptives Polling: solange der Events-WS verbunden ist, treiben die Events die
+// Frische dieser Keys — die Basis-Polls fallen auf 5×-Kadenz als Sicherheitsnetz
+// (Board 8s→40s usw.). Bei Disconnect sofort zurück auf Normal-Kadenz.
+const LIVE_SCALE = 5;
+const LIVE_SCALED_KEYS = [...TASK_EVENT_KEYS, ...RUN_EVENT_KEYS];
+
+export function setLivePollingMode(live: boolean): void {
+  for (const key of LIVE_SCALED_KEYS) setIntervalScale(key, live ? LIVE_SCALE : 1);
 }
 
 export function useLiveEvents(): void {
@@ -125,13 +135,16 @@ export function useLiveEvents(): void {
         socketRef.current = ws;
         ws.onopen = () => {
           backoffRef.current = 1000;
+          setLivePollingMode(true);
         };
         ws.onmessage = (event) => handleMessage(String(event.data));
         ws.onerror = () => {
+          setLivePollingMode(false);
           closeSocket();
           scheduleReconnect();
         };
         ws.onclose = () => {
+          setLivePollingMode(false);
           socketRef.current = null;
           scheduleReconnect();
         };
@@ -158,6 +171,7 @@ export function useLiveEvents(): void {
       document.removeEventListener("visibilitychange", onVisibility);
       clearReconnect();
       closeSocket();
+      setLivePollingMode(false);
     };
   }, []);
 }

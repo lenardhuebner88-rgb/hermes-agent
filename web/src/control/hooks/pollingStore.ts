@@ -77,13 +77,17 @@ function isServerError(err: StructuredError): boolean {
 interface StoreGlobal {
   entries: Map<string, Entry<unknown>>;
   visibilityBound: boolean;
+  /** Per-key Intervall-Multiplikator (adaptives Polling, s. setIntervalScale). */
+  intervalScales: Map<string, number>;
 }
 
 function getStore(): StoreGlobal {
   const g = globalThis as unknown as { __hermesPollingStore?: StoreGlobal };
   if (!g.__hermesPollingStore) {
-    g.__hermesPollingStore = { entries: new Map(), visibilityBound: false };
+    g.__hermesPollingStore = { entries: new Map(), visibilityBound: false, intervalScales: new Map() };
   }
+  // HMR-Altbestand vor Einführung der Scales tolerieren.
+  if (!g.__hermesPollingStore.intervalScales) g.__hermesPollingStore.intervalScales = new Map();
   const store = g.__hermesPollingStore;
   if (!store.visibilityBound && typeof document !== "undefined") {
     store.visibilityBound = true;
@@ -139,7 +143,7 @@ async function tick(key: string): Promise<void> {
     try {
       const data = await entry.loader();
       entry.failCount = 0;
-      entry.nextDelayMs = entry.intervalMs;
+      entry.nextDelayMs = entry.intervalMs * (getStore().intervalScales.get(key) ?? 1);
       const nextPayloadJson = payloadJson(data);
       const unchangedPayload =
         nextPayloadJson != null &&
@@ -170,6 +174,28 @@ async function tick(key: string): Promise<void> {
 /** Force an immediate refresh (used by reload()). Returns when the tick settles. */
 export function refresh(key: string): Promise<void> {
   return tick(key);
+}
+
+/**
+ * Adaptives Polling: streckt das Poll-Intervall eines Keys um `scale` (1 = normal).
+ * Gedacht für Event-getriebene Frische — solange der Kanban-Events-WebSocket
+ * verbunden ist, treiben Events die Refreshes und die Basis-Polls dürfen auf
+ * Sicherheitsnetz-Kadenz fallen (useLiveEvents setzt 5× / zurück auf 1×).
+ * Wirkt ab dem nächsten Tick; Fehler-Backoff bleibt unangetastet.
+ */
+export function setIntervalScale(key: string, scale: number): void {
+  const store = getStore();
+  if (scale <= 1) store.intervalScales.delete(key);
+  else store.intervalScales.set(key, scale);
+  const entry = store.entries.get(key);
+  // Beim Zurückschalten auf 1× sofort die normale Kadenz wiederherstellen,
+  // statt einen ggf. minutenlangen gestreckten Timer auslaufen zu lassen.
+  if (entry && scale <= 1 && entry.timer && entry.failCount === 0) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.nextDelayMs = entry.intervalMs;
+    scheduleNext(key);
+  }
 }
 
 export function getSnapshot<T>(key: string): StoreSnapshot<T> | null {
@@ -233,4 +259,5 @@ export function _resetPollingStore(): void {
     if (entry.timer) clearTimeout(entry.timer);
   }
   store.entries.clear();
+  store.intervalScales.clear();
 }

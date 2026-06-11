@@ -85,6 +85,30 @@ function activeFromPath(pathname: string): ControlTab {
   return "inbox";
 }
 
+// Hover/Fokus-Prefetch: lädt den Lazy-Chunk einer View, bevor der Klick kommt.
+// Vite dedupliziert dynamische Imports desselben Moduls — idempotent & billig.
+// Muss dieselben import()-Ziele treffen wie die lazy()-Wrapper oben.
+const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
+  overview: () => import("./views/OverviewView"),
+  pulse: () => import("./views/PulseView"),
+  workstreams: () => import("./views/AgentOpsView"),
+  flow: () => import("./views/FlowView"),
+  statistik: () => import("./views/StatistikView"),
+  autoresearch: () => import("./views/AutoresearchView"),
+  backlog: () => import("./views/BacklogView"),
+  orchestrator: () => import("./views/OrchestratorBacklogView"),
+  crons: () => import("./views/CronView"),
+  lanes: () => import("./views/LanesView"),
+  research: () => import("./views/ResearchView"),
+  bibliothek: () => import("./views/BibliothekView"),
+};
+
+export function prefetchControlView(tab: ControlTab): void {
+  // Prefetch ist best-effort — ein Netzfehler hier darf nichts kaputt machen;
+  // der echte Klick lädt den Chunk über Suspense erneut.
+  void viewImporters[tab]?.().catch(() => {});
+}
+
 const tabPath: Record<ControlTab, string> = {
   inbox: "/control",
   overview: "/control/overview",
@@ -173,6 +197,7 @@ export default function ControlPage() {
         inboxTone={inbox.worstTone}
         health={health}
         onNavigate={(tab) => navigate(tabPath[tab])}
+        onPrefetch={prefetchControlView}
         commandButtonRef={commandButtonRef}
         onOpenCommand={() => setPaletteOpen(true)}
       >

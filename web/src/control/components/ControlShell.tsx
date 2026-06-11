@@ -64,6 +64,8 @@ interface Props {
   onOpenCommand: () => void;
   children: React.ReactNode;
   onNavigate: (tab: ControlTab) => void;
+  /** Hover/Fokus auf einem Tab → Lazy-Chunk der View schon laden (perceived nav speed). */
+  onPrefetch?: (tab: ControlTab) => void;
 }
 
 interface BadgeInfo { count: number; cls: string }
@@ -85,31 +87,31 @@ export function ControlShell(props: Props) {
   return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
 }
 
-function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, commandButtonRef, onOpenCommand }: Props) {
+function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
-        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} onNavigate={onNavigate} />
+        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} onNavigate={onNavigate} onPrefetch={onPrefetch} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
         <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
-          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} />)}
+          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
         </div>
       </nav>
     </div>
   );
 }
 
-function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, commandButtonRef, onOpenCommand }: Props) {
+function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0">
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
         <div className="flex flex-col gap-2">
           <div className="mb-2 grid h-11 w-11 place-items-center rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"><Sparkles className="h-5 w-5" /></div>
-          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} />)}
+          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button ref={commandButtonRef} type="button" title="Command Palette" aria-label="Command Palette" onClick={onOpenCommand} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><Command className="h-5 w-5" /></button>
           <RailMoreNav />
         </div>
@@ -127,14 +129,14 @@ function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, 
 }
 
 
-function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, onNavigate }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; onNavigate: (tab: ControlTab) => void }) {
+function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
   return (
     <nav className="hidden w-full flex-wrap gap-2 lg:flex">
       {tabs.map((tab) => {
         const Icon = tab.icon;
         const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone);
         return (
-          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
+          <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} onMouseEnter={() => onPrefetch?.(tab.id)} onFocus={() => onPrefetch?.(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
             <Icon className="h-4 w-4" />{tab.label}
             {badge ? <span className={cn("hc-badge", badge.cls)}>{badge.count}</span> : null}
           </button>
@@ -229,10 +231,10 @@ function StatusDots({ health }: { health: Props["health"] }) {
   );
 }
 
-function TabButton({ tab, active, badge, onClick }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void }) {
+function TabButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
   const Icon = tab.icon;
   return (
-    <button type="button" onClick={onClick} aria-label={tab.label} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
+    <button type="button" onClick={onClick} onTouchStart={onPrefetch} onFocus={onPrefetch} aria-label={tab.label} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", active && "text-[var(--hc-accent-text)]")}>
       <Icon className="h-5 w-5" />
       <span className="max-w-full truncate px-0.5">{tab.mobileLabel}</span>
       {badge ? <span className={cn("hc-badge absolute right-4 top-2", badge.cls)}>{badge.count}</span> : null}
@@ -240,10 +242,10 @@ function TabButton({ tab, active, badge, onClick }: { tab: (typeof tabs)[number]
   );
 }
 
-function RailButton({ tab, active, badge, onClick }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void }) {
+function RailButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
   const Icon = tab.icon;
   return (
-    <button type="button" title={tab.label} aria-label={tab.label} onClick={onClick} className={cn("relative grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft transition", active && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
+    <button type="button" title={tab.label} aria-label={tab.label} onClick={onClick} onMouseEnter={onPrefetch} onFocus={onPrefetch} className={cn("relative grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft transition", active && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
       <Icon className="h-5 w-5" />
       {badge ? <span className={cn("hc-badge absolute -right-1 -top-1", badge.cls)}>{badge.count}</span> : null}
     </button>
