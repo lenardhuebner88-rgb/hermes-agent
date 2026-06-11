@@ -65,7 +65,7 @@ function RunHistoryCard({ run, card }: { run: AutoresearchRun; card: Autoresearc
         <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><StatusPill tone={runLaneTone(run.lane)} label={runLaneLabel(run.lane)} /><StatusPill tone={card.tone} label={card.label} /><span className="hc-mono text-xs hc-soft">{formatRunTime(run.at)}</span></div><Text as="h3" variant="label" className="mt-2 text-white">{card.title}</Text><p className="mt-1 text-xs leading-5 hc-soft">{card.detail}</p><p className="mt-2 text-xs text-white"><span className="font-semibold">Danach:</span> {card.next}</p></div>
         {model ? <span className="max-w-52 truncate rounded-full border border-zinc-600/25 bg-zinc-600/10 px-2 py-1 text-xs text-zinc-200" title={model}>{model}</span> : null}
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">{card.facts.map((fact) => <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}><p className="text-[9px] font-semibold uppercase tracking-[.12em] hc-dim">{fact.label}</p><p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p></div>)}</div>
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">{card.facts.map((fact) => <div key={fact.label} className={cn("rounded-md border px-2 py-1.5", reviewStepToneClass(fact.tone))}><p className="hc-eyebrow">{fact.label}</p><p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p></div>)}</div>
     </article>
   );
 }
@@ -75,7 +75,7 @@ function RunSummaryPanel({ summary }: { summary: AutoresearchRunSummary }) {
     <Panel eyebrow="Lauf-Auswertung" title={summary.title} actions={<StatusPill tone={summary.tone} label={summary.label} />} className="mb-4 p-3" surface="panel2">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0"><p className="max-w-3xl text-sm leading-6 hc-soft">{summary.detail}</p><p className="mt-2 text-sm text-white"><span className="font-semibold">Nächster Schritt:</span> {summary.next}</p></div>
-        <div className="grid shrink-0 gap-2 sm:grid-cols-5 lg:min-w-[520px]">{summary.facts.map((fact) => <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}><p className="text-[10px] font-semibold uppercase tracking-[.14em] hc-dim">{fact.label}</p><p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p></div>)}</div>
+        <div className="grid shrink-0 gap-2 sm:grid-cols-5 lg:min-w-[520px]">{summary.facts.map((fact) => <div key={fact.label} className={cn("rounded-md border px-3 py-2", reviewStepToneClass(fact.tone))}><p className="hc-eyebrow">{fact.label}</p><p className="mt-1 truncate text-sm font-semibold text-white" title={fact.value}>{fact.value}</p></div>)}</div>
       </div>
     </Panel>
   );

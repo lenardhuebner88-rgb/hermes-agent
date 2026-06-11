@@ -83,4 +83,15 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/de\.worker\.actionFailed/);
     expect(src).not.toMatch(/Aktion fehlgeschlagen/);
   });
+
+  it("keeps task deep-links visible and URL-backed", () => {
+    expect(src).toMatch(/useSearchParams/);
+    expect(src).toMatch(/const taskParam = searchParams\.get\("task"\)/);
+    expect(src).toMatch(/setSearchParams\([\s\S]*replace: true/);
+    expect(src).toMatch(/flowTaskDomId/);
+    expect(src).toMatch(/flowChainDomId/);
+    expect(src).toMatch(/scrollToFlowTask/);
+    expect(src).toMatch(/id=\{flowTaskDomId\(m\.id\)\}/);
+    expect(src).toMatch(/id=\{flowTaskDomId\(id\)\}/);
+  });
 });

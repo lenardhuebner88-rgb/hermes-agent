@@ -106,4 +106,16 @@ describe("pollingStore", () => {
     await refresh("k");
     expect(loader).toHaveBeenCalledTimes(2);
   });
+
+  it("does not notify listeners when a poll returns an identical JSON payload", async () => {
+    const loader = vi.fn().mockResolvedValue({ count: 1, items: ["a"] });
+    const cb = vi.fn();
+    subscribe("k", loader, 1000, cb);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cb).toHaveBeenCalledTimes(2); // initial loading snapshot + first data snapshot
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(cb).toHaveBeenCalledTimes(2);
+  });
 });

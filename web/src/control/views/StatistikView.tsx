@@ -21,7 +21,7 @@ import {
 } from "../hooks/useControlData";
 import type { CostBucket, Epic, ReliabilityProfile, RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 import { Hero } from "../components/Hero";
-import { ToneCallout } from "../components/atoms";
+import { StaleBadge, ToneCallout } from "../components/atoms";
 import { SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetPanel, FleetEmptyState } from "../components/fleet/atoms";
 import { RunSummaryTile } from "../components/RunSummaryTile";
@@ -59,12 +59,12 @@ function EpicRows({ epics }: { epics: Epic[] }) {
         const rate = e.task_count > 0 ? e.done_tasks / e.task_count : null;
         return (
           <li key={e.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2.5 py-2">
-            <span className="min-w-0 flex-1 basis-40 truncate text-[0.84rem] font-medium text-white">{e.title || e.id}</span>
-            <span className="hc-mono w-24 shrink-0 text-[0.72rem] hc-soft">
+            <span className="min-w-0 flex-1 basis-40 truncate hc-type-label text-white">{e.title || e.id}</span>
+            <span className="hc-mono w-24 shrink-0 hc-type-label hc-soft">
               {e.task_count > 0 ? de.stats.epicProgress(e.done_tasks, e.task_count) : de.stats.epicNoTasks}
             </span>
             <div className="w-20 shrink-0"><RateBar rate={rate} /></div>
-            <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">
+            <span className="hc-mono shrink-0 hc-type-label hc-dim">
               {tokens > 0 ? fmtTokens(tokens) : de.stats.epicNoTokens}
               {e.cost_usd != null && e.cost_usd > 0 ? ` · ${fmtUsd(e.cost_usd)}` : ""}
             </span>
@@ -92,11 +92,11 @@ export function CostBreakdownPanel({ data }: { data: RunsCostsResponse | null })
             const tokens = (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
             return (
               <li key={p.profile} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2.5 py-2">
-                <span className="min-w-0 flex-1 basis-32 truncate text-[0.84rem] font-medium text-white">{profileLabel[p.profile] ?? p.profile}</span>
-                <span className="hc-mono w-16 shrink-0 text-[0.72rem] hc-dim">{de.stats.costRuns(p.runs)}</span>
-                <span className="hc-mono w-16 shrink-0 text-[0.72rem] text-white">{p.cost_usd != null ? fmtUsd(p.cost_usd) : "—"}</span>
-                <span className="hc-mono w-20 shrink-0 text-[0.72rem] hc-soft">{p.cost_usd_equivalent != null ? `≈ ${fmtUsd(p.cost_usd_equivalent)}` : ""}</span>
-                <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{tokens > 0 ? fmtTokens(tokens) : "—"}</span>
+                <span className="min-w-0 flex-1 basis-32 truncate hc-type-label text-white">{profileLabel[p.profile] ?? p.profile}</span>
+                <span className="hc-mono w-16 shrink-0 hc-type-label hc-dim">{de.stats.costRuns(p.runs)}</span>
+                <span className="hc-mono w-16 shrink-0 hc-type-label text-white">{p.cost_usd != null ? fmtUsd(p.cost_usd) : "—"}</span>
+                <span className="hc-mono w-20 shrink-0 hc-type-label hc-soft">{p.cost_usd_equivalent != null ? `≈ ${fmtUsd(p.cost_usd_equivalent)}` : ""}</span>
+                <span className="hc-mono shrink-0 hc-type-label hc-dim">{tokens > 0 ? fmtTokens(tokens) : "—"}</span>
               </li>
             );
           })}
@@ -130,7 +130,7 @@ function ReliabilityTable({ profiles, baseline, minN }: {
               <tr key={p.profile} className="align-middle">
                 <td className="border-b border-[var(--hc-border)] px-2 py-2.5">
                   <span className="font-medium text-white">{profileLabel[p.profile] ?? p.profile}</span>
-                  {p.low_sample ? <span className="ml-2 rounded-full border border-[var(--hc-border)] px-1.5 py-0.5 text-[0.64rem] hc-dim">{de.stats.lowSample}</span> : null}
+                  {p.low_sample ? <span className="ml-2 rounded-full border border-[var(--hc-border)] px-1.5 py-0.5 hc-eyebrow">{de.stats.lowSample}</span> : null}
                 </td>
                 <td className="hc-mono border-b border-[var(--hc-border)] px-2 py-2.5">{p.runs}</td>
                 <td className="border-b border-[var(--hc-border)] px-2 py-2.5">
@@ -142,9 +142,9 @@ function ReliabilityTable({ profiles, baseline, minN }: {
                 <td className="hc-mono border-b border-[var(--hc-border)] px-2 py-2.5">{fmtPct(p.retry_rate)}</td>
                 <td className="border-b border-[var(--hc-border)] px-2 py-2.5">
                   {p.judged === 0 ? (
-                    <span className="hc-dim text-[0.78rem]">{de.stats.noJudgements}</span>
+                    <span className="hc-type-label hc-dim">{de.stats.noJudgements}</span>
                   ) : (
-                    <span className="text-[0.82rem]">
+                    <span className="hc-type-label">
                       <span className="text-emerald-300">{de.stats.judgedLine(p.approved, p.rejected)}</span>
                       <span className="hc-mono ml-2 hc-soft">{p.approve_rate != null ? fmtPct(p.approve_rate) : `n<${minN}`}</span>
                     </span>
@@ -194,6 +194,14 @@ export function StatistikView() {
         count={loadingFirst ? "—" : rootsWeek}
         countHint={de.stats.rootsWeek}
         tone="violet"
+        action={
+          <div className="flex flex-wrap justify-end gap-1.5">
+            <StaleBadge isStale={daily.isStale} lastUpdated={daily.lastUpdated} errorObj={daily.errorObj} error={daily.error} now={now} />
+            <StaleBadge isStale={summary.isStale} lastUpdated={summary.lastUpdated} errorObj={summary.errorObj} error={summary.error} now={now} />
+            <StaleBadge isStale={costs.isStale} lastUpdated={costs.lastUpdated} errorObj={costs.errorObj} error={costs.error} now={now} />
+            <StaleBadge isStale={reliability.isStale} lastUpdated={reliability.lastUpdated} errorObj={reliability.errorObj} error={reliability.error} now={now} />
+          </div>
+        }
       >
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <FleetPod label={de.stats.podToday} value={loadingFirst ? "—" : (today?.done_roots ?? 0)} />
@@ -265,7 +273,7 @@ export function StatistikView() {
               {/* F6: Absprung ins Issue-Board (Detail-Seite der Statistik). */}
               <a
                 href="/control/issues"
-                className="mt-3 inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 text-[0.78rem] hc-soft hover:bg-white/5"
+                className="mt-3 inline-flex min-h-9 items-center rounded-md border border-white/10 px-2.5 py-1 hc-type-label hc-soft hover:bg-white/5"
               >
                 {de.stats.issuesLink}
               </a>

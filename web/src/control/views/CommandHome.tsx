@@ -12,9 +12,9 @@
  * Everything is real, polled data (no mocks). One screen instead of the
  * inbox+overview+pulse triple that all re-rendered slices of the same sources.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, ChevronRight, Inbox as InboxIcon } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import {
   useBoard,
@@ -28,10 +28,10 @@ import {
 import type { Density } from "../hooks/useDensity";
 import type { BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
-import { severitySpine } from "../lib/tones";
+import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
 import { fmtAge, nowSec } from "../lib/derive";
-import { StatusPill } from "../components/atoms";
+import { StaleBadge, StatusPill } from "../components/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
@@ -44,21 +44,19 @@ const SURFACE: Record<InboxSurface, { label: string; tone: ToneName }> = {
   kanban: { label: "Kanban", tone: "amber" },
 };
 
-// worstTone → the hero mood (gradient + the big number colour).
-const HERO_ACCENT: Record<ToneName, string> = {
-  red: "var(--hc-red)", rose: "var(--hc-red)", amber: "var(--hc-amber)",
-  emerald: "var(--hc-emerald)", cyan: "var(--hc-cyan)", sky: "var(--hc-cyan)",
-  indigo: "var(--hc-cyan)", violet: "var(--hc-accent)", zinc: "var(--hc-accent)",
-};
+function surfaceFromParam(value: string | null): InboxSurface | null {
+  return value === "autoresearch" || value === "family" || value === "orchestrator" || value === "kanban" ? value : null;
+}
 
 export function CommandHome({ density }: { density: Density }) {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
-  const [surfaceFilter, setSurfaceFilter] = useState<InboxSurface | null>(null);
+  const [surfaceFilter, setSurfaceFilter] = useState<InboxSurface | null>(() => surfaceFromParam(searchParams.get("surface")));
   const fix = useFixRedispatch();
   const now = board.data?.now ?? nowSec();
 
@@ -76,6 +74,20 @@ export function CommandHome({ density }: { density: Density }) {
   const top = inbox.items[0];
   const rest = (surfaceFilter ? inbox.items.filter((i) => i.surface === surfaceFilter) : inbox.items).slice(top && !surfaceFilter ? 1 : 0);
 
+  useEffect(() => {
+    setSurfaceFilter(surfaceFromParam(searchParams.get("surface")));
+  }, [searchParams]);
+
+  const chooseSurfaceFilter = (id: InboxSurface | null) => {
+    setSurfaceFilter(id);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (id) next.set("surface", id);
+      else next.delete("surface");
+      return next;
+    }, { replace: true });
+  };
+
   const chips: Array<{ id: InboxSurface | null; label: string; count: number }> = [
     { id: null, label: "Alle", count: inbox.summary.total },
     { id: "autoresearch", label: SURFACE.autoresearch.label, count: inbox.summary.autoresearch },
@@ -91,7 +103,7 @@ export function CommandHome({ density }: { density: Density }) {
           (fleet + today + health) — the whole situation in one surface. */}
       <section
         className="hc-hero grid gap-6 p-5 sm:p-7 lg:grid-cols-[1.55fr_1fr]"
-        style={{ "--hc-hero-accent": HERO_ACCENT[heroTone] } as React.CSSProperties}
+        style={{ "--hc-hero-accent": heroAccent(heroTone) } as React.CSSProperties}
       >
         <div className="min-w-0">
           <div className="flex items-center gap-3">
@@ -121,11 +133,14 @@ export function CommandHome({ density }: { density: Density }) {
           blocked={counts.blocked}
           shippedToday={shippedToday}
           now={now}
+          board={board}
+          workers={workers}
+          digest={digest}
         />
       </section>
 
       {/* ── LIVE FLEET ──────────────────────────────────────────────────────── */}
-      <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/flow")} />
+      <FleetStrip workers={liveWorkers} loading={workers.loading && !workers.data} now={now} onOpen={() => navigate("/control/flow")} freshness={workers} />
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
@@ -141,7 +156,7 @@ export function CommandHome({ density }: { density: Density }) {
                   key={c.id ?? "all"}
                   type="button"
                   aria-pressed={surfaceFilter === c.id}
-                  onClick={() => setSurfaceFilter(c.id)}
+                  onClick={() => chooseSurfaceFilter(c.id)}
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition",
                     surfaceFilter === c.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:border-white/20",
@@ -249,11 +264,13 @@ function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<
 }
 
 /** The pulse rail: fleet · today · health, stacked — the situation at a glance. */
-function PulseRail({ health, running, inReview, blocked, shippedToday, now }: {
+function PulseRail({ health, running, inReview, blocked, shippedToday, now, board, workers, digest }: {
   health: ReturnType<typeof useSystemHealth>;
+  board: ReturnType<typeof useBoard>;
+  workers: ReturnType<typeof useHermesWorkers>;
+  digest: ReturnType<typeof useHermesTodayDigest>;
   running: number; inReview: number; blocked: number; shippedToday: number; now: number;
 }) {
-  void now;
   const overall = health.data?.overall ?? "offline";
   const healthTone = !health.data ? "zinc" : overall === "healthy" ? "emerald" : overall === "degraded" ? "amber" : "red";
   const subs = health.data?.subsystems;
@@ -275,6 +292,12 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now }: {
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">System</span>
           <StatusPill tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} dot={!health.data ? "idle" : overall === "healthy" ? "live" : overall === "degraded" ? "warn" : "error"} />
+        </div>
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          <StaleBadge isStale={health.isStale} lastUpdated={health.lastUpdated} errorObj={health.errorObj} error={health.error} now={now} />
+          <StaleBadge isStale={board.isStale} lastUpdated={board.lastUpdated} errorObj={board.errorObj} error={board.error} now={now} />
+          <StaleBadge isStale={workers.isStale} lastUpdated={workers.lastUpdated} errorObj={workers.errorObj} error={workers.error} now={now} />
+          <StaleBadge isStale={digest.isStale} lastUpdated={digest.lastUpdated} errorObj={digest.errorObj} error={digest.error} now={now} />
         </div>
         <div className="flex flex-col gap-1.5">
           {sysLabel.map(([label, st]) => (
@@ -306,11 +329,14 @@ function RailStat({ label, value, tone, dot }: { label: string; value: number; t
 }
 
 /** Live worker chips — what each agent is on right now. */
-function FleetStrip({ workers, loading, now, onOpen }: { workers: Worker[]; loading: boolean; now: number; onOpen: () => void }) {
+function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Worker[]; loading: boolean; now: number; onOpen: () => void; freshness: ReturnType<typeof useHermesWorkers> }) {
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between">
-        <Eyebrow>Die Flotte arbeitet</Eyebrow>
+        <div className="flex flex-wrap items-center gap-2">
+          <Eyebrow>Die Flotte arbeitet</Eyebrow>
+          <StaleBadge isStale={freshness.isStale} lastUpdated={freshness.lastUpdated} errorObj={freshness.errorObj} error={freshness.error} now={now} />
+        </div>
         <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Flow öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
       {loading ? (
@@ -369,16 +395,21 @@ function DecisionRow({ item, onOpen, fix }: { item: InboxItem; onOpen: () => voi
 function StatsPulse({ onOpen }: { onOpen: () => void }) {
   const daily = useHermesRunsDaily();
   const series = (daily.data?.series ?? []).slice(-14);
-  if (!series.length || !series.some((p) => p.done_tasks > 0 || (p.output_tokens ?? 0) > 0)) return null;
   const fmtTokens = (v: number) =>
     v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)} M` : v >= 1_000 ? `${Math.round(v / 1_000)} k` : String(v);
+  const hasSeries = series.length > 0 && series.some((p) => p.done_tasks > 0 || (p.output_tokens ?? 0) > 0);
+  const hasSourceProblem = Boolean(daily.isStale || daily.errorObj || daily.error);
+  if (!hasSeries && !hasSourceProblem) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between">
-        <Eyebrow>Statistik-Puls · 14 Tage</Eyebrow>
+        <div className="flex flex-wrap items-center gap-2">
+          <Eyebrow>Statistik-Puls · 14 Tage</Eyebrow>
+          <StaleBadge isStale={daily.isStale} lastUpdated={daily.lastUpdated} errorObj={daily.errorObj} error={daily.error} />
+        </div>
         <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Statistik öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      {hasSeries ? <div className="grid gap-3 sm:grid-cols-2">
         <div className="hc-surface-card p-3">
           <Text variant="label" className="hc-dim">Geliefert (Roots/Tag)</Text>
           <DayBars points={series.map((p) => ({ label: p.date.slice(5), value: p.done_roots }))} />
@@ -387,7 +418,7 @@ function StatsPulse({ onOpen }: { onOpen: () => void }) {
           <Text variant="label" className="hc-dim">Token-Burn (out/Tag)</Text>
           <Sparkline points={series.map((p) => ({ label: p.date.slice(5), value: p.output_tokens ?? 0 }))} stroke="var(--hc-accent-2)" valueFmt={fmtTokens} />
         </div>
-      </div>
+      </div> : null}
     </section>
   );
 }

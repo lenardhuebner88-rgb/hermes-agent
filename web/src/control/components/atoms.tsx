@@ -1,12 +1,15 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Clock3 } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { diffStats, withLineNumbers } from "../lib/diff";
+import { fmtAge, nowSec } from "../lib/derive";
 import type { DiffLine, ToneName } from "../lib/types";
 import { toneClasses } from "../lib/tones";
 import type { DotKind } from "../lib/tones";
+import type { StructuredError } from "../hooks/pollingStore";
+import { de } from "../i18n/de";
 
 export function Led({ kind, size = 8 }: { kind: DotKind; size?: number }) {
   return <span aria-hidden className={cn("hc-led inline-block shrink-0 rounded-full", `hc-led-${kind}`)} style={{ width: size, height: size }} />;
@@ -23,6 +26,32 @@ export function StatusPill({ tone, label, dot, size = "sm" }: { tone: ToneName; 
 
 export function ToneCallout({ tone, children }: { tone: ToneName; children: React.ReactNode }) {
   return <div className={cn("rounded-lg border px-3 py-2 text-sm", toneClasses(tone))}>{children}</div>;
+}
+
+export function StaleBadge({ isStale, lastUpdated, errorObj, error, now = nowSec(), className }: {
+  isStale?: boolean;
+  lastUpdated?: number | null;
+  errorObj?: StructuredError | null;
+  error?: string | null;
+  now?: number;
+  className?: string;
+}) {
+  const hasError = Boolean(errorObj || error);
+  if (!isStale && !hasError) return null;
+  const ageLabel = lastUpdated != null ? fmtAge(lastUpdated, now) : null;
+  const label = isStale ? (ageLabel ? de.staleBadge.stale(ageLabel) : de.staleBadge.staleUnknown) : de.staleBadge.error;
+  const title = errorObj?.message ?? error ?? label;
+  const tone: ToneName = hasError ? "amber" : "zinc";
+  const Icon = hasError ? AlertTriangle : Clock3;
+  return (
+    <span
+      title={title}
+      className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 hc-type-label", toneClasses(tone), className)}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </span>
+  );
 }
 
 export function ModeBadge({ mode }: { mode: "skill" | "code" }) {

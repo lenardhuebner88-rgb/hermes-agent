@@ -8,6 +8,7 @@ import { TONE_HEX } from "../lib/tones";
 import { FleetPanel, FleetPod, FleetEmptyState } from "../components/fleet/atoms";
 import { Hero } from "../components/Hero";
 import { SkeletonCard } from "../components/primitives";
+import { StaleBadge } from "../components/atoms";
 import { de } from "../i18n/de";
 import type { Proposal } from "../lib/types";
 
@@ -70,6 +71,12 @@ export function PulseView({ proposals, proposalsLastUpdated }: Props) {
           tone: error || fresh.stale ? "amber" : "emerald",
           dot: error ? "error" : fresh.stale ? "warn" : "live",
         }}
+        action={
+          <div className="flex flex-wrap justify-end gap-1.5">
+            <StaleBadge isStale={results.isStale} lastUpdated={results.lastUpdated} errorObj={results.errorObj} error={results.error} now={now} />
+            <StaleBadge isStale={crons.isStale} lastUpdated={crons.lastUpdated} errorObj={crons.errorObj} error={crons.error} now={now} />
+          </div>
+        }
       >
         {/* Tally: eine ehrliche Zeile darüber, was die Maschine geleistet hat. */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -125,13 +132,13 @@ function EventRow({ event, now, onOpen }: { event: PulseEvent; now: number; onOp
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-white">{event.title}</span>
-            <span className="shrink-0 rounded-full border border-white/10 px-1.5 py-0.5 text-[10px] hc-soft">{Meta.label}</span>
+            <span className="shrink-0 rounded-full border border-white/10 px-1.5 py-0.5 hc-type-label hc-soft">{Meta.label}</span>
           </span>
           {event.detail ? <span className="mt-0.5 line-clamp-1 block text-xs hc-soft">{event.detail}</span> : null}
         </span>
         <span className="shrink-0 text-right">
           <span className="hc-mono block text-xs text-white/80">{fmtClockTime(event.at)}</span>
-          <span className="hc-mono block text-[10px] hc-dim">{de.pulse.ago(fmtAge(event.at, now))}</span>
+          <span className="hc-mono block hc-type-label hc-dim">{de.pulse.ago(fmtAge(event.at, now))}</span>
         </span>
       </button>
     </li>

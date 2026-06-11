@@ -11,6 +11,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { de } from "../i18n/de";
@@ -48,7 +49,7 @@ import {
 } from "../hooks/useControlData";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
-import { StatusPill, ToneCallout } from "../components/atoms";
+import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
@@ -60,6 +61,21 @@ import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
 
 const MAX_CARDS = 12;
 const MAX_DELIVERED = 8;
+
+function flowTaskDomId(taskId: string): string {
+  return `flow-task-${encodeURIComponent(taskId)}`;
+}
+
+function flowChainDomId(rootId: string): string {
+  return `flow-chain-${encodeURIComponent(rootId)}`;
+}
+
+function scrollToFlowTask(taskId: string): void {
+  window.setTimeout(() => {
+    const target = document.getElementById(flowTaskDomId(taskId)) ?? document.getElementById(flowChainDomId(taskId));
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 80);
+}
 
 // Enrichment for a board task, gathered from the live sidecar endpoints.
 interface Enriched {
@@ -128,8 +144,8 @@ function FlowCardActions({ status, busy, error, dispatchChoice, onReleaseChain, 
     <div className="mt-2.5" onClick={(e) => e.stopPropagation()}>
       {dispatchChoice ? (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 p-2">
-          <p className="text-[0.72rem] font-medium text-emerald-100">{de.flow.singleDispatch.prompt}</p>
-          <p className="mt-1 text-[0.68rem] hc-soft">{de.flow.singleDispatch.heldSiblings(dispatchChoice.heldSiblingIds.length)}</p>
+          <p className="hc-type-label text-emerald-100">{de.flow.singleDispatch.prompt}</p>
+          <p className="mt-1 hc-type-label hc-soft">{de.flow.singleDispatch.heldSiblings(dispatchChoice.heldSiblingIds.length)}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" disabled={busy} onClick={onReleaseChain} className="inline-flex min-h-11 sm:min-h-8 items-center rounded-full border border-emerald-300/50 bg-emerald-300/15 px-3 text-xs font-semibold text-emerald-100 disabled:opacity-40">
               {busy ? de.flow.plan.releaseBusy : de.flow.singleDispatch.startChain}
@@ -142,7 +158,7 @@ function FlowCardActions({ status, busy, error, dispatchChoice, onReleaseChain, 
         </div>
       ) : pending ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[0.7rem] hc-soft">{pending.confirm}</span>
+          <span className="hc-type-label hc-soft">{pending.confirm}</span>
           <button type="button" disabled={busy} onClick={() => { onAct(pending); setPending(null); }} className="inline-flex min-h-11 sm:min-h-7 items-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2.5 text-xs text-[var(--hc-accent-text)] disabled:opacity-40">{busy ? "…" : "Bestätigen"}</button>
           <button type="button" onClick={() => setPending(null)} className="inline-flex min-h-11 sm:min-h-7 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft">Abbrechen</button>
         </div>
@@ -159,9 +175,9 @@ function FlowCardActions({ status, busy, error, dispatchChoice, onReleaseChain, 
           })}
         </div>
       ) : guard ? (
-        <p className="flex items-center gap-1.5 text-[0.68rem] hc-dim"><Lock className="h-3 w-3" />{guard}</p>
+        <p className="flex items-center gap-1.5 hc-type-label hc-dim"><Lock className="h-3 w-3" />{guard}</p>
       ) : null}
-      {error ? <p className="mt-1.5 flex items-start gap-1 text-[0.7rem] text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{error}</p> : null}
+      {error ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{error}</p> : null}
     </div>
   );
 }
@@ -201,6 +217,7 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
   const ageSec = task.age?.created_age_seconds ?? null;
   return (
     <article
+      id={flowTaskDomId(task.id)}
       role="button"
       tabIndex={0}
       aria-pressed={selected}
@@ -209,29 +226,29 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
       className={cn("cursor-pointer rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
     >
       <div className="flex items-center gap-2">
-        <span className="hc-mono text-[0.7rem] hc-dim">{task.id}</span>
+        <span className="hc-mono hc-type-label hc-dim">{task.id}</span>
         <span className="ml-auto"><RoleChip role={role} /></span>
       </div>
       <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{task.title}</p>
-      <p className="mt-1 hc-mono text-[0.68rem] hc-dim">
+      <p className="mt-1 hc-mono hc-type-label hc-dim">
         {ageSec != null ? `⏱ vor ${fmtAge(now - ageSec, now)}` : ""}{task.branch_name ? ` · ${task.branch_name}` : ""}
         {enriched.workerHeartbeat ? ` · ♥ ${fmtAge(enriched.workerHeartbeat, now)}` : ""}
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <StatusPill tone={isBlocked ? "red" : isDone ? "emerald" : isReview ? "amber" : task.status === "running" ? "cyan" : "zinc"} label={taskStatusLabel[task.status] ?? task.status} dot={task.status === "running" ? "live" : isBlocked ? "error" : isDone ? "ready" : isReview ? "warn" : "idle"} />
-        {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[0.7rem] text-rose-200">Hoch</span> : null}
-        {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[0.7rem] text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
-        {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[0.7rem] text-cyan-100">{enriched.verdict}</span> : null}
-        {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[0.7rem] text-emerald-100">{enriched.resultQualityLabel}</span> : null}
+        {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 hc-type-label text-rose-200">Hoch</span> : null}
+        {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 hc-type-label text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
+        {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100">{enriched.verdict}</span> : null}
+        {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 hc-type-label text-emerald-100">{enriched.resultQualityLabel}</span> : null}
       </div>
       {task.latest_summary ? <p className="mt-2 line-clamp-2 text-xs hc-soft">{task.latest_summary}</p> : null}
       {isBlocked && enriched.blockedReason ? (
-        <p className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[0.7rem] text-red-200"><Lock className="mt-0.5 h-3 w-3 shrink-0" />{enriched.blockedReason}</p>
+        <p className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 hc-type-label text-red-200"><Lock className="mt-0.5 h-3 w-3 shrink-0" />{enriched.blockedReason}</p>
       ) : null}
       {isReview ? (
-        <p className="mt-2 flex items-center gap-1.5 text-[0.68rem] hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — Ausliefern nimmt ab, Nacharbeit schickt zurück.</p>
+        <p className="mt-2 flex items-center gap-1.5 hc-type-label hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — Ausliefern nimmt ab, Nacharbeit schickt zurück.</p>
       ) : null}
-      {enriched.deliverableCount ? <p className="mt-1.5 text-[0.68rem] text-emerald-300">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</p> : null}
+      {enriched.deliverableCount ? <p className="mt-1.5 hc-type-label text-emerald-300">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</p> : null}
       <FlowCardActions
         status={task.status}
         busy={busy}
@@ -273,7 +290,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
       <div className="flex items-center justify-between gap-2">
         <Eyebrow>{childIds.length ? de.flow.plan.decomposedInto(childIds.length) : de.flow.plan.subtasksHeading}</Eyebrow>
         {hasSpec ? (
-          <a href={specUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[0.72rem] text-sky-200 hover:text-sky-100">
+          <a href={specUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hc-type-label text-sky-200 hover:text-sky-100">
             <FileText className="h-3.5 w-3.5" />{de.flow.plan.openSpec}
           </a>
         ) : null}
@@ -285,11 +302,11 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
             const statusExplanation = getFlowSubtaskStatusExplanation(c.status, c.status === "blocked" ? c.latest_summary : null);
             return (
               <li key={c.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2 py-1.5">
-                <span className="hc-mono text-[0.66rem] hc-dim">{c.id}</span>
-                <span className="min-w-0 flex-1 basis-36 truncate text-[0.78rem] text-white">{c.title}</span>
+                <span className="hc-mono hc-type-label hc-dim">{c.id}</span>
+                <span className="min-w-0 flex-1 basis-36 truncate hc-type-label text-white">{c.title}</span>
                 <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
                   <StatusPill tone={statusTone(c.status)} label={taskStatusLabel[c.status] ?? c.status} />
-                  <span className={cn("max-w-full text-[0.68rem] leading-snug hc-dim sm:max-w-[13rem] sm:text-right", c.status === "blocked" && "text-red-200")} title={statusExplanation}>
+                  <span className={cn("max-w-full hc-type-label hc-dim sm:max-w-[13rem] sm:text-right", c.status === "blocked" && "text-red-200")} title={statusExplanation}>
                     {statusExplanation}
                   </span>
                 </div>
@@ -303,7 +320,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
         <div className="mt-2.5">
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[0.7rem] hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
+              <span className="hc-type-label hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
               <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : de.flow.plan.releaseConfirmButton}</button>
               <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft">Abbrechen</button>
             </div>
@@ -312,13 +329,13 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
               <Play className="h-3.5 w-3.5" />{de.flow.plan.release} · {de.flow.plan.subtasksOf(heldCount)}
             </button>
           )}
-          <p className="mt-1.5 flex items-center gap-1.5 text-[0.68rem] hc-dim"><Lock className="h-3 w-3" />{de.flow.plan.heldGate}</p>
-          <p className="mt-1 text-[0.68rem] hc-dim">Kette starten gibt gehaltene Subtasks frei; Queue/Assignee und Dependencies entscheiden den tatsächlichen Start.</p>
+          <p className="mt-1.5 flex items-center gap-1.5 hc-type-label hc-dim"><Lock className="h-3 w-3" />{de.flow.plan.heldGate}</p>
+          <p className="mt-1 hc-type-label hc-dim">Kette starten gibt gehaltene Subtasks frei; Queue/Assignee und Dependencies entscheiden den tatsächlichen Start.</p>
         </div>
       ) : null}
 
-      {released ? <p className="mt-1.5 text-[0.7rem] text-emerald-300">{de.flow.plan.released(released)}</p> : null}
-      {releaseError ? <p className="mt-1.5 flex items-start gap-1 text-[0.7rem] text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
+      {released ? <p className="mt-1.5 hc-type-label text-emerald-300">{de.flow.plan.released(released)}</p> : null}
+      {releaseError ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
     </div>
   );
 }
@@ -359,29 +376,29 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
     <div className="mt-4 rounded-lg border border-sky-400/25 bg-sky-500/[.06] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Eyebrow>Ketten-Kontext</Eyebrow>
-        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.66rem] hc-dim">Snapshot · read-only</span>
-        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.66rem] hc-dim">Snapshot-Alter: {snapshotLabel}</span>
+        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">Snapshot · read-only</span>
+        <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">Snapshot-Alter: {snapshotLabel}</span>
       </div>
-      <p className="mt-1.5 text-[0.72rem] hc-dim">{parallelNote}</p>
+      <p className="mt-1.5 hc-type-label hc-dim">{parallelNote}</p>
       <div className="mt-2 grid gap-2">
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-sky-100">Gehalten</p>
+          <p className="hc-eyebrow text-sky-100">Gehalten</p>
           <p className="mt-1 text-[0.75rem] hc-soft">{heldTasks.length ? heldTasks.map(taskLine).join(" · ") : "Keine gehaltenen direkten Nachbarn im Snapshot."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-emerald-100">Ready-Nachbar im Snapshot</p>
+          <p className="hc-eyebrow text-emerald-100">Ready-Nachbar im Snapshot</p>
           <p className="mt-1 text-[0.75rem] hc-soft">{readyTasks.length ? readyTasks.map(taskLine).join(" · ") : "Kein ready-Nachbar im Snapshot; keine Scheduler-Zusage."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-cyan-100">Läuft bereits</p>
+          <p className="hc-eyebrow text-cyan-100">Läuft bereits</p>
           <p className="mt-1 text-[0.75rem] hc-soft">{runningTasks.length ? runningTasks.map(taskLine).join(" · ") : "Kein direkter Nachbar läuft im Snapshot."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-amber-100">Mögliche Vorgänger</p>
+          <p className="hc-eyebrow text-amber-100">Mögliche Vorgänger</p>
           <p className="mt-1 text-[0.75rem] hc-soft">{predecessorHintLine}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
-          <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-amber-100">Mögliche Nachfolger mit Wartestatus</p>
+          <p className="hc-eyebrow text-amber-100">Mögliche Nachfolger mit Wartestatus</p>
           <p className="mt-1 text-[0.75rem] hc-soft">{waitingDependents.length ? waitingDependents.map(taskLine).join(" · ") : "Keine möglichen Nachfolger mit Wartestatus im Snapshot."}</p>
         </div>
       </div>
@@ -389,9 +406,9 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
         {parentTasks.map((p) => <StatusPill key={`p-${p.id}`} tone={statusTone(p.status)} label={`Möglicher Vorgänger ${taskStatusLabel[p.status] ?? p.status}`} />)}
         {childTasks.map((c) => <StatusPill key={`c-${c.id}`} tone={statusTone(c.status)} label={`Möglicher Nachfolger ${taskStatusLabel[c.status] ?? c.status}`} />)}
       </div>
-      {unknownIds.length ? <p className="mt-2 text-[0.68rem] hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
-      {parentIds.length ? <p className="mt-2 text-[0.68rem] hc-dim">Snapshot-Hinweis: rohe Detail-Links zeigen Nähe, aber keinen sicheren Blockierungsgrund.</p> : null}
-      {hasAmbiguousTodo ? <p className="mt-2 text-[0.68rem] text-amber-200">Hinweis: todo ist uneindeutig; es kann Dependency-Warten, manuelles Backlog oder Dispatcher-Queue sein.</p> : null}
+      {unknownIds.length ? <p className="mt-2 hc-type-label hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
+      {parentIds.length ? <p className="mt-2 hc-type-label hc-dim">Snapshot-Hinweis: rohe Detail-Links zeigen Nähe, aber keinen sicheren Blockierungsgrund.</p> : null}
+      {hasAmbiguousTodo ? <p className="mt-2 hc-type-label text-amber-200">Hinweis: todo ist uneindeutig; es kann Dependency-Warten, manuelles Backlog oder Dispatcher-Queue sein.</p> : null}
     </div>
   );
 }
@@ -414,13 +431,13 @@ function DeliverableOpenButton({ url }: { url: string }) {
     <div className="shrink-0 text-right">
       <button
         type="button"
-        className="text-[0.7rem] text-emerald-200 hover:text-emerald-100 disabled:cursor-wait disabled:opacity-60"
+        className="hc-type-label text-emerald-200 hover:text-emerald-100 disabled:cursor-wait disabled:opacity-60"
         onClick={onOpen}
         disabled={busy}
       >
         {busy ? "öffnet…" : "öffnen"}
       </button>
-      {openError ? <p className="mt-1 max-w-32 text-[0.62rem] text-red-300">{openError}</p> : null}
+      {openError ? <p className="mt-1 max-w-32 hc-type-label text-red-300">{openError}</p> : null}
     </div>
   );
 }
@@ -445,7 +462,7 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
     <aside className="hc-surface-card h-fit p-4 xl:sticky xl:top-4">
       <Eyebrow>{de.flow.selectedChain}</Eyebrow>
       <div className="mt-2">
-        <p className="hc-mono text-[0.7rem] hc-dim">{taskId}</p>
+        <p className="hc-mono hc-type-label hc-dim">{taskId}</p>
         <p className="mt-1 text-sm font-semibold text-white">{detail?.task?.title ?? task?.title ?? ""}</p>
         {task ? (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -484,13 +501,13 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
                 <div key={run.id} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2.5">
                   <div className="flex items-center gap-2">
                     <RoleChip role={role} />
-                    <span className="ml-auto inline-flex items-center gap-1 text-[0.7rem]" style={{ color: ok ? "#4ade80" : run.error ? "#fb2c36" : "#9ca3af" }}>
-                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: ok ? "#4ade80" : run.error ? "#fb2c36" : "#9ca3af" }} />{run.outcome ?? run.status}
+                    <span className={cn("ml-auto inline-flex items-center gap-1 hc-type-label", ok ? "text-[var(--hc-emerald)]" : run.error ? "text-[var(--hc-red)]" : "hc-dim")}>
+                      <span className={cn("h-1.5 w-1.5 rounded-full", ok ? "bg-[var(--hc-emerald)]" : run.error ? "bg-[var(--hc-red)]" : "bg-[var(--hc-text-dim)]")} />{run.outcome ?? run.status}
                     </span>
                   </div>
-                  <p className="mt-1 hc-mono text-[0.68rem] hc-dim">Run {run.id} · {run.run_role_label ?? profileLabel[run.profile ?? ""] ?? run.profile ?? "—"}{run.ended_at ? ` · vor ${fmtAge(run.ended_at, now)}` : run.started_at ? ` · seit ${fmtAge(run.started_at, now)}` : ""}</p>
+                  <p className="mt-1 hc-mono hc-type-label hc-dim">Run {run.id} · {run.run_role_label ?? profileLabel[run.profile ?? ""] ?? run.profile ?? "—"}{run.ended_at ? ` · vor ${fmtAge(run.ended_at, now)}` : run.started_at ? ` · seit ${fmtAge(run.started_at, now)}` : ""}</p>
                   {run.summary ? <p className="mt-1 line-clamp-3 text-[0.78rem] text-zinc-100">{run.summary}</p> : null}
-                  {run.error ? <p className="mt-1 line-clamp-2 text-[0.72rem] text-red-300">{run.error}</p> : null}
+                  {run.error ? <p className="mt-1 line-clamp-2 hc-type-label text-red-300">{run.error}</p> : null}
                 </div>
               );
             })}
@@ -518,10 +535,10 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
           <div className="mt-2 space-y-2">
             {events.map((ev, i) => (
               <div key={ev.id} className="flex gap-2.5">
-                <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", i === 0 && "animate-pulse")} style={{ background: i === 0 ? "#4ade80" : "#52525b" }} />
+                <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", i === 0 ? "bg-[var(--hc-emerald)]" : "bg-[var(--hc-border-strong)]", i === 0 && "animate-pulse")} />
                 <div className="min-w-0">
                   <p className="text-[0.82rem] text-white">{eventLabel(ev.kind)}</p>
-                  <p className="text-[0.68rem] hc-dim">vor {fmtAge(ev.created_at, now)}</p>
+                  <p className="hc-type-label hc-dim">vor {fmtAge(ev.created_at, now)}</p>
                 </div>
               </div>
             ))}
@@ -549,7 +566,7 @@ function ChainStagePills({ chain }: { chain: ChainModel<BoardTask> }) {
           <span
             key={stage}
             title={`${meta.label}: ${n}`}
-            className={cn("hc-mono inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[0.64rem]", n === 0 && "opacity-40")}
+            className={cn("hc-mono inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 hc-type-label", n === 0 && "opacity-40")}
             style={n > 0 ? { borderColor: `${hex}55`, color: hex } : { borderColor: "var(--hc-border)", color: "var(--hc-text-dim)" }}
           >
             {meta.label[0]}<span>{n}</span>
@@ -593,7 +610,7 @@ function ChainEpicPicker({ chain, openEpics, busy, onAssign }: {
         <option value="">{de.flow.epicNoneOption}</option>
         {openEpics.map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}
       </select>
-      <span className="text-[0.68rem] hc-dim">{de.flow.epicAssignNote(chain.total)}</span>
+      <span className="hc-type-label hc-dim">{de.flow.epicAssignNote(chain.total)}</span>
       <button
         type="button"
         disabled={busy || (choice || null) === chain.epicId}
@@ -618,7 +635,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
   const doneMembers = chain.members.filter((m) => m.status === "done");
   const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
   return (
-    <article className={cn("hc-surface-card p-3", chain.blockedCount > 0 && "border-red-500/40")}>
+    <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
       <div
         role="button"
         tabIndex={0}
@@ -628,19 +645,19 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
         className="cursor-pointer"
       >
         <div className="flex items-center gap-2">
-          <span className="hc-mono text-[0.7rem] hc-dim">{chain.rootId}</span>
-          <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[0.66rem] hc-soft">{projectLabel(chain.tenant)}</span>
+          <span className="hc-mono hc-type-label hc-dim">{chain.rootId}</span>
+          <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{projectLabel(chain.tenant)}</span>
           {chain.epicId ? (
             <button
               type="button"
               title={de.flow.epicGroupToggle}
               onClick={(e) => { e.stopPropagation(); onEpicClick?.(chain.epicId!); }}
-              className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2 py-0.5 text-[0.66rem] text-indigo-200 transition hover:bg-indigo-400/20"
+              className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2 py-0.5 hc-type-label text-indigo-200 transition hover:bg-indigo-400/20"
             >
               {de.flow.epicBadge(epicTitle || chain.epicId)}
             </button>
           ) : null}
-          <span className="ml-auto inline-flex items-center gap-1 text-[0.7rem] hc-soft">
+          <span className="ml-auto inline-flex items-center gap-1 hc-type-label hc-soft">
             {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             {expanded ? de.flow.chainCollapse : de.flow.chainExpand}
           </span>
@@ -648,7 +665,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
         <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{title}</p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <ChainStagePills chain={chain} />
-          <span className="hc-mono text-[0.68rem] hc-soft">{de.flow.chainMembers(chain.doneCount, chain.total)}</span>
+          <span className="hc-mono hc-type-label hc-soft">{de.flow.chainMembers(chain.doneCount, chain.total)}</span>
           {chain.blockedCount > 0 ? <StatusPill tone="red" label={`${chain.blockedCount} blockiert`} dot="error" /> : null}
           {chain.runningCount > 0 ? <StatusPill tone="cyan" label={`${chain.runningCount} läuft`} dot="live" /> : null}
         </div>
@@ -666,6 +683,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
               {doneMembers.map((m) => (
                 <li key={m.id}>
                   <button
+                    id={flowTaskDomId(m.id)}
                     type="button"
                     onClick={() => onSelect(m.id)}
                     className={cn(
@@ -673,9 +691,9 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
                       selectedId === m.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
                     )}
                   >
-                    <span className="hc-mono text-[0.66rem] hc-dim">{m.id}</span>
+                    <span className="hc-mono hc-type-label hc-dim">{m.id}</span>
                     <span className="min-w-0 flex-1 truncate text-[0.78rem] text-zinc-200">{m.title}</span>
-                    <span className="text-[0.66rem] text-emerald-300">✓{m.completed_at ? ` vor ${fmtAge(m.completed_at, now)}` : ""}</span>
+                    <span className="hc-type-label text-emerald-300">✓{m.completed_at ? ` vor ${fmtAge(m.completed_at, now)}` : ""}</span>
                   </button>
                 </li>
               ))}
@@ -699,19 +717,19 @@ function EpicGroupHeader({ epicId, epic, closeBusy, onClose }: {
   const tokens = epic ? (epic.input_tokens ?? 0) + (epic.output_tokens ?? 0) : 0;
   return (
     <div id={epicId ? `epic-group-${epicId}` : undefined} className="flex scroll-mt-4 flex-wrap items-center gap-2">
-      <span className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2.5 py-0.5 text-[0.72rem] font-medium text-indigo-200">
+      <span className="rounded-full border border-indigo-400/25 bg-indigo-400/10 px-2.5 py-0.5 hc-type-label text-indigo-200">
         {epicId ? (epic?.title || epicId) : de.flow.epicGroupNone}
       </span>
       {epic ? (
         <>
-          <span className="hc-mono text-[0.68rem] hc-soft">{de.flow.epicGroupProgress(epic.done_tasks, epic.task_count)}</span>
-          <span className="hc-mono text-[0.68rem] hc-dim">{tokens > 0 ? de.flow.epicGroupTokens(fmtTokens(tokens)) : de.flow.epicGroupNoTokens}</span>
+          <span className="hc-mono hc-type-label hc-soft">{de.flow.epicGroupProgress(epic.done_tasks, epic.task_count)}</span>
+          <span className="hc-mono hc-type-label hc-dim">{tokens > 0 ? de.flow.epicGroupTokens(fmtTokens(tokens)) : de.flow.epicGroupNoTokens}</span>
         </>
       ) : null}
       {epicId && epic?.status === "open" && onClose ? (
         confirming ? (
           <span className="ml-auto flex flex-wrap items-center gap-2">
-            <span className="text-[0.7rem] hc-soft">{de.flow.epicCloseConfirm}</span>
+            <span className="hc-type-label hc-soft">{de.flow.epicCloseConfirm}</span>
             <button
               type="button"
               disabled={closeBusy}
@@ -750,7 +768,7 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
     <div>
       <div className="flex items-center gap-2">
         <Eyebrow>{de.flow.deliveredHeading}</Eyebrow>
-        <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{items.length}</span>
+        <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{items.length}</span>
       </div>
       <ul className="mt-2 space-y-1.5">
         {shown.map((item) => {
@@ -762,6 +780,7 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
           return (
             <li key={`${item.kind}-${id}`}>
               <button
+                id={flowTaskDomId(id)}
                 type="button"
                 onClick={() => onSelect(id)}
                 className={cn(
@@ -769,32 +788,34 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
                   selectedId === id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
                 )}
               >
-                <span className="hc-mono text-[0.66rem] hc-dim">{id}</span>
+                <span className="hc-mono hc-type-label hc-dim">{id}</span>
                 <span className="min-w-0 flex-1 truncate text-[0.8rem] text-zinc-100">{title}</span>
                 {enriched?.resultQualityLabel ? (
                   <span className={cn(
-                    "shrink-0 rounded-full border px-1.5 py-0.5 text-[0.62rem]",
+                    "shrink-0 rounded-full border px-1.5 py-0.5 hc-type-label",
                     enriched.resultQualityTone === "emerald" ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200" : "border-amber-500/25 bg-amber-500/10 text-amber-200",
                   )}>{enriched.resultQualityLabel}</span>
                 ) : null}
                 {enriched?.deliverableCount ? (
-                  <span className="shrink-0 rounded-full border border-cyan-500/25 bg-cyan-500/10 px-1.5 py-0.5 text-[0.62rem] text-cyan-200">
+                  <span className="shrink-0 rounded-full border border-cyan-500/25 bg-cyan-500/10 px-1.5 py-0.5 hc-type-label text-cyan-200">
                     {enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}
                   </span>
                 ) : null}
-                {item.kind === "chain" ? <span className="hc-mono text-[0.66rem] hc-soft">{item.chain.total} Tasks</span> : null}
-                <span className="shrink-0 text-[0.66rem] text-emerald-300">{item.at ? `vor ${fmtAge(item.at, now)}` : ""}</span>
+                {item.kind === "chain" ? <span className="hc-mono hc-type-label hc-soft">{item.chain.total} Tasks</span> : null}
+                <span className="shrink-0 hc-type-label text-emerald-300">{item.at ? `vor ${fmtAge(item.at, now)}` : ""}</span>
               </button>
             </li>
           );
         })}
       </ul>
-      {items.length > shown.length ? <p className="mt-1.5 px-1 text-[0.68rem] hc-dim">{de.flow.deliveredMore(items.length - shown.length)}</p> : null}
+      {items.length > shown.length ? <p className="mt-1.5 px-1 hc-type-label hc-dim">{de.flow.deliveredMore(items.length - shown.length)}</p> : null}
     </div>
   );
 }
 
 export function FlowView() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const taskParam = searchParams.get("task")?.trim() || null;
   const board = useBoard();
   const workers = useHermesWorkers();
   const reviews = useHermesReviewVerdicts();
@@ -821,6 +842,7 @@ export function FlowView() {
     [allTasks, projectFilter],
   );
   const chainBoard = useMemo(() => buildChains(filteredTasks), [filteredTasks]);
+  const allChainBoard = useMemo(() => buildChains(allTasks), [allTasks]);
   const [expandedRoot, setExpandedRoot] = useState<string | null>(null);
   // Ohne manuelle Wahl ist die dringendste Kette aufgeklappt.
   const effectiveExpanded = expandedRoot ?? chainBoard.active[0]?.rootId ?? null;
@@ -912,15 +934,24 @@ export function FlowView() {
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
 
-  const selectTask = useCallback((id: string) => {
+  const setSelectedTask = useCallback((id: string) => {
     setSelectedId(id);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("task", id);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  const selectTask = useCallback((id: string) => {
+    setSelectedTask(id);
     if (!taskDetail.detailById[id]) void fetchDetail(id);
     // On mobile/tablet the receipt rail stacks below the board (xl breakpoint),
     // so a tap would otherwise change something off-screen — bring it into view.
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches) {
       window.setTimeout(() => railRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
     }
-  }, [fetchDetail, taskDetail.detailById]);
+  }, [fetchDetail, setSelectedTask, taskDetail.detailById]);
   const clearDispatchChoice = useCallback(() => setDispatchChoice(null), []);
   const runTaskAction = useCallback((taskId: string, action: StageAction) => {
     void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Nacharbeit aus dem Flow-Board" } : undefined);
@@ -932,7 +963,7 @@ export function FlowView() {
       return;
     }
 
-    setSelectedId(task.id);
+    setSelectedTask(task.id);
     setDispatchChoice(null);
     setCheckingDispatchId(task.id);
     void (async () => {
@@ -949,7 +980,7 @@ export function FlowView() {
       }
       setCheckingDispatchId(null);
     })();
-  }, [runTaskAction, taskDetail.detailById, fetchDetail, allTasks]);
+  }, [runTaskAction, setSelectedTask, taskDetail.detailById, fetchDetail, allTasks]);
   // Release a gated plan: unblock the held subtasks, then refresh the board +
   // this root's detail so the held banner clears and the children move on.
   const onReleasePlan = useCallback((rootId: string, n: number) => {
@@ -975,10 +1006,10 @@ export function FlowView() {
   // A freshly captured task: select it so its receipt rail is ready, and pull the
   // board now so the new card appears without waiting for the next poll.
   const onCaptured = useCallback((taskId: string) => {
-    setSelectedId(taskId);
+    setSelectedTask(taskId);
     void reloadBoard();
     void fetchDetail(taskId);
-  }, [reloadBoard, fetchDetail]);
+  }, [reloadBoard, fetchDetail, setSelectedTask]);
 
   const counts = useMemo(() => flowCounts(filteredTasks), [filteredTasks]);
   const fresh = freshness(board.lastUpdated, 8000, now);
@@ -1023,6 +1054,25 @@ export function FlowView() {
   const loadingFirst = board.loading && board.data == null;
   const hasAnyRun = allTasks.length > 0;
 
+  useEffect(() => {
+    if (!taskParam || allTasks.length === 0) return;
+    const task = allTasks.find((item) => item.id === taskParam);
+    if (!task) return;
+    if (selectedId !== taskParam) {
+      setSelectedId(taskParam);
+      if (!taskDetail.detailById[taskParam]) void fetchDetail(taskParam);
+    }
+    const targetProject = projectKey(task.tenant);
+    if (projectFilter !== "all" && projectFilter !== targetProject) {
+      setProjectFilter(targetProject);
+    }
+    const targetChain = [...allChainBoard.active, ...allChainBoard.done].find(
+      (chain) => chain.rootId === taskParam || chain.members.some((member) => member.id === taskParam),
+    );
+    if (targetChain) setExpandedRoot(targetChain.rootId);
+    scrollToFlowTask(taskParam);
+  }, [allChainBoard, allTasks, fetchDetail, projectFilter, selectedId, taskDetail.detailById, taskParam]);
+
   // Keep the receipt rail live while a non-terminal task is selected: re-fetch
   // its detail every 8s so runs/events/the verifier verdict stream in during a
   // run. Pauses when the tab is hidden (same contract as usePolling).
@@ -1049,7 +1099,8 @@ export function FlowView() {
           dot: fresh.stale ? "warn" : "live",
         } : undefined}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <StaleBadge isStale={board.isStale} lastUpdated={board.lastUpdated} errorObj={board.errorObj} error={board.error} now={now} />
             <button type="button" onClick={() => void board.reload()} aria-label={de.flow.refresh} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"><RefreshCw className="h-4 w-4" /></button>
             <EpicCreate onCreated={() => void epicsReload()} />
             <FlowCapture onCreated={onCaptured} />
@@ -1120,7 +1171,7 @@ export function FlowView() {
                         : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
                     )}
                   >
-                    {p.label}<span className="hc-mono text-[0.66rem] opacity-70">{p.count}</span>
+                    {p.label}<span className="hc-mono hc-type-label opacity-70">{p.count}</span>
                   </button>
                 ))}
               </div>
@@ -1135,7 +1186,7 @@ export function FlowView() {
                   <section>
                     <div className="flex flex-wrap items-center gap-2">
                       <Eyebrow>{de.flow.chainsHeading}</Eyebrow>
-                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{chainBoard.active.length}</span>
+                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{chainBoard.active.length}</span>
                       <button
                         type="button"
                         aria-pressed={groupByEpic}
@@ -1212,12 +1263,12 @@ export function FlowView() {
                   <section>
                     <div className="flex items-center gap-2">
                       <Eyebrow>{de.flow.singlesHeading}</Eyebrow>
-                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 text-[0.7rem] hc-soft">{chainBoard.singles.length}</span>
+                      <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{chainBoard.singles.length}</span>
                     </div>
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
                       {chainBoard.singles.slice(0, MAX_CARDS).map((task) => <div key={task.id}>{renderTaskCard(task)}</div>)}
                     </div>
-                    {chainBoard.singles.length > MAX_CARDS ? <p className="mt-1.5 px-1 text-[0.68rem] hc-dim">+ {chainBoard.singles.length - MAX_CARDS} weitere</p> : null}
+                    {chainBoard.singles.length > MAX_CARDS ? <p className="mt-1.5 px-1 hc-type-label hc-dim">+ {chainBoard.singles.length - MAX_CARDS} weitere</p> : null}
                   </section>
                 ) : null}
 

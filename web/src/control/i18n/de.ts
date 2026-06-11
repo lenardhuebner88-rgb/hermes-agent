@@ -1,5 +1,10 @@
 export const de = {
   app: { name: "Hermes Control", operator: "pieter_pan" },
+  staleBadge: {
+    stale: (age: string) => `Daten von vor ${age}`,
+    staleUnknown: "Daten nicht frisch",
+    error: "Quelle meldet Fehler",
+  },
   tabs: { overview: "Übersicht", inbox: "Postfach", pulse: "Puls", workstreams: "Ströme", hermes: "Hermes", flow: "Flow", statistik: "Statistik", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
   stats: {
     eyebrow: "Statistik",

@@ -116,7 +116,7 @@ function TimelineRow({ item, maxDelta }: { item: TimelineItem; maxDelta: number 
           style={{ width: `${pct}%` }}
           aria-hidden="true"
         />
-        <span className="hc-mono text-[10px] hc-dim">{item.delta_seconds > 0 ? fmtDur(item.delta_seconds) : ""}</span>
+        <span className="hc-mono hc-type-label hc-dim">{item.delta_seconds > 0 ? fmtDur(item.delta_seconds) : ""}</span>
       </span>
       <StatusPill tone={tone} label={item.kind} size="sm" />
       {snippet ? <span className="min-w-0 truncate text-xs hc-soft">{snippet}</span> : null}
