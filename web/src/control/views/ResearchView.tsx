@@ -44,7 +44,7 @@ const DEPTH_HINT: Record<string, string> = {
   gründlich: "Tiefe: gründlich — mehrere Quellen, Gegencheck, strukturierter Bericht.",
 };
 
-interface ResearchCard {
+export interface ResearchCard {
   id: string;
   title: string;
   status: string;
@@ -75,7 +75,7 @@ export function pickAnswer(detail: ResearchDetail): { body: string; author: stri
   return null;
 }
 
-function ResearchEntry({ card, now }: { card: ResearchCard; now: number }) {
+export function ResearchEntry({ card, now }: { card: ResearchCard; now: number }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<ResearchDetail | null>(null);
   const workers = useHermesWorkers();

@@ -22,6 +22,8 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+    lv._cron_parse_cache.clear()  # In-Process-Caches nie zwischen Tests teilen
+    lv._cron_dir_cache.clear()
     kb.init_db()
     return home
 
@@ -51,6 +53,21 @@ def test_extract_response_ignores_headings_inside_prompt():
     md = "## Prompt\n\nfoo\n\n## Unterpunkt\nbar\n\n## Response\n\nDer Report."
     assert lv._extract_response(md) == "Der Report."
     assert lv._extract_response("## Prompt\nnur prompt") is None
+
+
+def test_extract_response_prompt_containing_literal_response_line_never_leaks():
+    """Redaction-Härtung: Enthält der PROMPT selbst eine wörtliche
+    ``## Response``-Zeile (z.B. weil der Job-Prompt das Output-Format
+    dokumentiert), darf kein Prompt-Text ausgeliefert werden — es zählt
+    das letzte Vorkommen (der echte Response-Teil steht am Dateiende)."""
+    md = (
+        "## Prompt\n\nGEHEIM-A\n\n## Response\n\nGEHEIM-B (immer noch Prompt: "
+        "so dokumentiert der Job sein eigenes Output-Format)\n\n"
+        "## Response\n\nDer echte Report."
+    )
+    out = lv._extract_response(md)
+    assert out == "Der echte Report."
+    assert "GEHEIM" not in out
 
 
 def test_categorize_job_explicit_hint_and_fallback():
@@ -137,6 +154,42 @@ def test_list_items_search_and_category_filter(kanban_home):
     # Kategorie-Filter
     assert lv._list_items("news", None, 10)["count"] == 0
     assert lv._list_items("briefings", None, 10)["count"] == 1
+
+
+def test_cron_collector_cache_and_per_job_cap(kanban_home):
+    """Härtung (b): mtime-Cache liefert identische Ergebnisse, invalidiert
+    bei Datei-Änderung, und pro Job werden nur die neuesten
+    ``_MAX_OUTPUTS_PER_JOB`` Ausgaben gelesen (Haupt-Store hält >100k)."""
+    store = kanban_home / "cron"
+    _write_cron_store(
+        store, job_id="16dd6ac01fc0", name="Morning Digest",
+        filename="2026-06-10_07-31-09.md", response="Erste Ausgabe.",
+    )
+    out_dir = store / "output" / "16dd6ac01fc0"
+    first = lv._collect_cron_items(with_bodies=True)
+    assert [i.body_md for i in first] == ["Erste Ausgabe."]
+    # 2. Lauf = Cache-Hit: gleiche Sicht, auch ohne Bodies kein Body-Leak
+    again = lv._collect_cron_items(with_bodies=False)
+    assert [i.preview for i in again] == [i.preview for i in first]
+    assert again[0].body_md is None
+    # Datei-Änderung (mtime/size) invalidiert den Eintrag
+    target = out_dir / "2026-06-10_07-31-09.md"
+    target.write_text(
+        "## Prompt\n\nGEHEIM\n\n## Response\n\nKorrigierte Ausgabe, länger.\n",
+        encoding="utf-8",
+    )
+    updated = lv._collect_cron_items(with_bodies=True)
+    assert [i.body_md for i in updated] == ["Korrigierte Ausgabe, länger."]
+    # Cap: 45 Ausgaben → nur die 40 neuesten (lexikalisch = zeitlich) bleiben
+    for minute in range(45):
+        (out_dir / f"2026-06-11_07-{minute:02d}-00.md").write_text(
+            f"## Response\n\nAusgabe {minute}.\n", encoding="utf-8",
+        )
+    capped = lv._collect_cron_items(with_bodies=False)
+    assert len(capped) == lv._MAX_OUTPUTS_PER_JOB
+    names = sorted(i.id.rsplit("::", 1)[1] for i in capped)
+    assert names[0] == "2026-06-11_07-05-00.md"  # die 5 ältesten + 10-06 fielen raus
+    assert "2026-06-10_07-31-09.md" not in set(names)
 
 
 def test_deliverable_adapter_lists_markdown(kanban_home):
