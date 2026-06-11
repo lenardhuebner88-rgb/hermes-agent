@@ -9909,6 +9909,69 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
+_SYSTEMD_SCOPE_USABLE: Optional[bool] = None
+
+
+def _systemd_scope_usable() -> bool:
+    """Probe (once per process) whether transient user scopes work here.
+
+    ``systemd-run --user`` needs a session DBus + user manager; containers,
+    Termux and CI runners typically lack both. The probe runs a no-op scope
+    so a broken environment degrades to the plain (in-cgroup) spawn instead
+    of failing every dispatch.
+    """
+    global _SYSTEMD_SCOPE_USABLE
+    if _SYSTEMD_SCOPE_USABLE is None:
+        try:
+            probe = subprocess.run(
+                ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+                 "--", "/bin/true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            _SYSTEMD_SCOPE_USABLE = probe.returncode == 0
+        except Exception:
+            _SYSTEMD_SCOPE_USABLE = False
+        if not _SYSTEMD_SCOPE_USABLE:
+            _log.warning(
+                "HERMES_WORKER_SYSTEMD_SCOPE is set but `systemd-run --user "
+                "--scope` is not usable here — workers stay in the spawning "
+                "service's cgroup."
+            )
+    return _SYSTEMD_SCOPE_USABLE
+
+
+def _maybe_scope_worker_cmd(cmd: list[str]) -> list[str]:
+    """Optionally detach a worker spawn into its own transient systemd scope.
+
+    Opt-in via ``HERMES_WORKER_SYSTEMD_SCOPE=1`` (set in the dashboard/gateway
+    service units). Without it, workers spawned from a systemd service stay in
+    that service's cgroup, which has two real consequences (2026-06-11 audit):
+
+    * ``systemctl restart`` of the service KILLS every running worker
+      (KillMode=control-group), so a dashboard deploy aborted in-flight runs;
+    * the service's MemoryPeak accounts the workers (780MB–2.6GB spikes that
+      look like a dashboard leak but aren't).
+
+    ``systemd-run --scope`` re-execs the command in place after moving it
+    into the scope: the returned PID *is* the worker's PID and signals hit
+    the worker directly (verified live), so reaper liveness checks and
+    SIGTERM/SIGKILL handling are unchanged. No-op on Windows, when the env
+    flag is absent, or when the probe says scopes don't work here.
+    """
+    if _IS_WINDOWS:
+        return cmd
+    flag = os.environ.get("HERMES_WORKER_SYSTEMD_SCOPE", "").strip().lower()
+    if flag not in ("1", "true", "yes"):
+        return cmd
+    if not _systemd_scope_usable():
+        return cmd
+    return [
+        "systemd-run", "--user", "--scope", "--quiet", "--collect", "--",
+    ] + cmd
+
+
 def _claude_worker_bin() -> str:
     """Resolve the ``claude`` CLI binary used for claude-CLI worker spawns.
 
@@ -10171,7 +10234,7 @@ def _spawn_claude_worker(
     log_f = open(log_path, "ab")
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            cmd,
+            _maybe_scope_worker_cmd(cmd),
             cwd=workspace if os.path.isdir(workspace) else None,
             stdin=subprocess.DEVNULL,
             stdout=log_f,
@@ -10404,7 +10467,7 @@ def _default_spawn(
     log_f = open(log_path, "ab")
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            cmd,
+            _maybe_scope_worker_cmd(cmd),
             cwd=workspace if os.path.isdir(workspace) else None,
             stdin=subprocess.DEVNULL,
             stdout=log_f,

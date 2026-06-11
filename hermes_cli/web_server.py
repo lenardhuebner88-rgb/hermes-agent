@@ -220,6 +220,70 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
+
+def _max_http_body_bytes() -> int:
+    """Request-body ceiling. Default fits the largest legitimate payload —
+    a 100 MB managed-file upload arrives as a base64 data-URL (~134 MB) in a
+    JSON body — with headroom; everything else the dashboard accepts is KB."""
+    raw = os.environ.get("HERMES_MAX_HTTP_BODY_BYTES", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 160 * 1024 * 1024
+
+
+_MAX_HTTP_BODY_BYTES = _max_http_body_bytes()
+
+
+class _BodySizeLimitMiddleware:
+    """Reject oversized request bodies BEFORE they are buffered.
+
+    FastAPI/Starlette read the whole body into memory before a Pydantic
+    handler (e.g. ``/api/files/upload``) runs, and uvicorn has no body limit
+    of its own — the existing 100 MB file cap only fired AFTER the full
+    data-URL had been buffered and decoded (transiently several GB possible;
+    part of the 2026-06-11 dashboard memory-peak audit). Pure ASGI (not
+    BaseHTTPMiddleware) so the check costs a header scan per request;
+    chunked requests without Content-Length pass through unchanged.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            for key, value in scope.get("headers", []):
+                if key == b"content-length":
+                    try:
+                        declared = int(value)
+                    except ValueError:
+                        declared = -1
+                    if declared > _MAX_HTTP_BODY_BYTES:
+                        body = (
+                            b'{"detail":"Request body is too large"}'
+                        )
+                        await send({
+                            "type": "http.response.start",
+                            "status": 413,
+                            "headers": [
+                                (b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode()),
+                            ],
+                        })
+                        await send({"type": "http.response.body", "body": body})
+                        return
+                    break
+        await self.app(scope, receive, send)
+
+
+# Added after GZip → runs OUTSIDE it: oversized requests are rejected before
+# any other middleware or the route layer touches (and buffers) the body.
+app.add_middleware(_BodySizeLimitMiddleware)
+
 # ---------------------------------------------------------------------------
 # Endpoints that do NOT require the session token.  Everything else under
 # /api/ is gated by the auth middleware below.
