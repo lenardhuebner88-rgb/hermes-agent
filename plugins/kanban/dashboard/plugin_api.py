@@ -2543,6 +2543,27 @@ def get_runs_daily(
         conn.close()
 
 
+@router.get("/runs/failures")
+def get_runs_failures(
+    hours: int = Query(48, ge=1, le=24 * 14),
+    limit: int = Query(30, ge=1, le=100),
+    board: Optional[str] = Query(None),
+):
+    """Phase F: triage strip — latest failed/blocked run per task (last
+    ``hours``), only for tasks still awaiting operator action. Read-only;
+    the actions themselves go through PATCH /tasks/{id} (status/model_override).
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_failures(conn, hours=hours, limit=limit)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/issues")
 def get_runs_issues(
     days: int = Query(30, ge=1, le=365),

@@ -49,6 +49,7 @@ import {
 import type { BoardTask, TaskStatus } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StatusPill, ToneCallout } from "../components/atoms";
+import { TriageStrip } from "../components/TriageStrip";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
@@ -1063,6 +1064,11 @@ export function FlowView() {
       </Hero>
 
       {board.error ? <ToneCallout tone="red">{de.flow.loadError}<br />{board.error}</ToneCallout> : null}
+
+      {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
+          „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
+          nichts, wenn es nichts zu triagieren gibt. */}
+      <TriageStrip />
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
           Runaway-Wache und vollen Aktionen (alle confirm-gated). */}
