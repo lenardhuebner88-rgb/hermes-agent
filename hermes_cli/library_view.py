@@ -136,11 +136,13 @@ def _load_jobs_meta(store_dir: Path) -> dict[str, dict]:
 
 def _extract_response(markdown: str) -> Optional[str]:
     """Nur den ``## Response``-Teil ausliefern (Redaction: Prompt/Script
-    bleiben draußen). Der Prompt-Abschnitt kann selbst ##-Headings enthalten,
-    darum wird exakt nach der Zeile ``## Response`` gesucht."""
+    bleiben draußen). Der Prompt-Abschnitt kann selbst ##-Headings — auch
+    eine wörtliche ``## Response``-Zeile — enthalten; der echte Response-Teil
+    ist im Output-Format immer der letzte, darum zählt das LETZTE Vorkommen.
+    Lieber einen Response-Anfang verlieren als je Prompt-Text leaken."""
     lines = markdown.splitlines()
-    for idx, line in enumerate(lines):
-        if line.strip() == "## Response":
+    for idx in range(len(lines) - 1, -1, -1):
+        if lines[idx].strip() == "## Response":
             return "\n".join(lines[idx + 1:]).strip()
     return None
 
@@ -187,8 +189,46 @@ class _Item:
         return d
 
 
+# Härtung 2026-06-11: Der Haupt-Store hält >100k historische Outputs (542 MB);
+# die alle pro Request zu lesen kostete 3-8 s. Zwei Schranken, kein FTS/DB:
+#   1. Pro Job nur die NEUESTEN Ausgaben (Dateiname beginnt mit Timestamp →
+#      lexikalisch absteigend sortierbar). Ältere Ausgaben sind über die
+#      Regal-Ansicht ohnehin nie erreichbar gewesen (Liste war limit-gekappt).
+#   2. mtime/size-keyed In-Process-Cache des Parse-Ergebnisses, inklusive
+#      Negativ-Einträgen (Datei ohne ##-Response-Teil → None).
+_MAX_OUTPUTS_PER_JOB = 40
+# path → (mtime_ns, size, meta_fingerprint, geparstes Item mit Body oder None).
+# meta_fingerprint = (series, category, series_meta) — invalidiert den Eintrag,
+# wenn der Job umbenannt/umkategorisiert wird (Datei-mtime ändert sich da nicht).
+_cron_parse_cache: dict[str, tuple[int, int, tuple[str, str, str], Optional[_Item]]] = {}
+# job_dir → (dir_mtime_ns, newest-N Dateinamen). Ein 30k-Einträge-Verzeichnis
+# zu listen+sortieren kostet allein ~0.5 s; das Verzeichnis-mtime ändert sich
+# bei jedem Anlegen/Löschen einer Datei und ist darum ein sicherer Schlüssel.
+_cron_dir_cache: dict[str, tuple[int, list[str]]] = {}
+
+
+def _newest_output_names(job_dir: Path) -> list[str]:
+    key = str(job_dir)
+    try:
+        dir_mtime = job_dir.stat().st_mtime_ns
+    except OSError:
+        _cron_dir_cache.pop(key, None)
+        return []
+    cached = _cron_dir_cache.get(key)
+    if cached is not None and cached[0] == dir_mtime:
+        return cached[1]
+    names = sorted(
+        (e.name for e in job_dir.iterdir() if _OUTPUT_FILE_RE.match(e.name)),
+        reverse=True,
+    )[:_MAX_OUTPUTS_PER_JOB]
+    _cron_dir_cache[key] = (dir_mtime, names)
+    return names
+
+
 def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
+    from dataclasses import replace as _dc_replace
     items: list[_Item] = []
+    seen_paths: set[str] = set()
     for store_id, store_dir in _cron_stores():
         output_root = store_dir / "output"
         if not output_root.is_dir():
@@ -202,11 +242,29 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
             category = _categorize_job(job_dir.name, name)
             series_meta = meta.get("schedule_display", "")
             profile = store_id.split(":", 1)[1] if ":" in store_id else None
-            for md_file in job_dir.iterdir():
-                if not _OUTPUT_FILE_RE.match(md_file.name):
-                    continue
+            for fname in _newest_output_names(job_dir):
+                md_file = job_dir / fname
                 try:
                     stat = md_file.stat()
+                except OSError:
+                    continue
+                cache_key = str(md_file)
+                seen_paths.add(cache_key)
+                meta_fp = (name, category, series_meta)
+                cached = _cron_parse_cache.get(cache_key)
+                if (
+                    cached is not None
+                    and cached[0] == stat.st_mtime_ns
+                    and cached[1] == stat.st_size
+                    and cached[2] == meta_fp
+                ):
+                    if cached[3] is not None:
+                        items.append(
+                            cached[3] if with_bodies
+                            else _dc_replace(cached[3], body_md=None)
+                        )
+                    continue
+                try:
                     raw = md_file.read_text(encoding="utf-8", errors="replace")
                     if len(raw) > _MAX_BODY_BYTES:
                         raw = raw[:_MAX_BODY_BYTES]
@@ -214,10 +272,13 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     continue
                 body = _extract_response(raw)
                 if not body:
+                    _cron_parse_cache[cache_key] = (
+                        stat.st_mtime_ns, stat.st_size, meta_fp, None,
+                    )
                     continue  # ohne Response-Teil nichts Lesbares
                 ts = _output_ts(md_file.name, stat.st_mtime)
                 day = _time.strftime("%d.%m. %H:%M", _time.localtime(ts))
-                items.append(_Item(
+                item = _Item(
                     id=f"cron::{store_id}::{job_dir.name}::{md_file.name}",
                     category=category,
                     series_id=f"{store_id}/{job_dir.name}",
@@ -230,8 +291,15 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                         else f"cron:{job_dir.name}"
                     ),
                     series_meta=series_meta,
-                    body_md=body if with_bodies else None,
-                ))
+                    body_md=body,
+                )
+                _cron_parse_cache[cache_key] = (
+                    stat.st_mtime_ns, stat.st_size, meta_fp, item,
+                )
+                items.append(item if with_bodies else _dc_replace(item, body_md=None))
+    # Einträge verschwundener/rotierter Dateien nicht endlos halten.
+    for stale in set(_cron_parse_cache) - seen_paths:
+        _cron_parse_cache.pop(stale, None)
     return items
 
 
