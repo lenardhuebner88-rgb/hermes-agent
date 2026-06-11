@@ -482,6 +482,31 @@ def test_dirty_chain_worktree_parks(repo):
     assert "uncommitted" in out["reason"]
 
 
+def test_cache_byproducts_do_not_count_as_dirty(repo):
+    """Gate runs write __pycache__/.pytest_cache into the worktree; in repos
+    without a .gitignore those must NOT park the chain (live E2E finding
+    2026-06-11: verifier's ruff run created util.cpython-311.pyc → park)."""
+    info = _provisioned_chain(repo, "t_cache")
+    wt = info["path"]
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "feature.cpython-311.pyc").write_bytes(b"\x00")
+    (wt / ".pytest_cache").mkdir()
+    (wt / ".pytest_cache" / "CACHEDIR.TAG").write_text("tag")
+    (wt / "stray.pyc").write_bytes(b"\x00")
+    assert kwt.dirty_files(wt) == []
+    out = kwt.integrate_chain(repo, wt, info["branch"], "main",
+                              gate_runner=_ok_gate)
+    assert out["action"] == "merged"
+    # A REAL uncommitted file still parks (filter is noise-only).
+    info2 = _provisioned_chain(repo, "t_cache2", relpath="other.py")
+    (info2["path"] / "__pycache__").mkdir()
+    (info2["path"] / "real_leftover.py").write_text("x = 1\n")
+    out2 = kwt.integrate_chain(repo, info2["path"], info2["branch"], "main",
+                               gate_runner=_ok_gate)
+    assert out2["action"] == "parked"
+    assert "real_leftover.py" in out2["reason"]
+
+
 def test_no_commits_is_clean_and_removes_worktree(repo):
     info = kwt.ensure_worktree(repo, "t_empty")
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",

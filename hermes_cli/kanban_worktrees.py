@@ -57,6 +57,26 @@ _IGNORED_DIRTY_PATHS = (
     "node_modules",
     "web/node_modules",
 )
+# Tool/cache byproducts that are never commit content and never part of a
+# branch diff. Gate runs themselves produce these (the verifier's
+# `ruff`/`pytest` in the worktree writes __pycache__), so counting them as
+# "uncommitted changes" would park every chain whose repo doesn't gitignore
+# them — observed live in the 2026-06-11 E2E probe.
+_IGNORED_DIRTY_DIR_PARTS = frozenset({
+    "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv",
+})
+_IGNORED_DIRTY_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_ignorable_dirty_path(path: str) -> bool:
+    if path in _IGNORED_DIRTY_PATHS:
+        return True
+    if any(path.startswith(pref) for pref in _IGNORED_DIRTY_PREFIXES):
+        return True
+    if path.endswith(_IGNORED_DIRTY_SUFFIXES):
+        return True
+    parts = path.rstrip("/").split("/")
+    return any(p in _IGNORED_DIRTY_DIR_PARTS for p in parts)
 
 # node_modules locations symlinked into a fresh worktree so frontend gates
 # work without an npm ci (monorepo: .bin lives in the ROOT node_modules).
@@ -210,9 +230,7 @@ def dirty_files(repo: Path) -> list[str]:
             # Rename/copy: the ORIGIN path follows as its own NUL field;
             # `path` already is the destination. Skip the origin field.
             i += 1
-        if path in _IGNORED_DIRTY_PATHS:
-            continue
-        if any(path.startswith(pref) for pref in _IGNORED_DIRTY_PREFIXES):
+        if _is_ignorable_dirty_path(path):
             continue
         files.append(path)
     return files
