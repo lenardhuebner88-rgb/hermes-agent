@@ -54,6 +54,9 @@ const IssuesView = lazy(() =>
 const ResearchView = lazy(() =>
   import("./views/ResearchView").then((m) => ({ default: m.ResearchView })),
 );
+const BibliothekView = lazy(() =>
+  import("./views/BibliothekView").then((m) => ({ default: m.BibliothekView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -184,6 +187,7 @@ export default function ControlPage() {
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />
+            <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>

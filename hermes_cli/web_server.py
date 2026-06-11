@@ -10873,6 +10873,12 @@ register_health_status_routes(app)
 from hermes_cli.cron_observability import register_cron_observability_routes  # noqa: E402
 register_cron_observability_routes(app)
 
+# Bibliothek (Programm 3 Phase D/E): read-only Lesesaal über Cron-Digests
+# (Multi-Store), Recherchen und Markdown-Deliverables. Under /api/ → inherits
+# the session-token gate; never in PUBLIC_API_PATHS. See hermes_cli/library_view.py.
+from hermes_cli.library_view import register_library_routes  # noqa: E402
+register_library_routes(app)
+
 # In-process self-metrics (route-group latency/error rates) fed by
 # metrics_middleware above. Loopback-gated; never in PUBLIC_API_PATHS.
 from hermes_cli.metrics_lite import register_metrics_lite_routes  # noqa: E402
