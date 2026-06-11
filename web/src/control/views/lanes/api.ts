@@ -9,10 +9,18 @@
 import { fetchJSON } from "@/lib/api";
 
 export type LaneRuntime = "hermes" | "claude-cli";
+export type LaneSpawnHealthStatus = "healthy" | "unhealthy" | "unknown";
+
+export interface LaneSpawnHealth {
+  status: LaneSpawnHealthStatus;
+  reason?: string | null;
+}
 
 export interface LaneProfileEntry {
   worker_runtime: LaneRuntime | null;
   model: string | null;
+  /** Optional backend evidence: can this profile actually spawn Kanban workers? */
+  kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
 }
 
 export interface Lane {
@@ -30,6 +38,8 @@ export interface LaneCatalogProfile {
   worker_runtime: LaneRuntime;
   default_model: string | null;
   description: string;
+  /** Optional backend evidence: can this profile actually spawn Kanban workers? */
+  kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
 }
 
 export interface LaneModelOption {
@@ -53,6 +63,163 @@ export interface LanesResponse {
 
 const BASE = "/api/plugins/kanban/lanes";
 const JSON_HEADERS = { "Content-Type": "application/json" };
+
+// Triage escalation helpers live beside the lane catalog types instead of in
+// the React component so Fast Refresh can keep component files component-only.
+const TRIAGE_RETRY_LABEL = "Nochmal";
+
+export const ESCALATION_MODEL = "claude-fable-5";
+export const ESCALATION_PROFILE = "premium";
+
+interface LaneProfileRuntimeInfo {
+  worker_runtime?: string | null;
+  kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
+}
+
+export interface LanesRuntimeInfo {
+  active_id?: string | null;
+  lanes?: {
+    id: string;
+    active?: boolean;
+    profiles?: Record<string, LaneProfileRuntimeInfo>;
+  }[];
+  profiles?: (LaneProfileRuntimeInfo & { name: string })[];
+}
+
+export interface EscalationPlan {
+  patch: Record<string, unknown> | null;
+  hint: string;
+  warns: boolean;
+  reassigns: boolean;
+  disabled: boolean;
+}
+
+function activeLane(lanes: LanesRuntimeInfo | null) {
+  return lanes?.lanes?.find((l) => l.active || l.id === lanes.active_id) ?? null;
+}
+
+function profileRuntimeInfo(profile: string | null, lanes: LanesRuntimeInfo | null): LaneProfileRuntimeInfo | null {
+  if (!profile || !lanes) return null;
+  const fromProfile = lanes.profiles?.find((p) => p.name === profile) ?? null;
+  const fromLane = activeLane(lanes)?.profiles?.[profile] ?? null;
+  if (fromLane && fromProfile) {
+    return {
+      ...fromProfile,
+      ...fromLane,
+      kanban_spawn_health: fromLane.kanban_spawn_health ?? fromProfile.kanban_spawn_health,
+    };
+  }
+  return fromLane ?? fromProfile;
+}
+
+/** Effektive Runtime eines Profils: aktive Lane gewinnt, sonst Profil-Default. */
+export function effectiveRuntime(
+  profile: string | null,
+  lanes: LanesRuntimeInfo | null,
+): string | null {
+  return profileRuntimeInfo(profile, lanes)?.worker_runtime ?? null;
+}
+
+function normalizeSpawnHealth(value: LaneProfileRuntimeInfo["kanban_spawn_health"]): LaneSpawnHealth | null {
+  if (!value) return null;
+  if (typeof value === "string") return { status: value };
+  return { status: value.status, reason: value.reason ?? null };
+}
+
+function effectiveSpawnHealth(
+  profile: string | null,
+  lanes: LanesRuntimeInfo | null,
+): LaneSpawnHealth | null {
+  return normalizeSpawnHealth(profileRuntimeInfo(profile, lanes)?.kanban_spawn_health);
+}
+
+function escalationHint(model: string): string {
+  return `setzt model_override=${model} und stellt den Task wieder ready`;
+}
+
+function escalationReassignHint(profile: string, model: string): string {
+  return `hängt den Task auf „premium" um (claude-cli, ${model}) — ` +
+    `Spezialwerkzeuge des alten Profils „${profile}" entfallen (z. B. qmd-vault bei research).`;
+}
+
+function disabledEscalationHint(profile: string | null, reason: string): string {
+  const label = profile ?? "—";
+  return `Nochmal stärker ist blockiert: Ziellane „${label}" ist nicht Kanban-spawn-healthy (${reason}). ` +
+    `Sicherer Weg: „${TRIAGE_RETRY_LABEL}" auf derselben Lane nutzen oder Operator repariert/reassigned die Lane-Health.`;
+}
+
+function validateEscalationTarget(profile: string | null, lanes: LanesRuntimeInfo | null): string | null {
+  if (!lanes) return null; // fail-soft: alter Backend-/Fetch-Fehler ohne Health-Katalog.
+  const runtime = effectiveRuntime(profile, lanes);
+  if (runtime === null) return `Profil fehlt im Lane-Katalog`;
+  if (runtime !== "claude-cli") return `Runtime ist ${runtime}, erwartet claude-cli`;
+  const health = effectiveSpawnHealth(profile, lanes);
+  if (!health) return `keine Kanban-Spawn-Health im Lane-Katalog`;
+  if (health.status !== "healthy") return health.reason ? `${health.status}: ${health.reason}` : health.status;
+  return null;
+}
+
+/** Eskalations-Plan — runtime- und lane-health-ehrlich: auf Nicht-claude-cli-
+ * Runtimes wird nur dann aufs premium-Profil umgehängt, wenn premium als
+ * Kanban-spawn-healthy belegt ist. Auf gesunden claude-cli-Profilen bleibt es
+ * beim reinen model_override. Hint und PATCH-Body kommen aus EINER Quelle,
+ * damit Confirm-Text und Wirkung nie auseinanderlaufen. */
+export function escalationPlan(
+  profile: string | null,
+  lanes: LanesRuntimeInfo | null,
+): EscalationPlan {
+  const runtime = effectiveRuntime(profile, lanes);
+  if (lanes && runtime === null) {
+    return {
+      reassigns: false,
+      warns: true,
+      disabled: true,
+      patch: null,
+      hint: disabledEscalationHint(profile, "Profil fehlt im Lane-Katalog"),
+    };
+  }
+  if (runtime !== null && runtime !== "claude-cli") {
+    const blockedReason = validateEscalationTarget(ESCALATION_PROFILE, lanes);
+    if (blockedReason) {
+      return {
+        reassigns: false,
+        warns: true,
+        disabled: true,
+        patch: null,
+        hint: disabledEscalationHint(ESCALATION_PROFILE, blockedReason),
+      };
+    }
+    return {
+      reassigns: true,
+      warns: true,
+      disabled: false,
+      patch: { assignee: ESCALATION_PROFILE, model_override: ESCALATION_MODEL },
+      hint: escalationReassignHint(profile ?? "—", ESCALATION_MODEL),
+    };
+  }
+
+  const blockedReason = runtime === "claude-cli" ? validateEscalationTarget(profile, lanes) : null;
+  if (blockedReason) {
+    return {
+      reassigns: false,
+      warns: true,
+      disabled: true,
+      patch: null,
+      hint: disabledEscalationHint(profile, blockedReason),
+    };
+  }
+  return {
+    reassigns: false,
+    warns: false,
+    disabled: false,
+    patch: { model_override: ESCALATION_MODEL },
+    hint: escalationHint(ESCALATION_MODEL),
+  };
+}
+
+export function escalationPatchSequence(plan: EscalationPlan): Record<string, unknown>[] {
+  return plan.disabled || plan.patch === null ? [] : [plan.patch, { status: "ready" }];
+}
 
 export function loadLanes(): Promise<LanesResponse> {
   return fetchJSON<LanesResponse>(BASE);
