@@ -3835,3 +3835,61 @@ def test_task_model_override_roundtrip(client):
     finally:
         conn.close()
     assert len(kinds) == 2
+
+
+# ---------------------------------------------------------------------------
+# Demand-Funnel Freigabe-Queue: GET /funnel/drafts + POST .../approve
+# ---------------------------------------------------------------------------
+
+
+def _make_funnel_draft(conn, *, created_by="family", title="wunsch"):
+    from hermes_cli import funnel
+    tid = funnel.create_wish(conn, title=title, body="b", created_by=created_by)
+    kb.add_comment(conn, tid, "coder-claude", "# Draft\n" + "d" * 200)
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (int(time.time()), tid),
+        )
+    return tid
+
+
+def test_funnel_drafts_lists_done_funnel_roots(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(conn)
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/funnel/drafts").json()
+    assert [d["id"] for d in data["drafts"]] == [tid]
+    assert data["drafts"][0]["created_by"] == "family"
+    assert data["drafts"][0]["draft_excerpt"].startswith("# Draft")
+
+
+def test_funnel_draft_approve_creates_build_child_then_409_on_repeat(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(conn, created_by="discord-idee")
+    finally:
+        conn.close()
+
+    r = client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/approve")
+    assert r.status_code == 200, r.text
+    task = r.json()["task"]
+    assert task["status"] == "ready"
+    assert task["created_by"] == "discord-idee"
+    assert task["title"].startswith("Umsetzen:")
+
+    # Liste ist danach leer (Root hat ein Build-Kind) …
+    assert client.get("/api/plugins/kanban/funnel/drafts").json()["drafts"] == []
+    # … und Doppel-Freigabe wird abgelehnt.
+    r2 = client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/approve")
+    assert r2.status_code == 409
+    assert "bereits freigegeben" in r2.json()["detail"]
+
+
+def test_funnel_draft_approve_404ish_on_unknown_task(client):
+    r = client.post("/api/plugins/kanban/funnel/drafts/t_gibtsnicht/approve")
+    assert r.status_code == 409
+    assert "nicht gefunden" in r.json()["detail"]

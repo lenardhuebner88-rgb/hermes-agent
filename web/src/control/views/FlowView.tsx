@@ -52,6 +52,7 @@ import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
+import { FunnelFreigaben } from "../components/FunnelFreigaben";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
@@ -1122,6 +1123,10 @@ export function FlowView() {
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
           nichts, wenn es nichts zu triagieren gibt. */}
       <TriageStrip />
+
+      {/* Funnel-Freigaben — fertige Drafts aus dem Wunsch-Trichter, die auf
+          den Operator-Klick warten (Freigeben = Build-Task als Ketten-Kind). */}
+      <FunnelFreigaben />
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
           Runaway-Wache und vollen Aktionen (alle confirm-gated). */}

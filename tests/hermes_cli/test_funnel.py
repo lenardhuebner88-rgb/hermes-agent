@@ -137,3 +137,71 @@ def test_auto_paths_skip_funnel_proposals(conn):
     for ids in (kanban_decompose.list_triage_ids(), kanban_specify.list_triage_ids()):
         assert normal_id in ids
         assert wish_id not in ids
+
+
+# --- Freigabe-Pfad: list_drafts + approve_draft -------------------------------
+
+
+def _make_done_draft(conn, *, created_by="family", title="wunsch mit draft",
+                     draft="# Spec-Draft\n" + "x" * 150):
+    tid = funnel.create_wish(conn, title=title, body="b", created_by=created_by)
+    if draft:
+        kb.add_comment(conn, tid, author="coder-claude", body=draft)
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (int(time.time()), tid),
+        )
+    return tid
+
+
+def test_list_drafts_returns_done_funnel_roots_with_excerpt(conn):
+    tid = _make_done_draft(conn)
+    funnel.create_wish(conn, title="noch offen", body="b", created_by="family")
+    kb.create_task(conn, title="normal done", created_by="dashboard")
+
+    drafts = funnel.list_drafts(conn)
+    assert [d["id"] for d in drafts] == [tid]
+    assert drafts[0]["draft_excerpt"].startswith("# Spec-Draft")
+
+
+def test_list_drafts_skips_blocked_comments_for_excerpt(conn):
+    tid = _make_done_draft(conn, draft="echter draft " + "y" * 150)
+    kb.add_comment(conn, tid, author="default", body="BLOCKED: " + "z" * 200)
+    (draft,) = funnel.list_drafts(conn)
+    assert draft["draft_excerpt"].startswith("echter draft")
+
+
+def test_approve_draft_creates_linked_ready_child(conn):
+    tid = _make_done_draft(conn, created_by="discord-idee")
+    new_id = funnel.approve_draft(conn, tid)
+
+    child = kb.get_task(conn, new_id)
+    assert child.status == "ready"
+    assert child.created_by == "discord-idee"  # Bilanz zählt die Kette einmal
+    assert child.assignee == "coder-claude"    # Fallback, Wunsch hatte keinen
+    assert child.title.startswith("Umsetzen:")
+    assert "Spec-Draft" in (child.body or "")
+    link = conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
+        (tid, new_id),
+    ).fetchone()
+    assert link is not None
+    # Root hat jetzt ein Kind -> fällt aus der Freigabe-Liste.
+    assert funnel.list_drafts(conn) == []
+
+
+def test_approve_draft_rejects_double_and_wrong_state(conn):
+    tid = _make_done_draft(conn)
+    funnel.approve_draft(conn, tid)
+    with pytest.raises(ValueError, match="bereits freigegeben"):
+        funnel.approve_draft(conn, tid)
+
+    open_id = funnel.create_wish(conn, title="offen", body="b", created_by="family")
+    with pytest.raises(ValueError, match="nicht fertig"):
+        funnel.approve_draft(conn, open_id)
+
+    normal = kb.create_task(conn, title="kein funnel", created_by="dashboard")
+    kb.complete_task(conn, normal, summary="x")
+    with pytest.raises(ValueError, match="kein Funnel-Vorschlag"):
+        funnel.approve_draft(conn, normal)

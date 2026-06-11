@@ -52,6 +52,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Respon
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from hermes_cli import funnel as kanban_funnel
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
 
@@ -2519,6 +2520,40 @@ def get_runs_reliability(
         return kanban_db.runs_reliability(
             conn, since_hours=since_hours, baseline_hours=baseline_hours, min_n=min_n,
         )
+    finally:
+        conn.close()
+
+
+@router.get("/funnel/drafts")
+def get_funnel_drafts(
+    days: int = Query(30, ge=1, le=365),
+    board: Optional[str] = Query(None),
+):
+    """Demand-Funnel Freigabe-Queue: fertige Funnel-Roots (family /
+    discord-idee / fo-gap-audit) ohne Build-Kind — also Drafts, die auf den
+    Operator-Klick warten. Nach der Freigabe (Build-Kind verlinkt) fallen
+    sie aus der Liste; die Kette übernimmt das Flow-Board."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return {"drafts": kanban_funnel.list_drafts(conn, days=days)}
+    finally:
+        conn.close()
+
+
+@router.post("/funnel/drafts/{task_id}/approve")
+def approve_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
+    """Freigabe eines Funnel-Drafts: legt den Build-Task als verlinktes Kind
+    an (erbt created_by → Wert-Bilanz zählt die Kette einmal als nutzer;
+    Parent ist done → Kind startet ready, der Dispatcher übernimmt)."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            new_id = kanban_funnel.approve_draft(conn, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"task": _task_dict(kanban_db.get_task(conn, new_id))}
     finally:
         conn.close()
 

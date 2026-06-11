@@ -83,6 +83,117 @@ def archive_stale(
     return archived
 
 
+# --- Freigabe-Pfad: fertiger Draft → Build-Task (Operator-Klick) -----------
+
+DRAFT_WINDOW_DAYS = 30
+_DRAFT_EXCERPT_MIN = 120
+_DRAFT_EXCERPT_MAX = 1500
+_BUILD_TITLE_LIMIT = 80
+
+APPROVE_BODY_TEMPLATE = (
+    "Freigegebener Funnel-Draft — jetzt umsetzen.\n\n"
+    "Ursprünglicher Wunsch: „{title}“ ({task_id}, Quelle: {created_by}).\n\n"
+    "Draft (letzter Stand aus dem Ursprungs-Task):\n{excerpt}\n\n"
+    "Anweisungen: Setze GENAU den freigegebenen Draft um — Referenzen stehen "
+    "im Ursprungs-Task (Kommentare) bzw. im dort genannten Backlog-Item. "
+    "Gates der Ziel-Lane fahren (Tests/Build); Push/Deploy nur bei grün gemäß "
+    "Lane-Governance. Bei unklarem Scope: blocken statt raten."
+)
+
+
+def _draft_excerpt(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Jüngster substanzieller Kommentar (= der Draft) eines Funnel-Tasks."""
+    rows = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for r in rows:
+        body = (r["body"] or "").strip()
+        if len(body) >= _DRAFT_EXCERPT_MIN and not body.startswith("BLOCKED:"):
+            return body[:_DRAFT_EXCERPT_MAX]
+    return None
+
+
+def list_drafts(
+    conn: sqlite3.Connection,
+    *,
+    days: int = DRAFT_WINDOW_DAYS,
+    now: Optional[int] = None,
+) -> List[dict]:
+    """Fertige Funnel-Roots ohne Build-Kind — sie warten auf die Freigabe.
+
+    Nach der Freigabe hat der Root ein verlinktes Build-Kind und fällt aus
+    dieser Liste; die Kette übernimmt das Flow-Board.
+    """
+    now = int(time.time()) if now is None else int(now)
+    cutoff = now - max(1, int(days)) * 86400
+    placeholders = ",".join("?" for _ in kb.FUNNEL_CREATED_BY)
+    rows = conn.execute(
+        "SELECT id, title, created_by, assignee, completed_at FROM tasks "
+        f"WHERE created_by IN ({placeholders}) AND status = 'done' "
+        "AND completed_at IS NOT NULL AND completed_at >= ? "
+        "AND id NOT IN (SELECT DISTINCT parent_id FROM task_links) "
+        "ORDER BY completed_at DESC",
+        (*kb.FUNNEL_CREATED_BY, cutoff),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "created_by": r["created_by"],
+            "assignee": r["assignee"],
+            "completed_at": r["completed_at"],
+            "draft_excerpt": _draft_excerpt(conn, r["id"]),
+        }
+        for r in rows
+    ]
+
+
+def approve_draft(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    assignee_fallback: str = "coder-claude",
+) -> str:
+    """Freigabe: Build-Task als verlinktes Kind des Draft-Roots anlegen.
+
+    Das Kind erbt ``created_by`` (die Wert-Bilanz zählt die Kette einmal als
+    nutzer — der Root wird interior, das Kind der neue Sink) und startet als
+    ``ready`` (Parent ist done) — der Dispatcher übernimmt. Raises ValueError
+    mit Begründung, wenn der Task kein freigabefähiger Draft ist.
+    """
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"Task {task_id} nicht gefunden")
+    if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
+        raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
+    if task.status != "done":
+        raise ValueError(f"{task_id} ist nicht fertig (status={task.status}) — erst der fertige Draft wird freigegeben")
+    has_child = conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1", (task_id,),
+    ).fetchone()
+    if has_child:
+        raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
+
+    title = f"Umsetzen: {task.title}"
+    if len(title) > _BUILD_TITLE_LIMIT:
+        title = title[: _BUILD_TITLE_LIMIT - 1].rstrip() + "…"
+    excerpt = _draft_excerpt(conn, task_id) or (
+        "(kein Draft-Kommentar gefunden — Referenzen im Ursprungs-Task prüfen)"
+    )
+    return kb.create_task(
+        conn,
+        title=title,
+        body=APPROVE_BODY_TEMPLATE.format(
+            title=task.title, task_id=task_id,
+            created_by=task.created_by, excerpt=excerpt,
+        ),
+        created_by=task.created_by,
+        assignee=task.assignee or assignee_fallback,
+        parents=(task_id,),
+    )
+
+
 def create_wish(
     conn: sqlite3.Connection,
     *,
