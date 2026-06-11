@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   ESCALATION_MODEL,
+  ESCALATION_PROFILE,
   effectiveRuntime,
-  escalateHintFor,
+  escalationPlan,
   type LanesRuntimeInfo,
 } from "./TriageStrip";
 
-// Härtung (d): „Nochmal stärker" verspricht claude-fable-5 — auf hermes-
-// Runtime-Profilen ohne Anthropic-Key fällt der Worker aber still aufs
-// Provider-Fallback zurück (live belegt 2026-06-11: research → gpt-5.4).
-// Der Hint muss das runtime-bewusst benennen.
+// „Nochmal stärker" muss auf jedem Profil wirklich stärker sein: auf
+// Nicht-claude-cli-Runtimes (ohne Anthropic-Key fiele der Worker still aufs
+// Provider-Fallback, live belegt 2026-06-11: research → gpt-5.4) wird der
+// Task aufs premium-Profil umgehängt; claude-cli-Profile bleiben beim
+// reinen model_override.
 
 const LANES: LanesRuntimeInfo = {
   active_id: "lane_api",
@@ -51,23 +53,29 @@ describe("effectiveRuntime", () => {
   });
 });
 
-describe("escalateHintFor", () => {
-  it("claude-cli-Runtime → neutraler Standard-Hint mit Modellnamen", () => {
-    const { hint, warns } = escalateHintFor("premium", LANES);
-    expect(warns).toBe(false);
-    expect(hint).toContain(ESCALATION_MODEL);
-    expect(hint).not.toContain("Achtung");
+describe("escalationPlan", () => {
+  it("claude-cli-Runtime → nur model_override, KEIN assignee im PATCH-Body", () => {
+    const plan = escalationPlan("premium", LANES);
+    expect(plan.reassigns).toBe(false);
+    expect(plan.warns).toBe(false);
+    expect(plan.patch).toEqual({ model_override: ESCALATION_MODEL });
+    expect(plan.hint).toContain(ESCALATION_MODEL);
   });
 
-  it("hermes-Runtime → warnt ehrlich vor dem stillen Provider-Fallback", () => {
-    const { hint, warns } = escalateHintFor("research", LANES);
-    expect(warns).toBe(true);
-    expect(hint).toContain("API-Runtime");
-    expect(hint).toContain("Fallback");
+  it("hermes-Runtime → hängt auf premium um (assignee im PATCH-Body) und nennt den Tool-Verlust", () => {
+    const plan = escalationPlan("research", LANES);
+    expect(plan.reassigns).toBe(true);
+    expect(plan.warns).toBe(true);
+    expect(plan.patch).toEqual({ assignee: ESCALATION_PROFILE, model_override: ESCALATION_MODEL });
+    expect(plan.hint).toContain("premium");
+    expect(plan.hint).toContain("Spezialwerkzeuge");
+    expect(plan.hint).toContain("research");
   });
 
-  it("ohne Katalog (fetch fehlgeschlagen) → neutraler Hint, keine falsche Warnung", () => {
-    const { warns } = escalateHintFor("research", null);
-    expect(warns).toBe(false);
+  it("ohne Katalog (fetch fehlgeschlagen) → fail-soft: kein Umhängen, neutraler Hint", () => {
+    const plan = escalationPlan("research", null);
+    expect(plan.reassigns).toBe(false);
+    expect(plan.warns).toBe(false);
+    expect(plan.patch).toEqual({ model_override: ESCALATION_MODEL });
   });
 });

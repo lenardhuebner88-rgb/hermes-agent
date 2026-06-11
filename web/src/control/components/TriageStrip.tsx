@@ -19,20 +19,26 @@ const t = {
   retry: "Nochmal",
   escalate: "Nochmal stärker",
   escalateHint: (model: string) => `setzt model_override=${model} und stellt den Task wieder ready`,
+  escalateReassignHint: (profile: string, model: string) =>
+    `hängt den Task auf „premium" um (claude-cli, ${model}) — ` +
+    `Spezialwerkzeuge des alten Profils „${profile}" entfallen (z. B. qmd-vault bei research).`,
   retryHint: "stellt den Task wieder ready (gleiche Lane)",
   confirm: "Bestätigen",
   cancel: "Abbrechen",
   done: (id: string) => `${id} wieder eingereiht.`,
   doneEscalated: (id: string, model: string) => `${id} eskaliert auf ${model} und wieder eingereiht.`,
+  doneReassigned: (id: string, model: string) =>
+    `${id} auf premium umgehängt (${model}) und wieder eingereiht.`,
 };
 
 // Eskalations-Ziel = Top-Modell der Premium-Lane (Fable-Tier).
 export const ESCALATION_MODEL = "claude-fable-5";
 
-// Härtung 2026-06-11: claude-fable-5 ist nur auf claude-cli-Runtimes (Max-Abo)
-// garantiert auflösbar. hermes-Runtime-Profile ohne Anthropic-Key fallen STILL
-// auf das Provider-Fallback zurück (live belegt: research → openai-codex /
-// gpt-5.4). Das UI benennt das ehrlich, statt Fable-5 zu versprechen.
+// Eskalation hängt auf Nicht-claude-cli-Runtimes den Task aufs premium-Profil
+// um — claude-fable-5 ist nur auf claude-cli-Runtimes (Max-Abo) garantiert
+// auflösbar; hermes-Runtime-Profile ohne Anthropic-Key fielen sonst STILL auf
+// das Provider-Fallback zurück (live belegt: research → openai-codex/gpt-5.4).
+export const ESCALATION_PROFILE = "premium";
 export interface LanesRuntimeInfo {
   active_id?: string | null;
   lanes?: {
@@ -55,21 +61,30 @@ export function effectiveRuntime(
   return lanes.profiles?.find((p) => p.name === profile)?.worker_runtime ?? null;
 }
 
-/** Hint-Text fürs Eskalations-Confirm — runtime-ehrlich. */
-export function escalateHintFor(
+/** Eskalations-Plan — runtime-ehrlich: auf Nicht-claude-cli-Runtimes wird
+ * der Task aufs premium-Profil umgehängt (PATCH kann assignee schon), auf
+ * claude-cli-Profilen bleibt es beim reinen model_override. Hint und
+ * PATCH-Body kommen aus EINER Quelle, damit Confirm-Text und Wirkung nie
+ * auseinanderlaufen. */
+export function escalationPlan(
   profile: string | null,
   lanes: LanesRuntimeInfo | null,
-): { hint: string; warns: boolean } {
+): { patch: Record<string, unknown>; hint: string; warns: boolean; reassigns: boolean } {
   const runtime = effectiveRuntime(profile, lanes);
   if (runtime !== null && runtime !== "claude-cli") {
     return {
+      reassigns: true,
       warns: true,
-      hint:
-        `setzt model_override=${ESCALATION_MODEL} — Achtung: „${profile}" läuft auf der ` +
-        "API-Runtime; ohne Anthropic-Key nutzt der Worker still sein Fallback-Modell statt Fable-5.",
+      patch: { assignee: ESCALATION_PROFILE, model_override: ESCALATION_MODEL },
+      hint: t.escalateReassignHint(profile ?? "—", ESCALATION_MODEL),
     };
   }
-  return { warns: false, hint: t.escalateHint(ESCALATION_MODEL) };
+  return {
+    reassigns: false,
+    warns: false,
+    patch: { model_override: ESCALATION_MODEL },
+    hint: t.escalateHint(ESCALATION_MODEL),
+  };
 }
 
 export interface TriageFailure {
@@ -144,10 +159,16 @@ export function TriageStrip() {
     setError(null);
     try {
       if (kind === "escalate") {
-        await patchTask(failure.task_id, { model_override: ESCALATION_MODEL });
+        const plan = escalationPlan(failure.profile, lanes);
+        await patchTask(failure.task_id, plan.patch);
+        await patchTask(failure.task_id, { status: "ready" });
+        setNotice(plan.reassigns
+          ? t.doneReassigned(failure.task_id, ESCALATION_MODEL)
+          : t.doneEscalated(failure.task_id, ESCALATION_MODEL));
+      } else {
+        await patchTask(failure.task_id, { status: "ready" });
+        setNotice(t.done(failure.task_id));
       }
-      await patchTask(failure.task_id, { status: "ready" });
-      setNotice(kind === "escalate" ? t.doneEscalated(failure.task_id, ESCALATION_MODEL) : t.done(failure.task_id));
       void load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -155,7 +176,7 @@ export function TriageStrip() {
       setBusy(false);
       setPending(null);
     }
-  }, [load]);
+  }, [load, lanes]);
 
   // Leere Triage = keine Leiste (kein Rauschen für den Nicht-Nutzer).
   if (data !== null && data.failures.length === 0 && !error && !notice) return null;
@@ -194,7 +215,7 @@ export function TriageStrip() {
                       </button>
                       <button type="button" disabled={busy} onClick={() => setPending(null)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
                       {isPending.kind === "escalate" ? (() => {
-                        const { hint, warns } = escalateHintFor(f.profile, lanes);
+                        const { hint, warns } = escalationPlan(f.profile, lanes);
                         return <span className={warns ? "text-[0.72rem] text-amber-200" : "text-[0.72rem] hc-dim"}>{hint}</span>;
                       })() : (
                         <span className="text-[0.72rem] hc-dim">{t.retryHint}</span>
