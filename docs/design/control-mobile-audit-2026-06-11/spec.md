@@ -1,8 +1,10 @@
 # Control-Dashboard — Mobile-/Design-Audit & Umsetzungs-Spec
 
-**Datum:** 2026-06-11 · **Autor:** Claude (Orchestrator-Session, Audit) · **Status:** M1+M2 umgesetzt
-(2026-06-11, Audit-Session selbst; alle 8 Abnahme-Checks der Probe PASS, Gates grün). **Offen: M3–M6**
-(M3 wartet auf Piets Go zu Variante A/B).
+**Datum:** 2026-06-11 · **Autor:** Claude (Orchestrator-Session, Audit) · **Status:** M1+M2+M3 umgesetzt
+(2026-06-11, Audit-Session selbst; M1-Probe 8/8 + M3-Probe 13/13 PASS, Gates grün; M3 = Variante A
+nach Piets Go). **Offen: M4–M6.** Gotcha für Folge-Slices: Portale an `document.body` brauchen einen
+`<div data-control className="contents">`-Wrapper — außerhalb des `[data-control]`-Scopes lösen die
+`--hc-*`-Tokens nicht auf, und direkt am Element setzt `[data-control]` min-height/background.
 **Anlass:** Piet konnte auf dem Handy im „Neues Epic“-Sheet den Submit-Button nicht erreichen (Screenshot 17:08). Daraus wurde ein voller Mobile-/Design-Audit des `/control`-Dashboards.
 
 Diese Spec ist die Arbeitsgrundlage für eine **frische Umsetzungs-Session**. Sie enthält alle Funde
