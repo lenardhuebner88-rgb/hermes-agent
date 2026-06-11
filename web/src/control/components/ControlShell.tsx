@@ -1,4 +1,4 @@
-import { Activity, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, SearchCheck, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, KanbanSquare, LayoutDashboard, MessageSquare, MoreHorizontal, PanelLeft, SearchCheck, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -31,9 +31,9 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
-  // Programm 3: Recherche (Wissen beauftragen). Bibliothek folgt in Phase D
-  // (Route existiert erst dann — Link erst mit View).
+  // Programm 3: Recherche (Wissen beauftragen) + Bibliothek (Lesesaal).
   { label: "Recherche", path: "/control/research", icon: SearchCheck },
+  { label: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
 ];
 
 const secondaryNav = [

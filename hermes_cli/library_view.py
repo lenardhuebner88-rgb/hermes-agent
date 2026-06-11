@@ -1,0 +1,523 @@
+"""Bibliothek (/control, Programm 3 Phase D/E) — der Lesesaal.
+
+Read-only Aggregation alles Menschenlesbaren, das Hermes produziert, an
+einem Ort — KEIN neuer Store, nur Adapter über Bestehendes:
+
+  1. Cron-Digests:   ``<store>/output/<job_id>/<timestamp>.md`` — alle Läufe,
+                     Multi-Store (Haupt-Store ``~/.hermes/cron`` UND
+                     ``~/.hermes/profiles/*/cron``, Phase E). Als Body wird
+                     ausschließlich der ``## Response``-Teil ausgeliefert —
+                     Redaction-Disziplin wie cron_observability (Prompts und
+                     Scripts bleiben draußen).
+  2. Recherchen:     Kanban-Tasks ``tenant=research`` — Frage (Titel/Body) +
+                     Antwort (letzter Kommentar, Receipt-Muster).
+  3. Deliverables:   Markdown-Deliverables fertiger Tasks aus
+                     ``<kanban_home>/reports/by-task/<task_id>/``.
+
+Hausmuster: ``register_library_routes(app)`` nach autoresearch_view/
+cron_observability-Vorbild — unter ``/api/`` (erbt das Session-Gate, nie in
+PUBLIC_API_PATHS), Blocking-FS via ``asyncio.to_thread``, Pfad-Eskapaden →
+400/404 statt 5xx, IDs streng validiert (kein Traversal über ``id``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time as _time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Kategorien (Grill-Entscheid §7.7: Backend-Dict, Fallback "briefings",
+# kein jobs.json-Schema-Touch). Phase E: die WM-/KI-Jobs des research-Stores
+# sind explizit gemappt — jeder Job ist eine Serie ("Abo").
+# ---------------------------------------------------------------------------
+
+CATEGORIES = ("news", "briefings", "recherchen", "arbeit", "wartung")
+
+# job_id → Kategorie (explizit; gewinnt vor den Namens-Heuristiken).
+_JOB_CATEGORY: dict[str, str] = {
+    # WM 2026 (research-Profil-Store)
+    "342d9529bf9c": "news",   # WM Morgenbrief
+    "de387a544da2": "news",   # WM Abendrecap
+    "ca21561e299f": "news",   # DFB Newswatch
+    "05f12eb3fd8c": "news",   # WM Pre-Kick
+    "5d9b9794c8a0": "news",   # WM Postmatch
+    # KI-News (research-Profil-Store)
+    "5a2a54ac3dae": "news",   # KI Modell-Brief (Morgen)
+    "4c88cd4449a6": "news",   # KI Modell Breaking-Watch (Mittag)
+}
+
+_NAME_HINTS: tuple[tuple[str, str], ...] = (
+    ("news", "news"), ("breaking", "news"), ("wm ", "news"), ("dfb", "news"),
+    ("triage", "wartung"), ("audit", "wartung"), ("cleanup", "wartung"),
+    ("wartung", "wartung"), ("health", "wartung"), ("heartbeat", "wartung"),
+)
+
+
+def _categorize_job(job_id: str, name: str) -> str:
+    explicit = _JOB_CATEGORY.get(job_id)
+    if explicit:
+        return explicit
+    lowered = (name or "").lower()
+    for needle, category in _NAME_HINTS:
+        if needle in lowered:
+            return category
+    return "briefings"
+
+
+# ---------------------------------------------------------------------------
+# Cron-Store-Adapter
+# ---------------------------------------------------------------------------
+
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
+_OUTPUT_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.md$")
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+_PREVIEW_CHARS = 280
+_MAX_BODY_BYTES = 512 * 1024  # ein Digest; Kappung gegen Ausreißer
+
+
+def _hermes_home() -> Path:
+    from hermes_cli.kanban_db import kanban_home
+    return kanban_home()
+
+
+def _cron_stores() -> list[tuple[str, Path]]:
+    """Alle Cron-Stores: ``main`` + ``profile:<name>`` (Phase E).
+
+    Store-IDs sind Teil der Item-IDs; die Auflösung läuft NUR über diese
+    Liste — nie über Pfade aus dem Request.
+    """
+    home = _hermes_home()
+    stores: list[tuple[str, Path]] = [("main", home / "cron")]
+    profiles_root = home / "profiles"
+    if profiles_root.is_dir():
+        for profile_dir in sorted(profiles_root.iterdir()):
+            cron_dir = profile_dir / "cron"
+            if cron_dir.is_dir() and _TASK_ID_RE.match(profile_dir.name):
+                stores.append((f"profile:{profile_dir.name}", cron_dir))
+    return stores
+
+
+def _resolve_store(store_id: str) -> Optional[Path]:
+    for sid, path in _cron_stores():
+        if sid == store_id:
+            return path
+    return None
+
+
+def _load_jobs_meta(store_dir: Path) -> dict[str, dict]:
+    """job_id → {name, schedule_display, enabled} aus jobs.json (fail-soft)."""
+    try:
+        raw = json.loads((store_dir / "jobs.json").read_text(encoding="utf-8"))
+        jobs = raw.get("jobs", []) if isinstance(raw, dict) else []
+    except (OSError, ValueError):
+        return {}
+    meta: dict[str, dict] = {}
+    for job in jobs:
+        if not isinstance(job, dict) or not job.get("id"):
+            continue
+        schedule = job.get("schedule") or {}
+        meta[str(job["id"])] = {
+            "name": str(job.get("name") or job["id"]),
+            "schedule_display": str(
+                schedule.get("display") or schedule.get("expr") or ""
+            ) if isinstance(schedule, dict) else "",
+            "enabled": bool(job.get("enabled", False)),
+        }
+    return meta
+
+
+def _extract_response(markdown: str) -> Optional[str]:
+    """Nur den ``## Response``-Teil ausliefern (Redaction: Prompt/Script
+    bleiben draußen). Der Prompt-Abschnitt kann selbst ##-Headings enthalten,
+    darum wird exakt nach der Zeile ``## Response`` gesucht."""
+    lines = markdown.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() == "## Response":
+            return "\n".join(lines[idx + 1:]).strip()
+    return None
+
+
+def _output_ts(filename: str, fallback: float) -> int:
+    try:
+        return int(_time.mktime(_time.strptime(filename[:19], "%Y-%m-%d_%H-%M-%S")))
+    except ValueError:
+        return int(fallback)
+
+
+def _preview(body: str) -> str:
+    flat = " ".join(body.split())
+    return flat[:_PREVIEW_CHARS]
+
+
+@dataclass
+class _Item:
+    id: str
+    category: str
+    series_id: str
+    series: str
+    title: str
+    ts: int
+    preview: str
+    source_ref: str
+    series_meta: str = ""
+    body_md: Optional[str] = field(default=None, repr=False)
+
+    def as_dict(self, *, with_body: bool) -> dict[str, Any]:
+        d = {
+            "id": self.id,
+            "category": self.category,
+            "series_id": self.series_id,
+            "series": self.series,
+            "title": self.title,
+            "ts": self.ts,
+            "preview": self.preview,
+            "source_ref": self.source_ref,
+            "series_meta": self.series_meta,
+        }
+        if with_body:
+            d["body_md"] = self.body_md or ""
+        return d
+
+
+def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
+    items: list[_Item] = []
+    for store_id, store_dir in _cron_stores():
+        output_root = store_dir / "output"
+        if not output_root.is_dir():
+            continue
+        jobs_meta = _load_jobs_meta(store_dir)
+        for job_dir in output_root.iterdir():
+            if not job_dir.is_dir() or not _JOB_ID_RE.match(job_dir.name):
+                continue
+            meta = jobs_meta.get(job_dir.name, {})
+            name = meta.get("name", job_dir.name)
+            category = _categorize_job(job_dir.name, name)
+            series_meta = meta.get("schedule_display", "")
+            profile = store_id.split(":", 1)[1] if ":" in store_id else None
+            for md_file in job_dir.iterdir():
+                if not _OUTPUT_FILE_RE.match(md_file.name):
+                    continue
+                try:
+                    stat = md_file.stat()
+                    raw = md_file.read_text(encoding="utf-8", errors="replace")
+                    if len(raw) > _MAX_BODY_BYTES:
+                        raw = raw[:_MAX_BODY_BYTES]
+                except OSError:
+                    continue
+                body = _extract_response(raw)
+                if not body:
+                    continue  # ohne Response-Teil nichts Lesbares
+                ts = _output_ts(md_file.name, stat.st_mtime)
+                day = _time.strftime("%d.%m. %H:%M", _time.localtime(ts))
+                items.append(_Item(
+                    id=f"cron::{store_id}::{job_dir.name}::{md_file.name}",
+                    category=category,
+                    series_id=f"{store_id}/{job_dir.name}",
+                    series=name,
+                    title=f"{name} — Ausgabe {day}",
+                    ts=ts,
+                    preview=_preview(body),
+                    source_ref=(
+                        f"cron:{profile}/{job_dir.name}" if profile
+                        else f"cron:{job_dir.name}"
+                    ),
+                    series_meta=series_meta,
+                    body_md=body if with_bodies else None,
+                ))
+    return items
+
+
+def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item]:
+    if not _JOB_ID_RE.match(job_id) or not _OUTPUT_FILE_RE.match(filename):
+        raise ValueError("invalid cron item id")
+    store_dir = _resolve_store(store_id)
+    if store_dir is None:
+        raise ValueError("unknown store")
+    output_root = (store_dir / "output").resolve(strict=False)
+    target = (output_root / job_id / filename).resolve(strict=False)
+    if not str(target).startswith(str(output_root) + "/"):
+        raise ValueError("path escape")
+    if not target.is_file():
+        return None
+    raw = target.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+    body = _extract_response(raw)
+    if body is None:
+        return None
+    jobs_meta = _load_jobs_meta(store_dir)
+    meta = jobs_meta.get(job_id, {})
+    name = meta.get("name", job_id)
+    ts = _output_ts(filename, target.stat().st_mtime)
+    profile = store_id.split(":", 1)[1] if ":" in store_id else None
+    return _Item(
+        id=f"cron::{store_id}::{job_id}::{filename}",
+        category=_categorize_job(job_id, name),
+        series_id=f"{store_id}/{job_id}",
+        series=name,
+        title=f"{name} — Ausgabe {_time.strftime('%d.%m. %H:%M', _time.localtime(ts))}",
+        ts=ts,
+        preview=_preview(body),
+        source_ref=f"cron:{profile}/{job_id}" if profile else f"cron:{job_id}",
+        series_meta=meta.get("schedule_display", ""),
+        body_md=body,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recherchen-Adapter (kanban.db, tenant=research)
+# ---------------------------------------------------------------------------
+
+def _collect_research_items(*, with_bodies: bool, limit: int = 200) -> list[_Item]:
+    from hermes_cli import kanban_db
+    items: list[_Item] = []
+    try:
+        conn = kanban_db.connect()
+    except Exception:
+        logger.debug("library: kanban connect failed", exc_info=True)
+        return items
+    try:
+        rows = conn.execute(
+            "SELECT id, title, status, created_at, completed_at FROM tasks "
+            "WHERE tenant = 'research' AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        for row in rows:
+            answer = None
+            answer_ts = None
+            comments = kanban_db.list_comments(conn, row["id"])
+            if comments:
+                answer = comments[-1].body
+                answer_ts = comments[-1].created_at
+            if not answer:
+                continue  # Bibliothek zeigt Lesbares; offene Fragen wohnen im Research-Tab
+            ts = int(answer_ts or row["completed_at"] or row["created_at"])
+            items.append(_Item(
+                id=f"research::{row['id']}",
+                category="recherchen",
+                series_id="research",
+                series="Recherchen",
+                title=row["title"],
+                ts=ts,
+                preview=_preview(answer),
+                source_ref=f"task:{row['id']}",
+                body_md=answer if with_bodies else None,
+            ))
+    except Exception:
+        logger.debug("library: research adapter failed", exc_info=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return items
+
+
+def _read_research_item(task_id: str) -> Optional[_Item]:
+    if not _TASK_ID_RE.match(task_id):
+        raise ValueError("invalid task id")
+    from hermes_cli import kanban_db
+    conn = kanban_db.connect()
+    try:
+        row = conn.execute(
+            "SELECT id, title, body, created_at, completed_at FROM tasks "
+            "WHERE id = ? AND tenant = 'research'",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        comments = kanban_db.list_comments(conn, task_id)
+        if not comments:
+            return None
+        answer = comments[-1].body
+        ts = int(comments[-1].created_at)
+        question = (row["body"] or "").strip()
+        body = (
+            f"> **Frage:** {row['title']}\n\n{answer}" if not question
+            else f"> **Frage:** {question.splitlines()[0]}\n\n{answer}"
+        )
+        return _Item(
+            id=f"research::{task_id}",
+            category="recherchen",
+            series_id="research",
+            series="Recherchen",
+            title=row["title"],
+            ts=ts,
+            preview=_preview(answer),
+            source_ref=f"task:{task_id}",
+            body_md=body,
+        )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Deliverables-Adapter (reports/by-task, nur Markdown)
+# ---------------------------------------------------------------------------
+
+_DELIVERABLE_MAX_PER_TASK = 3
+
+
+def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> list[_Item]:
+    items: list[_Item] = []
+    reports_root = _hermes_home() / "reports" / "by-task"
+    if not reports_root.is_dir():
+        return items
+    from hermes_cli import kanban_db
+    titles: dict[str, str] = {}
+    try:
+        conn = kanban_db.connect()
+        try:
+            for row in conn.execute(
+                "SELECT id, title FROM tasks WHERE status IN ('done', 'review')",
+            ).fetchall():
+                titles[row["id"]] = row["title"]
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("library: deliverable title lookup failed", exc_info=True)
+    task_dirs = sorted(
+        (d for d in reports_root.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime, reverse=True,
+    )[:limit_tasks]
+    for task_dir in task_dirs:
+        if not _TASK_ID_RE.match(task_dir.name):
+            continue
+        md_files = sorted(task_dir.rglob("*.md"))[:_DELIVERABLE_MAX_PER_TASK]
+        for md_file in md_files:
+            try:
+                stat = md_file.stat()
+                body = md_file.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+            except OSError:
+                continue
+            if not body.strip():
+                continue
+            rel = md_file.relative_to(task_dir).as_posix()
+            task_title = titles.get(task_dir.name, task_dir.name)
+            suffix = "" if rel == "RESULT.md" else f" · {rel}"
+            items.append(_Item(
+                id=f"deliverable::{task_dir.name}::{rel}",
+                category="arbeit",
+                series_id="deliverables",
+                series="Arbeit & Receipts",
+                title=f"{task_title}{suffix}",
+                ts=int(stat.st_mtime),
+                preview=_preview(body),
+                source_ref=f"task:{task_dir.name}/{rel}",
+                body_md=body if with_bodies else None,
+            ))
+    return items
+
+
+def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
+    if not _TASK_ID_RE.match(task_id):
+        raise ValueError("invalid task id")
+    if not rel_path.endswith(".md"):
+        raise ValueError("only markdown deliverables")
+    reports_root = (_hermes_home() / "reports" / "by-task").resolve(strict=False)
+    target = (reports_root / task_id / rel_path).resolve(strict=False)
+    if not str(target).startswith(str(reports_root) + "/"):
+        raise ValueError("path escape")
+    if not target.is_file():
+        return None
+    body = target.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+    return _Item(
+        id=f"deliverable::{task_id}::{rel_path}",
+        category="arbeit",
+        series_id="deliverables",
+        series="Arbeit & Receipts",
+        title=f"{task_id} · {rel_path}",
+        ts=int(target.stat().st_mtime),
+        preview=_preview(body),
+        source_ref=f"task:{task_id}/{rel_path}",
+        body_md=body,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aggregation + Routen
+# ---------------------------------------------------------------------------
+
+def _collect_all(*, with_bodies: bool) -> list[_Item]:
+    items: list[_Item] = []
+    for collector in (
+        lambda: _collect_cron_items(with_bodies=with_bodies),
+        lambda: _collect_research_items(with_bodies=with_bodies),
+        lambda: _collect_deliverable_items(with_bodies=with_bodies),
+    ):
+        try:
+            items.extend(collector())
+        except Exception:
+            # Ein kaputter Adapter darf die Bibliothek nie leeren.
+            logger.debug("library: adapter failed", exc_info=True)
+    items.sort(key=lambda i: -i.ts)
+    return items
+
+
+def _list_items(category: Optional[str], q: Optional[str], limit: int) -> dict:
+    needs_bodies = bool(q)
+    items = _collect_all(with_bodies=needs_bodies)
+    if category:
+        items = [i for i in items if i.category == category]
+    if q:
+        needle = q.casefold()
+        items = [
+            i for i in items
+            if needle in i.title.casefold()
+            or needle in (i.body_md or "").casefold()
+        ]
+    total = len(items)
+    sliced = items[:limit]
+    return {
+        "items": [i.as_dict(with_body=False) for i in sliced],
+        "count": total,
+        "truncated": total > limit,
+        "categories": list(CATEGORIES),
+        "now": int(_time.time()),
+    }
+
+
+def _get_item(item_id: str) -> Optional[_Item]:
+    parts = item_id.split("::")
+    if parts[0] == "cron" and len(parts) == 4:
+        return _read_cron_item(parts[1], parts[2], parts[3])
+    if parts[0] == "research" and len(parts) == 2:
+        return _read_research_item(parts[1])
+    if parts[0] == "deliverable" and len(parts) == 3:
+        return _read_deliverable_item(parts[1], parts[2])
+    raise ValueError("unknown item kind")
+
+
+def register_library_routes(app: Any) -> None:
+    """Bibliothek-Routen (read-only). Unter /api/ → Session-Gate der
+    Middleware; bewusst NIE in PUBLIC_API_PATHS."""
+    from fastapi import HTTPException, Query
+
+    @app.get("/api/library/items")
+    async def library_items(  # type: ignore[unused-variable]
+        category: Optional[str] = Query(None),
+        q: Optional[str] = Query(None, max_length=200),
+        limit: int = Query(60, ge=1, le=200),
+    ):
+        if category and category not in CATEGORIES:
+            raise HTTPException(status_code=400, detail="unknown category")
+        return await asyncio.to_thread(_list_items, category, q, limit)
+
+    @app.get("/api/library/item")
+    async def library_item(  # type: ignore[unused-variable]
+        id: str = Query(..., max_length=300),
+    ):
+        try:
+            item = await asyncio.to_thread(_get_item, id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if item is None:
+            raise HTTPException(status_code=404, detail="item not found")
+        return item.as_dict(with_body=True)
