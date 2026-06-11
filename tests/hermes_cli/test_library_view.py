@@ -24,6 +24,8 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
     lv._cron_parse_cache.clear()  # In-Process-Caches nie zwischen Tests teilen
     lv._cron_dir_cache.clear()
+    lv._receipt_parse_cache.clear()
+    lv._receipt_dir_cache.clear()
     kb.init_db()
     return home
 
@@ -234,6 +236,86 @@ def test_wartung_items_stay_listed(kanban_home):
     listing = lv._list_items("wartung", None, 10)
     assert listing["count"] == 1
     assert listing["items"][0]["category"] == "wartung"
+
+
+def _write_receipt(tmp_home: Path, agent: str, filename: str, *,
+                   frontmatter: str = "", body: str = "# Receipt\nInhalt.") -> Path:
+    receipts = tmp_home / "vault" / "03-Agents" / agent / "receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    target = receipts / filename
+    target.write_text(
+        (f"---\n{frontmatter}\n---\n{body}\n" if frontmatter else f"{body}\n"),
+        encoding="utf-8",
+    )
+    return target
+
+
+def test_receipt_adapter_frontmatter_meta_and_failsoft(kanban_home, tmp_path):
+    """Receipts: Frontmatter wird abgetrennt und als Meta-Zeile gerendert;
+    frontmatterlose Dateien erscheinen fail-soft (Titel = H1 → Dateiname)."""
+    _write_receipt(
+        tmp_path, "Claude-Code", "haertung-receipt.md",
+        frontmatter='agent: claude-code\nstatus: done\ndate: 2026-06-11\ntask: "Härtungs-Lauf"',
+        body="# Receipt — Härtungs-Lauf\n\nStep-Ledger …",
+    )
+    _write_receipt(
+        tmp_path, "Codex", "2026-05-04_ohne-frontmatter.md",
+        body="Nur Fließtext ohne Heading.",
+    )
+    items = lv._collect_receipt_items(with_bodies=True)
+    assert {i.series for i in items} == {"Claude-Code", "Codex"}
+    cc = next(i for i in items if i.series == "Claude-Code")
+    assert cc.category == "receipts"
+    assert cc.title == "Receipt — Härtungs-Lauf"
+    assert cc.body_md.startswith("> **status:** done · **task:** Härtungs-Lauf · **date:** 2026-06-11")
+    assert "agent: claude-code" not in cc.body_md  # Frontmatter nicht roh im Body
+    cx = next(i for i in items if i.series == "Codex")
+    assert cx.title == "2026-05-04_ohne-frontmatter"  # Fallback: Dateiname
+    assert "Fließtext" in cx.body_md and not cx.body_md.startswith(">")
+    # Detail-Pfad über die strenge ID-Auflösung
+    detail = lv._get_item(cc.id)
+    assert detail is not None and "Step-Ledger" in detail.body_md
+
+
+def test_receipt_adapter_traversal_and_extension_guards(kanban_home, tmp_path):
+    _write_receipt(tmp_path, "Hermes", "echt.md")
+    secret = tmp_path / "vault" / "03-Agents" / "Hermes" / "geheim.md"
+    secret.write_text("# nicht im Regal", encoding="utf-8")
+    receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    (receipts / "link.md").symlink_to(secret)
+    (receipts / "notiz.txt").write_text("kein markdown", encoding="utf-8")
+    items = lv._collect_receipt_items(with_bodies=False)
+    assert [i.id for i in items] == ["receipt::Hermes::echt.md"]  # Symlink + .txt draußen
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::Hermes::../geheim.md")
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::../00-Canon::echt.md")
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::Hermes::echt.txt")
+    with pytest.raises(ValueError):
+        lv._get_item("receipt::Hermes::link.md")  # Symlink-Ziel liegt außerhalb
+
+
+def test_receipt_adapter_cap_and_cache(kanban_home, tmp_path):
+    """Newest-40-Cap pro Agent (mtime-Reihenfolge) + Cache-Hit liefert
+    identische Items."""
+    import os
+    receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    for n in range(45):
+        p = _write_receipt(tmp_path, "Hermes", f"receipt-{n:02d}.md",
+                           body=f"# R{n}\nInhalt {n}.")
+        os.utime(p, (1_700_000_000 + n, 1_700_000_000 + n))
+    os.utime(receipts, (1_700_000_100, 1_700_000_100))
+    first = lv._collect_receipt_items(with_bodies=False)
+    assert len(first) == lv._MAX_RECEIPTS_PER_AGENT
+    names = {i.id.rsplit("::", 1)[1] for i in first}
+    assert "receipt-44.md" in names and "receipt-04.md" not in names  # 5 älteste raus
+    warm = lv._collect_receipt_items(with_bodies=True)
+    assert {i.id for i in warm} == {i.id for i in first}
+    assert all(i.body_md for i in warm)
+    # Parse-Cache ist gefüllt und liefert beim Hit dasselbe Item-Objekt
+    sample = str(receipts / "receipt-44.md")
+    assert lv._receipt_parse_cache[sample][2] is not None
 
 
 def test_deliverable_adapter_lists_markdown(kanban_home):

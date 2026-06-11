@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ItemRow, groupBySeries, type LibraryItem } from "./BibliothekView";
+import { CATEGORY_LABEL, ItemRow, groupBySeries, type LibraryItem } from "./BibliothekView";
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -41,5 +41,19 @@ describe("ItemRow (Render, RunTimelineView-Muster)", () => {
     );
     expect(seen).toContain("Alt");
     expect(seen).not.toContain("neu");
+  });
+});
+
+describe("Receipts-Regal (S2)", () => {
+  it("hat ein eigenes Chip-Label und rendert Receipt-Items wie jede Serie", () => {
+    expect(CATEGORY_LABEL.receipts).toBe("Receipts");
+    const row = renderToStaticMarkup(
+      <ItemRow
+        item={item({ category: "receipts", series: "Claude-Code", title: "Receipt — Härtungs-Lauf", ts: 200 })}
+        unreadSince={100}
+        onOpen={() => {}}
+      />,
+    );
+    expect(row).toContain("Receipt — Härtungs-Lauf");
   });
 });

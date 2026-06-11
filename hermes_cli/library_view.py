@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # sind explizit gemappt — jeder Job ist eine Serie ("Abo").
 # ---------------------------------------------------------------------------
 
-CATEGORIES = ("news", "briefings", "recherchen", "arbeit", "wartung")
+CATEGORIES = ("news", "briefings", "recherchen", "arbeit", "receipts", "wartung")
 
 # job_id → Kategorie (explizit; gewinnt vor den Namens-Heuristiken).
 _JOB_CATEGORY: dict[str, str] = {
@@ -525,6 +525,153 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
 
 
 # ---------------------------------------------------------------------------
+# Receipts-Adapter (~/vault/03-Agents/<Agent>/receipts/*.md — read-only
+# Quelle, wird NIE beschrieben). Serie = Agent. Der Hermes-Agent hält >500
+# Receipts → newest-40-Cap pro Agent + Dir/Parse-mtime-Cache (Cron-Muster
+# 1:1, Latenzfalle-Lehre vom 2026-06-11). Receipts haben kein Prompt/
+# Response-Format → Body roh (gekappt), Frontmatter abgetrennt und als
+# Meta-Zeile gerendert; fail-soft ohne Frontmatter (Titel = H1 → Dateiname,
+# ts = mtime).
+# ---------------------------------------------------------------------------
+
+_RECEIPT_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}\.md$")
+_MAX_RECEIPTS_PER_AGENT = 40
+# path → (mtime_ns, size, geparstes Item oder None).
+_receipt_parse_cache: dict[str, tuple[int, int, Optional[_Item]]] = {}
+# receipts_dir → (dir_mtime_ns, newest-N Dateinamen, mtime-absteigend).
+_receipt_dir_cache: dict[str, tuple[int, list[str]]] = {}
+
+
+def _receipts_root() -> Path:
+    return Path.home() / "vault" / "03-Agents"
+
+
+def _newest_receipt_names(receipts_dir: Path) -> list[str]:
+    """Newest-N per Datei-mtime (Receipt-Namen sind nicht zeitlich sortierbar).
+    Dir-mtime-keyed wie der Cron-Dir-Cache: Anlegen/Löschen invalidiert;
+    eine reine Inhalts-Änderung fängt der Parse-Cache."""
+    key = str(receipts_dir)
+    try:
+        dir_mtime = receipts_dir.stat().st_mtime_ns
+    except OSError:
+        _receipt_dir_cache.pop(key, None)
+        return []
+    cached = _receipt_dir_cache.get(key)
+    if cached is not None and cached[0] == dir_mtime:
+        return cached[1]
+    entries: list[tuple[int, str]] = []
+    for e in receipts_dir.iterdir():
+        if e.is_symlink() or not _RECEIPT_FILE_RE.match(e.name):
+            continue
+        try:
+            entries.append((e.stat().st_mtime_ns, e.name))
+        except OSError:
+            continue
+    names = [n for _, n in sorted(entries, reverse=True)[:_MAX_RECEIPTS_PER_AGENT]]
+    _receipt_dir_cache[key] = (dir_mtime, names)
+    return names
+
+
+def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
+    """Flaches ``key: value``-Frontmatter, fail-soft: ohne öffnendes/
+    schließendes ``---`` zählt alles als Body."""
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, raw
+    meta: dict[str, str] = {}
+    for idx in range(1, len(lines)):
+        stripped = lines[idx].strip()
+        if stripped == "---":
+            return meta, "\n".join(lines[idx + 1:])
+        if ":" in stripped and not lines[idx].startswith((" ", "\t")):
+            key, _, value = stripped.partition(":")
+            meta[key.strip().lower()] = value.strip().strip("\"'")
+    return {}, raw
+
+
+def _parse_receipt_file(md_file: Path, agent: str, stat: Any) -> Optional[_Item]:
+    try:
+        raw = md_file.read_text(encoding="utf-8", errors="replace")
+        if len(raw) > _MAX_BODY_BYTES:
+            raw = raw[:_MAX_BODY_BYTES]
+    except OSError:
+        return None
+    meta, body = _split_frontmatter(raw)
+    body = body.strip()
+    if not body:
+        return None
+    title = next(
+        (ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), "",
+    ) or md_file.stem
+    meta_bits = [f"**{k}:** {meta[k]}" for k in ("status", "task", "date") if meta.get(k)]
+    return _Item(
+        id=f"receipt::{agent}::{md_file.name}",
+        category="receipts",
+        series_id=f"receipts/{agent}",
+        series=agent,
+        title=title,
+        ts=int(stat.st_mtime),
+        preview=_preview(body),
+        source_ref=f"receipt:{agent}/{md_file.name}",
+        body_md=f"> {' · '.join(meta_bits)}\n\n{body}" if meta_bits else body,
+    )
+
+
+def _collect_receipt_items(*, with_bodies: bool) -> list[_Item]:
+    from dataclasses import replace as _dc_replace
+    items: list[_Item] = []
+    agents_root = _receipts_root()
+    if not agents_root.is_dir():
+        return items
+    seen_paths: set[str] = set()
+    for agent_dir in sorted(agents_root.iterdir()):
+        if not agent_dir.is_dir() or not _TASK_ID_RE.match(agent_dir.name):
+            continue
+        receipts_dir = agent_dir / "receipts"
+        if not receipts_dir.is_dir():
+            continue
+        for fname in _newest_receipt_names(receipts_dir):
+            md_file = receipts_dir / fname
+            try:
+                stat = md_file.stat()
+            except OSError:
+                continue
+            cache_key = str(md_file)
+            seen_paths.add(cache_key)
+            cached = _receipt_parse_cache.get(cache_key)
+            if (
+                cached is not None
+                and cached[0] == stat.st_mtime_ns
+                and cached[1] == stat.st_size
+            ):
+                if cached[2] is not None:
+                    items.append(
+                        cached[2] if with_bodies
+                        else _dc_replace(cached[2], body_md=None)
+                    )
+                continue
+            item = _parse_receipt_file(md_file, agent_dir.name, stat)
+            _receipt_parse_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, item)
+            if item is not None:
+                items.append(item if with_bodies else _dc_replace(item, body_md=None))
+    for stale in set(_receipt_parse_cache) - seen_paths:
+        _receipt_parse_cache.pop(stale, None)
+    return items
+
+
+def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
+    if not _TASK_ID_RE.match(agent) or not _RECEIPT_FILE_RE.match(filename):
+        raise ValueError("invalid receipt id")
+    receipts_root = (_receipts_root() / agent / "receipts").resolve(strict=False)
+    target = (receipts_root / filename).resolve(strict=False)
+    if not str(target).startswith(str(receipts_root) + "/"):
+        raise ValueError("path escape")
+    if not target.is_file():
+        return None
+    return _parse_receipt_file(target, agent, target.stat())
+
+
+# ---------------------------------------------------------------------------
 # Aggregation + Routen
 # ---------------------------------------------------------------------------
 
@@ -534,6 +681,7 @@ def _collect_all(*, with_bodies: bool) -> list[_Item]:
         lambda: _collect_cron_items(with_bodies=with_bodies),
         lambda: _collect_research_items(with_bodies=with_bodies),
         lambda: _collect_deliverable_items(with_bodies=with_bodies),
+        lambda: _collect_receipt_items(with_bodies=with_bodies),
     ):
         try:
             items.extend(collector())
@@ -575,6 +723,8 @@ def _get_item(item_id: str) -> Optional[_Item]:
         return _read_research_item(parts[1])
     if parts[0] == "deliverable" and len(parts) == 3:
         return _read_deliverable_item(parts[1], parts[2])
+    if parts[0] == "receipt" and len(parts) == 3:
+        return _read_receipt_item(parts[1], parts[2])
     raise ValueError("unknown item kind")
 
 
