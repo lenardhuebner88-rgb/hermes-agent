@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # sind explizit gemappt — jeder Job ist eine Serie ("Abo").
 # ---------------------------------------------------------------------------
 
-CATEGORIES = ("news", "briefings", "recherchen", "arbeit", "receipts", "wartung")
+CATEGORIES = ("news", "briefings", "recherchen", "familie", "arbeit", "receipts", "wartung")
 
 # job_id → Kategorie (explizit; gewinnt vor den Namens-Heuristiken).
 _JOB_CATEGORY: dict[str, str] = {
@@ -52,6 +52,8 @@ _JOB_CATEGORY: dict[str, str] = {
     # KI-News (research-Profil-Store)
     "5a2a54ac3dae": "news",   # KI Modell-Brief (Morgen)
     "4c88cd4449a6": "news",   # KI Modell Breaking-Watch (Mittag)
+    # Familie (fo-brain-Profil-Store)
+    "e28b8cd87809": "familie",  # Familien-Morgenbrief 06:30
 }
 
 _NAME_HINTS: tuple[tuple[str, str], ...] = (

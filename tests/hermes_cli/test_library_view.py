@@ -77,6 +77,10 @@ def test_categorize_job_explicit_hint_and_fallback():
     assert lv._categorize_job("ffffffffffff", "Breaking Watch KI") == "news"
     assert lv._categorize_job("ffffffffffff", "Repo Audit nightly") == "wartung"
     assert lv._categorize_job("ffffffffffff", "Morning Digest") == "briefings"
+    # Familien-Morgenbrief (fo-brain-Store) ist explizit gemappt und die
+    # Kategorie am category-Param validierbar
+    assert lv._categorize_job("e28b8cd87809", "Familien-Morgenbrief") == "familie"
+    assert "familie" in lv.CATEGORIES
 
 
 def test_cron_items_multi_store_with_redacted_response(kanban_home):
