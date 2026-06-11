@@ -14,6 +14,9 @@ def test_start_server_enables_ws_ping_for_half_open_detection(monkeypatch):
 
     assert captured["ws_ping_interval"] == 20.0
     assert captured["ws_ping_timeout"] == 20.0
+    # Graceful-stop cap: open SPA WebSockets must not hold the stopping server
+    # past the systemd unit's 10s budget (SIGKILL storms, 2026-06-11 journal).
+    assert captured["timeout_graceful_shutdown"] == 5
 
 
 def test_gzip_middleware_compresses_large_json(monkeypatch):

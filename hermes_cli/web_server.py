@@ -11040,4 +11040,10 @@ def start_server(
         # 20s stays under Cloudflare Tunnel's idle timeout, keeping it warm.
         ws_ping_interval=20.0,
         ws_ping_timeout=20.0,
+        # Without this, graceful shutdown waits FOREVER for open connections —
+        # any SPA tab with a live WebSocket made every `systemctl restart` hit
+        # the unit's TimeoutStopSec and die by SIGKILL ('stop-sigterm timed
+        # out' storms in the journal). Force-close stragglers after 5s, safely
+        # inside the unit's 10s stop budget.
+        timeout_graceful_shutdown=5,
     )
