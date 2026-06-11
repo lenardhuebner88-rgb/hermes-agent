@@ -766,13 +766,23 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
   items: DeliveredItem[]; selectedId: string | null; onSelect: (id: string) => void; now: number;
   enrichmentById: Record<string, Enriched>;
 }) {
+  // Historie, nicht Steuerung: standardmäßig eingeklappt (Zähler bleibt),
+  // aufklappen nur bei Bedarf — hält die Schaltzentrale kurz.
+  const [open, setOpen] = useState(false);
   const shown = items.slice(0, MAX_DELIVERED);
   return (
     <div>
-      <div className="flex items-center gap-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex min-h-9 items-center gap-2 rounded-md px-1 text-left hover:bg-white/5"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5 hc-soft" /> : <ChevronRight className="h-3.5 w-3.5 hc-soft" />}
         <Eyebrow>{de.flow.deliveredHeading}</Eyebrow>
         <span className="hc-mono rounded-full border border-[var(--hc-border)] px-1.5 hc-type-label hc-soft">{items.length}</span>
-      </div>
+      </button>
+      {!open ? null : (
       <ul className="mt-2 space-y-1.5">
         {shown.map((item) => {
           const id = item.kind === "chain" ? item.chain.rootId : item.task.id;
@@ -811,7 +821,8 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
           );
         })}
       </ul>
-      {items.length > shown.length ? <p className="mt-1.5 px-1 hc-type-label hc-dim">{de.flow.deliveredMore(items.length - shown.length)}</p> : null}
+      )}
+      {open && items.length > shown.length ? <p className="mt-1.5 px-1 hc-type-label hc-dim">{de.flow.deliveredMore(items.length - shown.length)}</p> : null}
     </div>
   );
 }
@@ -1129,7 +1140,10 @@ export function FlowView() {
       <FunnelFreigaben />
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
-          Runaway-Wache und vollen Aktionen (alle confirm-gated). */}
+          Runaway-Wache und vollen Aktionen (alle confirm-gated). Ruht die
+          Flotte (geladen, kein Fehler, keine Läufe), entfällt das Panel —
+          den Ruhe-Zustand trägt schon der Hero (Schaltzentrale statt Wand). */}
+      {workerList.length === 0 && !workers.error && !workerActionError && workers.data != null ? null : (
       <FleetPanel eyebrow={de.flow.workersHeading} meta={de.flow.workersHint}>
         {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
         {workerActionError ? <div className="mb-3"><ToneCallout tone="red">{workerActionError}</ToneCallout></div> : null}
@@ -1156,6 +1170,7 @@ export function FlowView() {
           </div>
         )}
       </FleetPanel>
+      )}
 
       {loadingFirst ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><SkeletonCard rows={4} /><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>

@@ -19,10 +19,10 @@ describe("FreigabenList (Funnel-Freigaben)", () => {
     const html = renderToStaticMarkup(
       <FreigabenList
         drafts={[draft()]}
-        pendingId={null}
+        pending={null}
         openId={null}
         busy={false}
-        onApprove={noop}
+        onAct={noop}
         onPending={noop}
         onToggleOpen={noop}
       />,
@@ -30,6 +30,7 @@ describe("FreigabenList (Funnel-Freigaben)", () => {
     expect(html).toContain("Essensplan-Rückblick");
     expect(html).toContain("Familie");
     expect(html).toContain("Freigeben → bauen");
+    expect(html).toContain("Verwerfen");
     expect(html).not.toContain("Bestätigen");
   });
 
@@ -37,10 +38,10 @@ describe("FreigabenList (Funnel-Freigaben)", () => {
     const html = renderToStaticMarkup(
       <FreigabenList
         drafts={[draft({ created_by: "discord-idee" })]}
-        pendingId="t_aaa"
+        pending={{ id: "t_aaa", kind: "approve" }}
         openId="t_aaa"
         busy={false}
-        onApprove={noop}
+        onAct={noop}
         onPending={noop}
         onToggleOpen={noop}
       />,

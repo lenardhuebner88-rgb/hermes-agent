@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Lightbulb, Rocket } from "lucide-react";
+import { ChevronDown, ChevronRight, Lightbulb, Rocket, Trash2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { fmtClock } from "../lib/derive";
 import { FleetPanel } from "./fleet/atoms";
@@ -17,12 +17,15 @@ const t = {
   empty: "Keine Drafts warten auf Freigabe.",
   approve: "Freigeben → bauen",
   approveHint: "legt den Build-Task an (ready) — der Worker setzt den Draft um, Gates wie immer",
+  dismiss: "Verwerfen",
+  dismissHint: "archiviert den Draft (mit Notiz) — es wird nichts gebaut",
   confirm: "Bestätigen",
   cancel: "Abbrechen",
   showDraft: "Draft ansehen",
   hideDraft: "Draft einklappen",
   noDraft: "Kein Draft-Text gefunden — Referenzen stehen im Ursprungs-Task.",
   done: (id: string) => `Freigegeben — Build-Task ${id} ist eingereiht.`,
+  dismissed: (id: string) => `${id} verworfen und archiviert.`,
 };
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -46,7 +49,7 @@ interface DraftsResponse {
 
 export function FunnelFreigaben() {
   const [data, setData] = useState<DraftsResponse | null>(null);
-  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ id: string; kind: "approve" | "dismiss" } | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -67,21 +70,26 @@ export function FunnelFreigaben() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  const approve = useCallback(async (draft: FunnelDraft) => {
+  const act = useCallback(async (draft: FunnelDraft, kind: "approve" | "dismiss") => {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetchJSON<{ task: { id: string } }>(
-        `/api/plugins/kanban/funnel/drafts/${encodeURIComponent(draft.id)}/approve`,
-        { method: "POST" },
-      );
-      setNotice(t.done(res.task.id));
+      if (kind === "approve") {
+        const res = await fetchJSON<{ task: { id: string } }>(
+          `/api/plugins/kanban/funnel/drafts/${encodeURIComponent(draft.id)}/approve`,
+          { method: "POST" },
+        );
+        setNotice(t.done(res.task.id));
+      } else {
+        await fetchJSON(`/api/plugins/kanban/funnel/drafts/${encodeURIComponent(draft.id)}/dismiss`, { method: "POST" });
+        setNotice(t.dismissed(draft.id));
+      }
       void load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      setPendingId(null);
+      setPending(null);
     }
   }, [load]);
 
@@ -97,11 +105,11 @@ export function FunnelFreigaben() {
       ) : (
         <FreigabenList
           drafts={data.drafts}
-          pendingId={pendingId}
+          pending={pending}
           openId={openId}
           busy={busy}
-          onApprove={(d) => void approve(d)}
-          onPending={setPendingId}
+          onAct={(d, kind) => void act(d, kind)}
+          onPending={setPending}
           onToggleOpen={(id) => setOpenId(openId === id ? null : id)}
         />
       )}
@@ -112,25 +120,25 @@ export function FunnelFreigaben() {
 // Pure Listen-Darstellung — separat exportiert für den statischen Render-Test.
 export function FreigabenList({
   drafts,
-  pendingId,
+  pending,
   openId,
   busy,
-  onApprove,
+  onAct,
   onPending,
   onToggleOpen,
 }: {
   drafts: FunnelDraft[];
-  pendingId: string | null;
+  pending: { id: string; kind: "approve" | "dismiss" } | null;
   openId: string | null;
   busy: boolean;
-  onApprove: (d: FunnelDraft) => void;
-  onPending: (id: string | null) => void;
+  onAct: (d: FunnelDraft, kind: "approve" | "dismiss") => void;
+  onPending: (p: { id: string; kind: "approve" | "dismiss" } | null) => void;
   onToggleOpen: (id: string) => void;
 }) {
   return (
     <ul className="space-y-1.5">
       {drafts.map((d) => {
-            const isPending = pendingId === d.id;
+            const isPending = pending?.id === d.id ? pending : null;
             const isOpen = openId === d.id;
             return (
               <li key={d.id} className="rounded-md border border-[var(--hc-accent-border)] px-3 py-2.5">
@@ -148,19 +156,24 @@ export function FreigabenList({
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => onApprove(d)}
+                        onClick={() => onAct(d, isPending.kind)}
                         className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
                       >
-                        <Rocket className="h-3.5 w-3.5" />
-                        {t.approve} · {t.confirm}
+                        {isPending.kind === "approve" ? <Rocket className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+                        {isPending.kind === "approve" ? t.approve : t.dismiss} · {t.confirm}
                       </button>
                       <button type="button" disabled={busy} onClick={() => onPending(null)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
-                      <span className="text-[0.72rem] hc-dim">{t.approveHint}</span>
+                      <span className="text-[0.72rem] hc-dim">{isPending.kind === "approve" ? t.approveHint : t.dismissHint}</span>
                     </>
                   ) : (
-                    <button type="button" disabled={busy} onClick={() => onPending(d.id)} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
-                      <Rocket className="h-3.5 w-3.5" />{t.approve}
-                    </button>
+                    <>
+                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "approve" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
+                        <Rocket className="h-3.5 w-3.5" />{t.approve}
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => onPending({ id: d.id, kind: "dismiss" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-red-500/25 px-3 py-1 text-[0.78rem] text-red-200 hover:bg-red-500/10">
+                        <Trash2 className="h-3.5 w-3.5" />{t.dismiss}
+                      </button>
+                    </>
                   )}
                   <button
                     type="button"

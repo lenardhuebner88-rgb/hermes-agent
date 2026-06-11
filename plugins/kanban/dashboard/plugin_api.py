@@ -2558,6 +2558,22 @@ def approve_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
+@router.post("/funnel/drafts/{task_id}/dismiss")
+def dismiss_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
+    """Verwerfen eines Funnel-Drafts: archiviert den Root (mit Kommentar) —
+    der Wunsch wird NICHT gebaut und fällt aus der Freigabe-Queue."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            kanban_funnel.dismiss_draft(conn, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"ok": True, "task_id": task_id}
+    finally:
+        conn.close()
+
+
 @router.get("/runs/daily")
 def get_runs_daily(
     days: int = Query(30, ge=1, le=365),

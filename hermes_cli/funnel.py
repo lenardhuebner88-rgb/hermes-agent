@@ -194,6 +194,29 @@ def approve_draft(
     )
 
 
+def dismiss_draft(conn: sqlite3.Connection, task_id: str) -> None:
+    """Verwerfen: Draft-Root archivieren (Operator-Entscheid, kein Build).
+
+    Gleiche Gültigkeitsregeln wie :func:`approve_draft` — nur Einträge der
+    Freigabe-Queue (fertiger Funnel-Root ohne Build-Kind) sind verwerfbar.
+    """
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"Task {task_id} nicht gefunden")
+    if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
+        raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
+    if task.status != "done":
+        raise ValueError(f"{task_id} ist nicht in der Freigabe-Queue (status={task.status})")
+    has_child = conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1", (task_id,),
+    ).fetchone()
+    if has_child:
+        raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
+    kb.add_comment(conn, task_id, "operator",
+                   "Verworfen über die Funnel-Freigabe-Queue — kein Build.")
+    kb.archive_task(conn, task_id)
+
+
 def create_wish(
     conn: sqlite3.Connection,
     *,

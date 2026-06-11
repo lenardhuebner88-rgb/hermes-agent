@@ -205,3 +205,22 @@ def test_approve_draft_rejects_double_and_wrong_state(conn):
     kb.complete_task(conn, normal, summary="x")
     with pytest.raises(ValueError, match="kein Funnel-Vorschlag"):
         funnel.approve_draft(conn, normal)
+
+
+def test_dismiss_draft_archives_with_comment(conn):
+    tid = _make_done_draft(conn)
+    funnel.dismiss_draft(conn, tid)
+    assert kb.get_task(conn, tid).status == "archived"
+    last = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
+    assert "Verworfen" in last["body"]
+    assert funnel.list_drafts(conn) == []
+
+
+def test_dismiss_draft_rejects_already_approved(conn):
+    tid = _make_done_draft(conn)
+    funnel.approve_draft(conn, tid)
+    with pytest.raises(ValueError, match="bereits freigegeben"):
+        funnel.dismiss_draft(conn, tid)

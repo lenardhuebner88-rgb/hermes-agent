@@ -3893,3 +3893,22 @@ def test_funnel_draft_approve_404ish_on_unknown_task(client):
     r = client.post("/api/plugins/kanban/funnel/drafts/t_gibtsnicht/approve")
     assert r.status_code == 409
     assert "nicht gefunden" in r.json()["detail"]
+
+
+def test_funnel_draft_dismiss_archives_root(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(conn)
+    finally:
+        conn.close()
+
+    r = client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss")
+    assert r.status_code == 200, r.text
+    assert client.get("/api/plugins/kanban/funnel/drafts").json()["drafts"] == []
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+    # Nochmal verwerfen -> 409 (nicht mehr in der Queue).
+    assert client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss").status_code == 409
