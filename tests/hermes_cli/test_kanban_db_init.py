@@ -175,3 +175,130 @@ def test_unseen_events_for_sub_survives_migrated_db(tmp_path, monkeypatch):
         )
         assert isinstance(cursor, int)
         assert isinstance(events, list)
+
+
+# ---------------------------------------------------------------------------
+# Cross-process init stamp (_SCHEMA_STAMP fast path)
+# ---------------------------------------------------------------------------
+
+def test_fresh_connect_stamps_user_version(tmp_path):
+    db = tmp_path / "kanban.db"
+    kb._INITIALIZED_PATHS.discard(str(db.resolve()))
+    conn = kb.connect(db_path=db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == kb._SCHEMA_STAMP
+    finally:
+        conn.close()
+
+
+def test_stamped_db_connects_without_flock_or_integrity_probe(tmp_path, monkeypatch):
+    """A NEW process (empty ``_INITIALIZED_PATHS``) connecting to a stamped DB
+    must skip the exclusive cross-process flock, the integrity probe and the
+    migration pass. That per-process combination (flock + integrity_check +
+    full migration pass, busy_timeout 120s) was the 'dashboard hangs for
+    minutes behind one worker spawn' shape."""
+    db = tmp_path / "kanban.db"
+    kb.connect(db_path=db).close()
+    kb._INITIALIZED_PATHS.discard(str(db.resolve()))  # simulate a fresh process
+
+    def _fail_lock(path):
+        raise AssertionError("cross-process init lock taken on stamped fast path")
+
+    def _fail_guard(path, **kwargs):
+        raise AssertionError("integrity probe ran on stamped fast path")
+
+    def _fail_migrate(conn):
+        raise AssertionError("migration pass ran on stamped fast path")
+
+    monkeypatch.setattr(kb, "_cross_process_init_lock", _fail_lock)
+    monkeypatch.setattr(kb, "_guard_existing_db_is_healthy", _fail_guard)
+    monkeypatch.setattr(kb, "_migrate_add_optional_columns", _fail_migrate)
+
+    conn = kb.connect(db_path=db)
+    try:
+        kb.create_task(conn, title="fast path works")
+        assert [t.title for t in kb.list_tasks(conn)] == ["fast path works"]
+    finally:
+        conn.close()
+
+
+def test_stale_stamp_reruns_full_init(tmp_path, monkeypatch):
+    """A stamp from a different schema generation must NOT satisfy the fast
+    path — the migration pass re-runs and re-stamps."""
+    db = tmp_path / "kanban.db"
+    kb.connect(db_path=db).close()
+    raw = sqlite3.connect(str(db))
+    raw.execute("PRAGMA user_version=12345")
+    raw.close()
+    kb._INITIALIZED_PATHS.discard(str(db.resolve()))
+
+    calls = {"migrate": 0}
+    real = kb._migrate_add_optional_columns
+
+    def counting(conn):
+        calls["migrate"] += 1
+        return real(conn)
+
+    monkeypatch.setattr(kb, "_migrate_add_optional_columns", counting)
+    conn = kb.connect(db_path=db)
+    try:
+        assert calls["migrate"] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == kb._SCHEMA_STAMP
+    finally:
+        conn.close()
+
+
+def test_init_db_forces_migration_pass_despite_stamp(tmp_path, monkeypatch):
+    """``init_db`` promises an unconditional re-migration; the on-disk stamp
+    must not short-circuit it."""
+    db = tmp_path / "kanban.db"
+    kb.connect(db_path=db).close()  # stamped now
+
+    calls = {"migrate": 0}
+    real = kb._migrate_add_optional_columns
+
+    def counting(conn):
+        calls["migrate"] += 1
+        return real(conn)
+
+    monkeypatch.setattr(kb, "_migrate_add_optional_columns", counting)
+    kb.init_db(db_path=db)
+    assert calls["migrate"] == 1
+
+
+def test_busy_timeout_override_applies_per_connection(tmp_path):
+    db = tmp_path / "kanban.db"
+    kb.connect(db_path=db).close()
+
+    conn = kb.connect(db_path=db, busy_timeout_ms=4321)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 4321
+    finally:
+        conn.close()
+
+    conn = kb.connect(db_path=db)
+    try:
+        assert (
+            conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            == kb.DEFAULT_BUSY_TIMEOUT_MS
+        )
+    finally:
+        conn.close()
+
+
+def test_fast_path_applies_connection_pragmas(tmp_path):
+    """The stamped fast path must produce a connection indistinguishable from
+    the init path: same per-connection PRAGMAs, WAL still active."""
+    db = tmp_path / "kanban.db"
+    kb.connect(db_path=db).close()
+    kb._INITIALIZED_PATHS.discard(str(db.resolve()))
+
+    conn = kb.connect(db_path=db)
+    try:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        assert conn.execute("PRAGMA cell_size_check").fetchone()[0] == 1
+    finally:
+        conn.close()

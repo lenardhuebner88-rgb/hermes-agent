@@ -1362,6 +1362,25 @@ _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
 
+# Bump when the migration pass (_migrate_add_optional_columns /
+# _rebuild_drifted_tables) changes WITHOUT a matching SCHEMA_SQL change —
+# e.g. a new data backfill or event-kind rename. Schema changes themselves
+# already invalidate the stamp via the SCHEMA_SQL hash below.
+_SCHEMA_GENERATION = 1
+
+# Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
+# successful schema+migration pass. A connect() that finds this exact stamp
+# in the DB header can skip the exclusive cross-process file lock, the
+# integrity probe and the whole migration pass — the expensive first-connect
+# work that used to run once per *process* (every worker spawn) and, under
+# the flock + 120s busy timeout, could stall every dashboard request for
+# minutes behind one slow init. 31-bit (user_version is a signed 32-bit
+# int) and never 0 (0 = "unstamped legacy DB" → full init path).
+_SCHEMA_STAMP = int.from_bytes(
+    hashlib.sha256(f"{_SCHEMA_GENERATION}:{SCHEMA_SQL}".encode()).digest()[:4],
+    "big",
+) & 0x7FFFFFFF or 1
+
 
 def _resolve_busy_timeout_ms() -> int:
     """Return the SQLite busy timeout for Kanban connections.
@@ -1381,9 +1400,18 @@ def _resolve_busy_timeout_ms() -> int:
     return DEFAULT_BUSY_TIMEOUT_MS
 
 
-def _sqlite_connect(path: Path) -> sqlite3.Connection:
-    """Open a Kanban SQLite connection with consistent lock waiting."""
-    busy_timeout_ms = _resolve_busy_timeout_ms()
+def _sqlite_connect(
+    path: Path, busy_timeout_ms: Optional[int] = None
+) -> sqlite3.Connection:
+    """Open a Kanban SQLite connection with consistent lock waiting.
+
+    ``busy_timeout_ms`` overrides the default (env-resolved, 120s) wait.
+    Read-mostly callers like the dashboard pass a few seconds: surfacing a
+    busy error quickly beats a 2-minute request hang (the SPA has its own
+    GET timeout + retry/backoff).
+    """
+    if busy_timeout_ms is None or busy_timeout_ms <= 0:
+        busy_timeout_ms = _resolve_busy_timeout_ms()
     conn = sqlite3.connect(
         str(path),
         isolation_level=None,
@@ -1394,6 +1422,65 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     # changes. Parameter binding is not supported for PRAGMA assignments.
     conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     return conn
+
+
+def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
+    """Per-connection PRAGMAs (not persisted in the DB file).
+
+    Shared by the init path and the stamped fast path so both connection
+    flavours behave identically. ``journal_mode=WAL`` is NOT here: it is
+    persisted in the DB header by the init path (apply_wal_with_fallback)
+    and re-applying it per connect is wasted work.
+    """
+    # FULL (was NORMAL): fsync before each checkpoint to narrow the
+    # crash window that can leave a b-tree page header torn.
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA wal_autocheckpoint=100")
+    conn.execute("PRAGMA foreign_keys=ON")
+    # Zero freed pages so a later torn write cannot expose stale
+    # cell content; persisted in the DB header for new DBs.
+    conn.execute("PRAGMA secure_delete=ON")
+    # Surface corrupt cells as read errors instead of silent
+    # wrong-data returns.
+    conn.execute("PRAGMA cell_size_check=ON")
+
+
+def _try_fast_connect(
+    path: Path, resolved: str, busy_timeout_ms: Optional[int] = None
+) -> Optional[sqlite3.Connection]:
+    """Fast path: connect without the cross-process init lock.
+
+    Succeeds only when the DB is already fully initialized — either proven
+    by this process (``_INITIALIZED_PATHS``) or stamped in the DB header by
+    any process (``PRAGMA user_version == _SCHEMA_STAMP``). Returns ``None``
+    on any doubt (missing/empty/corrupt file, legacy stamp, schema drift)
+    so the caller falls back to the full flock+init+integrity path.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    try:
+        conn = _sqlite_connect(path, busy_timeout_ms)
+    except sqlite3.Error:
+        return None
+    try:
+        if resolved not in _INITIALIZED_PATHS:
+            row = conn.execute("PRAGMA user_version").fetchone()
+            if row is None or int(row[0]) != _SCHEMA_STAMP:
+                conn.close()
+                return None
+        conn.row_factory = sqlite3.Row
+        _apply_connection_pragmas(conn)
+        _INITIALIZED_PATHS.add(resolved)
+        return conn
+    except sqlite3.Error:
+        # Unreadable header / corrupt file / locked beyond the busy timeout:
+        # let the slow path produce the canonical error handling.
+        with contextlib.suppress(Exception):
+            conn.close()
+        return None
 
 
 @contextlib.contextmanager
@@ -1657,16 +1744,27 @@ def connect(
     db_path: Optional[Path] = None,
     *,
     board: Optional[str] = None,
+    busy_timeout_ms: Optional[int] = None,
+    force_init: bool = False,
 ) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB.
 
-    WAL mode is enabled on every connection; it's a no-op after the first
-    time but keeps the code robust if the DB file is ever re-created.
+    The first connection to a given path auto-runs the schema+migration
+    pass so fresh installs and test harnesses that construct `connect()`
+    directly don't have to remember a separate init step. A successful
+    pass stamps ``PRAGMA user_version`` with :data:`_SCHEMA_STAMP`;
+    subsequent connects — including the first one of every NEW process —
+    see the stamp and take :func:`_try_fast_connect`, skipping the
+    exclusive cross-process file lock, header/integrity probes, WAL
+    re-activation and the migration pass entirely. Before the stamp this
+    full path ran once per process under the flock, so a single slow init
+    (or a stuck flock holder) serialized every dashboard request behind a
+    120s busy timeout.
 
-    The first connection to a given path auto-runs :func:`init_db` so
-    fresh installs and test harnesses that construct `connect()`
-    directly don't have to remember a separate init step. Subsequent
-    connections skip the schema check via a module-level path cache.
+    ``busy_timeout_ms`` overrides the lock-wait budget for this
+    connection only (dashboard reads pass a few seconds). ``force_init``
+    (used by :func:`init_db`) bypasses the fast path and re-runs the full
+    schema + migration pass under the cross-process lock.
 
     Path resolution:
 
@@ -1681,7 +1779,19 @@ def connect(
     else:
         path = kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = str(path.resolve())
+    if not force_init:
+        fast = _try_fast_connect(path, resolved, busy_timeout_ms)
+        if fast is not None:
+            return fast
     with _cross_process_init_lock(path):
+        if not force_init:
+            # Re-check under the lock: another process may have finished the
+            # init while we waited for the flock — its stamp lets us skip the
+            # heavy pass.
+            fast = _try_fast_connect(path, resolved, busy_timeout_ms)
+            if fast is not None:
+                return fast
         # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
         # and other invalid-header cases without opening a sqlite connection.
         _validate_sqlite_header(path)
@@ -1689,8 +1799,7 @@ def connect(
         # pages, broken internal metadata). Cached per-path after first success
         # via _INITIALIZED_PATHS so it only runs once per process per path.
         _guard_existing_db_is_healthy(path)
-        resolved = str(path.resolve())
-        conn = _sqlite_connect(path)
+        conn = _sqlite_connect(path, busy_timeout_ms)
         try:
             conn.row_factory = sqlite3.Row
             with _INIT_LOCK:
@@ -1703,27 +1812,17 @@ def connect(
                 # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
                 from hermes_state import apply_wal_with_fallback
                 apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-                # FULL (was NORMAL): fsync before each checkpoint to narrow the
-                # crash window that can leave a b-tree page header torn.
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
-                conn.execute("PRAGMA foreign_keys=ON")
-                # Zero freed pages so a later torn write cannot expose stale
-                # cell content; persisted in the DB header for new DBs.
-                conn.execute("PRAGMA secure_delete=ON")
-                # Surface corrupt cells as read errors instead of silent
-                # wrong-data returns.
-                conn.execute("PRAGMA cell_size_check=ON")
-                needs_init = resolved not in _INITIALIZED_PATHS
-                if needs_init:
-                    # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
-                    # migrations. Cached so subsequent connect() calls in the same
-                    # process are cheap. The lock prevents same-process dispatcher
-                    # threads from racing through the additive ALTER TABLE pass with
-                    # stale PRAGMA snapshots during gateway startup.
-                    conn.executescript(SCHEMA_SQL)
-                    _migrate_add_optional_columns(conn)
-                    _INITIALIZED_PATHS.add(resolved)
+                _apply_connection_pragmas(conn)
+                # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
+                # migrations. The lock prevents same-process dispatcher
+                # threads from racing through the additive ALTER TABLE pass with
+                # stale PRAGMA snapshots during gateway startup.
+                conn.executescript(SCHEMA_SQL)
+                _migrate_add_optional_columns(conn)
+                # Persist the cross-process stamp LAST: a stamp is only ever
+                # written over a schema that completed the full pass.
+                conn.execute(f"PRAGMA user_version={_SCHEMA_STAMP}")
+                _INITIALIZED_PATHS.add(resolved)
         except Exception:
             conn.close()
             raise
@@ -1735,6 +1834,7 @@ def connect_closing(
     db_path: Optional[Path] = None,
     *,
     board: Optional[str] = None,
+    busy_timeout_ms: Optional[int] = None,
 ):
     """Open a kanban DB connection and guarantee it is closed on exit.
 
@@ -1755,7 +1855,7 @@ def connect_closing(
     intentionally manage the connection lifetime (tests, long-lived
     callers) continue to work.
     """
-    conn = connect(db_path=db_path, board=board)
+    conn = connect(db_path=db_path, board=board, busy_timeout_ms=busy_timeout_ms)
     try:
         yield conn
     finally:
@@ -1786,11 +1886,12 @@ def init_db(
         path = kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = str(path.resolve())
-    # Clear the cache entry so the underlying connect() re-runs the
-    # schema + migration pass unconditionally.
+    # Clear the cache entry so the integrity probe re-runs, and force the
+    # full init path (the on-disk _SCHEMA_STAMP would otherwise satisfy the
+    # fast path and skip the migration pass this entry point promises).
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(resolved)
-    with contextlib.closing(connect(path)):
+    with contextlib.closing(connect(path, force_init=True)):
         pass
     return path
 

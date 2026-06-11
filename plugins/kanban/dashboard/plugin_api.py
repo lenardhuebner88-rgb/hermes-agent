@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import re
 import sqlite3
 import time
@@ -159,6 +160,22 @@ def _resolve_board(board: Optional[str]) -> Optional[str]:
     return normed
 
 
+def _resolve_dashboard_busy_timeout_ms() -> int:
+    """Lock-wait budget for dashboard DB connections (ms), env-overridable."""
+    raw = os.environ.get("HERMES_KANBAN_DASHBOARD_BUSY_TIMEOUT_MS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return 5_000
+
+
+_DASHBOARD_BUSY_TIMEOUT_MS = _resolve_dashboard_busy_timeout_ms()
+
+
 def _conn(board: Optional[str] = None):
     """Open a kanban_db connection, creating the schema on first use.
 
@@ -180,8 +197,13 @@ def _conn(board: Optional[str] = None):
     ``board`` is the query-param slug (already normalised by
     :func:`_resolve_board`). When ``None`` the active board is used
     via the resolution chain (env var → ``current`` file → ``default``).
+
+    Dashboard connections wait at most ``_DASHBOARD_BUSY_TIMEOUT_MS`` (5s
+    default) on a locked DB instead of kanban's 120s worker default: the
+    SPA has its own GET timeout + retry/backoff, so a fast 5xx beats a
+    request that pins a server thread for two minutes.
     """
-    return kanban_db.connect(board=board)
+    return kanban_db.connect(board=board, busy_timeout_ms=_DASHBOARD_BUSY_TIMEOUT_MS)
 
 
 # ---------------------------------------------------------------------------
