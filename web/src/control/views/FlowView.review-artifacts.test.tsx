@@ -37,7 +37,7 @@ const resultArtifact: TaskArtifactLink = {
 };
 
 const noop = vi.fn();
-const noopAct = vi.fn((_task: BoardTask, _action: StageAction) => undefined);
+const noopAct = vi.fn<(task: BoardTask, action: StageAction) => undefined>();
 
 describe("FlowView review gate and RESULT artifacts", () => {
   it("active-verifier fixture hides Ausliefern and shows Verifier läuft", () => {
