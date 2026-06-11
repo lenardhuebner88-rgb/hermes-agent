@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { testFoundryStatusPollIntervalMs, type TestFoundryStatus } from "./useControlData";
+import {
+  countLibraryUnread,
+  testFoundryStatusPollIntervalMs,
+  type TestFoundryStatus,
+} from "./useControlData";
 
 function status(state: TestFoundryStatus["state"]): TestFoundryStatus {
   return {
@@ -18,5 +22,28 @@ describe("useTestFoundry status polling", () => {
     expect(testFoundryStatusPollIntervalMs(status("idle"))).toBeNull();
     expect(testFoundryStatusPollIntervalMs(status("error"))).toBeNull();
     expect(testFoundryStatusPollIntervalMs(status("running"))).toBe(5000);
+  });
+});
+
+describe("countLibraryUnread (Bibliothek-Badge)", () => {
+  const items = [
+    { ts: 100, category: "briefings" },
+    { ts: 200, category: "wartung" },
+    { ts: 300, category: "news" },
+    { ts: 400 }, // Kategorie fehlt → zählt (fail-soft)
+  ];
+
+  it("zählt nur Einträge neuer als der letzte Besuch", () => {
+    expect(countLibraryUnread(items, 250)).toBe(2); // news + ohne Kategorie
+    expect(countLibraryUnread(items, 500)).toBe(0);
+  });
+
+  it("ignoriert wartung-Einträge (Routine-Rauschen bumpt das Badge nicht)", () => {
+    expect(countLibraryUnread(items, 50)).toBe(3); // alle außer wartung
+    expect(countLibraryUnread([{ ts: 999, category: "wartung" }], 50)).toBe(0);
+  });
+
+  it("Erstbesuch ohne Stempel zählt nichts", () => {
+    expect(countLibraryUnread(items, 0)).toBe(0);
   });
 });

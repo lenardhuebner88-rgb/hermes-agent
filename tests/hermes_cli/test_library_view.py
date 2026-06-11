@@ -192,6 +192,50 @@ def test_cron_collector_cache_and_per_job_cap(kanban_home):
     assert "2026-06-10_07-31-09.md" not in set(names)
 
 
+def test_silent_outputs_are_filtered_fresh_and_from_warm_cache(kanban_home):
+    """Entrauschung: [SILENT]-Ausgaben (Selbstauskunft "nichts Neues")
+    erscheinen nie im Lesesaal — weder beim Frisch-Parse noch über den
+    Cache-Hit-Pfad (Regression: bestehende positive Cache-Einträge müssen
+    NACH dem Cache-Read gefiltert werden)."""
+    store = kanban_home / "cron"
+    _write_cron_store(
+        store, job_id="16dd6ac01fc0", name="Evening Kanban Review",
+        filename="2026-06-10_21-00-00.md", response="[SILENT]",
+    )
+    out_dir = store / "output" / "16dd6ac01fc0"
+    (out_dir / "2026-06-11_21-00-00.md").write_text(
+        "## Response\n\nEchter Abend-Report.\n", encoding="utf-8",
+    )
+    fresh = lv._collect_cron_items(with_bodies=True)
+    assert [i.body_md for i in fresh] == ["Echter Abend-Report."]
+    # Warm-Cache-Lauf: SILENT bleibt draußen, der echte Report drin
+    warm = lv._collect_cron_items(with_bodies=False)
+    assert [i.preview for i in warm] == ["Echter Abend-Report."]
+    # Regression Hit-Pfad: ein VOR dem Filter gecachtes SILENT-Item (z.B. aus
+    # einer Prozess-Laufzeit vor dem Deploy) darf nicht ausgeliefert werden.
+    silent_path = str(out_dir / "2026-06-10_21-00-00.md")
+    assert silent_path in lv._cron_parse_cache
+    assert lv._cron_parse_cache[silent_path][3] is not None  # positiv gecacht
+    # Markervarianten bleiben toleriert (uppercased-Check wie Delivery-Skip)
+    (out_dir / "2026-06-12_21-00-00.md").write_text(
+        "## Response\n\nKein Update — [silent]\n", encoding="utf-8",
+    )
+    mixed = lv._collect_cron_items(with_bodies=False)
+    assert [i.preview for i in mixed] == ["Echter Abend-Report."]
+
+
+def test_wartung_items_stay_listed(kanban_home):
+    """Der SILENT-Filter ist kein Kategorie-Filter: echte wartung-Ausgaben
+    bleiben im Lesesaal gelistet (nur das Badge ignoriert sie)."""
+    _write_cron_store(
+        kanban_home / "cron", job_id="16dd6ac01fc0", name="Repo Audit nightly",
+        filename="2026-06-10_03-00-00.md", response="Audit-Befund: alles ok.",
+    )
+    listing = lv._list_items("wartung", None, 10)
+    assert listing["count"] == 1
+    assert listing["items"][0]["category"] == "wartung"
+
+
 def test_deliverable_adapter_lists_markdown(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="Build X")

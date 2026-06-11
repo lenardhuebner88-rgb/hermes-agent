@@ -1324,7 +1324,20 @@ export function useDecisionInbox(): DecisionInboxData {
 const LIBRARY_LAST_VISIT_KEY = "hc-bibliothek-last-visit";
 
 interface LibraryItemsLite {
-  items?: { ts?: number }[];
+  items?: { ts?: number; category?: string }[];
+}
+
+// Pure Zähllogik (testbar): "ungelesen" = neuer als der letzte Besuch UND
+// kein wartung-Routine-Rauschen — das Badge soll "Neues, das dich
+// interessiert" bedeuten.
+export function countLibraryUnread(
+  items: { ts?: number; category?: string }[],
+  since: number,
+): number {
+  if (!since) return 0;
+  return items.filter(
+    (i) => (i.ts ?? 0) > since && i.category !== "wartung",
+  ).length;
 }
 
 export function useLibraryUnread(): number {
@@ -1340,6 +1353,5 @@ export function useLibraryUnread(): number {
     /* private mode */
   }
   // Erstbesuch (kein Stempel): nichts anbrüllen — der Tab ist Einladung genug.
-  if (!since) return 0;
-  return (state.data?.items ?? []).filter((i) => (i.ts ?? 0) > since).length;
+  return countLibraryUnread(state.data?.items ?? [], since);
 }

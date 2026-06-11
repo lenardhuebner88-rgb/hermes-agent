@@ -159,6 +159,19 @@ def _preview(body: str) -> str:
     return flat[:_PREVIEW_CHARS]
 
 
+# Entrauschung 2026-06-11: ``[SILENT]``-Ausgaben sind die Selbstauskunft
+# "nichts Neues" (LLM-Pfad schreibt sie trotzdem als Output-File) — kein
+# Lesestoff. Check tolerant wie der Delivery-Skip des Schedulers
+# (SILENT_MARKER irgendwo im Inhalt, uppercased). Wichtig: Filter NACH dem
+# Cache-Read anwenden, nie als Negativ-Eintrag cachen — sonst würden
+# bestehende positive Cache-Einträge über den Hit-Pfad weiter ausgeliefert.
+_SILENT_MARKER = "[SILENT]"
+
+
+def _is_silent(item: _Item) -> bool:
+    return _SILENT_MARKER in (item.body_md or item.preview or "").upper()
+
+
 @dataclass
 class _Item:
     id: str
@@ -258,7 +271,7 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     and cached[1] == stat.st_size
                     and cached[2] == meta_fp
                 ):
-                    if cached[3] is not None:
+                    if cached[3] is not None and not _is_silent(cached[3]):
                         items.append(
                             cached[3] if with_bodies
                             else _dc_replace(cached[3], body_md=None)
@@ -296,6 +309,8 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                 _cron_parse_cache[cache_key] = (
                     stat.st_mtime_ns, stat.st_size, meta_fp, item,
                 )
+                if _is_silent(item):
+                    continue
                 items.append(item if with_bodies else _dc_replace(item, body_md=None))
     # Einträge verschwundener/rotierter Dateien nicht endlos halten.
     for stale in set(_cron_parse_cache) - seen_paths:
