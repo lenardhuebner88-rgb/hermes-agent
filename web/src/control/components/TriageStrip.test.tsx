@@ -3,9 +3,10 @@ import {
   ESCALATION_MODEL,
   ESCALATION_PROFILE,
   effectiveRuntime,
+  escalationPatchSequence,
   escalationPlan,
   type LanesRuntimeInfo,
-} from "./TriageStrip";
+} from "../views/lanes/api";
 
 // „Nochmal stärker" muss auf jedem Profil wirklich stärker sein: auf
 // Nicht-claude-cli-Runtimes (ohne Anthropic-Key fiele der Worker still aufs
@@ -20,19 +21,19 @@ const LANES: LanesRuntimeInfo = {
       id: "lane_api",
       active: true,
       profiles: {
-        research: { worker_runtime: "hermes" },
-        premium: { worker_runtime: "claude-cli" },
+        research: { worker_runtime: "hermes", kanban_spawn_health: { status: "healthy" } },
+        premium: { worker_runtime: "claude-cli", kanban_spawn_health: { status: "healthy" } },
       },
     },
     {
       id: "lane_max",
       active: false,
-      profiles: { research: { worker_runtime: "claude-cli" } },
+      profiles: { research: { worker_runtime: "claude-cli", kanban_spawn_health: { status: "healthy" } } },
     },
   ],
   profiles: [
-    { name: "research", worker_runtime: "hermes" },
-    { name: "coder-claude", worker_runtime: "claude-cli" },
+    { name: "research", worker_runtime: "hermes", kanban_spawn_health: { status: "healthy" } },
+    { name: "coder-claude", worker_runtime: "claude-cli", kanban_spawn_health: { status: "healthy" } },
   ],
 };
 
@@ -74,8 +75,54 @@ describe("escalationPlan", () => {
 
   it("ohne Katalog (fetch fehlgeschlagen) → fail-soft: kein Umhängen, neutraler Hint", () => {
     const plan = escalationPlan("research", null);
+    expect(plan.disabled).toBe(false);
     expect(plan.reassigns).toBe(false);
     expect(plan.warns).toBe(false);
     expect(plan.patch).toEqual({ model_override: ESCALATION_MODEL });
+  });
+
+  it("unhealthy premium-Ziellane → blockiert Nochmal stärker mit sicherem Alternativ-Hinweis", () => {
+    const lanes: LanesRuntimeInfo = {
+      ...LANES,
+      lanes: LANES.lanes?.map((lane) => lane.active ? {
+        ...lane,
+        profiles: {
+          ...lane.profiles,
+          premium: {
+            worker_runtime: "claude-cli",
+            kanban_spawn_health: {
+              status: "unhealthy",
+              reason: "Unknown skill(s): kanban-worker",
+            },
+          },
+        },
+      } : lane),
+    };
+
+    const plan = escalationPlan("research", lanes);
+
+    expect(plan.disabled).toBe(true);
+    expect(plan.reassigns).toBe(false);
+    expect(plan.warns).toBe(true);
+    expect(plan.patch).toBeNull();
+    expect(plan.hint).toContain("premium");
+    expect(plan.hint).toContain("Unknown skill(s): kanban-worker");
+    expect(plan.hint).toContain("Nochmal");
+    expect(plan.hint).toContain("Operator");
+  });
+
+  it("disabled escalation path liefert keine PATCH-Bodies", () => {
+    const plan = escalationPlan("research", {
+      ...LANES,
+      lanes: LANES.lanes?.map((lane) => lane.active ? {
+        ...lane,
+        profiles: {
+          ...lane.profiles,
+          premium: { worker_runtime: "claude-cli", kanban_spawn_health: { status: "unhealthy" } },
+        },
+      } : lane),
+    });
+
+    expect(escalationPatchSequence(plan)).toEqual([]);
   });
 });
