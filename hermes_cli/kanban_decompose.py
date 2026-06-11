@@ -1226,7 +1226,12 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Return task ids currently in the triage column.
+
+    Demand-Funnel-Vorschläge (``created_by`` in ``kb.FUNNEL_CREATED_BY``)
+    sind ausgenommen: sie warten auf den Operator-Tap (Annahme = PATCH
+    status→ready) und dürfen nie vom Auto-Decomposer gestartet werden.
+    """
     with kb.connect_closing() as conn:
         rows = kb.list_tasks(
             conn,
@@ -1234,7 +1239,8 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             limit=1000,
         )
-    return [row.id for row in rows]
+    return [row.id for row in rows
+            if (row.created_by or "") not in kb.FUNNEL_CREATED_BY]
 
 
 # ---------------------------------------------------------------------------

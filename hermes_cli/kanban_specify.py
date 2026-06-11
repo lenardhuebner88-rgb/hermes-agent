@@ -262,6 +262,9 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column.
 
     ``tenant`` narrows the sweep; ``None`` returns every triage task.
+    Demand-Funnel-Vorschläge (``created_by`` in ``kb.FUNNEL_CREATED_BY``)
+    sind ausgenommen — sie warten auf den Operator-Tap. Ein explizites
+    ``hermes kanban specify <task_id>`` bleibt möglich.
     """
     with kb.connect_closing() as conn:
         tasks = kb.list_tasks(
@@ -270,4 +273,5 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             include_archived=False,
         )
-    return [t.id for t in tasks]
+    return [t.id for t in tasks
+            if (t.created_by or "") not in kb.FUNNEL_CREATED_BY]

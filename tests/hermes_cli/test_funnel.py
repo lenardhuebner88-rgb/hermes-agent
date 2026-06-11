@@ -119,3 +119,21 @@ def test_archive_stale_archives_only_old_proposals(conn):
     assert kb.get_task(conn, fresh_id).status == "triage"
     # Idempotent: zweiter Lauf archiviert nichts mehr.
     assert funnel.archive_stale(conn, now=now) == []
+
+
+# --- Auto-Decomposer-Exemption (Contract: nichts startet ohne Operator-Tap) --
+
+
+def test_auto_paths_skip_funnel_proposals(conn):
+    from hermes_cli import kanban_decompose, kanban_specify
+
+    wish_id = funnel.create_wish(
+        conn, title="funnel wartet auf piet", body="b", created_by="fo-gap-audit",
+    )
+    normal_id = kb.create_task(
+        conn, title="normale idee", created_by="dashboard", triage=True,
+    )
+
+    for ids in (kanban_decompose.list_triage_ids(), kanban_specify.list_triage_ids()):
+        assert normal_id in ids
+        assert wish_id not in ids
