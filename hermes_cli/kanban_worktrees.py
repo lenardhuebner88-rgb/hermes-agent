@@ -525,6 +525,14 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
         shutil.rmtree(wt_path, ignore_errors=True)
     # -d (not -D): only delete when actually merged.
     _git(repo_root, "branch", "-d", branch, check=False)
+    # Tidy empty namespace dirs so a fully-drained repo has no .worktrees/
+    # residue (best-effort: rmdir only succeeds on empty dirs).
+    base = Path(repo_root) / WORKTREES_DIRNAME
+    for d in (base / WORKTREES_NAMESPACE, base):
+        try:
+            d.rmdir()
+        except OSError:
+            break
 
 
 def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[str]:
@@ -570,6 +578,10 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
     ruff_cmd = [ruff_bin, "check", "."] if ruff_bin else [
         sys.executable, "-m", "ruff", "check", "."
     ]
+    # Other chains' worktrees live under .worktrees/ in the SAME repo —
+    # their in-progress state must never fail THIS chain's gate (observed
+    # in the 2026-06-11 gate probe: ruff also flagged the worktree copy).
+    ruff_cmd += ["--extend-exclude", WORKTREES_DIRNAME]
     err = _run("ruff", ruff_cmd, repo_root, 300)
     if err:
         return False, err
