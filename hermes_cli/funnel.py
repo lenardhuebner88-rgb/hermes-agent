@@ -88,7 +88,12 @@ def archive_stale(
 DRAFT_WINDOW_DAYS = 30
 _DRAFT_EXCERPT_MIN = 120
 _DRAFT_EXCERPT_MAX = 1500
+_DRAFT_TEXT_MAX = 12_000
+_OPERATOR_EDIT_MAX = 60_000
 _BUILD_TITLE_LIMIT = 80
+
+OPERATOR_EDIT_MARKER = "# Operator-edited PlanSpec"
+REVISION_REQUEST_MARKER = "Revision angefordert"
 
 APPROVE_BODY_TEMPLATE = (
     "Freigegebener Funnel-Draft — jetzt umsetzen.\n\n"
@@ -100,9 +105,25 @@ APPROVE_BODY_TEMPLATE = (
     "Lane-Governance. Bei unklarem Scope: blocken statt raten."
 )
 
+REVISION_BODY_TEMPLATE = (
+    "Funnel-Draft zur Überarbeitung.\n\n"
+    "Quelle: „{title}“ ({task_id}, created_by={created_by}).\n\n"
+    "Aktuelle Plan-Spec / Operator-Fassung:\n{draft_text}\n\n"
+    "Operator-Input:\n{operator_note}\n\n"
+    "Done-Condition: Überarbeite die Plan-Spec so, dass der Operator-Input "
+    "explizit abgedeckt ist. Kommentiere die überarbeitete Plan-Spec als "
+    "letzten substantiellen Kommentar und complete den Task. Keine Build-"
+    "Umsetzung starten; es geht nur um den revidierten Draft."
+)
 
-def _draft_excerpt(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """Jüngster substanzieller Kommentar (= der Draft) eines Funnel-Tasks."""
+
+def draft_text(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    max_chars: int = _DRAFT_TEXT_MAX,
+) -> Optional[str]:
+    """Jüngster substanzieller Kommentar (= aktueller kanonischer Draft)."""
     rows = conn.execute(
         "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC",
         (task_id,),
@@ -110,8 +131,13 @@ def _draft_excerpt(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     for r in rows:
         body = (r["body"] or "").strip()
         if len(body) >= _DRAFT_EXCERPT_MIN and not body.startswith("BLOCKED:"):
-            return body[:_DRAFT_EXCERPT_MAX]
+            return body[:max(1, int(max_chars))]
     return None
+
+
+def _draft_excerpt(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Abwärtskompatibler kurzer Ausschnitt des kanonischen Drafts."""
+    return draft_text(conn, task_id, max_chars=_DRAFT_EXCERPT_MAX)
 
 
 def _is_funnel_root(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -125,6 +151,74 @@ def _is_funnel_root(conn: sqlite3.Connection, task_id: str) -> bool:
         "SELECT 1 FROM task_links WHERE child_id = ? LIMIT 1", (task_id,),
     ).fetchone()
     return row is None
+
+
+def _require_funnel_draft(conn: sqlite3.Connection, task_id: str) -> kb.Task:
+    """Validate that ``task_id`` is currently actionable in the release queue."""
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"Task {task_id} nicht gefunden")
+    if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
+        raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
+    if not _is_funnel_root(conn, task_id):
+        raise ValueError(
+            f"{task_id} ist kein Funnel-Root (hat Eltern) — Build-Kinder "
+            "gehören nicht in die Freigabe-Queue"
+        )
+    if task.status != "done":
+        raise ValueError(f"{task_id} ist nicht fertig (status={task.status}) — erst der fertige Draft wird freigegeben")
+    has_child = conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1", (task_id,),
+    ).fetchone()
+    if has_child:
+        raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
+    return task
+
+
+def _revision_of(body: Optional[str]) -> Optional[str]:
+    if not body:
+        return None
+    match = re.search(r"Revision von:\s*(t_[A-Za-z0-9]+)", body)
+    return match.group(1) if match else None
+
+
+def draft_dict(conn: sqlite3.Connection, task: kb.Task) -> dict:
+    text = draft_text(conn, task.id)
+    return {
+        "id": task.id,
+        "title": task.title,
+        "created_by": task.created_by,
+        "assignee": task.assignee,
+        "completed_at": task.completed_at,
+        "draft_excerpt": _draft_excerpt(conn, task.id),
+        "draft_text": text,
+        "operator_edited": bool(text and text.startswith(OPERATOR_EDIT_MARKER)),
+        "revision_of": _revision_of(task.body),
+    }
+
+
+def _format_operator_edit(draft_text: str, operator_note: str = "") -> str:
+    body = f"{OPERATOR_EDIT_MARKER}\n\n{draft_text.strip()}"
+    note = (operator_note or "").strip()
+    if note:
+        body += f"\n\n---\nOperator-Input:\n{note}"
+    return body
+
+
+def _validate_operator_draft_text(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        raise ValueError("draft_text darf nicht leer sein")
+    if len(text) > _OPERATOR_EDIT_MAX:
+        raise ValueError(f"draft_text ist zu lang (max {_OPERATOR_EDIT_MAX} Zeichen)")
+    return text
+
+
+def _revision_title(title: str) -> str:
+    base = title if (title or "").startswith("Überarbeiten: ") else f"Überarbeiten: {title}"
+    if len(base) > _BUILD_TITLE_LIMIT:
+        return base[: _BUILD_TITLE_LIMIT - 1].rstrip() + "…"
+    return base
 
 
 def list_drafts(
@@ -145,7 +239,7 @@ def list_drafts(
     cutoff = now - max(1, int(days)) * 86400
     placeholders = ",".join("?" for _ in kb.FUNNEL_CREATED_BY)
     rows = conn.execute(
-        "SELECT id, title, created_by, assignee, completed_at FROM tasks "
+        "SELECT * FROM tasks "
         f"WHERE created_by IN ({placeholders}) AND status = 'done' "
         "AND completed_at IS NOT NULL AND completed_at >= ? "
         "AND id NOT IN (SELECT DISTINCT parent_id FROM task_links) "
@@ -154,14 +248,7 @@ def list_drafts(
         (*kb.FUNNEL_CREATED_BY, cutoff),
     ).fetchall()
     return [
-        {
-            "id": r["id"],
-            "title": r["title"],
-            "created_by": r["created_by"],
-            "assignee": r["assignee"],
-            "completed_at": r["completed_at"],
-            "draft_excerpt": _draft_excerpt(conn, r["id"]),
-        }
+        draft_dict(conn, kb.Task.from_row(r))
         for r in rows
     ]
 
@@ -179,23 +266,7 @@ def approve_draft(
     ``ready`` (Parent ist done) — der Dispatcher übernimmt. Raises ValueError
     mit Begründung, wenn der Task kein freigabefähiger Draft ist.
     """
-    task = kb.get_task(conn, task_id)
-    if task is None:
-        raise ValueError(f"Task {task_id} nicht gefunden")
-    if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
-        raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
-    if not _is_funnel_root(conn, task_id):
-        raise ValueError(
-            f"{task_id} ist kein Funnel-Root (hat Eltern) — Build-Kinder sind "
-            "nicht erneut freigabefähig"
-        )
-    if task.status != "done":
-        raise ValueError(f"{task_id} ist nicht fertig (status={task.status}) — erst der fertige Draft wird freigegeben")
-    has_child = conn.execute(
-        "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1", (task_id,),
-    ).fetchone()
-    if has_child:
-        raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
+    task = _require_funnel_draft(conn, task_id)
 
     # Präfix idempotent halten: tippt die Familie den Wunsch selbst schon als
     # "Umsetzen: …", darf der Build-Titel nicht weiter stapeln.
@@ -224,26 +295,57 @@ def dismiss_draft(conn: sqlite3.Connection, task_id: str) -> None:
     Gleiche Gültigkeitsregeln wie :func:`approve_draft` — nur Einträge der
     Freigabe-Queue (fertiger Funnel-Root ohne Build-Kind) sind verwerfbar.
     """
-    task = kb.get_task(conn, task_id)
-    if task is None:
-        raise ValueError(f"Task {task_id} nicht gefunden")
-    if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
-        raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
-    if not _is_funnel_root(conn, task_id):
-        raise ValueError(
-            f"{task_id} ist kein Funnel-Root (hat Eltern) — Build-Kinder "
-            "gehören nicht in die Freigabe-Queue"
-        )
-    if task.status != "done":
-        raise ValueError(f"{task_id} ist nicht in der Freigabe-Queue (status={task.status})")
-    has_child = conn.execute(
-        "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1", (task_id,),
-    ).fetchone()
-    if has_child:
-        raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
+    _require_funnel_draft(conn, task_id)
     kb.add_comment(conn, task_id, "operator",
                    "Verworfen über die Funnel-Freigabe-Queue — kein Build.")
     kb.archive_task(conn, task_id)
+
+
+def save_draft_edit(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    draft_text: str,
+    operator_note: str = "",
+) -> dict:
+    """Persist an operator-edited PlanSpec as the newest canonical draft."""
+    task = _require_funnel_draft(conn, task_id)
+    text = _validate_operator_draft_text(draft_text)
+    kb.add_comment(conn, task_id, "operator", _format_operator_edit(text, operator_note))
+    return draft_dict(conn, task)
+
+
+def request_revision(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    draft_text: str,
+    operator_note: str = "",
+    assignee_fallback: str = "coder",
+) -> str:
+    """Archive the current draft and create a new root for re-specification."""
+    task = _require_funnel_draft(conn, task_id)
+    text = _validate_operator_draft_text(draft_text)
+    note = (operator_note or "").strip() or "(kein separater Operator-Input)"
+    new_id = kb.create_task(
+        conn,
+        title=_revision_title(task.title),
+        body=(
+            f"Revision von: {task_id}\n\n" + REVISION_BODY_TEMPLATE.format(
+                title=task.title,
+                task_id=task_id,
+                created_by=task.created_by,
+                draft_text=text,
+                operator_note=note,
+            )
+        ),
+        created_by=task.created_by,
+        assignee=task.assignee or assignee_fallback,
+        parents=(),
+    )
+    kb.add_comment(conn, task_id, "operator", f"{REVISION_REQUEST_MARKER} → {new_id}")
+    kb.archive_task(conn, task_id)
+    return new_id
 
 
 def create_wish(

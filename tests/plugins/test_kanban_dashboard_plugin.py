@@ -131,6 +131,62 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(client, monkeypatch):
+    """A transient corrupt-open signal must not make the Flow board vanish.
+
+    Runtime evidence for the Discord-vorfilter incident showed a dashboard
+    ``GET /board`` request failing at the DB-open boundary with
+    ``KanbanDbCorruptError`` while a fresh integrity probe immediately after was
+    healthy.  The dashboard should retry that one transient open and still return
+    the newly captured flow-capture triage card to the UI.
+    """
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="discord-vorfilter-fixture",
+            created_by="discord-idee",
+            tenant="flow-capture",
+            triage=True,
+        )
+    finally:
+        conn.close()
+
+    real_connect = kb.connect
+    calls = {"count": 0}
+
+    def flaky_connect(*args, **kwargs):
+        if calls["count"] == 0:
+            calls["count"] += 1
+            raise kb.KanbanDbCorruptError(
+                kb.kanban_db_path(),
+                None,
+                "transient integrity_check returned malformed",
+            )
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", flaky_connect)
+
+    r = client.get("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none")
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert calls["count"] == 1
+    source_errors = data.get("source_errors")
+    assert source_errors and len(source_errors) == 1
+    assert source_errors[0]["artifact"] == "kanban_board_fetch"
+    assert source_errors[0]["stage"] == "db_open"
+    assert source_errors[0]["source"] == "kanban_db"
+    assert source_errors[0]["severity"] == "warning"
+    assert source_errors[0]["retry_count"] == 1
+    assert "transient integrity_check" in source_errors[0]["message"]
+    tasks = [task for column in data["columns"] for task in column["tasks"]]
+    card = next(task for task in tasks if task["id"] == task_id)
+    assert card["title"] == "discord-vorfilter-fixture"
+    assert card["tenant"] == "flow-capture"
+    assert card["status"] == "triage"
+
+
 def test_board_card_diagnostics_summary_omits_detail(client, monkeypatch):
     """``card_diagnostics=summary`` drops the per-card structured diagnostics
     list (the bulk of the /control poll payload) but keeps the compact
@@ -1808,6 +1864,64 @@ def test_recent_results_includes_preserved_deliverables(client, kanban_home):
     assert result["deliverables"][0]["url"].endswith(f"/tasks/{task_id}/deliverables/RESULT.md")
 
 
+def test_recent_results_exposes_openable_artifact_links_from_metadata_and_preserved_event(client, kanban_home):
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="artifact-linked result", assignee="coder")
+        reports_root = kanban_home / "reports" / "by-task" / task_id
+        reports_result = reports_root / "RESULT.md"
+        workspace_result = kanban_home / "kanban" / "workspaces" / task_id / "RESULT.md"
+        run_id = _insert_completed_run(
+            conn,
+            task_id=task_id,
+            title="artifact-linked result",
+            started_at=now - 20,
+            ended_at=now - 10,
+            summary="APPROVED — Verifier-Run 944 checked RESULT.md",
+            metadata={
+                "verdict": "APPROVED",
+                "artifacts": [str(reports_result), str(workspace_result)],
+            },
+            profile="verifier",
+        )
+        _append_claimed_event(
+            conn,
+            task_id=task_id,
+            run_id=run_id,
+            payload={"run_id": run_id, "source_status": "review"},
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'deliverables_preserved', ?, ?)",
+            (task_id, json.dumps({"dir": str(reports_root), "files": ["RESULT.md", "PRESERVED.md"]}), now - 5),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reports_root.mkdir(parents=True)
+    reports_result.write_text("# Result\nVerifier approved.\n", encoding="utf-8")
+    (reports_root / "PRESERVED.md").write_text("# Preserved\n", encoding="utf-8")
+
+    r = client.get("/api/plugins/kanban/runs/recent-results")
+    assert r.status_code == 200, r.text
+    result = r.json()["results"][0]
+    assert result["task_id"] == task_id
+    assert result["verification_state"] == "approved"
+    assert result["verifier_verdict"] == "APPROVED"
+    assert str(reports_result) in result["artifacts"]
+    links = result["artifact_links"]
+    assert links, result
+    result_link = next(link for link in links if link["relative_path"] == "RESULT.md")
+    assert result_link["filename"] == "RESULT.md"
+    assert result_link["url"].endswith(f"/tasks/{task_id}/deliverables/RESULT.md")
+    assert result_link["source"] == "metadata.artifacts"
+    assert result_link["path"] == str(reports_result)
+    preserved_link = next(link for link in links if link["relative_path"] == "PRESERVED.md")
+    assert preserved_link["source"] == "deliverables_preserved"
+    assert preserved_link["url"].endswith(f"/tasks/{task_id}/deliverables/PRESERVED.md")
+
+
 def test_today_digest_summarizes_today_with_deliverable_excerpt_and_gate_state(client, kanban_home):
     now = int(time.time())
     today = time.localtime(now)
@@ -3366,6 +3480,52 @@ def test_review_verdicts_surfaces_review_tasks_with_request_changes_evidence(cli
     assert row["verifier_evidence"] == ["pytest tests/foo.py -> stdout: FAILED test_add"]
 
 
+def test_review_verdicts_surfaces_active_verifier_run_for_review_claim(client):
+    conn = kb.connect()
+    try:
+        review_task = kb.create_task(conn, title="Review active", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_task,))
+        claimed = kb.claim_review_task(conn, review_task, claimer="test-host:944", reviewer_profile="verifier")
+        assert claimed is not None
+        run = kb.latest_run(conn, review_task)
+        assert run is not None
+        run_id = run.id
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/plugins/kanban/tasks/review-verdicts")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 1
+    row = data["reviews"][0]
+    assert row["task_id"] == review_task
+    assert row["task_status"] == "running"
+    assert row["run_id"] == run_id
+    assert row["active_verifier"] is True
+    assert row["active_run_id"] == run_id
+    assert row["review_run_state"] == "active"
+    assert row["review_run_source"] == "claimed_event"
+    assert row["reviewer_profile"] == "verifier"
+    assert row["verification_state"] == "pending"
+    assert row["verifier_verdict"] is None
+
+
+def test_patch_status_done_rejected_from_review_without_review_done_affordance(client):
+    conn = kb.connect()
+    try:
+        review_task = kb.create_task(conn, title="Cannot manually finish review", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_task,))
+    finally:
+        conn.close()
+
+    r = client.patch(f"/api/plugins/kanban/tasks/{review_task}", json={"status": "done"})
+    assert r.status_code == 409
+    assert "not valid" in r.json()["detail"] or "refused" in r.json()["detail"]
+
+
 def test_recent_results_caps_limit_filters_since_and_truncates_summary(client):
     now = int(time.time())
     conn = kb.connect()
@@ -3912,6 +4072,78 @@ def test_funnel_draft_dismiss_archives_root(client):
         conn.close()
     # Nochmal verwerfen -> 409 (nicht mehr in der Queue).
     assert client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss").status_code == 409
+
+
+def test_funnel_draft_patch_saves_operator_edit(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(conn)
+    finally:
+        conn.close()
+
+    r = client.patch(
+        f"/api/plugins/kanban/funnel/drafts/{tid}",
+        json={
+            "draft_text": "# Operator-Fassung\n" + "o" * 160,
+            "operator_note": "ACs explizit aufnehmen.",
+        },
+    )
+    assert r.status_code == 200, r.text
+    draft = r.json()["draft"]
+    assert draft["id"] == tid
+    assert draft["operator_edited"] is True
+    assert "# Operator-edited PlanSpec" in draft["draft_text"]
+    assert "ACs explizit aufnehmen" in draft["draft_text"]
+
+    listed = client.get("/api/plugins/kanban/funnel/drafts").json()["drafts"]
+    assert [d["id"] for d in listed] == [tid]
+    assert listed[0]["operator_edited"] is True
+
+
+def test_funnel_draft_revise_creates_new_root_and_archives_old(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(conn, title="spec prüfen")
+    finally:
+        conn.close()
+
+    r = client.post(
+        f"/api/plugins/kanban/funnel/drafts/{tid}/revise",
+        json={
+            "draft_text": "# Zwischenstand\n" + "z" * 160,
+            "operator_note": "Bitte nochmal Familiennutzen schärfen.",
+        },
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    task = data["task"]
+    assert data["superseded"] == tid
+    assert task["status"] == "ready"
+    assert task["title"].startswith("Überarbeiten:")
+    assert client.get("/api/plugins/kanban/funnel/drafts").json()["drafts"] == []
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, tid).status == "archived"
+        assert conn.execute("SELECT 1 FROM task_links WHERE child_id = ?", (task["id"],)).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_funnel_draft_patch_and_revise_409_on_unknown(client):
+    r = client.patch(
+        "/api/plugins/kanban/funnel/drafts/t_gibtsnicht",
+        json={"draft_text": "# Nope\n" + "n" * 160},
+    )
+    assert r.status_code == 409
+    assert "nicht gefunden" in r.json()["detail"]
+
+    r2 = client.post(
+        "/api/plugins/kanban/funnel/drafts/t_gibtsnicht/revise",
+        json={"draft_text": "# Nope\n" + "n" * 160},
+    )
+    assert r2.status_code == 409
+    assert "nicht gefunden" in r2.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

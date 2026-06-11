@@ -36,6 +36,7 @@ the port.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -174,9 +175,23 @@ def _resolve_dashboard_busy_timeout_ms() -> int:
 
 
 _DASHBOARD_BUSY_TIMEOUT_MS = _resolve_dashboard_busy_timeout_ms()
+_DASHBOARD_CORRUPT_OPEN_RETRY_DELAY_S = 0.2
 
 
-def _conn(board: Optional[str] = None):
+def _discard_initialized_path(path: Path) -> None:
+    """Best-effort: force a retried dashboard open through kanban's slow path."""
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        return
+    with contextlib.suppress(Exception):
+        kanban_db._INITIALIZED_PATHS.discard(resolved)
+
+
+def _conn(
+    board: Optional[str] = None,
+    source_errors: Optional[list[dict[str, Any]]] = None,
+):
     """Open a kanban_db connection, creating the schema on first use.
 
     Every handler that mutates the DB goes through this so the plugin
@@ -202,8 +217,36 @@ def _conn(board: Optional[str] = None):
     default) on a locked DB instead of kanban's 120s worker default: the
     SPA has its own GET timeout + retry/backoff, so a fast 5xx beats a
     request that pins a server thread for two minutes.
+
+    The kanban DB layer still fails closed on persistent corruption.  The
+    dashboard adds one short retry for the observed WAL/checkpoint edge where
+    the initial open reported ``KanbanDbCorruptError`` but an immediate fresh
+    integrity probe was healthy; without that retry the whole Flow board showed
+    a browser-level "failed fetch" and hid the just-captured triage card.
     """
-    return kanban_db.connect(board=board, busy_timeout_ms=_DASHBOARD_BUSY_TIMEOUT_MS)
+    try:
+        return kanban_db.connect(board=board, busy_timeout_ms=_DASHBOARD_BUSY_TIMEOUT_MS)
+    except kanban_db.KanbanDbCorruptError as exc:
+        if source_errors is not None:
+            source_errors.append(
+                {
+                    "artifact": "kanban_board_fetch",
+                    "source": "kanban_db",
+                    "stage": "db_open",
+                    "severity": "warning",
+                    "message": exc.reason,
+                    "db_path": str(exc.db_path),
+                    "backup_path": str(exc.backup_path) if exc.backup_path else None,
+                    "retry_count": 1,
+                }
+            )
+        _discard_initialized_path(exc.db_path)
+        log.warning(
+            "kanban dashboard DB open reported corruption for %s; retrying once",
+            exc.db_path,
+        )
+        time.sleep(_DASHBOARD_CORRUPT_OPEN_RETRY_DELAY_S)
+        return kanban_db.connect(board=board, busy_timeout_ms=_DASHBOARD_BUSY_TIMEOUT_MS)
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +592,117 @@ def _list_task_deliverables(task_id: str) -> list[dict[str, Any]]:
     return items[:_DELIVERABLES_MAX_FILES]
 
 
+def _artifact_link_from_deliverable(
+    deliverable: dict[str, Any],
+    *,
+    path: str,
+    source: str,
+) -> dict[str, Any]:
+    item = dict(deliverable)
+    item["path"] = path
+    item["source"] = source
+    return item
+
+
+def _artifact_links_from_metadata(
+    task_id: str,
+    artifact_paths: list[str],
+    deliverables: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Map declared run artifact paths onto safe deliverable URLs when possible.
+
+    Workers record absolute paths in ``task_runs.metadata.artifacts``. For
+    scratch tasks those paths often point at the now-deleted workspace, while the
+    preserved file is served from ``reports/by-task/<task_id>/<basename>``. Keep
+    the original path for provenance, but only emit a link when it resolves to
+    an already-enumerated deliverable under the safe reports root.
+    """
+    by_rel = {str(item.get("relative_path") or ""): item for item in deliverables}
+    by_name: dict[str, dict[str, Any]] = {}
+    for item in deliverables:
+        name = str(item.get("filename") or "")
+        if name and name not in by_name:
+            by_name[name] = item
+
+    try:
+        _root, root_resolved = _safe_deliverables_root(task_id)
+    except HTTPException:
+        root_resolved = None
+
+    links: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in artifact_paths:
+        raw_path = str(raw or "").strip()
+        if not raw_path:
+            continue
+        deliverable = None
+        p = Path(raw_path).expanduser()
+        if p.is_absolute() and root_resolved is not None:
+            try:
+                rel = p.resolve(strict=False).relative_to(root_resolved).as_posix()
+                deliverable = by_rel.get(rel)
+            except (OSError, ValueError):
+                deliverable = None
+        if deliverable is None:
+            deliverable = by_name.get(p.name)
+        if deliverable is None:
+            continue
+        rel = str(deliverable.get("relative_path") or "")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        links.append(_artifact_link_from_deliverable(deliverable, path=raw_path, source="metadata.artifacts"))
+    return links
+
+
+def _artifact_links_from_preserved_events(
+    conn: sqlite3.Connection,
+    task_id: str,
+    deliverables: list[dict[str, Any]],
+    *,
+    seen: set[str],
+) -> list[dict[str, Any]]:
+    by_rel = {str(item.get("relative_path") or ""): item for item in deliverables}
+    links: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'deliverables_preserved' "
+        "ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        base_dir = str(payload.get("dir") or "").strip()
+        for filename in _coerce_str_list(payload.get("files")):
+            rel = PurePosixPath(filename).as_posix()
+            if rel in seen:
+                continue
+            deliverable = by_rel.get(rel)
+            if deliverable is None:
+                continue
+            seen.add(rel)
+            path = str(Path(base_dir) / rel) if base_dir else rel
+            links.append(_artifact_link_from_deliverable(deliverable, path=path, source="deliverables_preserved"))
+    return links
+
+
+def _artifact_links_for_result(
+    conn: sqlite3.Connection,
+    task_id: str,
+    artifact_paths: list[str],
+    deliverables: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    links = _artifact_links_from_metadata(task_id, artifact_paths, deliverables)
+    seen = {str(item.get("relative_path") or "") for item in links}
+    links.extend(_artifact_links_from_preserved_events(conn, task_id, deliverables, seen=seen))
+    return links
+
+
 def _deliverable_excerpt(task_id: str, deliverable: Optional[dict[str, Any]]) -> Optional[str]:
     if not deliverable:
         return None
@@ -604,6 +758,7 @@ def _recent_result_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str,
     verification_state = _verification_state(verdict, default="ungated")
     ended_at = int(row["ended_at"] or 0)
     started_at = int(row["started_at"] or 0)
+    deliverables = _list_task_deliverables(row["task_id"])
     d = {
         "run_id": row["run_id"],
         "task_id": row["task_id"],
@@ -620,12 +775,13 @@ def _recent_result_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str,
         "summary_preview": _summary_preview(summary),
         "followups": followups,
         "artifacts": artifacts,
+        "artifact_links": _artifact_links_for_result(conn, row["task_id"], artifacts, deliverables),
         "verification": verification,
         "verification_state": verification_state,
         "verifier_verdict": verdict,
         "verifier_evidence": _verifier_evidence(metadata) if verdict else [],
         "result_quality": _result_quality_badge(verification_state, profile=row["profile"]),
-        "deliverables": _list_task_deliverables(row["task_id"]),
+        "deliverables": deliverables,
         "residual_risk": metadata.get("residual_risk") if isinstance(metadata.get("residual_risk"), str) else None,
     }
     d.update(_run_lineage_fields(conn, row["task_id"], row["run_id"]))
@@ -674,23 +830,100 @@ def _today_digest_item(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, 
     }
 
 
+def _review_signal_run(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
+    """Return the active verifier run, else the latest verifier signal run."""
+    active = conn.execute(
+        """
+        SELECT
+            r.id AS run_id,
+            r.profile,
+            r.status AS run_status,
+            r.outcome AS run_outcome,
+            r.started_at,
+            r.ended_at,
+            r.summary,
+            r.metadata,
+            'claimed_event' AS review_run_source
+        FROM task_runs r
+        JOIN task_events e ON e.run_id = r.id
+        WHERE r.task_id = ?
+          AND r.ended_at IS NULL
+          AND e.kind = 'claimed'
+          AND json_extract(e.payload, '$.source_status') = 'review'
+        ORDER BY r.started_at DESC, r.id DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if active is not None:
+        return active
+    return conn.execute(
+        """
+        SELECT
+            r.id AS run_id,
+            r.profile,
+            r.status AS run_status,
+            r.outcome AS run_outcome,
+            r.started_at,
+            r.ended_at,
+            r.summary,
+            r.metadata,
+            CASE
+              WHEN EXISTS (
+                SELECT 1 FROM task_events e
+                WHERE e.run_id = r.id
+                  AND e.kind = 'claimed'
+                  AND json_extract(e.payload, '$.source_status') = 'review'
+              ) THEN 'claimed_event'
+              ELSE 'latest_ended_run'
+            END AS review_run_source
+        FROM task_runs r
+        WHERE r.task_id = ?
+          AND r.ended_at IS NOT NULL
+        ORDER BY r.ended_at DESC, r.id DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+
+
+def _review_run_state(run_row: Optional[sqlite3.Row], verdict: Optional[str]) -> str:
+    if run_row is None:
+        return "pending"
+    if run_row["ended_at"] is None:
+        return "active"
+    if verdict == "APPROVED":
+        return "approved"
+    if verdict == "REQUEST_CHANGES":
+        return "request_changes"
+    return "pending"
+
+
 def _review_verdict_dict(task_row: sqlite3.Row, run_row: Optional[sqlite3.Row]) -> dict[str, Any]:
     summary = (run_row["summary"] or "")[:_RESULT_SUMMARY_LIMIT] if run_row else ""
     metadata = _load_result_metadata(run_row["metadata"] if run_row else None)
     verdict = _normalize_verifier_verdict(summary, metadata)
+    active_verifier = bool(run_row is not None and run_row["ended_at"] is None)
+    submitted_at = None
+    if run_row is not None:
+        submitted_at = int((run_row["started_at"] if active_verifier else run_row["ended_at"]) or 0)
     return {
         "task_id": task_row["id"],
         "task_title": task_row["title"],
         "task_status": task_row["status"],
         "task_assignee": task_row["assignee"],
         "created_at": int(task_row["created_at"] or 0),
-        "submitted_at": int(run_row["ended_at"] or 0) if run_row else None,
+        "submitted_at": submitted_at,
         "run_id": run_row["run_id"] if run_row else None,
         "reviewer_profile": (run_row["profile"] if run_row else None),
         "summary_preview": _summary_preview(summary) if summary else "",
         "verification_state": _verification_state(verdict, default="pending"),
         "verifier_verdict": verdict,
         "verifier_evidence": _verifier_evidence(metadata) if verdict else [],
+        "active_verifier": active_verifier,
+        "active_run_id": run_row["run_id"] if active_verifier else None,
+        "review_run_state": _review_run_state(run_row, verdict),
+        "review_run_source": (run_row["review_run_source"] if run_row else None),
     }
 
 
@@ -978,7 +1211,8 @@ def get_board(
     ``current`` pointer → ``default``).
     """
     board = _resolve_board(board)
-    conn = _conn(board=board)
+    source_errors: list[dict[str, Any]] = []
+    conn = _conn(board=board, source_errors=source_errors)
     try:
         tasks = kanban_db.list_tasks(
             conn,
@@ -1124,6 +1358,8 @@ def get_board(
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
         }
+        if source_errors:
+            payload["source_errors"] = source_errors
         # Conditional GET: a weak ETag over the content WITHOUT the volatile
         # wall-clock fields — "now" and each card's derived "age" change every
         # second and would defeat caching. Both derive from timestamps that
@@ -1171,12 +1407,11 @@ def list_review_verdicts(
     limit: int = Query(12, ge=1, description="Maximum review tasks to return (capped at 50)"),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
-    """Return tasks currently parked in review plus the latest verifier signal.
+    """Return review-gate tasks plus their latest verifier signal.
 
-    The Hermes /control view uses this read-only shape to show why a review
-    task is approved/request-changes/pending without requiring the operator to
-    open the full Kanban drawer.  Done-task markers are carried by
-    /runs/recent-results; this endpoint is intentionally review-column only.
+    Includes both tasks parked in ``review`` and tasks actively claimed by the
+    verifier (``running`` with a claimed event whose ``source_status`` was
+    ``review``). Done-task markers are carried by /runs/recent-results.
     """
     board = _resolve_board(board)
     capped_limit = max(1, min(int(limit), 50))
@@ -1184,9 +1419,16 @@ def list_review_verdicts(
     try:
         tasks = conn.execute(
             """
-            SELECT id, title, status, assignee, created_at
-            FROM tasks
+            SELECT id, title, status, assignee, created_at, current_run_id
+            FROM tasks t
             WHERE status = 'review'
+               OR EXISTS (
+                    SELECT 1 FROM task_events e
+                    WHERE e.task_id = t.id
+                      AND e.run_id = t.current_run_id
+                      AND e.kind = 'claimed'
+                      AND json_extract(e.payload, '$.source_status') = 'review'
+               )
             ORDER BY created_at DESC
             LIMIT ?
             """,
@@ -1194,22 +1436,7 @@ def list_review_verdicts(
         ).fetchall()
         reviews: list[dict[str, Any]] = []
         for task in tasks:
-            run = conn.execute(
-                """
-                SELECT
-                    id AS run_id,
-                    profile,
-                    ended_at,
-                    summary,
-                    metadata
-                FROM task_runs
-                WHERE task_id = ?
-                  AND ended_at IS NOT NULL
-                ORDER BY ended_at DESC, id DESC
-                LIMIT 1
-                """,
-                (task["id"],),
-            ).fetchone()
+            run = _review_signal_run(conn, task["id"])
             reviews.append(_review_verdict_dict(task, run))
         return {
             "reviews": reviews,
@@ -2622,6 +2849,14 @@ def get_runs_reliability(
         conn.close()
 
 
+PlanSpecText = Annotated[str, Field(max_length=60_000)]
+
+
+class FunnelDraftEditBody(BaseModel):
+    draft_text: PlanSpecText
+    operator_note: Optional[FreeText] = ""
+
+
 @router.get("/funnel/drafts")
 def get_funnel_drafts(
     days: int = Query(30, ge=1, le=365),
@@ -2635,6 +2870,46 @@ def get_funnel_drafts(
     conn = _conn(board=board)
     try:
         return {"drafts": kanban_funnel.list_drafts(conn, days=days)}
+    finally:
+        conn.close()
+
+
+@router.patch("/funnel/drafts/{task_id}")
+def update_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional[str] = Query(None)):
+    """Speichert eine Operator-bearbeitete Plan-Spec als kanonischen Draft."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            draft = kanban_funnel.save_draft_edit(
+                conn,
+                task_id,
+                draft_text=body.draft_text,
+                operator_note=body.operator_note or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"draft": draft}
+    finally:
+        conn.close()
+
+
+@router.post("/funnel/drafts/{task_id}/revise")
+def revise_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional[str] = Query(None)):
+    """Schickt einen Funnel-Draft mit Operator-Input zurück in den Spec-Loop."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            new_id = kanban_funnel.request_revision(
+                conn,
+                task_id,
+                draft_text=body.draft_text,
+                operator_note=body.operator_note or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"task": _task_dict(kanban_db.get_task(conn, new_id)), "superseded": task_id}
     finally:
         conn.close()
 

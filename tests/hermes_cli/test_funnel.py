@@ -282,3 +282,66 @@ def test_approve_draft_title_prefix_is_idempotent(conn):
     child = kb.get_task(conn, funnel.approve_draft(conn, tid))
     assert child.title == "Umsetzen: Dunkles Theme"
     assert not child.title.startswith("Umsetzen: Umsetzen:")
+
+
+def test_save_draft_edit_becomes_canonical_build_text(conn):
+    tid = _make_done_draft(conn)
+
+    edited = "# Finale Operator-Version\n\nBitte genau diesen Scope bauen. " + "e" * 150
+    refreshed = funnel.save_draft_edit(
+        conn,
+        tid,
+        draft_text=edited,
+        operator_note="Mobile zuerst, keine Extra-Features.",
+    )
+
+    assert refreshed["id"] == tid
+    assert refreshed["operator_edited"] is True
+    assert refreshed["draft_text"].startswith("# Operator-edited PlanSpec")
+    assert edited in refreshed["draft_text"]
+    assert "Operator-Input:" in refreshed["draft_text"]
+    assert "Mobile zuerst" in refreshed["draft_text"]
+
+    child = kb.get_task(conn, funnel.approve_draft(conn, tid))
+    assert "# Operator-edited PlanSpec" in (child.body or "")
+    assert "Bitte genau diesen Scope bauen" in (child.body or "")
+    assert "Mobile zuerst" in (child.body or "")
+
+
+def test_save_draft_edit_rejects_empty_and_already_approved(conn):
+    tid = _make_done_draft(conn)
+
+    with pytest.raises(ValueError, match="draft_text"):
+        funnel.save_draft_edit(conn, tid, draft_text="   ")
+
+    funnel.approve_draft(conn, tid)
+    with pytest.raises(ValueError, match="bereits freigegeben"):
+        funnel.save_draft_edit(conn, tid, draft_text="# Zu spät\n" + "z" * 150)
+
+
+def test_request_revision_requeues_unlinked_root_and_archives_old(conn):
+    tid = _make_done_draft(conn, title="PlanSpec verbessern")
+
+    new_id = funnel.request_revision(
+        conn,
+        tid,
+        draft_text="# Zwischenstand\n" + "a" * 150,
+        operator_note="Bitte ACs explizit aufnehmen.",
+    )
+
+    old = kb.get_task(conn, tid)
+    revised = kb.get_task(conn, new_id)
+    assert old.status == "archived"
+    assert revised.status == "ready"
+    assert revised.created_by == old.created_by
+    assert revised.title.startswith("Überarbeiten:")
+    assert "Bitte ACs explizit aufnehmen" in (revised.body or "")
+    assert conn.execute("SELECT 1 FROM task_links WHERE child_id = ?", (new_id,)).fetchone() is None
+    assert conn.execute("SELECT 1 FROM task_links WHERE parent_id = ?", (tid,)).fetchone() is None
+    assert funnel.list_drafts(conn) == []
+
+    kb.add_comment(conn, new_id, author="coder-claude", body="# Revised PlanSpec\n" + "r" * 150)
+    _complete(conn, new_id)
+    drafts = funnel.list_drafts(conn)
+    assert [d["id"] for d in drafts] == [new_id]
+    assert drafts[0]["draft_text"].startswith("# Revised PlanSpec")
