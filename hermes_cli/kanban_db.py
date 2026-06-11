@@ -11747,28 +11747,18 @@ def decision_queue(
             "suggested_command": suggested_command,
         })
 
-    def _last_event_at(task_id, kinds=None) -> Optional[int]:
-        if kinds:
-            ph = ",".join("?" for _ in kinds)
-            r = conn.execute(
-                f"SELECT MAX(created_at) FROM task_events "
-                f"WHERE task_id = ? AND kind IN ({ph})",
-                (task_id, *kinds),
-            ).fetchone()
-        else:
-            r = conn.execute(
-                "SELECT MAX(created_at) FROM task_events WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        return r[0] if r else None
-
     # Blocked tasks feed two categories (review_rejected, sticky_blocked). Fetch
-    # the set ONCE and batch the latest-run verdict per task in a single
-    # window-function query, so neither category re-scans ``tasks`` nor issues a
-    # per-task ``task_runs`` lookup (was a double scan + N+1 over the blocked
-    # set on every 15s poll). Each step is fail-soft and independent.
+    # the set ONCE and batch every per-task lookup the categories need — the
+    # latest-run verdict, the latest blocked/unblocked event (sticky check) and
+    # the latest 'blocked' event (reason + age) — in one grouped query each.
+    # This endpoint is polled every 15s; the per-task variants were an N+1 over
+    # the blocked set AND over every ready task. Each step is fail-soft and
+    # independent. The grouped queries use SQLite's bare-column-with-MAX(id)
+    # guarantee: non-aggregate columns come from the max-id (latest) row.
     blocked_tasks: list = []
     latest_verdict: dict[str, Optional[str]] = {}
+    sticky_ids: set[str] = set()
+    last_blocked: dict[str, tuple] = {}  # task_id -> (payload, created_at)
     try:
         blocked_tasks = conn.execute(
             "SELECT id, title FROM tasks WHERE status = 'blocked'"
@@ -11776,9 +11766,9 @@ def decision_queue(
     except Exception:
         blocked_tasks = []
     if blocked_tasks:
+        ids = [r["id"] for r in blocked_tasks]
+        ph = ",".join("?" for _ in ids)
         try:
-            ph = ",".join("?" for _ in blocked_tasks)
-            ids = [r["id"] for r in blocked_tasks]
             for vr in conn.execute(
                 "SELECT task_id, verdict FROM ("
                 " SELECT task_id, verdict,"
@@ -11790,6 +11780,29 @@ def decision_queue(
                 latest_verdict[vr["task_id"]] = vr["verdict"]
         except Exception:
             latest_verdict = {}
+        try:
+            # Same semantics as _has_sticky_block, batched: sticky iff the most
+            # recent blocked/unblocked event is 'blocked'.
+            for sr in conn.execute(
+                "SELECT task_id, kind, MAX(id) FROM task_events "
+                f"WHERE kind IN ('blocked', 'unblocked') AND task_id IN ({ph}) "
+                "GROUP BY task_id",
+                ids,
+            ).fetchall():
+                if sr["kind"] == "blocked":
+                    sticky_ids.add(sr["task_id"])
+        except Exception:
+            sticky_ids = set()
+        try:
+            for br in conn.execute(
+                "SELECT task_id, payload, created_at, MAX(id) FROM task_events "
+                f"WHERE kind = 'blocked' AND task_id IN ({ph}) "
+                "GROUP BY task_id",
+                ids,
+            ).fetchall():
+                last_blocked[br["task_id"]] = (br["payload"], br["created_at"])
+        except Exception:
+            last_blocked = {}
 
     # 1) review_rejected — blocked task whose MOST RECENT run was a verifier
     #    REQUEST_CHANGES (B2 verdict). More specific than sticky_blocked.
@@ -11797,10 +11810,11 @@ def decision_queue(
         for row in blocked_tasks:
             verdict = latest_verdict.get(row["id"])
             if verdict and verdict.upper() == "REQUEST_CHANGES":
+                lb = last_blocked.get(row["id"])
                 _add(
                     "review_rejected", row["id"], row["title"],
                     "Verifier requested changes (REQUEST_CHANGES)",
-                    _age(_last_event_at(row["id"], ("blocked",))),
+                    _age(lb[1] if lb else None),
                     f"hermes kanban show {row['id']}",
                 )
     except Exception:
@@ -11808,55 +11822,50 @@ def decision_queue(
 
     # 2) budget_held / role_fit_held — a READY task whose LATEST event is a hold
     #    (F2-dedup semantics: the most recent event IS the standing hold).
+    #    One grouped query over the ready set instead of one lookup per task.
     try:
-        for row in conn.execute(
-            "SELECT id, title FROM tasks WHERE status = 'ready'"
+        for ev in conn.execute(
+            "SELECT t.id AS task_id, t.title AS title,"
+            "       e.kind AS kind, e.payload AS payload,"
+            "       e.created_at AS created_at, MAX(e.id) "
+            "FROM tasks t JOIN task_events e ON e.task_id = t.id "
+            "WHERE t.status = 'ready' "
+            "GROUP BY t.id",
         ).fetchall():
-            if row["id"] in seen:
-                continue
-            ev = conn.execute(
-                "SELECT kind, created_at, payload FROM task_events "
-                "WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                (row["id"],),
-            ).fetchone()
-            if ev is None:
+            if ev["task_id"] in seen:
                 continue
             if ev["kind"] == "budget_held":
                 _add(
-                    "budget_held", row["id"], row["title"],
+                    "budget_held", ev["task_id"], ev["title"],
                     _decision_event_reason(ev["payload"])
                     or "Daily budget cap reached — dispatch held",
                     _age(ev["created_at"]),
-                    f"hermes kanban show {row['id']}",
+                    f"hermes kanban show {ev['task_id']}",
                 )
             elif ev["kind"] == "role_fit_held":
                 _add(
-                    "role_fit_held", row["id"], row["title"],
+                    "role_fit_held", ev["task_id"], ev["title"],
                     _decision_event_reason(ev["payload"])
                     or "Held: assignee role does not fit the task",
                     _age(ev["created_at"]),
-                    f"hermes kanban show {row['id']}",
+                    f"hermes kanban show {ev['task_id']}",
                 )
     except Exception:
         pass
 
     # 3) sticky_blocked — worker/operator kanban_block, not a review rejection.
-    #    Reuses the single blocked-task fetch above (no re-scan).
+    #    Reuses the batched blocked-set lookups above (no per-task queries).
     try:
         for row in blocked_tasks:
             if row["id"] in seen:
                 continue
-            if _has_sticky_block(conn, row["id"]):
-                last = conn.execute(
-                    "SELECT payload FROM task_events WHERE task_id = ? "
-                    "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
-                    (row["id"],),
-                ).fetchone()
+            if row["id"] in sticky_ids:
+                lb = last_blocked.get(row["id"])
                 _add(
                     "sticky_blocked", row["id"], row["title"],
-                    _decision_event_reason(last["payload"] if last else None)
+                    _decision_event_reason(lb[0] if lb else None)
                     or "Blocked — awaiting operator unblock",
-                    _age(_last_event_at(row["id"], ("blocked",))),
+                    _age(lb[1] if lb else None),
                     f"hermes kanban unblock {row['id']}",
                 )
     except Exception:
@@ -11864,17 +11873,27 @@ def decision_queue(
 
     # 4) decompose_failed — unresolved decompose failures on a non-terminal task.
     try:
-        for row in conn.execute(
+        failed_rows = conn.execute(
             "SELECT id, title, decompose_failed FROM tasks "
             "WHERE decompose_failed > 0 AND status NOT IN ('done', 'archived')"
-        ).fetchall():
+        ).fetchall()
+        last_any: dict[str, Optional[int]] = {}
+        if failed_rows:
+            ph = ",".join("?" for _ in failed_rows)
+            for ar in conn.execute(
+                "SELECT task_id, MAX(created_at) AS at FROM task_events "
+                f"WHERE task_id IN ({ph}) GROUP BY task_id",
+                [r["id"] for r in failed_rows],
+            ).fetchall():
+                last_any[ar["task_id"]] = ar["at"]
+        for row in failed_rows:
             if row["id"] in seen:
                 continue
             _add(
                 "decompose_failed", row["id"], row["title"],
                 f"auto_decompose failed {int(row['decompose_failed'])}× "
                 "(last attempt unparsed or errored)",
-                _age(_last_event_at(row["id"])),
+                _age(last_any.get(row["id"])),
                 f"hermes kanban show {row['id']}",
             )
     except Exception:
