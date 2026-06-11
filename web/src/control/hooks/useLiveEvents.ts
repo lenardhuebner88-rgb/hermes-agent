@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { buildWsUrl } from "@/lib/api";
 import { getSnapshot, refresh } from "./pollingStore";
+import { boardLoader } from "./useControlData";
 import type { BoardResponse } from "../lib/types";
 
 export interface KanbanLiveEvent {
@@ -89,6 +90,28 @@ export function useLiveEvents(): void {
     };
     const connect = async () => {
       if (stopped || document.hidden || socketRef.current) return;
+      // since=0 würde die gesamte Event-Historie in 200er-Batches nachspielen
+      // und Live-Updates beim ersten Connect deutlich verzögern. Ohne bekannten
+      // Cursor daher erst das Board laden: Store-Snapshot, falls eine View ihn
+      // schon hält, sonst one-shot Fetch (latest_event_id=0 auf leerem Board
+      // ist danach ehrlich).
+      if (cursorRef.current === 0) {
+        const snapshot = getSnapshot<BoardResponse>("kanban/board")?.data;
+        if (snapshot != null) {
+          cursorRef.current = snapshot.latest_event_id ?? 0;
+        } else {
+          try {
+            const board = await boardLoader();
+            if (stopped || document.hidden || socketRef.current) return;
+            cursorRef.current = board.latest_event_id ?? 0;
+          } catch {
+            scheduleReconnect();
+            return;
+          }
+        }
+      } else {
+        cursorRef.current = Math.max(cursorRef.current, currentCursor());
+      }
       try {
         const url = await buildWsUrl("/api/plugins/kanban/events", { since: String(cursorRef.current) });
         if (stopped || document.hidden) return;

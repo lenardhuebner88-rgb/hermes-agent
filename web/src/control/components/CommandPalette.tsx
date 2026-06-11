@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowRight, Bot, Clock, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, Search, Workflow } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getSnapshot } from "../hooks/pollingStore";
+import { getSnapshot, subscribe } from "../hooks/pollingStore";
+import { boardLoader, cronObservabilityLoader, epicsLoader } from "../hooks/useControlData";
 import { KEYMAP } from "../lib/keymap";
 import type { BacklogResponse, EpicsResponse, OrchestrationBacklogResponse } from "../lib/schemas";
 import type { BoardResponse, CronObservabilityResponse, Worker } from "../lib/types";
@@ -152,6 +153,23 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
     setSnapshotTick((tick) => tick + 1);
     const timer = window.setInterval(() => setSnapshotTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(timer);
+  }, [open]);
+
+  // Board/Crons/Epics werden sonst nur von ihren Views gemountet — auf einem
+  // frischen /control-Load wäre die globale Suche dafür leer. Solange die
+  // Palette offen ist, abonnieren wir die Quellen selbst (ref-counted, teilt
+  // sich Timer/Requests mit ggf. offenen Views); der snapshotTick oben pickt
+  // die eintreffenden Snapshots auf.
+  useEffect(() => {
+    if (!open) return;
+    const unsubs = [
+      subscribe("kanban/board", boardLoader, 8000, () => {}),
+      subscribe("cron/observability", cronObservabilityLoader, 30000, () => {}),
+      subscribe("kanban/epics", epicsLoader, 15000, () => {}),
+    ];
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
   }, [open]);
 
   const items = useMemo<CommandItem[]>(() => {

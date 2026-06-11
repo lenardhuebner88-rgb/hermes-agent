@@ -19,7 +19,18 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
   const [enabled, setEnabled] = useState(readEnabled);
   const [permission, setPermission] = useState<NotificationPermission>(() => canNotify() ? Notification.permission : "denied");
   const notifiedRef = useRef<Set<string>>(new Set());
+  const seededRef = useRef(false);
   const redItems = useMemo(() => inbox.items.filter((item) => item.tone === "red"), [inbox.items]);
+
+  // Beim ersten vollständig geladenen Inbox-Stand die schon vorhandenen roten
+  // Items als "gesehen" seeden — sonst löst das Aktivieren der Glocke (oder ein
+  // Reload mit persistiertem Opt-in) eine Notification-Flut für alte
+  // Entscheidungen aus. Benachrichtigt wird nur, was NACH dem Seed neu auftaucht.
+  useEffect(() => {
+    if (seededRef.current || inbox.loading) return;
+    seededRef.current = true;
+    for (const item of redItems) notifiedRef.current.add(item.key);
+  }, [inbox.loading, redItems]);
 
   useEffect(() => {
     document.title = inbox.summary.total > 0 ? `(${inbox.summary.total}) ${DEFAULT_TITLE}` : DEFAULT_TITLE;
@@ -33,7 +44,7 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || permission !== "granted" || !canNotify()) return;
+    if (!seededRef.current || !enabled || permission !== "granted" || !canNotify()) return;
     for (const item of redItems) {
       if (notifiedRef.current.has(item.key)) continue;
       notifiedRef.current.add(item.key);

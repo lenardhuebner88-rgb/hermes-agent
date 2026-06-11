@@ -148,9 +148,9 @@ function CommandButton({ buttonRef, onOpen }: { buttonRef?: React.RefObject<HTML
   return <button ref={buttonRef} type="button" className="hc-hit inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5" onClick={onOpen}><Command className="h-4 w-4" />⌘K</button>;
 }
 
-function useDismissibleMenu() {
+function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
+  const ref = useRef<T | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -172,7 +172,7 @@ function useDismissibleMenu() {
 }
 
 function MoreNav() {
-  const menu = useDismissibleMenu();
+  const menu = useDismissibleMenu<HTMLDetailsElement>();
   return (
     <details ref={menu.ref} open={menu.open} onToggle={(event) => menu.setOpen(event.currentTarget.open)} className="group relative">
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
