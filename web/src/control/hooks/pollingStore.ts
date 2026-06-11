@@ -45,6 +45,7 @@ interface Entry<T> {
   loader: () => Promise<T>;
   intervalMs: number;
   snapshot: StoreSnapshot<T>;
+  lastPayloadJson: string | null;
   listeners: Set<Listener<T>>;
   timer: ReturnType<typeof setTimeout> | null;
   failCount: number;
@@ -109,6 +110,14 @@ function patch<T>(entry: Entry<T>, partial: Partial<StoreSnapshot<T>>): void {
   notify(entry);
 }
 
+function payloadJson(data: unknown): string | null {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return null;
+  }
+}
+
 function scheduleNext(key: string): void {
   const entry = getStore().entries.get(key) as Entry<unknown> | undefined;
   if (!entry || entry.listeners.size === 0) return;
@@ -131,7 +140,18 @@ async function tick(key: string): Promise<void> {
       const data = await entry.loader();
       entry.failCount = 0;
       entry.nextDelayMs = entry.intervalMs;
-      patch(entry, { data, error: null, errorObj: null, loading: false, lastUpdated: nowSec(), isStale: false });
+      const nextPayloadJson = payloadJson(data);
+      const unchangedPayload =
+        nextPayloadJson != null &&
+        nextPayloadJson === entry.lastPayloadJson &&
+        entry.snapshot.error == null &&
+        entry.snapshot.errorObj == null &&
+        !entry.snapshot.loading &&
+        !entry.snapshot.isStale;
+      if (!unchangedPayload) {
+        entry.lastPayloadJson = nextPayloadJson;
+        patch(entry, { data, error: null, errorObj: null, loading: false, lastUpdated: nowSec(), isStale: false });
+      }
     } catch (e) {
       const errObj = parseStructuredError(e);
       entry.failCount += 1;
@@ -174,6 +194,7 @@ export function subscribe<T>(
       loader,
       intervalMs,
       snapshot: initialSnapshot<T>(),
+      lastPayloadJson: null,
       listeners: new Set(),
       timer: null,
       failCount: 0,

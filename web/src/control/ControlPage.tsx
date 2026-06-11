@@ -3,9 +3,13 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
-import { useDecisionInbox, useHermesWorkers, useProposals } from "./hooks/useControlData";
+import { useDecisionInbox, useHermesWorkers, useProposals, useSystemHealth } from "./hooks/useControlData";
+import { useLiveEvents } from "./hooks/useLiveEvents";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { NotificationBridge } from "./components/NotificationBridge";
+import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
 import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
 
@@ -118,10 +122,12 @@ export default function ControlPage() {
   const proposals = useProposals();
   const workers = useHermesWorkers();
   const inbox = useDecisionInbox();
+  const health = useSystemHealth();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const gPendingRef = useRef<number>(0);
   const active = activeFromPath(location.pathname);
+  useLiveEvents();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -157,17 +163,21 @@ export default function ControlPage() {
 
   return (
     <div data-control>
+      <OfflineStaleBanner health={health} />
+      <NotificationBridge inbox={inbox} />
       <ControlShell
         active={active}
         density={density.density}
         openProposals={proposals.openSkillProposals.length}
         inboxTotal={inbox.summary.total}
         inboxTone={inbox.worstTone}
+        health={health}
         onNavigate={(tab) => navigate(tabPath[tab])}
         commandButtonRef={commandButtonRef}
         onOpenCommand={() => setPaletteOpen(true)}
       >
         <RouteTransition pathname={active}>
+          <ErrorBoundary>
           <Suspense fallback={<ControlViewFallback />}>
           <Routes location={location}>
             <Route index element={<CommandHome density={density.density} />} />
@@ -191,6 +201,7 @@ export default function ControlPage() {
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>
+          </ErrorBoundary>
         </RouteTransition>
       </ControlShell>
       <CommandPalette

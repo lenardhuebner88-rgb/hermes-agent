@@ -531,32 +531,33 @@ export function useHermesWorkers() {
 }
 
 
+// Loader auch für Nicht-Hook-Subscriber exportiert (CommandPalette abonniert
+// Board/Crons/Epics on-demand, solange die Palette offen ist — sonst bleibt
+// die globale Suche leer, bis die jeweilige View einmal besucht wurde).
+// card_diagnostics=summary drops the per-card structured diagnostics list,
+// card_body=none drops body+result (BoardTaskSchema strips both anyway —
+// together they dominate the 8 s payload on real boards); the drawer
+// fetches detail via /tasks/:id. The kanban plugin dashboard keeps the
+// defaults (full). The server also sends an ETag, so an unchanged board
+// revalidates as a 304 instead of re-transferring.
+export const boardLoader = async () =>
+  parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"), "kanban/board");
+
 // Full kanban board grouped by status column — the Fleet pipeline (stage
 // counts + actionable rows) reads this. 8s keeps the operator's stage view
 // fresh without churning the DB; usePolling pauses it when the tab is hidden.
 export function useBoard() {
-  return usePolling<BoardResponse>(
-    "kanban/board",
-    // card_diagnostics=summary drops the per-card structured diagnostics list,
-    // card_body=none drops body+result (BoardTaskSchema strips both anyway —
-    // together they dominate the 8 s payload on real boards); the drawer
-    // fetches detail via /tasks/:id. The kanban plugin dashboard keeps the
-    // defaults (full). The server also sends an ETag, so an unchanged board
-    // revalidates as a 304 instead of re-transferring.
-    async () => parseOrThrow(BoardResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"), "kanban/board"),
-    8000,
-  );
+  return usePolling<BoardResponse>("kanban/board", boardLoader, 8000);
 }
 
 // Epics (Vorhaben-Ebene): Rollup pro Epic für die Flow-Gruppierung und die
 // Statistik-Kompaktübersicht. 15s — Epics ändern sich selten; ein Fehler hier
 // darf das Board nie blanken (die Gruppierung degradiert auf rohe IDs).
+export const epicsLoader = async () =>
+  parseOrThrow(EpicsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/epics"), "kanban/epics");
+
 export function useEpics() {
-  return usePolling<EpicsResponse>(
-    "kanban/epics",
-    async () => parseOrThrow(EpicsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/epics"), "kanban/epics"),
-    15000,
-  );
+  return usePolling<EpicsResponse>("kanban/epics", epicsLoader, 15000);
 }
 
 // Epic-Schreibpfade (Phase-1-API): anlegen, schließen, ganze Kette zuordnen.
@@ -1134,14 +1135,13 @@ export function useBacklogDetail() {
 // existing POST endpoints and reload the bundle on success.
 type CronControlJob = { id: string; profile: string };
 
+export const cronObservabilityLoader = async () =>
+  parseOrThrow(CronObservabilityResponseSchema, await fetchJSON<unknown>("/api/cron/observability"), "cron/observability");
+
 export function useCronObservability() {
   const [busyJob, setBusyJob] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const state = usePolling<CronObservabilityResponse>(
-    "cron/observability",
-    async () => parseOrThrow(CronObservabilityResponseSchema, await fetchJSON<unknown>("/api/cron/observability"), "cron/observability"),
-    30000,
-  );
+  const state = usePolling<CronObservabilityResponse>("cron/observability", cronObservabilityLoader, 30000);
 
   const runControl = useCallback(async (action: "trigger" | "pause" | "resume", job: CronControlJob) => {
     setBusyJob(job.id);
