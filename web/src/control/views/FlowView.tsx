@@ -47,7 +47,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, TaskStatus } from "../lib/types";
+import type { BoardTask, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -80,16 +80,20 @@ function scrollToFlowTask(taskId: string): void {
 }
 
 // Enrichment for a board task, gathered from the live sidecar endpoints.
-interface Enriched {
+export interface Enriched {
   workerProfile?: string | null;
   workerHeartbeat?: number | null;
   verdict?: string | null;
   verifierEvidenceCount?: number;
+  activeVerifier?: boolean;
+  activeRunId?: string | null;
+  reviewRunState?: "active" | "approved" | "request_changes" | "pending";
   blockedKind?: string | null;
   blockedReason?: string | null;
   resultQualityLabel?: string | null;
   resultQualityTone?: string | null;
   deliverableCount?: number;
+  resultArtifactLinks?: TaskArtifactLink[];
 }
 
 // A single frozen empty-enrichment object: cards with no sidecar data get this
@@ -100,17 +104,47 @@ const EMPTY_ENRICHED: Enriched = Object.freeze({});
 // for an entry whose content didn't change across a poll tick — without it every
 // workers/reviews/results tick hands each card a new `enriched` object and the
 // memo never holds.
+function artifactKey(item: Pick<TaskDeliverable, "relative_path" | "url"> & { path?: string }): string {
+  return item.url || item.path || item.relative_path;
+}
+
+function sameArtifactLinks(a?: TaskArtifactLink[], b?: TaskArtifactLink[]): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  if (left.length !== right.length) return false;
+  return left.every((item, i) => artifactKey(item) === artifactKey(right[i]));
+}
+
+function preferredResultArtifactLink(links?: TaskArtifactLink[]): TaskArtifactLink | null {
+  const items = links ?? [];
+  if (!items.length) return null;
+  return items.find((item) => /(^|\/)RESULT\.md$/i.test(item.relative_path) || /(^|\/)RESULT\.md$/i.test(item.path)) ?? items[0];
+}
+
+function reviewGateStatus(enriched: Enriched): string | null {
+  if (enriched.activeVerifier) {
+    return `Verifier läuft${enriched.activeRunId ? ` · Run ${enriched.activeRunId}` : ""}`;
+  }
+  if (enriched.reviewRunState === "approved") return "Verifier APPROVED — wartet auf Board-Refresh";
+  if (enriched.reviewRunState === "request_changes") return "Verifier REQUEST_CHANGES — Nacharbeit folgt";
+  return null;
+}
+
 function sameEnriched(a: Enriched, b: Enriched): boolean {
   return (
     a.workerProfile === b.workerProfile &&
     a.workerHeartbeat === b.workerHeartbeat &&
     a.verdict === b.verdict &&
     a.verifierEvidenceCount === b.verifierEvidenceCount &&
+    a.activeVerifier === b.activeVerifier &&
+    a.activeRunId === b.activeRunId &&
+    a.reviewRunState === b.reviewRunState &&
     a.blockedKind === b.blockedKind &&
     a.blockedReason === b.blockedReason &&
     a.resultQualityLabel === b.resultQualityLabel &&
     a.resultQualityTone === b.resultQualityTone &&
-    a.deliverableCount === b.deliverableCount
+    a.deliverableCount === b.deliverableCount &&
+    sameArtifactLinks(a.resultArtifactLinks, b.resultArtifactLinks)
   );
 }
 
@@ -135,16 +169,22 @@ interface FlowDispatchChoice extends HeldFlowDispatchGuard {
   taskId: string;
 }
 
-function FlowCardActions({ status, busy, error, dispatchChoice, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
+function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStatus, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
   status: BoardTask["status"]; busy: boolean; error?: string; dispatchChoice?: FlowDispatchChoice | null;
+  verifierGateStatus?: string | null;
   onReleaseChain?: () => void; onDispatchSingle?: () => void; onCancelDispatchChoice?: () => void; onAct: (action: StageAction) => void;
 }) {
   const [pending, setPending] = useState<StageAction | null>(null);
   const actions = stageActions(status);
   const guard = stageGuard(status);
+  const reviewIsVerifierDriven = status === "review" && verifierGateStatus;
   return (
     <div className="mt-2.5" onClick={(e) => e.stopPropagation()}>
-      {dispatchChoice ? (
+      {reviewIsVerifierDriven ? (
+        <p className="flex items-center gap-1.5 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 hc-type-label text-cyan-100">
+          <ShieldCheck className="h-3 w-3" />{verifierGateStatus}
+        </p>
+      ) : dispatchChoice ? (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 p-2">
           <p className="hc-type-label text-emerald-100">{de.flow.singleDispatch.prompt}</p>
           <p className="mt-1 hc-type-label hc-soft">{de.flow.singleDispatch.heldSiblings(dispatchChoice.heldSiblingIds.length)}</p>
@@ -211,11 +251,13 @@ function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
   );
 }
 
-const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
+export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
   const role = roleChip(enriched.workerProfile ?? task.assignee, task.status === "review" ? "verification" : null);
   const isBlocked = task.status === "blocked";
   const isReview = task.status === "review";
   const isDone = task.status === "done";
+  const verifierGate = reviewGateStatus(enriched);
+  const resultArtifact = preferredResultArtifactLink(enriched.resultArtifactLinks);
   const ageSec = task.age?.created_age_seconds ?? null;
   return (
     <article
@@ -249,14 +291,21 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
         <p className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 hc-type-label text-red-200"><Lock className="mt-0.5 h-3 w-3 shrink-0" />{enriched.blockedReason}</p>
       ) : null}
       {isReview ? (
-        <p className="mt-2 flex items-center gap-1.5 hc-type-label hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — Ausliefern nimmt ab, Nacharbeit schickt zurück.</p>
+        <p className="mt-2 flex items-center gap-1.5 hc-type-label hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — {verifierGate ?? "wartet auf Verifier; Nacharbeit schickt zurück."}</p>
       ) : null}
       {enriched.deliverableCount ? <p className="mt-1.5 hc-type-label text-emerald-300">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</p> : null}
+      {resultArtifact ? (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2 py-1.5">
+          <span className="min-w-0 truncate hc-type-label text-emerald-100">Spec-Draft / RESULT · {resultArtifact.relative_path}</span>
+          <DeliverableOpenButton url={resultArtifact.url} label="RESULT öffnen" />
+        </div>
+      ) : null}
       <FlowCardActions
         status={task.status}
         busy={busy}
         error={error}
         dispatchChoice={dispatchChoice}
+        verifierGateStatus={verifierGate}
         onReleaseChain={onReleaseChain}
         onDispatchSingle={onDispatchSingle}
         onCancelDispatchChoice={onCancelDispatchChoice}
@@ -416,7 +465,7 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
   );
 }
 
-function DeliverableOpenButton({ url }: { url: string }) {
+function DeliverableOpenButton({ url, label = "öffnen" }: { url: string; label?: string }) {
   const [openError, setOpenError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const onOpen = useCallback(async () => {
@@ -437,16 +486,18 @@ function DeliverableOpenButton({ url }: { url: string }) {
         className="hc-type-label text-emerald-200 hover:text-emerald-100 disabled:cursor-wait disabled:opacity-60"
         onClick={onOpen}
         disabled={busy}
+        title={url}
+        aria-label={`${label}: ${url}`}
       >
-        {busy ? "öffnet…" : "öffnen"}
+        {busy ? "öffnet…" : label}
       </button>
       {openError ? <p className="mt-1 max-w-32 hc-type-label text-red-300">{openError}</p> : null}
     </div>
   );
 }
 
-function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released }: {
-  taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; loading: boolean; error?: string; now: number;
+export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released }: {
+  taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; enriched?: Enriched; loading: boolean; error?: string; now: number;
   boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
 }) {
   if (!taskId) {
@@ -460,7 +511,9 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
   const runs = detail?.runs ?? [];
   const events = (detail?.events ?? []).slice(-12).reverse();
   const deliverables = detail?.deliverables ?? [];
-  const empty = !loading && !error && runs.length === 0 && events.length === 0 && deliverables.length === 0;
+  const resultArtifactLinks = enriched.resultArtifactLinks ?? [];
+  const artifactLinksOnly = resultArtifactLinks.filter((link) => !deliverables.some((deliverable) => artifactKey(deliverable) === artifactKey(link)));
+  const empty = !loading && !error && runs.length === 0 && events.length === 0 && deliverables.length === 0 && artifactLinksOnly.length === 0;
   return (
     <aside className="hc-surface-card h-fit p-4 xl:sticky xl:top-4">
       <Eyebrow>{de.flow.selectedChain}</Eyebrow>
@@ -526,6 +579,20 @@ function FlowReceiptRail({ taskId, task, detail, loading, error, now, boardTasks
               <li key={d.relative_path} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5">
                 <span className="min-w-0 truncate text-[0.78rem] text-white">{d.relative_path}</span>
                 <DeliverableOpenButton url={d.url} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {artifactLinksOnly.length ? (
+        <div className="mt-4">
+          <Eyebrow>Spec-Draft / RESULT</Eyebrow>
+          <ul className="mt-2 space-y-1.5">
+            {artifactLinksOnly.map((d) => (
+              <li key={`${d.source}-${artifactKey(d)}`} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5">
+                <span className="min-w-0 truncate text-[0.78rem] text-white" title={d.path}>{d.relative_path || d.filename || d.path}</span>
+                <DeliverableOpenButton url={d.url} label={/(^|\/)RESULT\.md$/i.test(d.relative_path) ? "RESULT öffnen" : "Artifact öffnen"} />
               </li>
             ))}
           </ul>
@@ -933,13 +1000,27 @@ export function FlowView() {
       map[w.task_id] = { ...map[w.task_id], workerProfile: w.profile, workerHeartbeat: w.last_heartbeat_at || null };
     }
     for (const r of reviews.data?.reviews ?? []) {
-      map[r.task_id] = { ...map[r.task_id], verdict: r.verifier_verdict, verifierEvidenceCount: r.verifier_evidence?.length ?? 0 };
+      map[r.task_id] = {
+        ...map[r.task_id],
+        verdict: r.active_verifier ? "Verifier läuft" : r.verifier_verdict,
+        verifierEvidenceCount: r.verifier_evidence?.length ?? 0,
+        activeVerifier: r.active_verifier,
+        activeRunId: r.active_run_id,
+        reviewRunState: r.review_run_state,
+      };
     }
     for (const b of blocked.data?.blocked ?? []) {
       map[b.task_id] = { ...map[b.task_id], blockedKind: b.kind, blockedReason: b.fix_summary || b.summary_preview || null };
     }
     for (const res of results.data?.results ?? []) {
-      map[res.task_id] = { ...map[res.task_id], resultQualityLabel: res.result_quality?.label ?? null, resultQualityTone: res.result_quality?.tone ?? null, deliverableCount: res.deliverables?.length ?? 0 };
+      const artifactLinks = res.artifact_links ?? [];
+      map[res.task_id] = {
+        ...map[res.task_id],
+        resultQualityLabel: res.result_quality?.label ?? null,
+        resultQualityTone: res.result_quality?.tone ?? null,
+        deliverableCount: Math.max(res.deliverables?.length ?? 0, artifactLinks.length),
+        resultArtifactLinks: artifactLinks,
+      };
     }
     return map;
   }, [workers.data, reviews.data, blocked.data, results.data]);
@@ -1067,6 +1148,7 @@ export function FlowView() {
   const selectedStatus = selectedTask?.status;
   const loadingFirst = board.loading && board.data == null;
   const hasAnyRun = allTasks.length > 0;
+  const boardSourceErrors = board.data?.source_errors ?? [];
 
   useEffect(() => {
     if (!taskParam || allTasks.length === 0) return;
@@ -1129,6 +1211,18 @@ export function FlowView() {
       </Hero>
 
       {board.error ? <ToneCallout tone="red">{de.flow.loadError}<br />{board.error}</ToneCallout> : null}
+      {boardSourceErrors.length ? (
+        <ToneCallout tone="amber">
+          {de.flow.sourceErrorTitle}
+          {boardSourceErrors.map((err) => (
+            <div key={`${err.artifact}-${err.source}-${err.stage}-${err.message}`} className="mt-1">
+              <span className="hc-mono">{err.artifact}</span>: {err.message}
+              <br />
+              <span className="hc-dim">{de.flow.sourceErrorContext(err.source, err.stage, err.retry_count)}</span>
+            </div>
+          ))}
+        </ToneCallout>
+      ) : null}
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
@@ -1306,6 +1400,7 @@ export function FlowView() {
               taskId={selectedId}
               task={selectedTask}
               detail={selectedId ? taskDetail.detailById[selectedId] : undefined}
+              enriched={selectedId ? enrichmentById[selectedId] : undefined}
               loading={taskDetail.loadingId === selectedId}
               error={selectedId ? taskDetail.errorById[selectedId] : undefined}
               now={now}

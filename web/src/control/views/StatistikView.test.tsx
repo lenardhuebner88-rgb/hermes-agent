@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBreakdownPanel, WertBilanzPanel } from "./StatistikView";
+import { CostBreakdownPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
 import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 
 const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
@@ -77,6 +77,48 @@ function dailyPoint(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
     ...over,
   };
 }
+
+describe("WochenvergleichPanel", () => {
+  it("vergleicht die letzten 7 Tage mit den 7 Tagen davor inkl. Roots-Prozentdelta", () => {
+    const previous = Array.from({ length: 7 }, (_, i) => dailyPoint({
+      date: `2026-06-${String(i + 1).padStart(2, "0")}`,
+      done_roots: 2,
+      done_tasks: 4,
+      output_tokens: 1000,
+      cost_usd: 0.1,
+    }));
+    const current = Array.from({ length: 7 }, (_, i) => dailyPoint({
+      date: `2026-06-${String(i + 8).padStart(2, "0")}`,
+      done_roots: 3,
+      done_tasks: 6,
+      output_tokens: 2000,
+      cost_usd: 0.2,
+    }));
+
+    const html = renderToStaticMarkup(<WochenvergleichPanel series={[...previous, ...current]} />);
+
+    expect(html).toContain("Wochenvergleich");
+    expect(html).toContain("letzte 7 Tage vs. 7 Tage davor");
+    expect(html).toContain("Roots geliefert");
+    expect(html).toContain(">21<");
+    expect(html).toContain("+7");
+    expect(html).toContain("+50 %");
+    expect(html).toContain("Tasks geliefert");
+    expect(html).toContain("+14");
+    expect(html).toContain("Out-Tokens");
+    expect(html).toContain("+7 k");
+    expect(html).toContain("gemessene $");
+    expect(html).toContain("+ $ 0.70");
+  });
+
+  it("blendet gemessene Kosten aus, wenn die Daily-Series keine Kostenwerte enthält", () => {
+    const html = renderToStaticMarkup(<WochenvergleichPanel series={[dailyPoint({ done_roots: 1 })]} />);
+
+    expect(html).toContain("Wochenvergleich");
+    expect(html).not.toContain("gemessene $");
+  });
+});
+
 
 describe("WertBilanzPanel (T5)", () => {
   it("summiert die Woche pro Klasse", () => {

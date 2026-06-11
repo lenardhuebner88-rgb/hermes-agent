@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DraftEditDialog, FreigabenList, type FunnelDraft } from "./FunnelFreigaben";
+import { funnelDraftEditRequest } from "./funnelDraftEditRequest";
 
 const draft = (over: Partial<FunnelDraft> = {}): FunnelDraft => ({
   id: "t_aaa",
@@ -95,5 +96,37 @@ describe("DraftEditDialog", () => {
     expect(html).toContain("Finale Version bauen");
     expect(html).toContain("Inhalt des vollständigen Drafts");
     expect(html).toContain("Bitte ACs ergänzen");
+  });
+
+  it("rendert einen konkreten Fehler im Popup statt nur hinter dem Overlay", () => {
+    const html = renderToStaticMarkup(
+      <DraftEditDialog
+        draft={draft()}
+        editText="# Draft\nInhalt des vollständigen Drafts"
+        operatorNote="Bitte ACs ergänzen"
+        error="409: draft_text darf nicht leer sein"
+        busy={false}
+        onEditTextChange={noop}
+        onOperatorNoteChange={noop}
+        onClose={noop}
+        onSave={noop}
+        onRevise={noop}
+        onBuild={noop}
+      />,
+    );
+    expect(html).toContain("409: draft_text darf nicht leer sein");
+  });
+});
+
+describe("funnelDraftEditRequest", () => {
+  it("baut den PATCH-Request für Bearbeiten inklusive Operator-Kommentar", () => {
+    const [url, init] = funnelDraftEditRequest("t_aaa", "# Plan\nUmsetzen", "Bitte ACs ergänzen");
+
+    expect(url).toBe("/api/plugins/kanban/funnel/drafts/t_aaa");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({
+      draft_text: "# Plan\nUmsetzen",
+      operator_note: "Bitte ACs ergänzen",
+    });
   });
 });

@@ -712,6 +712,8 @@ def resolve_provider_full(
 
     # 2b. Saved custom providers from config
     custom_pdef = resolve_custom_provider(name, custom_providers)
+    if custom_pdef is None and canonical != raw:
+        custom_pdef = resolve_custom_provider(canonical, custom_providers)
     if custom_pdef is not None:
         return custom_pdef
 

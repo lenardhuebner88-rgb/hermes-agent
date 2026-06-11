@@ -85,3 +85,59 @@ def test_item_unknown_id_is_404_and_gate_applies(client):
         "/api/library/item", params={"id": "research::t_00000000"}, headers=HEADERS,
     )
     assert res.status_code == 404
+
+
+def test_saved_search_routes_create_list_update_delete(client):
+    assert client.get("/api/library/saved-searches").status_code == 401
+
+    created = client.post(
+        "/api/library/saved-searches",
+        headers=HEADERS,
+        json={
+            "name": "KI Modelle täglich",
+            "query": "frontier model releases",
+            "topic_tags": ["KI-Modelle"],
+            "person_tags": ["Piet"],
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["name"] == "KI Modelle täglich"
+    assert body["query"] == "frontier model releases"
+
+    listed = client.get("/api/library/saved-searches", headers=HEADERS)
+    assert listed.status_code == 200
+    assert [s["name"] for s in listed.json()["items"]] == ["KI Modelle täglich"]
+
+    patched = client.patch(
+        f"/api/library/saved-searches/{body['id']}",
+        headers=HEADERS,
+        json={"name": "KI Modelle Woche", "query": "open weights"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["name"] == "KI Modelle Woche"
+    assert patched.json()["query"] == "open weights"
+
+    deleted = client.delete(f"/api/library/saved-searches/{body['id']}", headers=HEADERS)
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert client.get("/api/library/saved-searches", headers=HEADERS).json()["items"] == []
+
+
+def test_topic_routes_list_follow_unfollow_demo_seed(client):
+    listed = client.get("/api/library/topics", headers=HEADERS)
+    assert listed.status_code == 200
+    topics = {topic["title"]: topic for topic in listed.json()["items"]}
+    topic = topics["KI-Modelle"]
+    assert topic["seeded"] is True
+    assert topic["followed"] is False
+
+    followed = client.post(f"/api/library/topics/{topic['id']}/follow", headers=HEADERS)
+    assert followed.status_code == 200
+    assert followed.json()["followed"] is True
+    assert followed.json()["subscribed"] is True
+
+    unfollowed = client.delete(f"/api/library/topics/{topic['id']}/follow", headers=HEADERS)
+    assert unfollowed.status_code == 200
+    assert unfollowed.json()["followed"] is False
+    assert unfollowed.json()["subscribed"] is False

@@ -130,6 +130,26 @@ def test_clear_session_cookies_emits_expired_at_and_rt():
     )
 
 
+def test_clear_session_cookies_deletes_secure_prefix_variants_with_secure_flag():
+    """Browser-enforced __Host-/__Secure- deletions must carry Secure too."""
+    client = TestClient(_build_app())
+    r = client.get("/clear")
+    cookies = r.headers.get_list("set-cookie")
+
+    secure_prefixed = [
+        c for c in cookies
+        if c.startswith(f"__Host-{SESSION_AT_COOKIE}=")
+        or c.startswith(f"__Secure-{SESSION_AT_COOKIE}=")
+        or c.startswith(f"__Host-{SESSION_RT_COOKIE}=")
+        or c.startswith(f"__Secure-{SESSION_RT_COOKIE}=")
+        or c.startswith(f"__Host-{PKCE_COOKIE}=")
+        or c.startswith(f"__Secure-{PKCE_COOKIE}=")
+    ]
+
+    assert secure_prefixed
+    assert all("Secure" in c for c in secure_prefixed)
+
+
 def test_pkce_cookie_short_ttl_and_path_root():
     client = TestClient(_build_app(use_https=True))
     r = client.get("/set-pkce")

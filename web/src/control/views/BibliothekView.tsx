@@ -28,6 +28,16 @@ const t = {
   prev: "← ältere",
   next: "neuere →",
   truncated: "Liste gekappt — neueste zuerst.",
+  topicsTitle: "Themen folgen",
+  topicsMeta: "Beobachtungsliste für deine Bibliothek",
+  topicFollow: "Thema folgen",
+  topicFollowing: "Folge ich",
+  topicUnfollow: "Entfolgen",
+  topicPending: "Speichern …",
+  savedTitle: "Smart Shelves",
+  savedMeta: "Gespeicherte Suchen",
+  savedEmpty: "Noch keine gespeicherten Suchen.",
+  savedApply: "Suche öffnen",
 };
 
 export const CATEGORY_LABEL: Record<string, string> = {
@@ -61,6 +71,37 @@ interface LibraryListResponse {
 
 type LibraryDetail = LibraryItem & { body_md: string };
 
+export interface LibraryTopic {
+  id: string;
+  title: string;
+  followed: boolean;
+  subscribed: boolean;
+  seeded: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface LibrarySavedSearch {
+  id: string;
+  name: string;
+  title: string;
+  query: string;
+  topic_tags: string[];
+  person_tags: string[];
+  created_at: number;
+  updated_at: number;
+}
+
+interface LibraryTopicsResponse {
+  items: LibraryTopic[];
+  count: number;
+}
+
+interface LibrarySavedSearchesResponse {
+  items: LibrarySavedSearch[];
+  count: number;
+}
+
 const LAST_VISIT_KEY = "hc-bibliothek-last-visit";
 
 /** Serien-Gruppierung fürs Regal (exportiert für den Test). */
@@ -92,6 +133,81 @@ export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unre
         <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(item.ts)}</span>
       </button>
     </li>
+  );
+}
+
+export function TopicFollowCard({ topic, onToggle, pending }: { topic: LibraryTopic; onToggle: (topic: LibraryTopic) => void; pending: boolean }) {
+  return (
+    <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="truncate text-[0.9rem] font-semibold text-white">{topic.title}</h3>
+          {topic.followed ? (
+            <p className="mt-1 text-[0.72rem] text-emerald-300">{t.topicFollowing}</p>
+          ) : (
+            <p className="mt-1 text-[0.72rem] hc-dim">{t.topicFollow}</p>
+          )}
+        </div>
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() => onToggle(topic)}
+          aria-pressed={topic.followed}
+          className={`inline-flex min-h-8 shrink-0 items-center rounded-full border px-2.5 py-1 text-[0.72rem] ${
+            topic.followed
+              ? "border-emerald-500/40 text-emerald-200"
+              : "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]"
+          } disabled:opacity-50`}
+        >
+          {pending ? t.topicPending : topic.followed ? t.topicUnfollow : t.topicFollow}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+export function TopicFollowSection({ topics, onToggle, pendingTopicId }: { topics: LibraryTopic[]; onToggle: (topic: LibraryTopic) => void; pendingTopicId: string | null }) {
+  return (
+    <FleetPanel eyebrow={t.topicsTitle} meta={t.topicsMeta}>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {topics.map((topic) => (
+          <TopicFollowCard key={topic.id} topic={topic} onToggle={onToggle} pending={pendingTopicId === topic.id} />
+        ))}
+      </div>
+    </FleetPanel>
+  );
+}
+
+export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySavedSearch[]; onApply: (search: LibrarySavedSearch) => void }) {
+  return (
+    <FleetPanel eyebrow={t.savedTitle} meta={t.savedMeta}>
+      {searches.length === 0 ? (
+        <p className="text-sm hc-dim">{t.savedEmpty}</p>
+      ) : (
+        <ul className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {searches.map((search) => (
+            <li key={search.id} className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="truncate text-[0.9rem] font-semibold text-white">{search.title || search.name}</h3>
+                  <p className="mt-1 line-clamp-2 text-[0.78rem] hc-soft">{search.query}</p>
+                  {[...search.topic_tags, ...search.person_tags].length ? (
+                    <p className="mt-2 flex flex-wrap gap-1">
+                      {[...search.topic_tags, ...search.person_tags].map((tag) => (
+                        <span key={tag} className="rounded-full border border-white/10 px-1.5 py-0.5 text-[0.62rem] hc-dim">{tag}</span>
+                      ))}
+                    </p>
+                  ) : null}
+                </div>
+                <button type="button" onClick={() => onApply(search)} className="inline-flex min-h-8 shrink-0 items-center rounded-full border border-white/10 px-2.5 py-1 text-[0.72rem] hc-soft hover:bg-white/5">
+                  {t.savedApply}
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </FleetPanel>
   );
 }
 
@@ -136,6 +252,9 @@ export function BibliothekView(_props: { density?: Density }) {
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [data, setData] = useState<LibraryListResponse | null>(null);
+  const [topics, setTopics] = useState<LibraryTopic[]>([]);
+  const [savedSearches, setSavedSearches] = useState<LibrarySavedSearch[]>([]);
+  const [pendingTopicId, setPendingTopicId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState<LibraryItem | null>(null);
   // Ungelesen v1: Zeitstempel des letzten Besuchs aus localStorage; beim
@@ -162,11 +281,47 @@ export function BibliothekView(_props: { density?: Density }) {
     }
   }, [category, q]);
 
+  const loadPreferences = useCallback(async () => {
+    try {
+      const [topicRes, savedRes] = await Promise.all([
+        fetchJSON<LibraryTopicsResponse>("/api/library/topics"),
+        fetchJSON<LibrarySavedSearchesResponse>("/api/library/saved-searches"),
+      ]);
+      setTopics(topicRes.items);
+      setSavedSearches(savedRes.items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const toggleTopicFollow = useCallback(async (topic: LibraryTopic) => {
+    setPendingTopicId(topic.id);
+    try {
+      const updated = await fetchJSON<LibraryTopic>(
+        `/api/library/topics/${encodeURIComponent(topic.id)}/follow`,
+        { method: topic.followed ? "DELETE" : "POST" },
+      );
+      setTopics((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPendingTopicId(null);
+    }
+  }, []);
+
+  const applySavedSearch = useCallback((search: LibrarySavedSearch) => {
+    setCategory(null);
+    setReading(null);
+    setQ(search.query);
+  }, []);
+
   useEffect(() => {
     void load();
+    void loadPreferences();
     const id = window.setInterval(() => void load(), 60000);
     return () => window.clearInterval(id);
-  }, [load]);
+  }, [load, loadPreferences]);
 
   const items = useMemo(() => data?.items ?? [], [data]);
   const isFrontpage = !category && !q.trim();
@@ -224,6 +379,9 @@ export function BibliothekView(_props: { density?: Density }) {
           />
         </div>
       </Hero>
+
+      <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
+      <SavedSearchShelf searches={savedSearches} onApply={applySavedSearch} />
 
       {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
       {data?.truncated ? <p className="text-xs text-amber-200">{t.truncated}</p> : null}

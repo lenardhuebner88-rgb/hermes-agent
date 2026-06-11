@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CATEGORY_LABEL, ItemRow, groupBySeries, type LibraryItem } from "./BibliothekView";
+import {
+  CATEGORY_LABEL,
+  ItemRow,
+  SavedSearchShelf,
+  TopicFollowCard,
+  TopicFollowSection,
+  groupBySeries,
+  type LibraryItem,
+  type LibrarySavedSearch,
+  type LibraryTopic,
+} from "./BibliothekView";
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -55,5 +65,61 @@ describe("Receipts-Regal (S2)", () => {
       />,
     );
     expect(row).toContain("Receipt — Härtungs-Lauf");
+  });
+});
+
+describe("Themen-Follows und Smart Shelves", () => {
+  const topics: LibraryTopic[] = [
+    { id: "ki-modelle", title: "KI-Modelle", followed: false, subscribed: false, seeded: true, created_at: 0, updated_at: 0 },
+    { id: "wm-2026-deutschland", title: "WM 2026 Deutschland", followed: true, subscribed: true, seeded: true, created_at: 1, updated_at: 2 },
+    { id: "hermes-dashboard", title: "Hermes Dashboard", followed: false, subscribed: false, seeded: true, created_at: 0, updated_at: 0 },
+    { id: "langfuse-langsmith", title: "Langfuse/LangSmith", followed: false, subscribed: false, seeded: true, created_at: 0, updated_at: 0 },
+  ];
+
+  it("rendert die vier Beispielthemen als followbare deutsche Chips/Karten", () => {
+    const html = renderToStaticMarkup(<TopicFollowSection topics={topics} onToggle={() => {}} pendingTopicId={null} />);
+    for (const label of ["KI-Modelle", "WM 2026 Deutschland", "Hermes Dashboard", "Langfuse/LangSmith"]) {
+      expect(html).toContain(label);
+    }
+    expect(html).toContain("Thema folgen");
+    expect(html).toContain("Folge ich");
+    expect(html).toContain("Entfolgen");
+    expect(html).toContain("Beobachtungsliste");
+  });
+
+  it("macht den Follow-Zustand nach neu geladenen Topic-Daten sichtbar", () => {
+    const before = renderToStaticMarkup(<TopicFollowCard topic={topics[0]} onToggle={() => {}} pending={false} />);
+    expect(before).toContain("Thema folgen");
+    expect(before).not.toContain("Folge ich");
+
+    const afterFollow = renderToStaticMarkup(<TopicFollowCard topic={{ ...topics[0], followed: true, subscribed: true }} onToggle={() => {}} pending={false} />);
+    expect(afterFollow).toContain("Folge ich");
+    expect(afterFollow).toContain("Entfolgen");
+
+    const afterUnfollowReload = renderToStaticMarkup(<TopicFollowCard topic={{ ...topics[0], followed: false, subscribed: false }} onToggle={() => {}} pending={false} />);
+    expect(afterUnfollowReload).toContain("Thema folgen");
+    expect(afterUnfollowReload).not.toContain("Folge ich");
+  });
+});
+
+describe("Gespeicherte Suchen und aggregierte Themenseite", () => {
+  it("zeigt gespeicherte Suchen als Smart-Shelf-Liste", () => {
+    const searches: LibrarySavedSearch[] = [
+      { id: "ss_1", name: "KI Modelle täglich", title: "KI Modelle täglich", query: "frontier model releases", topic_tags: ["KI-Modelle"], person_tags: ["Piet"], created_at: 1, updated_at: 2 },
+    ];
+    const html = renderToStaticMarkup(<SavedSearchShelf searches={searches} onApply={() => {}} />);
+    expect(html).toContain("Smart Shelves");
+    expect(html).toContain("KI Modelle täglich");
+    expect(html).toContain("frontier model releases");
+    expect(html).toContain("KI-Modelle");
+  });
+
+  it("gruppiert aggregierte Treffer aus mindestens zwei Serien/Sources", () => {
+    const shelves = groupBySeries([
+      item({ id: "cron1", series_id: "profile:research/ki", series: "KI Modell-Brief", source_ref: "cron:research/ki", ts: 300 }),
+      item({ id: "research1", series_id: "research", series: "Recherchen", source_ref: "task:t_123", ts: 200 }),
+    ]);
+    expect(shelves.map((s) => s.series)).toEqual(["KI Modell-Brief", "Recherchen"]);
+    expect(shelves.flatMap((s) => s.items.map((i) => i.source_ref))).toEqual(["cron:research/ki", "task:t_123"]);
   });
 });

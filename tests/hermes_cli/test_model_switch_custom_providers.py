@@ -65,6 +65,25 @@ def test_resolve_provider_full_finds_named_custom_provider():
     assert resolved.source == "user-config"
 
 
+def test_resolve_provider_full_falls_back_from_ollama_alias_to_first_custom_provider():
+    """Bare ``ollama`` normalizes to ``custom`` and should self-heal to a custom provider."""
+    resolved = resolve_provider_full(
+        "ollama",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "Local Ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+            }
+        ],
+    )
+
+    assert resolved is not None
+    assert resolved.id == "custom:local-ollama"
+    assert resolved.name == "Local Ollama"
+    assert resolved.base_url == "http://127.0.0.1:11434/v1"
+
+
 def test_is_aggregator_recognizes_named_custom_provider():
     assert providers_mod.is_aggregator("custom:hpc-ai") is True
     assert providers_mod.is_aggregator("custom:litellm") is True

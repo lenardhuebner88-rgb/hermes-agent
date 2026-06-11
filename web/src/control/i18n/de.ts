@@ -44,6 +44,14 @@ export const de = {
     classNutzer: "Nutzer-Feature",
     classHaertung: "Härtung",
     classMeta: "Meta",
+    // Wochenvergleich: rollierende letzte 7 Tage vs. 7 Tage davor.
+    weekCompare: "Wochenvergleich",
+    weekCompareHint: "letzte 7 Tage vs. 7 Tage davor",
+    weekCompareRoots: "Roots geliefert",
+    weekCompareTasks: "Tasks geliefert",
+    weekCompareOutTokens: "Out-Tokens",
+    weekCompareMeasuredCost: "gemessene $",
+    weekCompareNoPrior: "—",
     // Epic-Kompaktübersicht (eine Zeile pro offenem Epic).
     epics: "Offene Epics",
     epicsHint: "Fortschritt + Token-Burn pro Vorhaben · aus dem Live-Rollup",
@@ -128,6 +136,8 @@ export const de = {
     wip: "In Arbeit",
     review: "In Prüfung",
     loadError: "Das Flow-Board konnte nicht aus dem Kanban geladen werden.",
+    sourceErrorTitle: "Kanban-Quelle meldete einen Fetch-Fehler",
+    sourceErrorContext: (source: string, stage: string, retryCount: number) => `${source} · ${stage}${retryCount ? ` · Retry ${retryCount}` : ""}`,
     emptyTitle: "Noch keine Läufe",
     emptyDesc: "Sobald in Kanban Aufgaben angelegt oder Worker gestartet werden, erscheinen sie hier in ihrer Stufe — keine Demo-Daten.",
     stageEmpty: "Nichts in dieser Stufe.",

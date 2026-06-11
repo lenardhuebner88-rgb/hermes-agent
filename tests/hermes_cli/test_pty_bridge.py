@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("ptyprocess", reason="ptyprocess not installed")
 
+import hermes_cli.pty_bridge as pty_bridge
 from hermes_cli.pty_bridge import PtyBridge, PtyUnavailableError
 
 
@@ -53,6 +54,26 @@ class TestPtyBridgeSpawn:
     def test_spawn_raises_on_missing_argv0(self, tmp_path):
         with pytest.raises((FileNotFoundError, OSError)):
             PtyBridge.spawn([str(tmp_path / "definitely-not-a-real-binary")])
+
+    def test_spawn_clamps_initial_winsize_dimensions(self, monkeypatch):
+        """Initial PTY spawn gets the same sane dimension clamp as resize()."""
+        captured = {}
+
+        class FakeProc:
+            pid = 123
+            fd = -1
+
+        def fake_spawn(argv, **kwargs):
+            captured["dimensions"] = kwargs.get("dimensions")
+            return FakeProc()
+
+        monkeypatch.setattr(pty_bridge, "_PTY_AVAILABLE", True)
+        monkeypatch.setattr(pty_bridge.ptyprocess.PtyProcess, "spawn", fake_spawn)
+
+        bridge = PtyBridge.spawn(["fake-hermes"], cols=131072, rows=0)
+
+        assert bridge.pid == 123
+        assert captured["dimensions"] == (1, 2000)
 
 
 @skip_on_windows

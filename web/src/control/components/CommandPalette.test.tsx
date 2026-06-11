@@ -35,6 +35,7 @@ const snapshots: CommandPaletteSnapshots = {
     tenants: [],
     assignees: [],
     latest_event_id: 7,
+    source_errors: [],
     now: 10,
   },
   crons: {

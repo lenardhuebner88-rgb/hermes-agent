@@ -5,6 +5,7 @@ import { fmtClock } from "../lib/derive";
 import { FleetPanel } from "./fleet/atoms";
 import { ToneCallout } from "./atoms";
 import { Markdown } from "./Markdown";
+import { funnelDraftEditRequest } from "./funnelDraftEditRequest";
 
 // Demand-Funnel Freigabe-Queue: fertige Drafts aus dem Wunsch-Trichter
 // (family / discord-idee / fo-gap-audit), die auf den Operator-Klick warten.
@@ -84,9 +85,12 @@ export function FunnelFreigaben() {
   }, []);
 
   useEffect(() => {
-    void load();
+    const initialLoad = window.setTimeout(() => void load(), 0);
     const id = window.setInterval(() => void load(), 30000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(initialLoad);
+      window.clearInterval(id);
+    };
   }, [load]);
 
   const act = useCallback(async (draft: FunnelDraft, kind: "approve" | "dismiss") => {
@@ -120,14 +124,7 @@ export function FunnelFreigaben() {
   }, []);
 
   const saveEdit = useCallback(async (draft: FunnelDraft, text: string, note: string) => {
-    return fetchJSON<{ draft: FunnelDraft }>(
-      `/api/plugins/kanban/funnel/drafts/${encodeURIComponent(draft.id)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ draft_text: text, operator_note: note }),
-      },
-    );
+    return fetchJSON<{ draft: FunnelDraft }>(...funnelDraftEditRequest(draft.id, text, note));
   }, []);
 
   const handleSaveEdit = useCallback(async () => {
@@ -215,6 +212,7 @@ export function FunnelFreigaben() {
           draft={editingDraft}
           editText={editText}
           operatorNote={operatorNote}
+          error={error}
           busy={modalBusy}
           onEditTextChange={setEditText}
           onOperatorNoteChange={setOperatorNote}
@@ -326,6 +324,7 @@ export function DraftEditDialog({
   draft,
   editText,
   operatorNote,
+  error,
   busy,
   onEditTextChange,
   onOperatorNoteChange,
@@ -337,6 +336,7 @@ export function DraftEditDialog({
   draft: FunnelDraft;
   editText: string;
   operatorNote: string;
+  error?: string | null;
   busy: boolean;
   onEditTextChange: (value: string) => void;
   onOperatorNoteChange: (value: string) => void;
@@ -359,6 +359,7 @@ export function DraftEditDialog({
           </button>
         </div>
         <div className="max-h-[70vh] space-y-3 overflow-y-auto px-4 py-3">
+          {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
           <label className="block text-[0.78rem] font-medium text-white" htmlFor="funnel-edit-text">{t.editTextLabel}</label>
           <textarea
             id="funnel-edit-text"

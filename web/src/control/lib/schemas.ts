@@ -85,6 +85,17 @@ const TaskStatusSchema = z
   .enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"])
   .catch("todo");
 
+const BoardSourceErrorSchema = z.object({
+  artifact: z.string().catch("kanban_board_fetch"),
+  source: z.string().catch("unknown"),
+  stage: z.string().catch("unknown"),
+  severity: z.enum(["info", "warning", "error"]).catch("warning"),
+  message: z.string().catch(""),
+  db_path: z.string().nullable().catch(null),
+  backup_path: z.string().nullable().catch(null),
+  retry_count: z.coerce.number().catch(0),
+});
+
 export const BoardTaskSchema = z.object({
   id: z.coerce.string(),
   title: z.string().catch("Ohne Titel"),
@@ -118,6 +129,7 @@ export const BoardResponseSchema = z.object({
   tenants: z.array(z.string()).catch([]),
   assignees: z.array(z.string()).catch([]),
   latest_event_id: z.coerce.number().catch(0),
+  source_errors: z.array(BoardSourceErrorSchema).catch([]),
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
@@ -155,6 +167,11 @@ const TaskDeliverableSchema = z.object({
   url: z.string().catch(""),
 });
 
+const TaskArtifactLinkSchema = TaskDeliverableSchema.extend({
+  path: z.string().catch(""),
+  source: z.enum(["metadata.artifacts", "deliverables_preserved"]).catch("metadata.artifacts"),
+});
+
 export const KanbanResultSchema = z.object({
   run_id: z.coerce.string(),
   task_id: z.string().catch(""),
@@ -174,6 +191,7 @@ export const KanbanResultSchema = z.object({
   summary_preview: z.string().catch(""),
   followups: z.array(z.string()).catch([]),
   artifacts: z.array(z.string()).catch([]),
+  artifact_links: z.array(TaskArtifactLinkSchema).catch([]),
   verification: z.array(z.string()).catch([]),
   verification_state: VerificationStateSchema.catch("ungated"),
   verifier_verdict: VerifierVerdictSchema.nullable().catch(null),
@@ -225,6 +243,10 @@ export const KanbanReviewSchema = z.object({
   verification_state: VerificationStateSchema.catch("pending"),
   verifier_verdict: VerifierVerdictSchema.nullable().catch(null),
   verifier_evidence: z.array(z.string()).catch([]),
+  active_verifier: z.boolean().catch(false),
+  active_run_id: z.coerce.string().nullable().catch(null),
+  review_run_state: z.enum(["active", "approved", "request_changes", "pending"]).catch("pending"),
+  review_run_source: z.enum(["claimed_event", "latest_ended_run"]).nullable().catch(null),
 });
 
 export const RecentResultsResponseSchema = z.object({

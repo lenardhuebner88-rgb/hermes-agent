@@ -166,6 +166,83 @@ function ReliabilityTable({ profiles, baseline, minN }: {
   );
 }
 
+type WeekTotals = {
+  roots: number;
+  tasks: number;
+  outTokens: number;
+  measuredCost: number;
+  hasMeasuredCost: boolean;
+};
+
+function weekTotals(points: RunsDailyPoint[]): WeekTotals {
+  const initial: WeekTotals = { roots: 0, tasks: 0, outTokens: 0, measuredCost: 0, hasMeasuredCost: false };
+  return points.reduce<WeekTotals>(
+    (acc, p) => ({
+      roots: acc.roots + p.done_roots,
+      tasks: acc.tasks + p.done_tasks,
+      outTokens: acc.outTokens + (p.output_tokens ?? 0),
+      measuredCost: acc.measuredCost + (p.cost_usd ?? 0),
+      hasMeasuredCost: acc.hasMeasuredCost || p.cost_usd != null,
+    }),
+    initial,
+  );
+}
+
+function signedNumberDelta(delta: number) {
+  return `${delta >= 0 ? "+" : "−"}${Math.abs(delta)}`;
+}
+
+function signedTokenDelta(delta: number) {
+  return `${delta >= 0 ? "+" : "−"}${fmtTokens(Math.abs(delta))}`;
+}
+
+function signedUsdDelta(delta: number) {
+  return `${delta >= 0 ? "+" : "−"} ${fmtUsd(Math.abs(delta))}`;
+}
+
+function percentDelta(current: number, previous: number): string {
+  if (previous === 0) return de.stats.weekCompareNoPrior;
+  const delta = (current - previous) / previous;
+  return `${delta >= 0 ? "+" : "−"}${Math.abs(Math.round(delta * 100))} %`;
+}
+
+// Wochenvergleich: rollierende letzte 7 Kalendertage gegen die 7 Tage davor.
+// Frontend-only aus /runs/daily; keine Kalenderwochen, keine Backend-Erweiterung.
+export function WochenvergleichPanel({ series }: { series: RunsDailyPoint[] }) {
+  const current = weekTotals(series.slice(-7));
+  const previous = weekTotals(series.slice(-14, -7));
+  const showMeasuredCost = current.hasMeasuredCost || previous.hasMeasuredCost;
+
+  return (
+    <FleetPanel eyebrow={de.stats.weekCompare} meta={de.stats.weekCompareHint}>
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <FleetPod
+          label={de.stats.weekCompareRoots}
+          value={current.roots}
+          suffix={`${signedNumberDelta(current.roots - previous.roots)} · ${percentDelta(current.roots, previous.roots)}`}
+        />
+        <FleetPod
+          label={de.stats.weekCompareTasks}
+          value={current.tasks}
+          suffix={signedNumberDelta(current.tasks - previous.tasks)}
+        />
+        <FleetPod
+          label={de.stats.weekCompareOutTokens}
+          value={fmtTokens(current.outTokens)}
+          suffix={signedTokenDelta(current.outTokens - previous.outTokens)}
+        />
+        {showMeasuredCost ? (
+          <FleetPod
+            label={de.stats.weekCompareMeasuredCost}
+            value={fmtUsd(current.measuredCost)}
+            suffix={signedUsdDelta(current.measuredCost - previous.measuredCost)}
+          />
+        ) : null}
+      </div>
+    </FleetPanel>
+  );
+}
+
 // T5 (Wert-Bilanz): Wochenbilanz nach Klasse — zeigt erstmals, WOFÜR die
 // Flotte gearbeitet hat (Nutzer-Feature aus dem Demand-Funnel vs. Härtung vs.
 // Meta). Klasse kommt v1 aus created_by (bewusst unscharf, kein Schema-Touch).
@@ -251,6 +328,7 @@ export function StatistikView() {
       ) : (
         <>
           <WertBilanzPanel last7={last7} />
+          <WochenvergleichPanel series={series} />
 
           <div className="grid gap-3 lg:grid-cols-2">
             <FleetPanel eyebrow={de.stats.throughput} meta={de.stats.throughputHint}>

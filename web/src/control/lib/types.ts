@@ -79,6 +79,7 @@ export interface KanbanResult {
   summary_preview: string;
   followups: string[];
   artifacts: string[];
+  artifact_links?: TaskArtifactLink[];
   verification: string[];
   verification_state?: VerificationState;
   verifier_verdict?: VerifierVerdict | null;
@@ -95,6 +96,11 @@ export interface TaskDeliverable {
   mtime: number;
   content_type: string;
   url: string;
+}
+
+export interface TaskArtifactLink extends TaskDeliverable {
+  path: string;
+  source: "metadata.artifacts" | "deliverables_preserved";
 }
 
 export type VerifierVerdict = "APPROVED" | "REQUEST_CHANGES";
@@ -122,6 +128,10 @@ export interface KanbanReview {
   verification_state: VerificationState;
   verifier_verdict: VerifierVerdict | null;
   verifier_evidence: string[];
+  active_verifier?: boolean;
+  active_run_id?: string | null;
+  review_run_state?: "active" | "approved" | "request_changes" | "pending";
+  review_run_source?: "claimed_event" | "latest_ended_run" | null;
 }
 
 export interface RecentResultsResponse {
@@ -235,11 +245,23 @@ export interface BoardColumn {
   tasks: BoardTask[];
 }
 
+export interface BoardSourceError {
+  artifact: string;
+  source: string;
+  stage: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  db_path: string | null;
+  backup_path: string | null;
+  retry_count: number;
+}
+
 export interface BoardResponse {
   columns: BoardColumn[];
   tenants: string[];
   assignees: string[];
   latest_event_id: number;
+  source_errors: BoardSourceError[];
   now: number;
 }
 

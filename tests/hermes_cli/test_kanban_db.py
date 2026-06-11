@@ -5858,6 +5858,104 @@ def test_b2_metadata_verdict_field_is_untouched(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# Family Organizer backlog write-back on terminal done
+# ---------------------------------------------------------------------------
+
+def _frontmatter_dict(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "---"
+    end = lines.index("---", 1)
+    for line in lines[1:end]:
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip()
+    return data
+
+
+def _write_fo_backlog_item(path: Path, *, status: str = "next") -> None:
+    path.write_text(
+        "---\n"
+        "id: 0141\n"
+        "title: Shopping-Favoriten Chips\n"
+        f"status: {status}\n"
+        "owner: hermes\n"
+        "risk: medium\n"
+        "area: shopping\n"
+        "updated: 2026-06-01\n"
+        "---\n\n"
+        "## Kontext\n\n"
+        "Analog zu FO Beispiel 141.\n",
+        encoding="utf-8",
+    )
+
+
+def test_fo_backlog_item_closes_only_on_terminal_flow_done(
+    kanban_home, tmp_path, monkeypatch
+):
+    """Regression: FO tasks copied into Fleet close their source backlog item
+    only once the flow reaches terminal done, not at coder->review handoff."""
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.setattr(kb.time, "time", lambda: 1781049600)  # 2026-06-10 UTC
+    item = tmp_path / "0141-shopping-favoriten-chips-aus-historie.md"
+    _write_fo_backlog_item(item)
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="[FO] Favoriten-Chips",
+            assignee="coder",
+            tenant="family-organizer",
+            idempotency_key="fo-backlog:0141",
+        )
+        kb.claim_task(conn, task_id)
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result=None,
+            summary="Implemented favorite chips from history",
+            metadata={"changed_files": ["web/src/shopping.tsx"]},
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        assert _frontmatter_dict(item)["status"] == "next"
+
+        assert kb.claim_review_task(conn, task_id) is not None
+        assert kb.complete_task(conn, task_id, result="APPROVED", summary="APPROVED")
+
+        fm = _frontmatter_dict(item)
+        assert fm["status"] == "done"
+        assert fm["updated"] == "2026-06-10"
+        assert fm["result"] == "Implemented favorite chips from history"
+        events = [
+            e for e in kb.list_events(conn, task_id)
+            if e.kind == "family_organizer_backlog_closed"
+        ]
+        assert len(events) == 1
+        assert events[0].payload is not None
+        assert events[0].payload["item_id"] == "0141"
+
+
+def test_fo_backlog_close_ignores_unlinked_family_organizer_tasks(
+    kanban_home, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    item = tmp_path / "0141-shopping-favoriten-chips-aus-historie.md"
+    _write_fo_backlog_item(item)
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="[FO] unrelated",
+            assignee="coder",
+            tenant="family-organizer",
+        )
+        kb.claim_task(conn, task_id)
+        assert kb.complete_task(conn, task_id, summary="unrelated done")
+
+    assert _frontmatter_dict(item)["status"] == "next"
+
+
+# ---------------------------------------------------------------------------
 # A1 (N-A1): acceptance-criteria column + body parser
 # ---------------------------------------------------------------------------
 

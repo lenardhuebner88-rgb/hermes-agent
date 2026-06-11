@@ -31,6 +31,12 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/buildChains/);
   });
 
+  it("surfaces structured board source errors inside the Flow view", () => {
+    expect(src).toMatch(/board\.data\?\.source_errors/);
+    expect(src).toMatch(/sourceErrorTitle/);
+    expect(src).toMatch(/sourceErrorContext/);
+  });
+
   it("shows quiet operator explanations next to Flow subtask status pills", () => {
     expect(src).toMatch(/getFlowSubtaskStatusExplanation/);
     expect(src).toMatch(/c\.status === "blocked" \? c\.latest_summary : null/);

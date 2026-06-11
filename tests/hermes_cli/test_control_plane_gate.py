@@ -169,6 +169,20 @@ def test_runtime_scope_can_use_explicit_piet_override_without_mandatory_reviewer
     )
 
 
+def test_false_piet_override_does_not_bypass_reviewer_gate():
+    decision = orchestrator_gate_decision(
+        plan_spec=RUNTIME_PLAN,
+        current_thread_approval="GO apply",
+        piet_override=False,
+    )
+
+    assert decision == GateDecision(
+        allowed=False,
+        reason="orchestrator_apply_blocked",
+        blocking_findings=["reviewer_or_explicit_piet_override_required"],
+    )
+
+
 # Legacy compatibility: old callers can still prove a mechanical-only Coordinator
 # normalization path, but these tests do not make Coordinator a target requirement.
 

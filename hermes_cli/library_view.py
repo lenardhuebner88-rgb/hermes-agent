@@ -1,7 +1,8 @@
 """Bibliothek (/control, Programm 3 Phase D/E) — der Lesesaal.
 
-Read-only Aggregation alles Menschenlesbaren, das Hermes produziert, an
-einem Ort — KEIN neuer Store, nur Adapter über Bestehendes:
+Aggregation alles Menschenlesbaren, das Hermes produziert, an
+einem Ort. Inhalte bleiben Adapter über Bestehendes; nur Bibliothek-Präferenzen
+(gespeicherte Suchen/Themen-Follows) nutzen einen kleinen profile-lokalen Store:
 
   1. Cron-Digests:   ``<store>/output/<job_id>/<timestamp>.md`` — alle Läufe,
                      Multi-Store (Haupt-Store ``~/.hermes/cron`` UND
@@ -31,7 +32,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
+
+
+class SavedSearchCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=160)
+    query: str = Field(..., min_length=1, max_length=1000)
+    topic_tags: list[str] = Field(default_factory=list, max_length=50)
+    person_tags: list[str] = Field(default_factory=list, max_length=50)
+
+
+class SavedSearchUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=160)
+    query: Optional[str] = Field(None, min_length=1, max_length=1000)
+    topic_tags: Optional[list[str]] = Field(None, max_length=50)
+    person_tags: Optional[list[str]] = Field(None, max_length=50)
 
 # ---------------------------------------------------------------------------
 # Kategorien (Grill-Entscheid §7.7: Backend-Dict, Fallback "briefings",
@@ -731,9 +748,11 @@ def _get_item(item_id: str) -> Optional[_Item]:
 
 
 def register_library_routes(app: Any) -> None:
-    """Bibliothek-Routen (read-only). Unter /api/ → Session-Gate der
-    Middleware; bewusst NIE in PUBLIC_API_PATHS."""
-    from fastapi import HTTPException, Query
+    """Bibliothek-Routen. Unter /api/ → Session-Gate der Middleware;
+    bewusst NIE in PUBLIC_API_PATHS."""
+    from fastapi import Body, HTTPException, Query
+
+    from hermes_cli import library_state
 
     @app.get("/api/library/items")
     async def library_items(  # type: ignore[unused-variable]
@@ -756,3 +775,78 @@ def register_library_routes(app: Any) -> None:
         if item is None:
             raise HTTPException(status_code=404, detail="item not found")
         return item.as_dict(with_body=True)
+
+    @app.get("/api/library/saved-searches")
+    async def library_saved_searches():  # type: ignore[unused-variable]
+        items = await asyncio.to_thread(library_state.list_saved_searches)
+        return {"items": items, "count": len(items)}
+
+    @app.post("/api/library/saved-searches")
+    async def library_create_saved_search(  # type: ignore[unused-variable]
+        payload: SavedSearchCreate = Body(...),
+    ):
+        try:
+            return await asyncio.to_thread(
+                library_state.create_saved_search,
+                name=payload.name,
+                query=payload.query,
+                topic_tags=payload.topic_tags,
+                person_tags=payload.person_tags,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.patch("/api/library/saved-searches/{search_id}")
+    async def library_update_saved_search(  # type: ignore[unused-variable]
+        search_id: str,
+        payload: SavedSearchUpdate = Body(...),
+    ):
+        try:
+            updated = await asyncio.to_thread(
+                library_state.update_saved_search,
+                search_id,
+                name=payload.name,
+                query=payload.query,
+                topic_tags=payload.topic_tags,
+                person_tags=payload.person_tags,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if updated is None:
+            raise HTTPException(status_code=404, detail="saved search not found")
+        return updated
+
+    @app.delete("/api/library/saved-searches/{search_id}")
+    async def library_delete_saved_search(  # type: ignore[unused-variable]
+        search_id: str,
+    ):
+        try:
+            deleted = await asyncio.to_thread(library_state.delete_saved_search, search_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"deleted": deleted}
+
+    @app.get("/api/library/topics")
+    async def library_topics():  # type: ignore[unused-variable]
+        items = await asyncio.to_thread(library_state.list_topics)
+        return {"items": items, "count": len(items), "demo_topics": list(library_state.DEMO_TOPICS)}
+
+    @app.post("/api/library/topics/{topic_id}/follow")
+    async def library_follow_topic(topic_id: str):  # type: ignore[unused-variable]
+        try:
+            topic = await asyncio.to_thread(library_state.set_topic_follow, topic_id, True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if topic is None:
+            raise HTTPException(status_code=404, detail="topic not found")
+        return topic
+
+    @app.delete("/api/library/topics/{topic_id}/follow")
+    async def library_unfollow_topic(topic_id: str):  # type: ignore[unused-variable]
+        try:
+            topic = await asyncio.to_thread(library_state.set_topic_follow, topic_id, False)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if topic is None:
+            raise HTTPException(status_code=404, detail="topic not found")
+        return topic

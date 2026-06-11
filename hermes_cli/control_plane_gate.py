@@ -74,6 +74,18 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _explicit_override(value: Any) -> bool:
+    """True for explicit non-empty override evidence, but not false literals."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return bool(normalized) and normalized not in {"false", "no", "0", "none", "null", "off"}
+    return bool(value)
+
+
 def _int_value(value: Any) -> int | None:
     if isinstance(value, bool):
         return int(value)
@@ -243,7 +255,7 @@ def orchestrator_gate_decision(
 
     expected_workflow_id = str(plan_spec.get("workflow_id") or "") or None
     needs_review = reviewer_gate_required(plan_spec)
-    override = bool(str(piet_override).strip()) if piet_override is not None else False
+    override = _explicit_override(piet_override) if piet_override is not None else False
 
     if reviewer_metadata is not None:
         verdict_missing = validate_reviewer_verdict_metadata(
