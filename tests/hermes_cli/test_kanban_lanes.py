@@ -235,8 +235,11 @@ class TestLaneSpawnResolution:
             lane_profiles={"coder": {"worker_runtime": "hermes", "model": "gpt-5.5"}},
         )
         assert "chat" in cmd  # hermes path, not claude
-        m_idx = cmd.index("-m")
-        assert m_idx > cmd.index("chat")  # argparse: -m must follow chat
+        # Search AFTER "chat": _resolve_hermes_argv() may itself expand to
+        # ["python", "-m", "hermes_cli.main", ...] (dev/venv installs), so a
+        # bare cmd.index("-m") can hit the python -m flag instead of the
+        # model flag (argparse requires the model -m to follow chat).
+        m_idx = cmd.index("-m", cmd.index("chat"))
         assert cmd[m_idx + 1] == "gpt-5.5"
 
     # 6. Profile NOT mapped in the active lane → untouched config fallback.
@@ -257,7 +260,9 @@ class TestLaneSpawnResolution:
     ):
         cmd = self._spawn(kanban_home, tmp_path, monkeypatch)
         assert "chat" in cmd
-        assert "-m" not in cmd
+        # Only the argv AFTER "chat" is lane/model territory — the hermes
+        # launcher itself may legitimately be ["python", "-m", "hermes_cli.main"].
+        assert "-m" not in cmd[cmd.index("chat"):]
 
     # 8. Corrupt lane JSON is fail-soft: config behavior wins, no crash.
     def test_corrupt_lane_json_fails_soft(
