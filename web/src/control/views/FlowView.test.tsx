@@ -100,4 +100,21 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/id=\{flowTaskDomId\(m\.id\)\}/);
     expect(src).toMatch(/id=\{flowTaskDomId\(id\)\}/);
   });
+
+  it("applies the ?task= deep-link once per value, not on every poll tick", () => {
+    // Ohne den One-Shot-Guard lief der Effekt bei jeder neuen Board-Identität
+    // (8s-Poll) erneut: Scroll-Yank zur Karte, Re-Expand manuell eingeklappter
+    // Ketten, Revert manuell gewählter Projekt-Filter.
+    expect(src).toMatch(/handledTaskParamRef\.current === taskParam\) return/);
+    expect(src).toMatch(/handledTaskParamRef\.current = taskParam/);
+  });
+
+  it("anchors relative-time labels to the client clock, not the 304-frozen payload now", () => {
+    expect(src).toMatch(/Math\.max\(board\.data\?\.now \?\? 0, Math\.floor\(Date\.now\(\) \/ 1000\)\)/);
+  });
+
+  it("opens the flow-plan spec through the authenticated opener, not a raw anchor", () => {
+    expect(src).toMatch(/DeliverableOpenButton url=\{specUrl\}/);
+    expect(src).not.toMatch(/href=\{specUrl\}/);
+  });
 });

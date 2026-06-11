@@ -10,7 +10,7 @@
  * exist for a stage.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -342,9 +342,10 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
       <div className="flex items-center justify-between gap-2">
         <Eyebrow>{childIds.length ? de.flow.plan.decomposedInto(childIds.length) : de.flow.plan.subtasksHeading}</Eyebrow>
         {hasSpec ? (
-          <a href={specUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hc-type-label text-sky-200 hover:text-sky-100">
-            <FileText className="h-3.5 w-3.5" />{de.flow.plan.openSpec}
-          </a>
+          // Über den authentifizierten Opener wie alle Deliverables: ein
+          // plain <a target="_blank"> trägt im Session-Token-Modus keinen
+          // Auth-Header und lief dort auf ein 401.
+          <DeliverableOpenButton url={specUrl} label={de.flow.plan.openSpec} />
         ) : null}
       </div>
 
@@ -906,8 +907,10 @@ export function FlowView() {
   const taskDetail = useTaskDetail();
   const flowRelease = useFlowRelease(board.reload);
   const [releasedById, setReleasedById] = useState<Record<string, number>>({});
-  const [fallbackNow] = useState(() => Math.floor(Date.now() / 1000));
-  const now = board.data?.now ?? fallbackNow;
+  // board.data.now freezes on browser 304 revalidations (the cached body is
+  // replayed verbatim), which froze every "vor X" label on an idle board —
+  // anchor to the client clock, never regressing below the server stamp.
+  const now = Math.max(board.data?.now ?? 0, Math.floor(Date.now() / 1000));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dispatchChoice, setDispatchChoice] = useState<FlowDispatchChoice | null>(null);
   const [checkingDispatchId, setCheckingDispatchId] = useState<string | null>(null);
@@ -1026,6 +1029,7 @@ export function FlowView() {
   }, [workers.data, reviews.data, blocked.data, results.data]);
 
   const railRef = useRef<HTMLDivElement>(null);
+  const handledTaskParamRef = useRef<string | null>(null);
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
 
@@ -1152,8 +1156,14 @@ export function FlowView() {
 
   useEffect(() => {
     if (!taskParam || allTasks.length === 0) return;
+    // One-shot per param value: the data deps below get a new identity on
+    // every 8s board poll, and re-running the filter/expand/scroll block on
+    // each tick yanked the page back to the card, re-expanded a manually
+    // collapsed chain and reverted manual project-filter choices.
+    if (handledTaskParamRef.current === taskParam) return;
     const task = allTasks.find((item) => item.id === taskParam);
     if (!task) return;
+    handledTaskParamRef.current = taskParam;
     if (selectedId !== taskParam) {
       setSelectedId(taskParam);
       if (!taskDetail.detailById[taskParam]) void fetchDetail(taskParam);
