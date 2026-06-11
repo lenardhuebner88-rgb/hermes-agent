@@ -347,3 +347,44 @@ def test_detail_route_empty_and_unknown_id_return_error(tmp_path, monkeypatch):
     unknown = client.get("/api/orchestration/backlog/not-real")
     assert unknown.status_code == 200
     assert "error" in unknown.json()
+
+
+def test_route_serves_ttl_cache_within_window(tmp_path, monkeypatch):
+    """Polls within the TTL must not re-run the git/file scan (perf audit C2);
+    a different source dir must NOT hit the other dir's cache entry."""
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    import hermes_cli.orchestration_backlog_view as obv
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+    _write(tmp_path, "f-a.md", id="f-a", title="A", status="todo",
+           priority="low", dependsOn="[]", planGate="false", created="2026-06-01")
+
+    calls = {"n": 0}
+    real = obv._read_items_sync
+
+    def counting(now):
+        calls["n"] += 1
+        return real(now)
+
+    monkeypatch.setattr(obv, "_read_items_sync", counting)
+
+    app = FastAPI()
+    obv.register_orchestration_backlog_routes(app)
+    client = TestClient(app)
+
+    for _ in range(3):
+        assert client.get("/api/orchestration/backlog").status_code == 200
+    assert calls["n"] == 1, "polls within the TTL must reuse the cached payload"
+
+    # A redirected source dir is a different cache key → fresh scan.
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(other))
+    assert client.get("/api/orchestration/backlog").status_code == 200
+    assert calls["n"] == 2, "a different source dir must not reuse the cache"

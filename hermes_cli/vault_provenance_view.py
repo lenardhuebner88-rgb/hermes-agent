@@ -19,7 +19,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,14 @@ from fastapi import FastAPI
 _SCRIPT = Path("/home/piet/vault/_agents/_shared/scripts/activity-overview.py")
 _SCHEMA = "hermes-vault-provenance-v1"
 _TIMEOUT = 8
+
+# The collector spawns a Python subprocess that scans the Vault (up to 8s).
+# The tile polls every 20s and several open tabs poll independently, so cache
+# the result briefly and serialize concurrent refreshes — without this every
+# poll forked a fresh interpreter.
+_CACHE_TTL_S = 15.0
+_cache: tuple[float, dict[str, Any]] | None = None
+_refresh_lock = asyncio.Lock()
 
 
 def _empty(error: str | None) -> dict[str, Any]:
@@ -73,12 +81,20 @@ def _collect_sync() -> dict[str, Any]:
 
 
 async def _collect() -> dict[str, Any]:
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        return await loop.run_in_executor(executor, _collect_sync)
-    finally:
-        executor.shutdown(wait=True)
+    global _cache
+    now = time.monotonic()
+    if _cache is not None and now - _cache[0] < _CACHE_TTL_S:
+        return _cache[1]
+    async with _refresh_lock:
+        # Re-check: a concurrent poll may have refreshed while we waited.
+        now = time.monotonic()
+        if _cache is not None and now - _cache[0] < _CACHE_TTL_S:
+            return _cache[1]
+        result = await asyncio.to_thread(_collect_sync)
+        # Don't cache failures for the full TTL — the next poll retries.
+        if result.get("error") is None:
+            _cache = (time.monotonic(), result)
+        return result
 
 
 def register_vault_provenance_routes(app: FastAPI) -> None:

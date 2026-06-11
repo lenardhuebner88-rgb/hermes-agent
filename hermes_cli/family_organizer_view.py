@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Coarse Markdown-stripping for excerpt extraction (mirrors orchestration_backlog_view).
@@ -473,14 +472,30 @@ def _read_items_sync(now: int) -> dict[str, Any]:
     }
 
 
+_CACHE_TTL_S = 20.0
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_refresh_lock = asyncio.Lock()
+
+
 async def _get_backlog() -> dict[str, Any]:
-    now = int(time.time())
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        return await loop.run_in_executor(executor, _read_items_sync, now)
-    finally:
-        executor.shutdown(wait=True)
+    # The sync reader shells out to git per request; the tab polls every 30s
+    # and multiple open clients poll independently. A short TTL cache keeps
+    # at most one subprocess fan-out per window, and the lock serializes
+    # concurrent refreshes (others reuse the fresh result). Keyed by source
+    # dir + ref so an env-redirected source (tests, board switches) never
+    # serves another source's cached payload.
+    key = f"{_backlog_dir()}|{_ref()}"
+    hit = _cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _CACHE_TTL_S:
+        return hit[1]
+    async with _refresh_lock:
+        hit = _cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < _CACHE_TTL_S:
+            return hit[1]
+        result = await asyncio.to_thread(_read_items_sync, int(time.time()))
+        if result.get("error") is None:
+            _cache[key] = (time.monotonic(), result)
+        return result
 
 
 def _detail_error(message: str) -> dict[str, str]:
@@ -594,13 +609,8 @@ def _read_item_detail_sync(item_id: str, now: int) -> dict[str, Any]:
 
 
 async def _get_backlog_detail(item_id: str) -> dict[str, Any]:
-    now = int(time.time())
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        return await loop.run_in_executor(executor, _read_item_detail_sync, item_id, now)
-    finally:
-        executor.shutdown(wait=True)
+    # On-click detail (not polled): no cache, but still off the event loop.
+    return await asyncio.to_thread(_read_item_detail_sync, item_id, int(time.time()))
 
 
 def register_backlog_routes(app: FastAPI) -> None:

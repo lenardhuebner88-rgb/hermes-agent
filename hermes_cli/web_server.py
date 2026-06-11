@@ -210,6 +210,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress responses for clients that send Accept-Encoding: gzip (every
+# browser). The /control SPA polls multi-hundred-KB JSON payloads
+# (board ~430 KB, autoresearch proposals ~1.8 MB) over Tailscale links where
+# transfer, not server CPU, dominates latency — JSON/diff text compresses
+# ~5–10×. Level 5 instead of starlette's default 9: nearly the same ratio at
+# a fraction of the per-request CPU. WebSockets are unaffected.
+from fastapi.middleware.gzip import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+
 # ---------------------------------------------------------------------------
 # Endpoints that do NOT require the session token.  Everything else under
 # /api/ is gated by the auth middleware below.

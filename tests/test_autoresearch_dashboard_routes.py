@@ -287,3 +287,49 @@ def test_heartbeat_stub_drives_running_then_clear(client, monkeypatch):
     assert cl.get("/api/autoresearch/status").json()["state"] == "running"
     stub.clear(view._state_dir_test)
     assert cl.get("/api/autoresearch/status").json()["state"] == "idle"
+
+
+# ---------------------------------------------------------------------------
+# Event-loop hygiene: sync-IO handlers must NOT be coroutine functions
+# ---------------------------------------------------------------------------
+
+def test_polled_handlers_are_threadpool_sync_not_async(client):
+    """Every autoresearch handler that does synchronous file/subprocess IO
+    must be a plain ``def`` so FastAPI runs it on its threadpool. As
+    ``async def`` the same body runs ON the event loop: /status (5s poll) and
+    /proposals (6s poll) then stall every other dashboard request for the
+    duration of their disk reads. Regression guard for the 2026-06-11 perf
+    audit (Variante C, Slice 2)."""
+    import asyncio as _asyncio
+
+    test_client, _view = client
+    app = test_client.app
+    must_be_sync = {
+        "/api/autoresearch/status",
+        "/api/autoresearch/audit",
+        "/api/autoresearch/selftest",
+        "/api/autoresearch/worklist",
+        "/api/autoresearch/proposals",
+        "/api/autoresearch/runs",
+        "/api/autoresearch/apply",
+        "/api/autoresearch/skip",
+        "/api/autoresearch/trigger",
+        "/api/autoresearch/stop",
+        "/api/autoresearch/generate",
+        "/api/autoresearch/prune",
+        "/api/autoresearch/deep-audit/status",
+        "/api/autoresearch/deep-audit/findings",
+        "/api/autoresearch/test-foundry/status",
+        "/api/autoresearch/test-foundry/targets",
+    }
+    seen = set()
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        endpoint = getattr(route, "endpoint", None)
+        if path in must_be_sync and endpoint is not None:
+            seen.add(path)
+            assert not _asyncio.iscoroutinefunction(endpoint), (
+                f"{path} is async def with sync IO — it blocks the event loop; "
+                "make it a plain def (FastAPI threadpool)."
+            )
+    assert seen == must_be_sync, f"routes missing from app: {must_be_sync - seen}"

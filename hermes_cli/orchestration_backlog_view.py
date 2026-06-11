@@ -23,7 +23,6 @@ import os
 import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -411,14 +410,30 @@ def _read_items_sync(now: int) -> dict[str, Any]:
     }
 
 
+_CACHE_TTL_S = 20.0
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_refresh_lock = asyncio.Lock()
+
+
 async def _get_backlog() -> dict[str, Any]:
-    now = int(time.time())
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        return await loop.run_in_executor(executor, _read_items_sync, now)
-    finally:
-        executor.shutdown(wait=True)
+    # The sync reader shells out to git per request; the tab polls every 30s
+    # and multiple open clients poll independently. A short TTL cache keeps
+    # at most one subprocess fan-out per window, and the lock serializes
+    # concurrent refreshes (others reuse the fresh result). Keyed by source
+    # dir + ref so an env-redirected source (tests, board switches) never
+    # serves another source's cached payload.
+    key = f"{_backlog_dir()}|{_ref()}"
+    hit = _cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _CACHE_TTL_S:
+        return hit[1]
+    async with _refresh_lock:
+        hit = _cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < _CACHE_TTL_S:
+            return hit[1]
+        result = await asyncio.to_thread(_read_items_sync, int(time.time()))
+        if result.get("error") is None:
+            _cache[key] = (time.monotonic(), result)
+        return result
 
 
 def register_orchestration_backlog_routes(app: FastAPI) -> None:
@@ -431,7 +446,9 @@ def register_orchestration_backlog_routes(app: FastAPI) -> None:
     @app.get("/api/orchestration/backlog/{id:path}")
     async def orchestration_backlog_detail(id: str) -> dict[str, Any]:
         try:
-            return _read_detail_sync(id)
+            # On-click detail (not polled): no cache, but off the event loop —
+            # it reads files and can shell out to git.
+            return await asyncio.to_thread(_read_detail_sync, id)
         except Exception as exc:
             _log.exception("orchestration backlog detail unavailable")
             message = scrub_detail(str(exc).strip()) or exc.__class__.__name__
