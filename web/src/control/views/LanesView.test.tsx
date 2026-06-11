@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { LanesPanel } from "./LanesView";
+import { LaneCard, LanesPanel } from "./LanesView";
 import type { LanesResponse } from "./lanes/api";
 
 const fixture: LanesResponse = {
@@ -76,5 +76,38 @@ describe("LanesPanel", () => {
       />,
     );
     expect(html).toContain("Keine Lanes");
+  });
+});
+
+describe("LaneCard (S4: mobil + Zwei-Schritt-Confirm)", () => {
+  const lane = fixture.lanes[1]; // max-abo, inaktiv → Aktivieren + Löschen
+
+  it("rendert die gestapelte Karte mit Feld-Labels (mobil) und ohne Speichern-Geist", () => {
+    const html = renderToStaticMarkup(
+      <LaneCard lane={lane} busy={false} actions={noopActions} />,
+    );
+    // Label-über-Feld (unterhalb sm sichtbar, ab sm per sm:hidden weg)
+    expect(html).toContain("sm:hidden");
+    expect(html).toContain(">Profil<");
+    expect(html).toContain(">Runtime<");
+    expect(html).toContain(">Modell<");
+    // armed-Schritt 1: Aktionen da, kein Confirm, kein dirty-loses Speichern
+    expect(html).toContain("Aktivieren");
+    expect(html).toContain("Löschen");
+    expect(html).not.toContain("Bestätigen");
+    expect(html).not.toContain("Speichern");
+  });
+
+  it("armed → zeigt Inline-Confirm mit Bestätigen/Abbrechen statt window.confirm", () => {
+    const armed = renderToStaticMarkup(
+      <LaneCard lane={lane} busy={false} actions={noopActions} initialPending="delete" />,
+    );
+    expect(armed).toContain("wirklich löschen?");
+    expect(armed).toContain("Bestätigen");
+    expect(armed).toContain("Abbrechen");
+    const armedActivate = renderToStaticMarkup(
+      <LaneCard lane={lane} busy={false} actions={noopActions} initialPending="activate" />,
+    );
+    expect(armedActivate).toContain("aktivieren? Gilt ab dem nächsten Worker-Spawn.");
   });
 });

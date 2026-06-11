@@ -45,6 +45,8 @@ const t = {
   confirmDelete: (name: string) => `Lane „${name}" wirklich löschen?`,
   confirmActivate: (name: string) =>
     `Lane „${name}" aktivieren? Gilt ab dem nächsten Worker-Spawn.`,
+  confirmYes: "Bestätigen",
+  confirmNo: "Abbrechen",
   noProfiles: "Keine Profile gemappt — alle Profile laufen auf ihrem Config-Default.",
 };
 
@@ -57,6 +59,10 @@ interface LaneActions {
   onSave: (lane: Lane, rows: DraftRow[], name: string) => void;
 }
 
+// Unterhalb `sm` wird jede Editor-Zeile eine gestapelte Profil-Karte (Label
+// über Feld, Trash als volles 44px-Ziel rechts oben); ab `sm` bleibt die
+// heutige Zeilenoptik. Inputs mobil `text-base` (≥16px — iOS-Safari zoomt
+// sonst beim Fokus), Trefferflächen über den kanonischen `.hc-hit`-Token.
 function LaneRowEditor({
   row,
   onChange,
@@ -67,42 +73,53 @@ function LaneRowEditor({
   onRemove: () => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <input
-        type="text"
-        value={row.profile}
-        list={PROFILE_DATALIST_ID}
-        aria-label={t.profileCol}
-        placeholder={t.profileCol}
-        onChange={(e) => onChange({ ...row, profile: e.target.value })}
-        className="hc-mono w-36 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs text-white"
-      />
-      <select
-        value={row.runtime}
-        aria-label={t.runtimeCol}
-        onChange={(e) =>
-          onChange({ ...row, runtime: e.target.value as DraftRow["runtime"] })
-        }
-        className="rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs text-white"
-      >
-        <option value="">{t.runtimeDefault}</option>
-        <option value="hermes">hermes</option>
-        <option value="claude-cli">claude-cli</option>
-      </select>
-      <input
-        type="text"
-        value={row.model}
-        list={MODEL_DATALIST_ID}
-        aria-label={t.modelCol}
-        placeholder={t.modelPlaceholder}
-        onChange={(e) => onChange({ ...row, model: e.target.value })}
-        className="hc-mono w-48 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs text-white"
-      />
+    <div className="relative rounded-md border border-[var(--hc-border)] bg-black/15 p-3 pr-14 sm:static sm:flex sm:flex-wrap sm:items-center sm:gap-2 sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0">
+      <div className="flex flex-col gap-2 sm:contents">
+        <label className="flex flex-col gap-1">
+          <span className="hc-type-label hc-dim sm:hidden">{t.profileCol}</span>
+          <input
+            type="text"
+            value={row.profile}
+            list={PROFILE_DATALIST_ID}
+            aria-label={t.profileCol}
+            placeholder={t.profileCol}
+            onChange={(e) => onChange({ ...row, profile: e.target.value })}
+            className="hc-mono min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-0 sm:w-36 sm:text-xs"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="hc-type-label hc-dim sm:hidden">{t.runtimeCol}</span>
+          <select
+            value={row.runtime}
+            aria-label={t.runtimeCol}
+            onChange={(e) =>
+              onChange({ ...row, runtime: e.target.value as DraftRow["runtime"] })
+            }
+            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-0 sm:w-auto sm:text-xs"
+          >
+            <option value="">{t.runtimeDefault}</option>
+            <option value="hermes">hermes</option>
+            <option value="claude-cli">claude-cli</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="hc-type-label hc-dim sm:hidden">{t.modelCol}</span>
+          <input
+            type="text"
+            value={row.model}
+            list={MODEL_DATALIST_ID}
+            aria-label={t.modelCol}
+            placeholder={t.modelPlaceholder}
+            onChange={(e) => onChange({ ...row, model: e.target.value })}
+            className="hc-mono min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-0 sm:w-48 sm:text-xs"
+          />
+        </label>
+      </div>
       <button
         type="button"
         aria-label={`${t.remove} ${row.profile}`}
         onClick={onRemove}
-        className="inline-flex min-h-11 items-center px-1 text-xs hc-dim hover:text-white"
+        className="hc-hit absolute right-2 top-2 inline-flex w-11 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim hover:text-white sm:static sm:w-auto sm:border-0 sm:px-1"
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>
@@ -110,18 +127,27 @@ function LaneRowEditor({
   );
 }
 
-function LaneCard({
+type LanePendingAction = "activate" | "delete";
+
+// Exported for render tests (initialPending macht den armed-Zustand ohne
+// Interaktions-Harness prüfbar).
+export function LaneCard({
   lane,
   busy,
   actions,
+  initialPending = null,
 }: {
   lane: Lane;
   busy: boolean;
   actions: LaneActions;
+  initialPending?: LanePendingAction | null;
 }) {
   const [rows, setRows] = useState<DraftRow[]>(() => rowsFromLane(lane));
   const [name, setName] = useState(lane.name);
   const [dirty, setDirty] = useState(false);
+  // Inline-Zwei-Schritt (FlowView-Muster) statt window.confirm — auf dem
+  // Handy gibt es keinen Dialog-Kontext, und confirm() blockiert den Tab.
+  const [pending, setPending] = useState<LanePendingAction | null>(initialPending);
 
   const edit = (next: DraftRow[]) => {
     setRows(next);
@@ -138,49 +164,9 @@ function LaneCard({
 
   return (
     <FleetPanel eyebrow={eyebrow}>
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        {!lane.active ? (
-          <Button
-            size="xs"
-            className="min-h-11"
-            disabled={busy}
-            onClick={() => {
-              if (window.confirm(t.confirmActivate(lane.name))) actions.onActivate(lane);
-            }}
-          >
-            <Check className="h-3.5 w-3.5" />
-            {t.activate}
-          </Button>
-        ) : null}
-        <Button
-          size="xs"
-          ghost
-          className="min-h-11"
-          disabled={busy || !dirty}
-          onClick={() => {
-            actions.onSave(lane, rows, name);
-            setDirty(false);
-          }}
-        >
-          {t.save}
-        </Button>
-        {!lane.active ? (
-          <Button
-            size="xs"
-            ghost
-            className="min-h-11"
-            disabled={busy}
-            onClick={() => {
-              if (window.confirm(t.confirmDelete(lane.name))) actions.onDelete(lane);
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            {t.remove}
-          </Button>
-        ) : null}
-      </div>
-
-      <div className="mt-3 space-y-2">
+      {/* Action-Bar: Name links, Aktionen rechts in EINER Zeile (kein toter
+          Raum, kein schwebender Speichern-Geist — Speichern nur bei dirty). */}
+      <div className="flex flex-wrap items-center gap-2">
         <input
           type="text"
           value={name}
@@ -189,8 +175,71 @@ function LaneCard({
             setName(e.target.value);
             setDirty(true);
           }}
-          className="w-56 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-sm text-white"
+          className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-0 sm:w-56 sm:text-sm"
         />
+        {pending ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+            <span className="hc-type-label hc-soft">
+              {pending === "activate" ? t.confirmActivate(lane.name) : t.confirmDelete(lane.name)}
+            </span>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                if (pending === "activate") actions.onActivate(lane);
+                else actions.onDelete(lane);
+                setPending(null);
+              }}
+              className={`inline-flex min-h-11 items-center rounded-full border px-2.5 text-xs disabled:opacity-40 sm:min-h-7 ${
+                pending === "delete"
+                  ? "border-red-400/40 bg-red-400/10 text-red-200"
+                  : "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+              }`}
+            >
+              {busy ? "…" : t.confirmYes}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setPending(null)}
+              className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft sm:min-h-7"
+            >
+              {t.confirmNo}
+            </button>
+          </div>
+        ) : (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+            {!lane.active ? (
+              <Button size="xs" className="hc-hit" disabled={busy} onClick={() => setPending("activate")}>
+                <Check className="h-3.5 w-3.5" />
+                {t.activate}
+              </Button>
+            ) : null}
+            {dirty ? (
+              <Button
+                size="xs"
+                ghost
+                className="hc-hit"
+                disabled={busy}
+                onClick={() => {
+                  actions.onSave(lane, rows, name);
+                  setDirty(false);
+                }}
+              >
+                {t.save}
+              </Button>
+            ) : null}
+            {!lane.active ? (
+              <Button size="xs" ghost className="hc-hit" disabled={busy} onClick={() => setPending("delete")}>
+                <Trash2 className="h-3.5 w-3.5" />
+                {t.remove}
+              </Button>
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 space-y-2">
         {rows.length === 0 ? <p className="text-xs hc-dim">{t.noProfiles}</p> : null}
         {rows.map((row, i) => (
           <LaneRowEditor
@@ -203,7 +252,7 @@ function LaneCard({
         <Button
           size="xs"
           ghost
-          className="min-h-11"
+          className="hc-hit"
           onClick={() => edit([...rows, { profile: "", runtime: "", model: "" }])}
         >
           <Plus className="h-3.5 w-3.5" />
@@ -259,11 +308,11 @@ export function LanesPanel({
           aria-label={t.namePlaceholder}
           placeholder={t.namePlaceholder}
           onChange={(e) => setNewName(e.target.value)}
-          className="w-56 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-sm text-white"
+          className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-0 sm:w-56 sm:text-sm"
         />
         <Button
           size="xs"
-          className="min-h-11"
+          className="hc-hit"
           disabled={busy || newName.trim() === ""}
           onClick={() => {
             onCreate(newName.trim());
