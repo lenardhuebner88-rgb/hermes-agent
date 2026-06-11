@@ -1313,3 +1313,33 @@ export function useDecisionInbox(): DecisionInboxData {
 
   return { items, summary, snapshot, worstTone, loading, sourceErrors };
 }
+
+// ---------------------------------------------------------------------------
+// Bibliothek-Badge (2026-06-11): Zahl neuer Lesesaal-Einträge seit dem letzten
+// Besuch. Der Besuchs-Zeitstempel ist der localStorage-Schlüssel der
+// BibliothekView (sie stempelt beim Mount); hier nur lesen. Leichtgewichtiger
+// Listen-Poll ohne Bodies über den geteilten pollingStore.
+// ---------------------------------------------------------------------------
+
+const LIBRARY_LAST_VISIT_KEY = "hc-bibliothek-last-visit";
+
+interface LibraryItemsLite {
+  items?: { ts?: number }[];
+}
+
+export function useLibraryUnread(): number {
+  const state = usePolling<LibraryItemsLite>(
+    "library/items-badge",
+    () => fetchJSON<LibraryItemsLite>("/api/library/items?limit=60"),
+    120000,
+  );
+  let since = 0;
+  try {
+    since = Number(window.localStorage.getItem(LIBRARY_LAST_VISIT_KEY) ?? 0) || 0;
+  } catch {
+    /* private mode */
+  }
+  // Erstbesuch (kein Stempel): nichts anbrüllen — der Tab ist Einladung genug.
+  if (!since) return 0;
+  return (state.data?.items ?? []).filter((i) => (i.ts ?? 0) > since).length;
+}

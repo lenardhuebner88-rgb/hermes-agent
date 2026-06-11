@@ -10,14 +10,15 @@ export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow"
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
-// throughput / burn / cycle-time / reliability), Autoresearch (the
-// self-improvement console). Everything else is a re-slice of these and
-// lives in the "Mehr" overflow (moreTabs) below.
+// throughput / burn / cycle-time / reliability), Bibliothek (the reading
+// room — Piet-Entscheid 2026-06-11: der Alltags-Lesesaal verdrängt
+// Autoresearch in den "Mehr"-Overflow). Everything else is a re-slice of
+// these and lives in the "Mehr" overflow (moreTabs) below.
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Stats", path: "/control/statistik", icon: ChartSpline },
-  { id: "autoresearch", label: de.tabs.autoresearch, mobileLabel: "Auto", path: "/control/autoresearch", icon: FlaskConical },
+  { id: "bibliothek", label: "Bibliothek", mobileLabel: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
 ];
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
@@ -32,9 +33,10 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
-  // Programm 3: Recherche (Wissen beauftragen) + Bibliothek (Lesesaal).
+  // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
+  // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.
   { label: "Recherche", path: "/control/research", icon: SearchCheck },
-  { label: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
+  { label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
 ];
 
 const secondaryNav = [
@@ -54,6 +56,8 @@ interface Props {
   inboxTotal: number;
   /** Worst tone present in the inbox — colours the Postfach badge. */
   inboxTone: ToneName;
+  /** Neue Bibliothek-Einträge seit dem letzten Besuch — badged den Lesesaal-Tab. */
+  libraryUnread?: number;
   health: {
     data: SystemHealthResponse | null;
     error: string | null;
@@ -71,14 +75,19 @@ interface Props {
 interface BadgeInfo { count: number; cls: string }
 
 // One badge model for every nav surface: the Postfach tab carries the live
-// "needs me" total (tone-coloured), Autoresearch keeps its open-proposal count.
-function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName): BadgeInfo | null {
+// "needs me" total (tone-coloured), Autoresearch keeps its open-proposal count
+// (relevant, falls es je in die Haupt-Nav zurückkehrt), die Bibliothek zählt
+// ungelesene Lesesaal-Einträge.
+function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName, libraryUnread: number): BadgeInfo | null {
   if (tab === "inbox" && inboxTotal > 0) {
     const cls = inboxTone === "red" || inboxTone === "rose" ? "hc-badge-red" : inboxTone === "amber" ? "hc-badge-amber" : "hc-badge-accent";
     return { count: inboxTotal, cls };
   }
   if (tab === "autoresearch" && openProposals > 0) {
     return { count: openProposals, cls: "hc-badge-accent" };
+  }
+  if (tab === "bibliothek" && libraryUnread > 0) {
+    return { count: libraryUnread, cls: "hc-badge-accent" };
   }
   return null;
 }
@@ -87,31 +96,31 @@ export function ControlShell(props: Props) {
   return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
 }
 
-function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
-        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} onNavigate={onNavigate} onPrefetch={onPrefetch} />
+        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} onNavigate={onNavigate} onPrefetch={onPrefetch} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
         <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
-          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
         </div>
       </nav>
     </div>
   );
 }
 
-function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0">
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
         <div className="flex flex-col gap-2">
           <div className="mb-2 grid h-11 w-11 place-items-center rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"><Sparkles className="h-5 w-5" /></div>
-          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button ref={commandButtonRef} type="button" title="Command Palette" aria-label="Command Palette" onClick={onOpenCommand} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><Command className="h-5 w-5" /></button>
           <RailMoreNav />
         </div>
@@ -129,12 +138,12 @@ function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, 
 }
 
 
-function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
+function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, libraryUnread, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; libraryUnread?: number; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
   return (
     <nav className="hidden w-full flex-wrap gap-2 lg:flex">
       {tabs.map((tab) => {
         const Icon = tab.icon;
-        const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone);
+        const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0);
         return (
           <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} onMouseEnter={() => onPrefetch?.(tab.id)} onFocus={() => onPrefetch?.(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
             <Icon className="h-4 w-4" />{tab.label}

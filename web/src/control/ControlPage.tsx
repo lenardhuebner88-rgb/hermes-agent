@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
-import { useDecisionInbox, useHermesWorkers, useProposals, useSystemHealth } from "./hooks/useControlData";
+import { useDecisionInbox, useHermesWorkers, useLibraryUnread, useProposals, useSystemHealth } from "./hooks/useControlData";
 import { useLiveEvents } from "./hooks/useLiveEvents";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
@@ -147,6 +147,7 @@ export default function ControlPage() {
   const workers = useHermesWorkers();
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
+  const libraryUnread = useLibraryUnread();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const gPendingRef = useRef<number>(0);
@@ -174,7 +175,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", t: "statistik", a: "autoresearch", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "pulse" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -195,6 +196,7 @@ export default function ControlPage() {
         openProposals={proposals.openSkillProposals.length}
         inboxTotal={inbox.summary.total}
         inboxTone={inbox.worstTone}
+        libraryUnread={active === "bibliothek" ? 0 : libraryUnread}
         health={health}
         onNavigate={(tab) => navigate(tabPath[tab])}
         onPrefetch={prefetchControlView}
