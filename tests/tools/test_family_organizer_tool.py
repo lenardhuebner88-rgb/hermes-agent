@@ -618,7 +618,63 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_delete_vacation",
         "fo_list_lists",
         "fo_list_presence",
+        "fo_log_wish",
     ):
         entry = registry._tools.get(name)
         assert entry is not None, f"{name} not registered"
         assert entry.toolset == "family-organizer"
+
+
+# ─── fo_log_wish (Demand-Funnel T1) ─────────────────────────────────────────
+# Schreibt in die lokale Kanban-DB (kein FO-API-Write) — isoliertes
+# HERMES_HOME pro Test, gleiche Fixture-Idee wie tests/hermes_cli/test_funnel.py.
+
+from pathlib import Path
+
+from hermes_cli import funnel
+from hermes_cli import kanban_db as kb
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
+
+
+def test_log_wish_creates_triage_task_for_family(kanban_home):
+    out = json.loads(fo.fo_log_wish("Dunkles Theme fürs Tablet", context="Oskar abends"))
+    assert out.get("status") == "triage"
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, out["task_id"])
+        assert task.status == "triage"
+        assert task.created_by == "family"
+        assert task.assignee == "coder-claude"
+        assert "NICHT bauen" in (task.body or "")
+        assert "Oskar abends" in (task.body or "")
+    finally:
+        conn.close()
+
+
+def test_log_wish_dedupes_same_wish(kanban_home):
+    a = json.loads(fo.fo_log_wish("Mehr Statistik bitte"))
+    b = json.loads(fo.fo_log_wish("mehr   STATISTIK bitte"))
+    assert a["task_id"] == b["task_id"]
+
+
+def test_log_wish_cap_guard(kanban_home):
+    for i in range(funnel.FUNNEL_CAP):
+        out = json.loads(fo.fo_log_wish(f"wunsch nummer {i}"))
+        assert "task_id" in out, out
+    out = json.loads(fo.fo_log_wish("einer zu viel"))
+    assert "error" in out
+    assert "voll" in out["error"]
+
+
+def test_log_wish_requires_text(kanban_home):
+    out = json.loads(fo.fo_log_wish("   "))
+    assert "error" in out

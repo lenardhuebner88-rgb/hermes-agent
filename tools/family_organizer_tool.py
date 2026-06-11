@@ -712,6 +712,76 @@ def fo_delete_vacation(
     )
 
 
+# ─── Demand-Funnel (T1): Wünsche der Familie → Kanban-triage ─────────────────
+
+_WISH_TITLE_LIMIT = 80
+
+WISH_BODY_TEMPLATE = (
+    "Wunsch aus der HermesBar (Familie).\n\n"
+    "Originaläußerung:\n{wish}\n"
+    "{context_block}\n"
+    "Standing-Anweisung: Bei Annahme ein FO-Backlog-Item draften "
+    "(status: proposed) — NICHT bauen. Die FO-Grill-Governance bleibt intakt."
+)
+
+WISH_CAP_MESSAGE = (
+    "Der Wunsch-Briefkasten ist gerade voll ({cap} offene Vorschläge). "
+    "Der Wunsch wurde NICHT notiert — sag es Piet direkt oder versuch es "
+    "nach dem Sonntags-Aufräumen nochmal."
+)
+
+
+def fo_log_wish(wish: str, context: Optional[str] = None) -> str:
+    """Familien-Wunsch als Funnel-Vorschlag in Kanban-triage ablegen.
+
+    Kein FO-API-Write — der Vorschlag landet als normaler Kanban-Task
+    (``created_by=family``) im triage-Trichter. Cap- und Dedupe-Guard
+    sitzen in :mod:`hermes_cli.funnel` (Code, nicht Prompt); nichts
+    startet ohne Piets Tap.
+    """
+    wish = (wish or "").strip()
+    if not wish:
+        return tool_error("wish fehlt — was wünscht sich die Familie?")
+    title = wish.splitlines()[0].strip()
+    if len(title) > _WISH_TITLE_LIMIT:
+        title = title[: _WISH_TITLE_LIMIT - 1].rstrip() + "…"
+    context = (context or "").strip()
+    context_block = f"\nKontext: {context}\n" if context else ""
+    try:
+        # Lazy import (kanban_tools-Muster): Modul bleibt auch in
+        # Nicht-Kanban-Kontexten sauber importierbar.
+        from hermes_cli import funnel
+        from hermes_cli import kanban_db as kb
+
+        with kb.connect_closing() as conn:
+            task_id = funnel.create_wish(
+                conn,
+                title=title,
+                body=WISH_BODY_TEMPLATE.format(
+                    wish=wish, context_block=context_block,
+                ),
+                created_by="family",
+                key=funnel.wish_key(wish),
+                assignee="coder-claude",
+            )
+    except Exception as exc:
+        return tool_error(str(exc))
+    if task_id is None:
+        from hermes_cli.funnel import FUNNEL_CAP
+
+        return tool_error(WISH_CAP_MESSAGE.format(cap=FUNNEL_CAP))
+    return tool_result(
+        {
+            "task_id": task_id,
+            "status": "triage",
+            "hinweis": (
+                "Wunsch notiert — Piet entscheidet darüber, es startet "
+                "nichts automatisch."
+            ),
+        }
+    )
+
+
 def check_family_organizer_requirements() -> bool:
     """Verfügbar, wenn die FO-Hermes-API /health mit unserem Token mit 200 antwortet."""
     if not _service_token():
@@ -1076,6 +1146,35 @@ FO_LIST_PRESENCE_SCHEMA = {
     },
 }
 
+FO_LOG_WISH_SCHEMA = {
+    "name": "fo_log_wish",
+    "description": (
+        "Notiere einen WUNSCH, eine Beschwerde, einen Bug-Bericht oder eine "
+        "Feature-Idee der Familie als Vorschlag für Piet (z. B. „die App "
+        "bräuchte…“, „es nervt, dass…“, „kaputt ist…“). NICHT für normale "
+        "Inhalts-Kommandos (Einkauf, Termine, Essensplan, Anwesenheit, "
+        "Geburtstage) — die laufen über die anderen fo_*-Tools. Es startet "
+        "nichts automatisch; Piet entscheidet über jeden Vorschlag."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "wish": {
+                "type": "string",
+                "description": "Der Wunsch in eigenen Worten, kurz und konkret.",
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Optionaler Kontext: wer hat es gesagt, in welcher "
+                    "Situation (hilft Piet beim Entscheiden)."
+                ),
+            },
+        },
+        "required": ["wish"],
+    },
+}
+
 
 # ─── Registry ────────────────────────────────────────────────────────────────
 
@@ -1248,4 +1347,17 @@ registry.register(
     handler=lambda args, **kw: fo_list_presence(date=args.get("date", "")),
     check_fn=check_family_organizer_requirements,
     emoji="👀",
+)
+
+# Demand-Funnel (T1): schreibt in die lokale Kanban-DB, nicht in die FO-API —
+# deshalb bewusst OHNE check_fn (funktioniert auch, wenn die FO-API hakt).
+registry.register(
+    name="fo_log_wish",
+    toolset="family-organizer",
+    schema=FO_LOG_WISH_SCHEMA,
+    handler=lambda args, **kw: fo_log_wish(
+        wish=args.get("wish", ""),
+        context=args.get("context"),
+    ),
+    emoji="💡",
 )

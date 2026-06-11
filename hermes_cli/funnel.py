@@ -91,6 +91,7 @@ def create_wish(
     created_by: str,
     key: Optional[str] = None,
     cap: int = FUNNEL_CAP,
+    assignee: Optional[str] = None,
 ) -> Optional[str]:
     """Funnel-Vorschlag anlegen (triage, dedupe). None, wenn das Cap greift.
 
@@ -106,6 +107,7 @@ def create_wish(
         title=title,
         body=body,
         created_by=created_by,
+        assignee=assignee,
         triage=True,
         idempotency_key=key or wish_key(title),
     )
