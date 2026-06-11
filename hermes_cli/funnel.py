@@ -114,6 +114,19 @@ def _draft_excerpt(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     return None
 
 
+def _is_funnel_root(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True, wenn der Task keine Eltern hat (echter Funnel-Root).
+
+    Build-Kinder erben ``created_by`` von der Quelle (Wert-Bilanz) — ohne
+    diesen Check qualifizierte sich jedes fertige Build-Kind erneut als
+    "Draft" und die Kette fraß sich selbst (Umsetzen: Umsetzen: …).
+    """
+    row = conn.execute(
+        "SELECT 1 FROM task_links WHERE child_id = ? LIMIT 1", (task_id,),
+    ).fetchone()
+    return row is None
+
+
 def list_drafts(
     conn: sqlite3.Connection,
     *,
@@ -122,8 +135,11 @@ def list_drafts(
 ) -> List[dict]:
     """Fertige Funnel-Roots ohne Build-Kind — sie warten auf die Freigabe.
 
-    Nach der Freigabe hat der Root ein verlinktes Build-Kind und fällt aus
-    dieser Liste; die Kette übernimmt das Flow-Board.
+    Root heißt: keine Eltern. Damit sind die per :func:`approve_draft`
+    erzeugten Build-Kinder (gleiches ``created_by``, irgendwann ``done``)
+    hart ausgeschlossen — sonst loopt der Trichter über seine eigene
+    Ausgabe. Nach der Freigabe hat der Root ein verlinktes Build-Kind und
+    fällt aus dieser Liste; die Kette übernimmt das Flow-Board.
     """
     now = int(time.time()) if now is None else int(now)
     cutoff = now - max(1, int(days)) * 86400
@@ -133,6 +149,7 @@ def list_drafts(
         f"WHERE created_by IN ({placeholders}) AND status = 'done' "
         "AND completed_at IS NOT NULL AND completed_at >= ? "
         "AND id NOT IN (SELECT DISTINCT parent_id FROM task_links) "
+        "AND id NOT IN (SELECT DISTINCT child_id FROM task_links) "
         "ORDER BY completed_at DESC",
         (*kb.FUNNEL_CREATED_BY, cutoff),
     ).fetchall()
@@ -167,6 +184,11 @@ def approve_draft(
         raise ValueError(f"Task {task_id} nicht gefunden")
     if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
         raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
+    if not _is_funnel_root(conn, task_id):
+        raise ValueError(
+            f"{task_id} ist kein Funnel-Root (hat Eltern) — Build-Kinder sind "
+            "nicht erneut freigabefähig"
+        )
     if task.status != "done":
         raise ValueError(f"{task_id} ist nicht fertig (status={task.status}) — erst der fertige Draft wird freigegeben")
     has_child = conn.execute(
@@ -175,7 +197,9 @@ def approve_draft(
     if has_child:
         raise ValueError(f"{task_id} wurde bereits freigegeben (Build-Kind existiert)")
 
-    title = f"Umsetzen: {task.title}"
+    # Präfix idempotent halten: tippt die Familie den Wunsch selbst schon als
+    # "Umsetzen: …", darf der Build-Titel nicht weiter stapeln.
+    title = task.title if (task.title or "").startswith("Umsetzen: ") else f"Umsetzen: {task.title}"
     if len(title) > _BUILD_TITLE_LIMIT:
         title = title[: _BUILD_TITLE_LIMIT - 1].rstrip() + "…"
     excerpt = _draft_excerpt(conn, task_id) or (
@@ -205,6 +229,11 @@ def dismiss_draft(conn: sqlite3.Connection, task_id: str) -> None:
         raise ValueError(f"Task {task_id} nicht gefunden")
     if (task.created_by or "") not in kb.FUNNEL_CREATED_BY:
         raise ValueError(f"{task_id} ist kein Funnel-Vorschlag (created_by={task.created_by!r})")
+    if not _is_funnel_root(conn, task_id):
+        raise ValueError(
+            f"{task_id} ist kein Funnel-Root (hat Eltern) — Build-Kinder "
+            "gehören nicht in die Freigabe-Queue"
+        )
     if task.status != "done":
         raise ValueError(f"{task_id} ist nicht in der Freigabe-Queue (status={task.status})")
     has_child = conn.execute(

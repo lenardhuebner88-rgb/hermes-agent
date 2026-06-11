@@ -224,3 +224,61 @@ def test_dismiss_draft_rejects_already_approved(conn):
     funnel.approve_draft(conn, tid)
     with pytest.raises(ValueError, match="bereits freigegeben"):
         funnel.dismiss_draft(conn, tid)
+
+
+# --- Loop-Guard: Build-Kinder dürfen nie wieder zu Drafts werden ---------------
+# Regression 2026-06-11: Build-Kinder erben created_by (Wert-Bilanz) und haben
+# selbst keine Kinder — sobald eines done war, tauchte es erneut in der
+# Freigabe-Queue auf. Jede Freigabe stapelte ein weiteres "Umsetzen: " auf den
+# Titel (t_8e26e103 → t_91188cfe → t_2fd31dd7 → t_e7cd8d07).
+
+
+def _complete(conn, task_id):
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (int(time.time()), task_id),
+        )
+
+
+def test_list_drafts_excludes_completed_build_children(conn):
+    tid = _make_done_draft(conn)
+    child_id = funnel.approve_draft(conn, tid)
+    kb.add_comment(conn, child_id, author="coder-claude", body="Ergebnis " + "r" * 150)
+    _complete(conn, child_id)
+
+    # Weder der freigegebene Root (hat Kind) noch das fertige Build-Kind
+    # (hat Eltern) sind freigabefähig — die Queue bleibt leer.
+    assert funnel.list_drafts(conn) == []
+
+
+def test_approve_draft_rejects_completed_build_child(conn):
+    tid = _make_done_draft(conn)
+    child_id = funnel.approve_draft(conn, tid)
+    _complete(conn, child_id)
+
+    with pytest.raises(ValueError, match="kein Funnel-Root"):
+        funnel.approve_draft(conn, child_id)
+    # Es darf kein Enkel "Umsetzen: Umsetzen: …" entstanden sein.
+    grandchild = conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ?", (child_id,),
+    ).fetchone()
+    assert grandchild is None
+
+
+def test_dismiss_draft_rejects_completed_build_child(conn):
+    tid = _make_done_draft(conn)
+    child_id = funnel.approve_draft(conn, tid)
+    _complete(conn, child_id)
+
+    with pytest.raises(ValueError, match="kein Funnel-Root"):
+        funnel.dismiss_draft(conn, child_id)
+    assert kb.get_task(conn, child_id).status == "done"  # nicht archiviert
+
+
+def test_approve_draft_title_prefix_is_idempotent(conn):
+    # Familie tippt den Wunsch selbst schon als "Umsetzen: …" in die HermesBar.
+    tid = _make_done_draft(conn, title="Umsetzen: Dunkles Theme")
+    child = kb.get_task(conn, funnel.approve_draft(conn, tid))
+    assert child.title == "Umsetzen: Dunkles Theme"
+    assert not child.title.startswith("Umsetzen: Umsetzen:")
