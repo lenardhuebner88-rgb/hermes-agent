@@ -44,7 +44,9 @@ import mimetypes
 import os
 import re
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Optional
@@ -1164,6 +1166,82 @@ def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# GET /board — server-side payload cache
+# ---------------------------------------------------------------------------
+# /board is the hottest dashboard endpoint (every SPA client polls it on an
+# 8 s interval) and each request used to rebuild the full payload — diagnostics
+# for ALL tasks, serialisation, sha256 ETag — even when nothing changed. The
+# browser-side 304 only saves transfer, not that CPU. So the handler keeps the
+# last rendered payload+ETag per parameter combination and revalidates it with
+# a cheap DB change stamp instead of recomputing.
+#
+# The stamp is a tuple of aggregates over every table the payload reads.
+# Most board-visible mutations append a ``task_events`` row, but not all of
+# them do (in-place run/heartbeat updates, direct SQL), and some diagnostics
+# rules are TIME-driven (stuck_in_blocked & friends flip without any DB
+# write), so a short max-TTL backstops the stamp: a stale entry is never
+# served longer than ``_BOARD_CACHE_TTL_S`` even when the stamp still matches.
+
+_BOARD_CACHE_MAX_ENTRIES = 8
+
+
+def _resolve_board_cache_ttl_s() -> float:
+    """Max age for a cached board payload (s), env-overridable; 0 disables."""
+    raw = os.environ.get("HERMES_KANBAN_BOARD_CACHE_TTL_S", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 30.0
+
+
+_BOARD_CACHE_TTL_S = _resolve_board_cache_ttl_s()
+_board_cache: "OrderedDict[tuple, dict[str, Any]]" = OrderedDict()
+_board_cache_lock = threading.Lock()
+
+
+def _board_db_version(conn: sqlite3.Connection) -> tuple:
+    """Cheap change stamp over every table the /board payload reads.
+
+    MAX over autoincrement PKs is an O(1) index lookup; the COUNTs run over
+    tables with at most a few hundred rows. Together well under 1 ms — vs
+    ~100 ms for a full payload rebuild.
+    """
+    row = conn.execute(
+        "SELECT"
+        " (SELECT COALESCE(MAX(id), 0) FROM task_events),"
+        " (SELECT COUNT(*) FROM tasks),"
+        " (SELECT COALESCE(MAX(id), 0) FROM task_runs),"
+        " (SELECT COUNT(*) FROM task_links),"
+        " (SELECT COALESCE(MAX(id), 0) FROM task_comments)"
+    ).fetchone()
+    return tuple(row)
+
+
+def _board_json_response(body_prefix: bytes, etag: str) -> Response:
+    """Assemble the final /board response from a pre-serialised payload.
+
+    ``body_prefix`` is the payload JSON minus its closing brace; the volatile
+    ``now`` field is appended per-request so cache hits skip re-serialising
+    the ~400 KB document but clients still get a fresh server clock.
+    """
+    body = body_prefix + (',"now":%d}' % int(time.time())).encode()
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+    )
+
+
+def _board_not_modified(etag: str) -> Response:
+    return Response(
+        status_code=304,
+        headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /board
 # ---------------------------------------------------------------------------
 
@@ -1214,6 +1292,45 @@ def get_board(
     source_errors: list[dict[str, Any]] = []
     conn = _conn(board=board, source_errors=source_errors)
     try:
+        # Cache lookup. Keyed by the resolved DB file (NOT the query param:
+        # omitting ``board`` follows the on-disk ``current`` pointer, which
+        # can move without any DB write) plus every payload-shaping param.
+        # A degraded open (source_errors) bypasses the cache entirely — its
+        # payload carries the error annotation and must not be reused.
+        version: Optional[tuple] = None
+        cache_key: Optional[tuple] = None
+        if not source_errors and _BOARD_CACHE_TTL_S > 0:
+            try:
+                db_file = conn.execute("PRAGMA database_list").fetchone()["file"]
+            except Exception:
+                db_file = f"board:{board}"
+            version = _board_db_version(conn)
+            cache_key = (
+                db_file,
+                tenant,
+                include_archived,
+                workflow_template_id,
+                current_step_key,
+                card_diagnostics,
+                card_body,
+            )
+            with _board_cache_lock:
+                entry = _board_cache.get(cache_key)
+                if (
+                    entry
+                    and entry["version"] == version
+                    and time.monotonic() < entry["expires"]
+                ):
+                    _board_cache.move_to_end(cache_key)
+                    cached_etag = entry["etag"]
+                    cached_prefix = entry["body_prefix"]
+                else:
+                    entry = None
+            if entry is not None:
+                if request.headers.get("if-none-match") == cached_etag:
+                    return _board_not_modified(cached_etag)
+                return _board_json_response(cached_prefix, cached_etag)
+
         tasks = kanban_db.list_tasks(
             conn,
             tenant=tenant,
@@ -1385,15 +1502,26 @@ def get_board(
         etag = 'W/"' + hashlib.sha256(
             json.dumps(etag_basis, sort_keys=True, separators=(",", ":"), default=str).encode()
         ).hexdigest()[:32] + '"'
-        response.headers["ETag"] = etag
-        response.headers["Cache-Control"] = "private, no-cache"
+        # Serialise once (matching JSONResponse's compact encoding) and keep
+        # the result — minus the closing brace — for the per-request ``now``
+        # append and for cache reuse by later identical requests.
+        body_prefix = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), default=str,
+        ).encode()[:-1]
+        if cache_key is not None:
+            with _board_cache_lock:
+                _board_cache[cache_key] = {
+                    "version": version,
+                    "expires": time.monotonic() + _BOARD_CACHE_TTL_S,
+                    "etag": etag,
+                    "body_prefix": body_prefix,
+                }
+                _board_cache.move_to_end(cache_key)
+                while len(_board_cache) > _BOARD_CACHE_MAX_ENTRIES:
+                    _board_cache.popitem(last=False)
         if request.headers.get("if-none-match") == etag:
-            return Response(
-                status_code=304,
-                headers={"ETag": etag, "Cache-Control": "private, no-cache"},
-            )
-        payload["now"] = int(time.time())
-        return payload
+            return _board_not_modified(etag)
+        return _board_json_response(body_prefix, etag)
     finally:
         conn.close()
 

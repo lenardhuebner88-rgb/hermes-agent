@@ -293,6 +293,80 @@ def test_board_etag_304_roundtrip(client):
     assert r3.headers.get("etag") != etag
 
 
+def test_board_payload_cache_reuses_unchanged_payload(client, monkeypatch):
+    """A second poll with identical params and an unchanged DB is served from
+    the server-side payload cache (no diagnostics recompute, identical body
+    apart from ``now``), and a board-visible mutation invalidates it."""
+    client.post("/api/plugins/kanban/tasks", json={"title": "cache me"})
+
+    mod = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    real = mod._compute_task_diagnostics
+    calls = {"n": 0}
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(mod, "_compute_task_diagnostics", counting)
+
+    url = "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"
+    r1 = client.get(url)
+    assert r1.status_code == 200
+    assert calls["n"] == 1
+
+    r2 = client.get(url)
+    assert r2.status_code == 200
+    assert calls["n"] == 1  # cache hit — payload not rebuilt
+    assert r2.headers.get("etag") == r1.headers.get("etag")
+
+    d1, d2 = r1.json(), r2.json()
+    assert d1.pop("now") and d2.pop("now")
+    assert d1 == d2
+
+    # ETag revalidation rides the cache too: 304 without recompute.
+    r3 = client.get(url, headers={"If-None-Match": r2.headers["ETag"]})
+    assert r3.status_code == 304
+    assert calls["n"] == 1
+
+    # A board-visible mutation bumps the DB stamp → fresh payload next poll.
+    new_id = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "invalidate cache"},
+    ).json()["task"]["id"]
+    r4 = client.get(url)
+    assert r4.status_code == 200
+    assert calls["n"] == 2
+    ids = [t["id"] for col in r4.json()["columns"] for t in col["tasks"]]
+    assert new_id in ids
+
+
+def test_board_payload_cache_ttl_expiry_and_disable(client, monkeypatch):
+    """Time-driven diagnostics rules flip without any DB write, so a stamp
+    match alone must never serve an entry past the max TTL; TTL 0 disables
+    the cache entirely (ops escape hatch)."""
+    client.post("/api/plugins/kanban/tasks", json={"title": "ttl probe"})
+
+    mod = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    real = mod._compute_task_diagnostics
+    calls = {"n": 0}
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(mod, "_compute_task_diagnostics", counting)
+
+    monkeypatch.setattr(mod, "_BOARD_CACHE_TTL_S", 0.05)
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    time.sleep(0.06)
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert calls["n"] == 2  # TTL elapsed → recompute despite unchanged stamp
+
+    monkeypatch.setattr(mod, "_BOARD_CACHE_TTL_S", 0.0)
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert calls["n"] == 4  # cache disabled → every poll recomputes
+
+
 def test_create_task_park_lands_in_scheduled(client):
     # The dashboard "copy to Fleet" action sends triage=True + park=True so the
     # new task is parked in `scheduled` (Plan stage) instead of being
