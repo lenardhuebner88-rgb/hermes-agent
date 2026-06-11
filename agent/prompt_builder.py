@@ -275,6 +275,43 @@ KANBAN_GUIDANCE = (
     "cross-agent handoffs that outlive one API loop."
 )
 
+# Worker isolation (Entscheidung 1): appended to KANBAN_GUIDANCE ONLY when
+# the worker's workspace is a dispatcher-provisioned worktree
+# (…/.worktrees/kanban/<root-id>). Workers in the live checkout (flag off,
+# legacy dir tasks) never see this — a `git add -A` there would commit
+# foreign dirty work onto the live branch. Kept as a SEPARATE constant so
+# the KANBAN_GUIDANCE size-budget test stays meaningful.
+KANBAN_COMMIT_GUIDANCE = (
+    "\n\n## Git (provisioned worktree)\n"
+    "Your workspace is a dispatcher-provisioned git worktree on your own "
+    "task branch. When your gates are green, commit your work: "
+    "`git add -A && git commit -m \"kanban(<task-id>): <one-line summary>\"` "
+    "(your real task id is in `$HERMES_KANBAN_TASK`), then include the hash "
+    "in your completion metadata as `\"commit\"`. NEVER push, NEVER merge "
+    "into another branch, NEVER switch branches — integration into the live "
+    "branch happens outside your run after review."
+)
+
+
+def kanban_commit_guidance_for(workspace) -> str:
+    """Return :data:`KANBAN_COMMIT_GUIDANCE` iff *workspace* is a
+    dispatcher-provisioned kanban worktree, else ``""``.
+
+    Path-shape check only (``…/.worktrees/kanban/<id>``) — duplicated from
+    ``hermes_cli.kanban_worktrees.is_provisioned_path`` on purpose: the
+    agent layer must not import the kanban DB layer.
+    """
+    if not workspace:
+        return ""
+    from pathlib import Path
+
+    parts = Path(str(workspace)).parts
+    for i in range(len(parts) - 2):
+        if parts[i] == ".worktrees" and parts[i + 1] == "kanban":
+            return KANBAN_COMMIT_GUIDANCE
+    return ""
+
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
