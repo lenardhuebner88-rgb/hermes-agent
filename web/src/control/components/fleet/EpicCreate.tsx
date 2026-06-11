@@ -8,6 +8,8 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Layers, Loader2, X } from "lucide-react";
 import { de } from "../../i18n/de";
 import { useEpicActions } from "../../hooks/useControlData";
+import { Overlay } from "../Overlay";
+import { hasFinePointer } from "../../lib/pointer";
 
 function EpicCreateSheet({ onClose, onCreated }: { onClose: () => void; onCreated?: () => void }) {
   const [title, setTitle] = useState("");
@@ -16,12 +18,7 @@ function EpicCreateSheet({ onClose, onCreated }: { onClose: () => void; onCreate
   const inputRef = useRef<HTMLInputElement>(null);
   const { busyKey, error, createEpic, clearError } = useEpicActions();
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEffect(() => { if (hasFinePointer()) inputRef.current?.focus(); }, []);
 
   const busy = busyKey != null;
   const submit = async () => {
@@ -34,51 +31,43 @@ function EpicCreateSheet({ onClose, onCreated }: { onClose: () => void; onCreate
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={onClose} role="presentation">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={de.flow.epicCreate.sheetTitle}
-        onClick={(e) => e.stopPropagation()}
-        className="hc-surface-card w-full max-w-md rounded-b-none rounded-t-2xl p-4 sm:rounded-2xl"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="hc-type-label text-white">{de.flow.epicCreate.sheetTitle}</h2>
-          <button type="button" onClick={onClose} aria-label={de.flow.epicCreate.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]"><X className="h-4 w-4" /></button>
-        </div>
-
-        <input
-          ref={inputRef}
-          value={title}
-          onChange={(e) => { setTitle(e.target.value); if (error) clearError(); }}
-          onKeyDown={(e) => { if (e.key === "Enter" && title.trim() && !busy) void submit(); }}
-          placeholder={de.flow.epicCreate.titlePlaceholder}
-          className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
-        />
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder={de.flow.epicCreate.bodyPlaceholder}
-          rows={3}
-          className="mt-2 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-sm text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
-        />
-
-        {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
-
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.epicCreate.cancel}</button>
-          <button
-            type="button"
-            disabled={busy || !title.trim() || done}
-            onClick={() => void submit()}
-            className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
-          >
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : done ? <Check className="h-4 w-4" /> : <Layers className="h-4 w-4" />}
-            {busy ? de.flow.epicCreate.submitting : done ? de.flow.epicCreate.done : de.flow.epicCreate.submit}
-          </button>
-        </div>
+    <Overlay onClose={onClose} ariaLabel={de.flow.epicCreate.sheetTitle}>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="hc-type-label text-white">{de.flow.epicCreate.sheetTitle}</h2>
+        <button type="button" onClick={onClose} aria-label={de.flow.epicCreate.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]"><X className="h-4 w-4" /></button>
       </div>
-    </div>
+
+      <input
+        ref={inputRef}
+        value={title}
+        onChange={(e) => { setTitle(e.target.value); if (error) clearError(); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && title.trim() && !busy) void submit(); }}
+        placeholder={de.flow.epicCreate.titlePlaceholder}
+        className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+      />
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder={de.flow.epicCreate.bodyPlaceholder}
+        rows={3}
+        className="mt-2 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+      />
+
+      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
+
+      <div className="mt-4 flex items-center justify-end gap-2">
+        <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.epicCreate.cancel}</button>
+        <button
+          type="button"
+          disabled={busy || !title.trim() || done}
+          onClick={() => void submit()}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : done ? <Check className="h-4 w-4" /> : <Layers className="h-4 w-4" />}
+          {busy ? de.flow.epicCreate.submitting : done ? de.flow.epicCreate.done : de.flow.epicCreate.submit}
+        </button>
+      </div>
+    </Overlay>
   );
 }
 

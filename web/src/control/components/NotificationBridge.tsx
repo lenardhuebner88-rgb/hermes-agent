@@ -79,7 +79,9 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
       title={enabled ? "Browser-Benachrichtigungen aus" : "Browser-Benachrichtigungen an"}
       aria-pressed={enabled}
       className={cn(
-        "fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))] right-3 z-40 grid h-10 w-10 place-items-center rounded-full border text-xs shadow-xl backdrop-blur lg:bottom-4",
+        // 9.5rem: über dem mobilen Capture-FAB (5rem–8.5rem) — vorher lag die
+        // Glocke AUF dem FAB und fing dessen Taps ab (Audit 2026-06-11, F3).
+        "fixed bottom-[calc(9.5rem+env(safe-area-inset-bottom,0px))] right-3 z-40 grid h-10 w-10 place-items-center rounded-full border text-xs shadow-xl backdrop-blur lg:bottom-4",
         enabled ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 bg-black/30 hc-soft hover:bg-white/5",
       )}
     >

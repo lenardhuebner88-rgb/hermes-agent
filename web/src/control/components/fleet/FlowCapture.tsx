@@ -10,11 +10,14 @@
  * No optimistic illusion — on success the new card appears on the live board.
  */
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
 import { useCaptureTask } from "../../hooks/useControlData";
 import { usesFlowCaptureEndpoint, type CaptureMethod } from "../../lib/fleet";
+import { Overlay } from "../Overlay";
+import { hasFinePointer } from "../../lib/pointer";
 
 function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSelect: () => void; title: string; hint: string }) {
   return (
@@ -75,12 +78,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   const inputRef = useRef<HTMLInputElement>(null);
   const { state, error, capture, reset } = useCaptureTask(onCreated);
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEffect(() => { if (hasFinePointer()) inputRef.current?.focus(); }, []);
 
   const busy = state === "busy";
   // park is operator-held already; the gate switch only applies to the two
@@ -98,52 +96,44 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={onClose} role="presentation">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={de.flow.capture.sheetTitle}
-        onClick={(e) => e.stopPropagation()}
-        className="hc-surface-card w-full max-w-md rounded-b-none rounded-t-2xl p-4 sm:rounded-2xl"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="hc-type-label text-white">{de.flow.capture.sheetTitle}</h2>
-          <button type="button" onClick={onClose} aria-label={de.flow.capture.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]"><X className="h-4 w-4" /></button>
-        </div>
-
-        <input
-          ref={inputRef}
-          value={title}
-          onChange={(e) => { setTitle(e.target.value); if (state === "error") reset(); }}
-          onKeyDown={(e) => { if (e.key === "Enter" && title.trim() && !busy) void submit(); }}
-          placeholder={de.flow.capture.titlePlaceholder}
-          className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
-        />
-
-        <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.methodLabel}>
-          <ModeOption active={method === "lean"} onSelect={() => setMethod("lean")} title={de.flow.capture.methodLean} hint={de.flow.capture.methodLeanHint} />
-          <ModeOption active={method === "document"} onSelect={() => setMethod("document")} title={de.flow.capture.methodDocument} hint={de.flow.capture.methodDocumentHint} />
-          <ModeOption active={method === "park"} onSelect={() => setMethod("park")} title={de.flow.capture.methodPark} hint={de.flow.capture.methodParkHint} />
-        </div>
-
-        {method !== "park" ? <GateToggle gate={gate} onChange={setGate} /> : null}
-
-        {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
-
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.capture.cancel}</button>
-          <button
-            type="button"
-            disabled={busy || !title.trim() || state === "done"}
-            onClick={() => void submit()}
-            className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
-          >
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : state === "done" ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-            {busy ? (planning ? de.flow.capture.planning : de.flow.capture.submitting) : state === "done" ? doneLabel : de.flow.capture.submit}
-          </button>
-        </div>
+    <Overlay onClose={onClose} ariaLabel={de.flow.capture.sheetTitle}>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="hc-type-label text-white">{de.flow.capture.sheetTitle}</h2>
+        <button type="button" onClick={onClose} aria-label={de.flow.capture.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]"><X className="h-4 w-4" /></button>
       </div>
-    </div>
+
+      <input
+        ref={inputRef}
+        value={title}
+        onChange={(e) => { setTitle(e.target.value); if (state === "error") reset(); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && title.trim() && !busy) void submit(); }}
+        placeholder={de.flow.capture.titlePlaceholder}
+        className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+      />
+
+      <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.methodLabel}>
+        <ModeOption active={method === "lean"} onSelect={() => setMethod("lean")} title={de.flow.capture.methodLean} hint={de.flow.capture.methodLeanHint} />
+        <ModeOption active={method === "document"} onSelect={() => setMethod("document")} title={de.flow.capture.methodDocument} hint={de.flow.capture.methodDocumentHint} />
+        <ModeOption active={method === "park"} onSelect={() => setMethod("park")} title={de.flow.capture.methodPark} hint={de.flow.capture.methodParkHint} />
+      </div>
+
+      {method !== "park" ? <GateToggle gate={gate} onChange={setGate} /> : null}
+
+      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
+
+      <div className="mt-4 flex items-center justify-end gap-2">
+        <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.capture.cancel}</button>
+        <button
+          type="button"
+          disabled={busy || !title.trim() || state === "done"}
+          onClick={() => void submit()}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-4 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : state === "done" ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+          {busy ? (planning ? de.flow.capture.planning : de.flow.capture.submitting) : state === "done" ? doneLabel : de.flow.capture.submit}
+        </button>
+      </div>
+    </Overlay>
   );
 }
 
@@ -160,15 +150,20 @@ export function FlowCapture({ onCreated }: { onCreated?: (taskId: string) => voi
       >
         <Plus className="h-4 w-4" />{de.flow.capture.button}
       </button>
-      {/* Mobile: a sticky FAB, lifted above the bottom tab nav. */}
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-label={de.flow.capture.fabAria}
-        className="fixed bottom-20 right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-lg shadow-black/40 backdrop-blur transition active:scale-95 sm:hidden"
-      >
-        <Plus className="h-6 w-6" />
-      </button>
+      {/* Mobile: a sticky FAB, lifted above the bottom tab nav (+ safe-area).
+          Portal: inline säße der FAB im Hero-Stacking-Context (.hc-hero hat
+          isolation:isolate) und sein z-40 wäre gegen Nav/Overlays Glückssache. */}
+      {createPortal(
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label={de.flow.capture.fabAria}
+          className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom,0px))] right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-lg shadow-black/40 backdrop-blur transition active:scale-95 sm:hidden"
+        >
+          <Plus className="h-6 w-6" />
+        </button>,
+        document.body,
+      )}
       {open ? <CaptureSheet onClose={() => setOpen(false)} onCreated={created} /> : null}
     </>
   );
