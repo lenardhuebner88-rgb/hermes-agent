@@ -48,6 +48,7 @@ import {
   useTaskDetail,
 } from "../hooks/useControlData";
 import type { BoardTask, TaskStatus } from "../lib/types";
+import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
@@ -239,6 +240,7 @@ const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, 
         {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 hc-type-label text-rose-200">Hoch</span> : null}
         {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 hc-type-label text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
         {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100">{enriched.verdict}</span> : null}
+        {isIsolatedWorkspace(task) ? <span title={task.workspace_path ?? undefined} className="rounded-full border border-violet-400/30 bg-violet-400/10 px-2 py-0.5 hc-type-label text-violet-200">⧉ Worktree</span> : null}
         {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 hc-type-label text-emerald-100">{enriched.resultQualityLabel}</span> : null}
       </div>
       {task.latest_summary ? <p className="mt-2 line-clamp-2 text-xs hc-soft">{task.latest_summary}</p> : null}

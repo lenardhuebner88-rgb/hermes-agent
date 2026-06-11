@@ -215,6 +215,18 @@ export interface BoardTask {
   root_id: string | null;
   /** Epic membership when assigned (first-class backend grouping). */
   epic_id: string | null;
+  /** Workspace model (worker isolation): "scratch" | "dir" | "worktree".
+   * Optional: older payload mocks omit it. */
+  workspace_kind?: string | null;
+  /** Resolved workspace path; a dispatcher-provisioned isolated worktree
+   * lives under `<repo>/.worktrees/kanban/<root_id>`. */
+  workspace_path?: string | null;
+}
+
+/** True when the task runs in a dispatcher-provisioned isolated worktree
+ * (worker isolation — kanban.worker_isolation: worktree). */
+export function isIsolatedWorkspace(task: Pick<BoardTask, "workspace_path">): boolean {
+  return !!task.workspace_path && task.workspace_path.includes("/.worktrees/kanban/");
 }
 
 export interface BoardColumn {

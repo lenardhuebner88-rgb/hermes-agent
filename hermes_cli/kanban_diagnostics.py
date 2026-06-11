@@ -1382,6 +1382,70 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 # Registry — order matters: rules higher on the list render first when
 # severity ties. Add new rules here.
+def _rule_orphaned_worktree(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Worker isolation: a terminal task whose dispatcher-provisioned
+    worktree (``<repo>/.worktrees/kanban/<root>``) still exists on disk
+    well after completion — the chain was never drained by the integrator
+    (e.g. last sibling archived instead of completed, or a parked chain
+    whose task was archived). Disk-state check is read-only and cheap
+    (one ``Path.exists``)."""
+    status = _task_field(task, "status")
+    if status not in ("done", "archived", "cancelled", "failed"):
+        return []
+    ws = _task_field(task, "workspace_path") or ""
+    if not ws:
+        return []
+    try:
+        from pathlib import Path as _Path
+
+        parts = _Path(ws).parts
+        wt = None
+        for i in range(len(parts) - 2):
+            if parts[i] == ".worktrees" and parts[i + 1] == "kanban":
+                wt = _Path(*parts[: i + 3])
+                break
+        if wt is None or not wt.exists():
+            return []
+    except OSError:
+        return []
+    threshold = _positive_int(
+        cfg.get("orphaned_worktree_age_seconds"), 48 * 3600,
+    )
+    completed = _task_field(task, "completed_at") or 0
+    anchor = completed or (_task_field(task, "created_at") or now)
+    if now - anchor < threshold:
+        return []
+    task_id = _task_field(task, "id") or "<task_id>"
+    return [Diagnostic(
+        kind="orphaned_worktree",
+        severity="warning",
+        title="Verwaister Kanban-Worktree",
+        detail=(
+            f"Task ist terminal ({status}), aber der provisionierte "
+            f"Worktree existiert noch: {wt}. Die Kette wurde nie vom "
+            "Integrator gemergt/aufgeräumt (z.B. letzter Task archiviert "
+            "statt completed, oder geparkter Merge nie entschieden)."
+        ),
+        actions=[
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Worktree inspizieren (uncommittete Arbeit?)",
+                payload={"command": f"git -C {wt} status --short && git -C {wt} log --oneline -5"},
+                suggested=True,
+            ),
+            DiagnosticAction(
+                kind="cli_hint",
+                label="Nach Sichtung entfernen",
+                payload={"command": (
+                    f"git -C {wt.parent.parent.parent} worktree remove {wt}"
+                )},
+            ),
+        ],
+        first_seen_at=anchor,
+        last_seen_at=now,
+    )]
+
+
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
     _rule_triage_aux_unavailable,
@@ -1394,6 +1458,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_orphaned_worktree,
 ]
 
 
@@ -1412,6 +1477,7 @@ DIAGNOSTIC_KINDS = (
     "block_unblock_cycling",
     "stranded_in_ready",
     "descendants_blocked_by_stuck_parent",
+    "orphaned_worktree",
 )
 
 

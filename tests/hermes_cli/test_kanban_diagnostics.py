@@ -1062,3 +1062,70 @@ def test_descendants_blocked_by_stuck_parent_silent_when_parent_recovered(kanban
         out = kd.find_descendants_blocked_by_stuck_parent(conn)
 
     assert child not in out
+
+
+# ---------------------------------------------------------------------------
+# orphaned_worktree (worker isolation, Phase 4)
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedWorktree:
+    def _wt(self, tmp_path):
+        wt = tmp_path / "repo" / ".worktrees" / "kanban" / "t_orph01"
+        wt.mkdir(parents=True)
+        return wt
+
+    def test_fires_for_old_terminal_task_with_existing_worktree(self, tmp_path):
+        wt = self._wt(tmp_path)
+        now = int(time.time())
+        task = _task(
+            id="t_orph01", status="done",
+            workspace_path=str(wt), completed_at=now - 72 * 3600,
+        )
+        diags = kd.compute_task_diagnostics(task, [], [], now=now)
+        kinds = [d.kind for d in diags]
+        assert "orphaned_worktree" in kinds
+        d = next(d for d in diags if d.kind == "orphaned_worktree")
+        assert d.severity == "warning"
+        assert str(wt) in d.detail
+
+    def test_silent_when_worktree_already_removed(self, tmp_path):
+        wt = tmp_path / "repo" / ".worktrees" / "kanban" / "t_orph02"  # never created
+        now = int(time.time())
+        task = _task(
+            id="t_orph02", status="done",
+            workspace_path=str(wt), completed_at=now - 72 * 3600,
+        )
+        diags = kd.compute_task_diagnostics(task, [], [], now=now)
+        assert all(d.kind != "orphaned_worktree" for d in diags)
+
+    def test_silent_within_grace_period_and_for_open_tasks(self, tmp_path):
+        wt = self._wt(tmp_path)
+        now = int(time.time())
+        fresh = _task(
+            id="t_orph01", status="done",
+            workspace_path=str(wt), completed_at=now - 3600,
+        )
+        assert all(
+            d.kind != "orphaned_worktree"
+            for d in kd.compute_task_diagnostics(fresh, [], [], now=now)
+        )
+        running = _task(
+            id="t_orph01", status="running",
+            workspace_path=str(wt), completed_at=None,
+        )
+        assert all(
+            d.kind != "orphaned_worktree"
+            for d in kd.compute_task_diagnostics(running, [], [], now=now)
+        )
+
+    def test_silent_for_plain_workspace(self, tmp_path):
+        plain = tmp_path / "somewhere"
+        plain.mkdir()
+        now = int(time.time())
+        task = _task(
+            id="t_orph03", status="done",
+            workspace_path=str(plain), completed_at=now - 72 * 3600,
+        )
+        diags = kd.compute_task_diagnostics(task, [], [], now=now)
+        assert all(d.kind != "orphaned_worktree" for d in diags)
