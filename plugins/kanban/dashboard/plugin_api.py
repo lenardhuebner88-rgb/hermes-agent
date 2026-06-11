@@ -2372,43 +2372,77 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
     return out
 
 
+_LANE_PROFILE_CACHE_TTL_S = 30.0
+_lane_profile_cache: Optional[tuple[float, list[dict]]] = None
+
+
+def _scan_lane_profiles() -> list[dict]:
+    """Direct profile-dir scan for the Lanes UI dropdowns.
+
+    Deliberately NOT ``list_profiles()``: that helper additionally rglobs
+    every profile's skills/ tree (~100 files per profile) and probes
+    gateway pids — measured at ~5s per call with 11 profiles, which made
+    GET /lanes time out on mobile. The editor only needs name, runtime,
+    default model and description, all of which live in two small YAML
+    files per profile (same seams the dispatcher uses).
+    """
+    import yaml
+    from hermes_cli.profiles import _PROFILE_ID_RE, _get_profiles_root, read_profile_meta
+
+    out: list[dict] = []
+    root = _get_profiles_root()
+    if not root.is_dir():
+        return out
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name == "default" or not _PROFILE_ID_RE.match(entry.name):
+            continue
+        runtime = "hermes"
+        claude_model = None
+        model = None
+        try:
+            cfg_path = entry / "config.yaml"
+            if cfg_path.is_file():
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+                if isinstance(cfg, dict):
+                    if cfg.get("worker_runtime") == "claude-cli":
+                        runtime = "claude-cli"
+                    cm = cfg.get("claude_model")
+                    if isinstance(cm, str) and cm.strip():
+                        claude_model = cm.strip()
+                    model_cfg = cfg.get("model")
+                    if isinstance(model_cfg, str):
+                        model = model_cfg
+                    elif isinstance(model_cfg, dict):
+                        model = model_cfg.get("default") or model_cfg.get("model")
+        except Exception:
+            pass
+        out.append({
+            "name": entry.name,
+            "worker_runtime": runtime,
+            "default_model": claude_model if runtime == "claude-cli" else model,
+            "description": read_profile_meta(entry).get("description", ""),
+        })
+    return out
+
+
 def _lane_profile_catalog() -> list[dict]:
     """Profile names + config defaults for the Lanes UI dropdowns.
 
     Fail-soft: any error yields an empty list — the UI then falls back to
-    free-text profile entry. Reads worker_runtime / claude_model straight
-    from each profile's config.yaml (same seams the dispatcher uses).
+    free-text profile entry. Cached for a short TTL because the catalog
+    only changes when someone edits a profile's config.yaml, while the
+    Lanes tab refetches after every mutation.
     """
-    out: list[dict] = []
+    global _lane_profile_cache
+    now = time.monotonic()
+    if _lane_profile_cache is not None and now - _lane_profile_cache[0] < _LANE_PROFILE_CACHE_TTL_S:
+        return _lane_profile_cache[1]
     try:
-        import yaml
-        from hermes_cli.profiles import list_profiles
-        for info in list_profiles():
-            if info.name == "default":
-                continue
-            runtime = "hermes"
-            claude_model = None
-            try:
-                cfg_path = info.path / "config.yaml"
-                if cfg_path.is_file():
-                    with open(cfg_path, "r", encoding="utf-8") as fh:
-                        cfg = yaml.safe_load(fh) or {}
-                    if isinstance(cfg, dict):
-                        if cfg.get("worker_runtime") == "claude-cli":
-                            runtime = "claude-cli"
-                        cm = cfg.get("claude_model")
-                        if isinstance(cm, str) and cm.strip():
-                            claude_model = cm.strip()
-            except Exception:
-                pass
-            out.append({
-                "name": info.name,
-                "worker_runtime": runtime,
-                "default_model": claude_model if runtime == "claude-cli" else info.model,
-                "description": info.description or "",
-            })
+        out = _scan_lane_profiles()
     except Exception:
         return []
+    _lane_profile_cache = (now, out)
     return out
 
 

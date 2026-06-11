@@ -49,7 +49,18 @@ function currentCursor(): number {
 // Frische dieser Keys — die Basis-Polls fallen auf 5×-Kadenz als Sicherheitsnetz
 // (Board 8s→40s usw.). Bei Disconnect sofort zurück auf Normal-Kadenz.
 const LIVE_SCALE = 5;
-const LIVE_SCALED_KEYS = [...TASK_EVENT_KEYS, ...RUN_EVENT_KEYS];
+
+// Dauer-Polls der Shell ohne eigenen Event-Kanal (Badges/Status): solange der
+// Events-WS verbunden ist, dürfen auch sie auf Sicherheitsnetz-Kadenz fallen
+// (5s→25s usw.) — zu dritt sind sie mit ~34 req/min der größte Einzelposten
+// der Idle-Last über den Tailscale-Proxy.
+const STATUS_POLL_KEYS = [
+  "health-status",
+  "metrics-lite",
+  "autoresearch/proposals",
+] as const;
+
+const LIVE_SCALED_KEYS = [...TASK_EVENT_KEYS, ...RUN_EVENT_KEYS, ...STATUS_POLL_KEYS];
 
 export function setLivePollingMode(live: boolean): void {
   for (const key of LIVE_SCALED_KEYS) setIntervalScale(key, live ? LIVE_SCALE : 1);

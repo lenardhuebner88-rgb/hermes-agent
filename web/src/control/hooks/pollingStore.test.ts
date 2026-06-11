@@ -138,3 +138,37 @@ describe("pollingStore", () => {
     expect(cb).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("foreground refresh stagger", () => {
+  it("staggers per-key refreshes on visibilitychange instead of firing all at once", async () => {
+    let onVisibility: (() => void) | null = null;
+    (globalThis as { document?: unknown }).document = {
+      hidden: false,
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") onVisibility = fn;
+      },
+    };
+    const loaders = [
+      vi.fn().mockResolvedValue(1),
+      vi.fn().mockResolvedValue(2),
+      vi.fn().mockResolvedValue(3),
+    ];
+    subscribe("k0", loaders[0], 60_000, vi.fn());
+    subscribe("k1", loaders[1], 60_000, vi.fn());
+    subscribe("k2", loaders[2], 60_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0); // initial ticks
+    loaders.forEach((l) => l.mockClear());
+    expect(onVisibility).not.toBeNull();
+
+    onVisibility!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loaders[0]).toHaveBeenCalledTimes(1); // first key fires immediately
+    expect(loaders[1]).not.toHaveBeenCalled(); // the rest are staggered
+    expect(loaders[2]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(loaders[1]).toHaveBeenCalledTimes(1);
+    expect(loaders[2]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(loaders[2]).toHaveBeenCalledTimes(1);
+  });
+});

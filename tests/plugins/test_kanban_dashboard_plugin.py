@@ -3912,3 +3912,71 @@ def test_funnel_draft_dismiss_archives_root(client):
         conn.close()
     # Nochmal verwerfen -> 409 (nicht mehr in der Queue).
     assert client.post(f"/api/plugins/kanban/funnel/drafts/{tid}/dismiss").status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# /lanes — profile catalog fast path
+# ---------------------------------------------------------------------------
+
+
+def _plugin_module():
+    """The dynamically loaded plugin module behind the `client` fixture."""
+    return sys.modules["hermes_dashboard_plugin_kanban_test"]
+
+
+def _write_lane_profiles(home: Path) -> None:
+    coder = home / "profiles" / "coder"
+    coder.mkdir(parents=True)
+    (coder / "config.yaml").write_text(
+        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\n"
+    )
+    (coder / "profile.yaml").write_text("description: builds things\n")
+    research = home / "profiles" / "research"
+    research.mkdir()
+    (research / "config.yaml").write_text("model:\n  default: gpt-5.4\n")
+
+
+def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
+    """GET /lanes must not call list_profiles(): that helper rglobs every
+    profile's skills/ tree (~5s with 11 real profiles) and made the lanes
+    tab time out. The lean scan reads only the two small YAMLs per profile."""
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+
+    import hermes_cli.profiles as profiles_mod
+
+    def _boom():
+        raise AssertionError("list_profiles must not be called from /lanes")
+
+    monkeypatch.setattr(profiles_mod, "list_profiles", _boom)
+
+    r = client.get("/api/plugins/kanban/lanes")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    catalog = {p["name"]: p for p in data["profiles"]}
+    assert catalog["coder"]["worker_runtime"] == "claude-cli"
+    assert catalog["coder"]["default_model"] == "claude-fable-5"
+    assert catalog["coder"]["description"] == "builds things"
+    assert catalog["research"]["worker_runtime"] == "hermes"
+    assert catalog["research"]["default_model"] == "gpt-5.4"
+    # The curated model catalog still picks up live profile defaults.
+    assert "gpt-5.4" in {m["id"] for m in data["models"]}
+
+
+def test_lanes_profile_catalog_cached_between_requests(client, monkeypatch):
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+
+    calls = {"n": 0}
+    real_scan = mod._scan_lane_profiles
+
+    def counting_scan():
+        calls["n"] += 1
+        return real_scan()
+
+    monkeypatch.setattr(mod, "_scan_lane_profiles", counting_scan)
+    assert client.get("/api/plugins/kanban/lanes").status_code == 200
+    assert client.get("/api/plugins/kanban/lanes").status_code == 200
+    assert calls["n"] == 1

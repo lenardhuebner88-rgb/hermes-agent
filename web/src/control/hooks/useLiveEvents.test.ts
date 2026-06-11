@@ -54,3 +54,26 @@ describe("setLivePollingMode", () => {
     expect(loader).toHaveBeenCalledTimes(4);
   });
 });
+
+describe("setLivePollingMode — status polls", () => {
+  it("also stretches the always-on status polls (health/metrics/proposals)", async () => {
+    vi.useFakeTimers();
+    _resetPollingStore();
+    const loader = vi.fn().mockResolvedValue({ ok: true });
+    subscribe("health-status", loader, 5000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    setLivePollingMode(true);
+    await vi.advanceTimersByTimeAsync(5000); // already scheduled at 1×
+    expect(loader).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5000); // 5×: nothing yet at +5s
+    expect(loader).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(20000); // +25s reached
+    expect(loader).toHaveBeenCalledTimes(3);
+
+    setLivePollingMode(false);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(loader).toHaveBeenCalledTimes(4);
+  });
+});

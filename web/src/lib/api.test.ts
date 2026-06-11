@@ -147,3 +147,62 @@ describe("fetchJSON loopback stale-token reload", () => {
     expect(session.getItem("hermes.tokenReloadAttempted")).toBeNull();
   });
 });
+
+describe("fetchJSON GET timeout", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("aborts a hung GET after 20s with a network-classified timeout error", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchJSON("/api/slow");
+    const assertion = expect(pending).rejects.toThrow(/network timeout after 20000ms/);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await assertion;
+  });
+
+  it("applies NO default timeout to mutations (long-running POST actions)", async () => {
+    vi.useFakeTimers();
+    let resolveFetch: (r: Response) => void = () => {};
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchJSON("/api/action", { method: "POST" });
+    await vi.advanceTimersByTimeAsync(120_000);
+    resolveFetch(mockResponse(200, { jsonBody: { ok: true } }));
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("honours an explicit timeoutMs override", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchJSON("/api/slow", undefined, { timeoutMs: 1_000 });
+    const assertion = expect(pending).rejects.toThrow(/network timeout after 1000ms/);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await assertion;
+  });
+});

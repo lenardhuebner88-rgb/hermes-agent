@@ -45,6 +45,7 @@ const t = {
   emptyTitle: "Keine Presets",
   emptyDesc: "Beim ersten Laden werden api-standard und max-abo angelegt.",
   loading: "Lade Modelle …",
+  retry: "Erneut versuchen",
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -292,18 +293,33 @@ export function LanesView(_props: { density?: Density }) {
   const [busy, setBusy] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const [failCount, setFailCount] = useState(0);
+
   const reload = useCallback(async () => {
     try {
       setData(await loadLanes());
       setError(null);
+      setFailCount(0);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setFailCount((n) => n + 1);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Selbstheilung: schlägt der Erstload fehl (z. B. "Failed to fetch" am
+  // Handy direkt nach dem Foregrounding), retried der View mit mildem
+  // Backoff statt für immer "Lade Modelle …" zu zeigen. Nur solange noch
+  // keine Daten da sind — Fehler späterer Aktionen überschreibt kein
+  // automatischer Reload.
+  useEffect(() => {
+    if (data !== null || failCount === 0) return;
+    const timer = setTimeout(() => void reload(), Math.min(5_000 * failCount, 30_000));
+    return () => clearTimeout(timer);
+  }, [data, failCount, reload]);
 
   const run = useCallback(
     async (op: () => Promise<unknown>) => {
@@ -344,7 +360,16 @@ export function LanesView(_props: { density?: Density }) {
   return (
     <section aria-label={t.title} className="space-y-4">
       <h2 className="text-lg font-semibold text-white">{t.title}</h2>
-      {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
+      {error ? (
+        <ToneCallout tone="red">
+          <span className="flex items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button size="xs" ghost className="hc-hit" onClick={() => void reload()} disabled={busy}>
+              {t.retry}
+            </Button>
+          </span>
+        </ToneCallout>
+      ) : null}
       {data === null ? (
         <p className="text-sm hc-dim">{t.loading}</p>
       ) : lane === null ? (

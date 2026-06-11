@@ -21,6 +21,12 @@
 
 const MAX_BACKOFF_MS = 60_000;
 
+/** Spacing between per-key refreshes when the tab returns to the foreground.
+ * On a phone the (Tailscale-)link is itself just waking up; 12+ simultaneous
+ * fetches in that window reliably drop some with "Failed to fetch". */
+const FOREGROUND_STAGGER_MS = 150;
+const FOREGROUND_STAGGER_CAP_MS = 2_500;
+
 export interface StructuredError {
   /** HTTP status ("500"), or "network" / "contract" for non-HTTP failures. */
   code: string;
@@ -93,12 +99,17 @@ function getStore(): StoreGlobal {
     store.visibilityBound = true;
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) return;
-      // Tab refocused: refresh everything immediately and reset backoff so a
-      // recovered endpoint snaps back to its normal cadence.
+      // Tab refocused: refresh everything and reset backoff so a recovered
+      // endpoint snaps back to its normal cadence — staggered rather than
+      // all at once (thundering herd, see FOREGROUND_STAGGER_MS).
+      let i = 0;
       for (const key of store.entries.keys()) {
         const entry = store.entries.get(key);
         if (entry) entry.nextDelayMs = entry.intervalMs;
-        void refresh(key);
+        const delay = Math.min(i * FOREGROUND_STAGGER_MS, FOREGROUND_STAGGER_CAP_MS);
+        if (delay === 0) void refresh(key);
+        else setTimeout(() => void refresh(key), delay);
+        i += 1;
       }
     });
   }
@@ -252,7 +263,9 @@ export function subscribe<T>(
   };
 }
 
-/** Test helper: drop all entries and timers. */
+/** Test helper: drop all entries and timers. Also unbinds the visibility
+ * flag so a test can install its own `document` mock and capture the
+ * foreground-refresh listener. */
 export function _resetPollingStore(): void {
   const store = getStore();
   for (const entry of store.entries.values()) {
@@ -260,4 +273,5 @@ export function _resetPollingStore(): void {
   }
   store.entries.clear();
   store.intervalScales.clear();
+  store.visibilityBound = false;
 }

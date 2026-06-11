@@ -53,7 +53,17 @@ export interface FetchJSONOptions {
    * error so the caller (e.g. AuthWidget) can handle it.
    */
   skipStaleTokenReload?: boolean;
+  /**
+   * Abort the request after this many milliseconds (0 disables). Defaults
+   * to 20s for GETs — polling callers self-heal via the pollingStore
+   * backoff, and a request stuck behind a slow link/locked backend must
+   * not hang a tile forever. Mutations default to NO timeout: some POST
+   * actions (LLM describers, ops runs) legitimately take longer.
+   */
+  timeoutMs?: number;
 }
+
+const GET_TIMEOUT_MS = 20_000;
 
 export async function fetchJSON<T>(
   url: string,
@@ -66,15 +76,40 @@ export async function fetchJSON<T>(
   if (token) {
     setSessionHeader(headers, token);
   }
-  const res = await fetch(`${BASE}${url}`, {
-    ...init,
-    headers,
-    // ``credentials: 'include'`` so the cookie-auth path (gated mode) works
-    // for any fetch routed through here. Loopback mode is unaffected — the
-    // server doesn't read cookies and the legacy session-token header is
-    // already attached above.
-    credentials: init?.credentials ?? "include",
-  });
+  const isGet = !init?.method || init.method.toUpperCase() === "GET";
+  const timeoutMs = opts?.timeoutMs ?? (isGet ? GET_TIMEOUT_MS : 0);
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  if (controller) {
+    // Propagate a caller-supplied abort signal into the timeout controller.
+    if (init?.signal?.aborted) controller.abort();
+    else init?.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      ...init,
+      headers,
+      signal: controller ? controller.signal : init?.signal,
+      // ``credentials: 'include'`` so the cookie-auth path (gated mode) works
+      // for any fetch routed through here. Loopback mode is unaffected — the
+      // server doesn't read cookies and the legacy session-token header is
+      // already attached above.
+      credentials: init?.credentials ?? "include",
+    });
+  } catch (e) {
+    // "network timeout" so pollingStore classifies this like a network
+    // failure (stale-while-error + backoff) instead of a contract error.
+    if (timedOut) throw new Error(`network timeout after ${timeoutMs}ms: ${url}`);
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (res.status === 401) {
     // Phase 6: the gated middleware emits a structured envelope so the
     // SPA can full-page-navigate to /login on session expiry. Parse it,
