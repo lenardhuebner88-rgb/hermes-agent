@@ -54,7 +54,9 @@ export const WorkerSchema = z.object({
   task_title: z.string().catch("Ohne Titel"),
   task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("running"),
   task_assignee: z.string().catch("hermes"),
-  profile: z.enum(["default", "admin", "coder", "devpower", "dispatcher", "kanbanops", "planner", "research", "critic", "verifier"]).catch("default"),
+  // Profile sind operator-definiert (Lanes!) — kein Enum: das stempelte echte
+  // claude-cli-Lanes (coder-claude, premium, reviewer) zu "default" um.
+  profile: z.string().catch("default"),
   // claude-cli-Lanes laufen ohne greifbaren Prozess — pid bleibt dort ehrlich null.
   worker_pid: z.coerce.number().nullable().catch(null),
   started_at: z.coerce.number().catch(0),

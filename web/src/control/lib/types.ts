@@ -1,6 +1,7 @@
-export type WorkerProfile =
-  | "default" | "admin" | "coder" | "devpower" | "dispatcher"
-  | "kanbanops" | "planner" | "research" | "critic" | "verifier";
+// Profile sind operator-definiert (profiles/* + Lanes-Presets) — ein hartes
+// Union-Enum etikettierte echte Lanes (coder-claude, premium, reviewer, …)
+// per zod-catch als "default"/„Standard". Anzeige-Labels: lib/tones.ts.
+export type WorkerProfile = string;
 
 export type TaskStatus =
   | "triage" | "todo" | "scheduled" | "ready" | "running"
