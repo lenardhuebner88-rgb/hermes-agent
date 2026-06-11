@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { groupBySeries, type LibraryItem } from "./BibliothekView";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ItemRow, groupBySeries, type LibraryItem } from "./BibliothekView";
 
 const item = (over: Partial<LibraryItem>): LibraryItem => ({
   id: "x",
@@ -25,5 +26,20 @@ describe("groupBySeries (Bibliothek-Regal)", () => {
     expect(shelves.map((s) => s.series)).toEqual(["WM Morgenbrief", "KI Modell-Brief"]);
     expect(shelves[0].items.map((i) => i.id)).toEqual(["wm2", "wm1"]);
     expect(shelves[1].items).toHaveLength(1);
+  });
+});
+
+describe("ItemRow (Render, RunTimelineView-Muster)", () => {
+  it("zeigt Titel und markiert nur Einträge nach dem letzten Besuch als neu", () => {
+    const fresh = renderToStaticMarkup(
+      <ItemRow item={item({ title: "WM Morgenbrief — Ausgabe 11.06.", ts: 200 })} unreadSince={100} onOpen={() => {}} />,
+    );
+    expect(fresh).toContain("WM Morgenbrief — Ausgabe 11.06.");
+    expect(fresh).toContain("neu");
+    const seen = renderToStaticMarkup(
+      <ItemRow item={item({ title: "Alt", ts: 50 })} unreadSince={100} onOpen={() => {}} />,
+    );
+    expect(seen).toContain("Alt");
+    expect(seen).not.toContain("neu");
   });
 });

@@ -29,6 +29,49 @@ const t = {
 // Eskalations-Ziel = Top-Modell der Premium-Lane (Fable-Tier).
 export const ESCALATION_MODEL = "claude-fable-5";
 
+// Härtung 2026-06-11: claude-fable-5 ist nur auf claude-cli-Runtimes (Max-Abo)
+// garantiert auflösbar. hermes-Runtime-Profile ohne Anthropic-Key fallen STILL
+// auf das Provider-Fallback zurück (live belegt: research → openai-codex /
+// gpt-5.4). Das UI benennt das ehrlich, statt Fable-5 zu versprechen.
+export interface LanesRuntimeInfo {
+  active_id?: string | null;
+  lanes?: {
+    id: string;
+    active?: boolean;
+    profiles?: Record<string, { worker_runtime?: string | null }>;
+  }[];
+  profiles?: { name: string; worker_runtime?: string | null }[];
+}
+
+/** Effektive Runtime eines Profils: aktive Lane gewinnt, sonst Profil-Default. */
+export function effectiveRuntime(
+  profile: string | null,
+  lanes: LanesRuntimeInfo | null,
+): string | null {
+  if (!profile || !lanes) return null;
+  const active = lanes.lanes?.find((l) => l.active || l.id === lanes.active_id);
+  const fromLane = active?.profiles?.[profile]?.worker_runtime;
+  if (fromLane) return fromLane;
+  return lanes.profiles?.find((p) => p.name === profile)?.worker_runtime ?? null;
+}
+
+/** Hint-Text fürs Eskalations-Confirm — runtime-ehrlich. */
+export function escalateHintFor(
+  profile: string | null,
+  lanes: LanesRuntimeInfo | null,
+): { hint: string; warns: boolean } {
+  const runtime = effectiveRuntime(profile, lanes);
+  if (runtime !== null && runtime !== "claude-cli") {
+    return {
+      warns: true,
+      hint:
+        `setzt model_override=${ESCALATION_MODEL} — Achtung: „${profile}" läuft auf der ` +
+        "API-Runtime; ohne Anthropic-Key nutzt der Worker still sein Fallback-Modell statt Fable-5.",
+    };
+  }
+  return { warns: false, hint: t.escalateHint(ESCALATION_MODEL) };
+}
+
 export interface TriageFailure {
   run_id: number;
   task_id: string;
@@ -64,6 +107,7 @@ export function TriageStrip() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lanes, setLanes] = useState<LanesRuntimeInfo | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +123,21 @@ export function TriageStrip() {
     const id = window.setInterval(() => void load(), 30000);
     return () => window.clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    // Lane-Katalog einmalig, nur für den ehrlichen Eskalations-Hint —
+    // fail-soft: ohne Katalog bleibt der neutrale Standard-Hint.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchJSON<LanesRuntimeInfo>("/api/plugins/kanban/lanes");
+        if (!cancelled) setLanes(res);
+      } catch {
+        /* Katalog ist nur Komfort */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const act = useCallback(async (failure: TriageFailure, kind: "retry" | "escalate") => {
     setBusy(true);
@@ -134,7 +193,12 @@ export function TriageStrip() {
                         {isPending.kind === "escalate" ? t.escalate : t.retry} · {t.confirm}
                       </button>
                       <button type="button" disabled={busy} onClick={() => setPending(null)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
-                      <span className="text-[0.72rem] hc-dim">{isPending.kind === "escalate" ? t.escalateHint(ESCALATION_MODEL) : t.retryHint}</span>
+                      {isPending.kind === "escalate" ? (() => {
+                        const { hint, warns } = escalateHintFor(f.profile, lanes);
+                        return <span className={warns ? "text-[0.72rem] text-amber-200" : "text-[0.72rem] hc-dim"}>{hint}</span>;
+                      })() : (
+                        <span className="text-[0.72rem] hc-dim">{t.retryHint}</span>
+                      )}
                     </>
                   ) : (
                     <>

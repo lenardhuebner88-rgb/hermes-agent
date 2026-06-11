@@ -75,7 +75,7 @@ export function groupBySeries(items: LibraryItem[]): { seriesId: string; series:
   return [...groups.values()].sort((a, b) => (b.items[0]?.ts ?? 0) - (a.items[0]?.ts ?? 0));
 }
 
-function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unreadSince: number; onOpen: (item: LibraryItem) => void }) {
+export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unreadSince: number; onOpen: (item: LibraryItem) => void }) {
   return (
     <li>
       <button
