@@ -38,11 +38,14 @@ export const taskStatusLabel: Record<string, string> = {
   running: 'Läuft', blocked: 'Blockiert', review: 'In Prüfung', done: 'Fertig', archived: 'Archiv',
 };
 
-/** Profil-Rollen in Klartext. */
+/** Profil-Rollen in Klartext. Unbekannte Profile zeigen ihren Rohnamen
+ *  (Lookup-Fallback `?? profile` an den Call-Sites). */
 export const profileLabel: Record<string, string> = {
   default: 'Standard', admin: 'Admin', coder: 'Coder', devpower: 'DevPower',
   dispatcher: 'Dispatcher', kanbanops: 'Kanban-Ops', planner: 'Planer',
   research: 'Research', critic: 'Kritiker', verifier: 'Verifier',
+  // claude-cli-Lanes (Max-Abo) + Review-Lane
+  'coder-claude': 'Coder (Claude)', premium: 'Premium', reviewer: 'Reviewer',
 };
 
 export const priorityLabel: Record<Priority, string> = { high: 'Hoch', med: 'Mittel', low: 'Niedrig' };
