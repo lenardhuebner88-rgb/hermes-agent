@@ -11197,6 +11197,30 @@ def runs_reliability(
     }
 
 
+# --- Demand-Funnel / Wert-Bilanz -------------------------------------------
+# Herkunfts-Tags der Funnel-Quellen (created_by). Bewusst Konvention statt
+# Schema: Vorschläge sind normale Kanban-Tasks, nur mit diesen Autoren.
+FUNNEL_CREATED_BY = ("family", "discord-idee", "fo-gap-audit")
+
+_VALUE_CLASSES = ("nutzer", "haertung", "meta")
+
+
+def value_class(created_by: Optional[str]) -> str:
+    """Wert-Klasse eines gelieferten Roots, abgeleitet aus ``created_by``.
+
+    v1 bewusst unscharf (kein Schema-Touch): Funnel-Quellen → ``nutzer``,
+    Review-/Verifier-Ketten → ``haertung``, alles andere → ``meta``.
+    Fehlklassifikationen sind im Digest sichtbar; wenn das nervt, ist eine
+    ``value_class``-Spalte der dokumentierte v2-Schritt.
+    """
+    c = (created_by or "").strip().lower()
+    if c in FUNNEL_CREATED_BY:
+        return "nutzer"
+    if c == "kanban-review-chain" or "review" in c or "verif" in c:
+        return "haertung"
+    return "meta"
+
+
 def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
     """Tages-Zeitreihe für die Statistik-Charts: Durchsatz (gelieferte Roots +
     Tasks), Kosten-Burn und Run-Ausgänge pro lokalem Kalendertag. Leere Tage
@@ -11224,6 +11248,8 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
             "runs_completed": 0,
             "runs_failed": 0,
             "cycle_times": [],
+            # Wert-Bilanz: wofür wurde geliefert (Klasse je Root via created_by).
+            "done_roots_by_class": {cls: 0 for cls in _VALUE_CLASSES},
         }
 
     def _day_key(ts: int) -> Optional[str]:
@@ -11239,7 +11265,7 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
     }
     for row in conn.execute(
-        "SELECT id, created_at, completed_at FROM tasks "
+        "SELECT id, created_at, completed_at, created_by FROM tasks "
         "WHERE completed_at IS NOT NULL AND completed_at >= ?",
         (window_start,),
     ).fetchall():
@@ -11250,6 +11276,7 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         b["done_tasks"] += 1
         if row["id"] not in interior:
             b["done_roots"] += 1
+            b["done_roots_by_class"][value_class(row["created_by"])] += 1
             if row["created_at"] is not None:
                 delta = int(row["completed_at"]) - int(row["created_at"])
                 if delta >= 0:

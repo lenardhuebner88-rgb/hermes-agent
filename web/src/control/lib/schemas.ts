@@ -785,9 +785,20 @@ export const ReliabilityResponseSchema = z.object({
 export type ReliabilityProfile = z.infer<typeof ReliabilityProfileSchema>;
 export type ReliabilityResponse = z.infer<typeof ReliabilityResponseSchema>;
 
+// T5 (Wert-Bilanz): wofür wurde geliefert — Klasse je Root via created_by
+// (Funnel-Quellen → nutzer, Review-/Verifier-Ketten → haertung, Rest → meta).
+const ValueClassBreakdownSchema = z
+  .object({
+    nutzer: z.coerce.number().catch(0),
+    haertung: z.coerce.number().catch(0),
+    meta: z.coerce.number().catch(0),
+  })
+  .catch({ nutzer: 0, haertung: 0, meta: 0 });
+
 const RunsDailyPointSchema = z.object({
   date: z.string().catch(""),
   done_roots: z.coerce.number().catch(0),
+  done_roots_by_class: ValueClassBreakdownSchema,
   done_tasks: z.coerce.number().catch(0),
   cost_usd: nullableNumber,
   input_tokens: nullableNumber,

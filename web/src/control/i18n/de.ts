@@ -38,6 +38,12 @@ export const de = {
     recent: "Letzte Lieferungen",
     loadError: "Statistik konnte nicht geladen werden.",
     empty: "Noch keine Daten — sobald Runs laufen, füllt sich die Statistik.",
+    // T5: Wert-Bilanz — wofür wurde geliefert (Klasse je Root via created_by).
+    valueBalance: "Wert-Bilanz · 7 Tage",
+    valueBalanceHint: "Gelieferte Roots nach Klasse · Herkunft (created_by), v1 bewusst grob",
+    classNutzer: "Nutzer-Feature",
+    classHaertung: "Härtung",
+    classMeta: "Meta",
     // Epic-Kompaktübersicht (eine Zeile pro offenem Epic).
     epics: "Offene Epics",
     epicsHint: "Fortschritt + Token-Burn pro Vorhaben · aus dem Live-Rollup",

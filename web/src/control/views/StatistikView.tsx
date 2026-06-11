@@ -166,6 +166,29 @@ function ReliabilityTable({ profiles, baseline, minN }: {
   );
 }
 
+// T5 (Wert-Bilanz): Wochenbilanz nach Klasse — zeigt erstmals, WOFÜR die
+// Flotte gearbeitet hat (Nutzer-Feature aus dem Demand-Funnel vs. Härtung vs.
+// Meta). Klasse kommt v1 aus created_by (bewusst unscharf, kein Schema-Touch).
+export function WertBilanzPanel({ last7 }: { last7: RunsDailyPoint[] }) {
+  const sums = last7.reduce(
+    (acc, p) => ({
+      nutzer: acc.nutzer + (p.done_roots_by_class?.nutzer ?? 0),
+      haertung: acc.haertung + (p.done_roots_by_class?.haertung ?? 0),
+      meta: acc.meta + (p.done_roots_by_class?.meta ?? 0),
+    }),
+    { nutzer: 0, haertung: 0, meta: 0 },
+  );
+  return (
+    <FleetPanel eyebrow={de.stats.valueBalance} meta={de.stats.valueBalanceHint}>
+      <div className="grid grid-cols-3 gap-2">
+        <FleetPod label={de.stats.classNutzer} value={sums.nutzer} />
+        <FleetPod label={de.stats.classHaertung} value={sums.haertung} />
+        <FleetPod label={de.stats.classMeta} value={sums.meta} />
+      </div>
+    </FleetPanel>
+  );
+}
+
 export function StatistikView() {
   const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
@@ -227,6 +250,8 @@ export function StatistikView() {
         <FleetEmptyState title={de.stats.empty} desc="" />
       ) : (
         <>
+          <WertBilanzPanel last7={last7} />
+
           <div className="grid gap-3 lg:grid-cols-2">
             <FleetPanel eyebrow={de.stats.throughput} meta={de.stats.throughputHint}>
               <DayBars points={points(series, (p) => p.done_roots)} />

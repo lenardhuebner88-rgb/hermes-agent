@@ -650,6 +650,30 @@ def test_runs_daily_series(client):
     assert data["series"][0]["cycle_time_p50_seconds"] is None
 
 
+def test_runs_daily_value_classes(client):
+    """Wert-Bilanz: done_roots_by_class teilt gelieferte Roots nach
+    created_by in nutzer (Funnel) / haertung (Review-Ketten) / meta (Rest)."""
+    conn = kb.connect()
+    try:
+        for created_by in ("family", "discord-idee", "kanban-review-chain",
+                           "dashboard", "worker"):
+            tid = kb.create_task(
+                conn, title=f"root {created_by}", created_by=created_by,
+            )
+            kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/runs/daily?days=7").json()
+    today = data["series"][-1]
+    assert today["done_roots"] == 5
+    assert today["done_roots_by_class"] == {"nutzer": 2, "haertung": 1, "meta": 2}
+    # leere Tage tragen die Klassen-Struktur mit Nullen (durchgehende Achse)
+    assert data["series"][0]["done_roots_by_class"] == {
+        "nutzer": 0, "haertung": 0, "meta": 0,
+    }
+
+
 def test_runs_costs_today_window_and_profiles(client):
     """F4: Kosten heute vs. Fenster + Top-Profile; Subscription-Runs zählen
     über metadata.cost_usd_equivalent, ungestempelte (Verifier-)Runs als 0."""

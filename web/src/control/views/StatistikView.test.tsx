@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBreakdownPanel } from "./StatistikView";
-import type { RunsCostsResponse } from "../lib/schemas";
+import { CostBreakdownPanel, WertBilanzPanel } from "./StatistikView";
+import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 
 const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
   runs: 0,
@@ -57,5 +57,50 @@ describe("CostBreakdownPanel (F4)", () => {
   it("zeigt Skeleton solange keine Daten da sind", () => {
     const html = renderToStaticMarkup(<CostBreakdownPanel data={null} />);
     expect(html).not.toContain("Kosten heute");
+  });
+});
+
+// T5: Wert-Bilanz-Kachel — Wochenbilanz nach Klasse (nutzer/haertung/meta).
+
+function dailyPoint(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
+  return {
+    date: "2026-06-10",
+    done_roots: 0,
+    done_roots_by_class: { nutzer: 0, haertung: 0, meta: 0 },
+    done_tasks: 0,
+    cost_usd: null,
+    input_tokens: null,
+    output_tokens: null,
+    runs_completed: 0,
+    runs_failed: 0,
+    cycle_time_p50_seconds: null,
+    ...over,
+  };
+}
+
+describe("WertBilanzPanel (T5)", () => {
+  it("summiert die Woche pro Klasse", () => {
+    const html = renderToStaticMarkup(
+      <WertBilanzPanel
+        last7={[
+          dailyPoint({ done_roots_by_class: { nutzer: 2, haertung: 1, meta: 4 } }),
+          dailyPoint({ done_roots_by_class: { nutzer: 1, haertung: 0, meta: 3 } }),
+        ]}
+      />,
+    );
+    expect(html).toContain("Wert-Bilanz");
+    expect(html).toContain("Nutzer-Feature");
+    expect(html).toContain("Härtung");
+    expect(html).toContain("Meta");
+    // Summen 3 / 1 / 7 stehen als Pod-Werte im Markup.
+    expect(html).toContain(">3<");
+    expect(html).toContain(">1<");
+    expect(html).toContain(">7<");
+  });
+
+  it("rendert Nullen bei leerer Woche", () => {
+    const html = renderToStaticMarkup(<WertBilanzPanel last7={[]} />);
+    expect(html).toContain("Wert-Bilanz");
+    expect(html).toContain(">0<");
   });
 });
