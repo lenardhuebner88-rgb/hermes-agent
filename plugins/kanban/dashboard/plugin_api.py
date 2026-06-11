@@ -2332,6 +2332,46 @@ def close_epic_endpoint(
 # --- Lanes (night-sprint F1) — switchable profile→(runtime, model) presets ---
 
 
+# Curated model options for the Lanes UI dropdown: only models that are
+# actually wired up in THIS install (provider keys / Max subscription) and
+# known to work. label = operator-facing name, id = the technical model id
+# the dispatcher passes through. Grouped by how they run: the Claude models
+# go through the claude-cli runtime (Max-Abo), everything else through the
+# hermes runtime (API providers).
+_LANE_MODEL_CATALOG: list[dict] = [
+    {"id": "claude-fable-5", "label": "Claude Fable 5", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
+    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
+    {"id": "gpt-5.5", "label": "GPT-5.5", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "gpt-5.4", "label": "GPT-5.4", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "qwen/qwen3.7-max", "label": "Qwen 3.7 Max", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "moonshotai/kimi-k2.6", "label": "Kimi K2.6", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "kimi-for-coding", "label": "Kimi for Coding", "runtime": "hermes", "group": "API-Modelle"},
+]
+
+
+def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
+    """Curated model list, extended by any profile default model not yet in
+    it (a profile default demonstrably works — it is live config). Fail-soft
+    and pure: bad profile entries are skipped."""
+    out = [dict(m) for m in _LANE_MODEL_CATALOG]
+    seen = {m["id"] for m in out}
+    for prof in profiles:
+        try:
+            model = (prof.get("default_model") or "").strip()
+            if not model or model in seen:
+                continue
+            runtime = "claude-cli" if prof.get("worker_runtime") == "claude-cli" else "hermes"
+            group = "Claude (Max-Abo)" if runtime == "claude-cli" else "API-Modelle"
+            out.append({"id": model, "label": model, "runtime": runtime, "group": group})
+            seen.add(model)
+        except Exception:
+            continue
+    return out
+
+
 def _lane_profile_catalog() -> list[dict]:
     """Profile names + config defaults for the Lanes UI dropdowns.
 
@@ -2382,11 +2422,13 @@ def list_lanes_endpoint(
     conn = _conn(board=board)
     try:
         lanes = kanban_db.list_lanes(conn)
+        profiles = _lane_profile_catalog()
         return {
             "lanes": lanes,
             "count": len(lanes),
             "active_id": next((l["id"] for l in lanes if l["active"]), None),
-            "profiles": _lane_profile_catalog(),
+            "profiles": profiles,
+            "models": _lane_model_catalog(profiles),
         }
     finally:
         conn.close()

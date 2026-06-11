@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateLane,
+  choiceFromEntry,
   deleteLane,
-  profilesFromRows,
-  rowsFromLane,
+  editorRows,
+  entryFromChoice,
+  modelLabel,
+  profilesFromEditorRows,
   type Lane,
+  type LaneCatalogProfile,
+  type LaneModelOption,
 } from "./api";
 
 function jsonResponse(body: unknown): Response {
@@ -57,7 +62,41 @@ describe("lanes api client", () => {
   });
 });
 
-describe("draft helpers", () => {
+const MODELS: LaneModelOption[] = [
+  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
+];
+
+describe("choice encoding", () => {
+  it("maps default / claude-auto / explicit entries round-trip", () => {
+    expect(choiceFromEntry(undefined)).toBe("");
+    expect(choiceFromEntry({ worker_runtime: null, model: null })).toBe("");
+    expect(choiceFromEntry({ worker_runtime: "claude-cli", model: null })).toBe("claude-cli|");
+    expect(choiceFromEntry({ worker_runtime: "hermes", model: "gpt-5.5" })).toBe("hermes|gpt-5.5");
+
+    expect(entryFromChoice("")).toBeNull();
+    expect(entryFromChoice("claude-cli|")).toEqual({ worker_runtime: "claude-cli", model: null });
+    expect(entryFromChoice("hermes|gpt-5.5")).toEqual({ worker_runtime: "hermes", model: "gpt-5.5" });
+  });
+
+  it("derives the runtime from the model id when the entry has none", () => {
+    expect(choiceFromEntry({ worker_runtime: null, model: "claude-fable-5" })).toBe(
+      "claude-cli|claude-fable-5",
+    );
+    expect(choiceFromEntry({ worker_runtime: null, model: "gpt-5.5" })).toBe("hermes|gpt-5.5");
+  });
+
+  it("modelLabel prefers the catalog label and falls back to the id", () => {
+    expect(modelLabel("gpt-5.5", MODELS)).toBe("GPT-5.5");
+    expect(modelLabel("unbekannt-9", MODELS)).toBe("unbekannt-9");
+  });
+});
+
+describe("editor rows", () => {
+  const catalog: LaneCatalogProfile[] = [
+    { name: "coder", worker_runtime: "hermes", default_model: "gpt-5.5", description: "schreibt" },
+    { name: "premium", worker_runtime: "claude-cli", default_model: "claude-fable-5", description: "" },
+  ];
   const lane: Lane = {
     id: "lane_1",
     name: "max-abo",
@@ -67,30 +106,23 @@ describe("draft helpers", () => {
     updated_at: 0,
     profiles: {
       premium: { worker_runtime: "claude-cli", model: "claude-fable-5" },
-      coder: { worker_runtime: "claude-cli", model: null },
+      altprofil: { worker_runtime: "hermes", model: "gpt-5.5" },
     },
   };
 
-  it("rowsFromLane yields sorted editable rows", () => {
-    const rows = rowsFromLane(lane);
-    expect(rows.map((r) => r.profile)).toEqual(["coder", "premium"]);
-    expect(rows[1]).toEqual({
-      profile: "premium",
-      runtime: "claude-cli",
-      model: "claude-fable-5",
-    });
-    expect(rows[0].model).toBe("");
+  it("yields one row per catalog profile plus lane-only extras", () => {
+    const rows = editorRows(lane, catalog, MODELS);
+    expect(rows.map((r) => r.profile)).toEqual(["coder", "premium", "altprofil"]);
+    expect(rows[0]).toMatchObject({ choice: "", defaultLabel: "GPT-5.5" });
+    expect(rows[1].choice).toBe("claude-cli|claude-fable-5");
+    expect(rows[2].choice).toBe("hermes|gpt-5.5");
   });
 
-  it("profilesFromRows drops blank rows and nulls blank fields", () => {
-    const out = profilesFromRows([
-      { profile: " premium ", runtime: "claude-cli", model: " claude-fable-5 " },
-      { profile: "coder", runtime: "", model: "" },
-      { profile: "   ", runtime: "hermes", model: "gpt-5.5" },
-    ]);
-    expect(out).toEqual({
+  it("profilesFromEditorRows drops default rows and keeps explicit ones", () => {
+    const rows = editorRows(lane, catalog, MODELS);
+    expect(profilesFromEditorRows(rows)).toEqual({
       premium: { worker_runtime: "claude-cli", model: "claude-fable-5" },
-      coder: { worker_runtime: null, model: null },
+      altprofil: { worker_runtime: "hermes", model: "gpt-5.5" },
     });
   });
 });

@@ -32,11 +32,23 @@ export interface LaneCatalogProfile {
   description: string;
 }
 
+export interface LaneModelOption {
+  /** Technical model id the dispatcher passes through (e.g. "qwen/qwen3.7-max"). */
+  id: string;
+  /** Operator-facing name (e.g. "Qwen 3.7 Max"). */
+  label: string;
+  runtime: LaneRuntime;
+  /** Dropdown optgroup, e.g. "Claude (Max-Abo)" / "API-Modelle". */
+  group: string;
+}
+
 export interface LanesResponse {
   lanes: Lane[];
   count: number;
   active_id: string | null;
   profiles: LaneCatalogProfile[];
+  /** Curated working-model catalog; absent on older backends. */
+  models?: LaneModelOption[];
 }
 
 const BASE = "/api/plugins/kanban/lanes";
@@ -82,43 +94,94 @@ export function deleteLane(laneId: string): Promise<{ deleted: string }> {
   );
 }
 
-/** Datalist suggestions for the model field — free text stays allowed.
- *  Phase B: kanonische Liste lebt jetzt in components/ModelPicker (gehoben),
- *  hier nur Re-Export für die bestehenden LanesView-Importe. */
-export { MODEL_SUGGESTIONS } from "../../components/ModelPicker";
+// --- choice helpers (pure; unit-tested) -------------------------------------
+//
+// The simple editor shows ONE dropdown per profile. Its value encodes
+// runtime + model as `${runtime}|${model}`:
+//   ""             → Standard (profile config default, no lane entry)
+//   "claude-cli|"  → claude-cli runtime, CLI default model
+//   "hermes|gpt-5.5" / "claude-cli|claude-fable-5" → explicit model
 
-// --- draft helpers (pure; unit-tested) -------------------------------------
+/** Fallback catalog when the backend payload carries no `models` yet. */
+export const FALLBACK_MODELS: LaneModelOption[] = [
+  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
+];
 
-export interface DraftRow {
+/** Lane entry → dropdown value. Entries without runtime derive it from the
+ *  model id (claude-* → claude-cli), so nothing renders as unrepresentable. */
+export function choiceFromEntry(
+  entry: LaneProfileEntry | undefined,
+): string {
+  if (!entry || (entry.worker_runtime == null && entry.model == null)) return "";
+  const model = entry.model ?? "";
+  const runtime =
+    entry.worker_runtime ?? (model.startsWith("claude") ? "claude-cli" : "hermes");
+  return `${runtime}|${model}`;
+}
+
+/** Dropdown value → lane entry (null = drop the mapping, profile default). */
+export function entryFromChoice(
+  choice: string,
+): Partial<LaneProfileEntry> | null {
+  if (choice === "") return null;
+  const sep = choice.indexOf("|");
+  const runtime = choice.slice(0, sep) as LaneRuntime;
+  const model = choice.slice(sep + 1);
+  return { worker_runtime: runtime, model: model === "" ? null : model };
+}
+
+/** Operator-facing label for a model id (falls back to the raw id). */
+export function modelLabel(id: string, models: LaneModelOption[]): string {
+  return models.find((m) => m.id === id)?.label ?? id;
+}
+
+export interface EditorRow {
   profile: string;
-  runtime: "" | LaneRuntime;
-  model: string;
+  description: string;
+  /** Label of the profile's config default, for the "Standard (…)" option. */
+  defaultLabel: string;
+  choice: string;
 }
 
-/** Lane → editable rows (sorted for a stable editor layout). */
-export function rowsFromLane(lane: Lane): DraftRow[] {
-  return Object.entries(lane.profiles)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([profile, entry]) => ({
-      profile,
-      runtime: entry?.worker_runtime ?? "",
-      model: entry?.model ?? "",
-    }));
+/** One row per catalog profile (catalog order) plus any extra profiles the
+ *  lane maps that the catalog does not know (appended, sorted) — so a lane
+ *  never loses entries by being opened in the simple editor. */
+export function editorRows(
+  lane: Lane,
+  catalog: LaneCatalogProfile[],
+  models: LaneModelOption[],
+): EditorRow[] {
+  const known = new Set(catalog.map((p) => p.name));
+  const rows: EditorRow[] = catalog.map((p) => ({
+    profile: p.name,
+    description: p.description,
+    defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
+    choice: choiceFromEntry(lane.profiles[p.name]),
+  }));
+  const extras = Object.keys(lane.profiles)
+    .filter((name) => !known.has(name))
+    .sort((a, b) => a.localeCompare(b));
+  for (const name of extras) {
+    rows.push({
+      profile: name,
+      description: "",
+      defaultLabel: "automatisch",
+      choice: choiceFromEntry(lane.profiles[name]),
+    });
+  }
+  return rows;
 }
 
-/** Editable rows → API payload. Blank profile rows are dropped; blank
- *  runtime/model become null (= profile config default). */
-export function profilesFromRows(
-  rows: DraftRow[],
+/** Editor rows → API payload. Default rows ("") are dropped entirely. */
+export function profilesFromEditorRows(
+  rows: EditorRow[],
 ): Record<string, Partial<LaneProfileEntry>> {
   const out: Record<string, Partial<LaneProfileEntry>> = {};
   for (const row of rows) {
-    const profile = row.profile.trim();
-    if (!profile) continue;
-    out[profile] = {
-      worker_runtime: row.runtime === "" ? null : row.runtime,
-      model: row.model.trim() === "" ? null : row.model.trim(),
-    };
+    const entry = entryFromChoice(row.choice);
+    if (entry !== null) out[row.profile] = entry;
   }
   return out;
 }

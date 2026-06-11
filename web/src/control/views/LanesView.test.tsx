@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { LaneCard, LanesPanel } from "./LanesView";
+import { LanesEditor } from "./LanesView";
 import type { LanesResponse } from "./lanes/api";
 
 const fixture: LanesResponse = {
@@ -9,6 +9,12 @@ const fixture: LanesResponse = {
   profiles: [
     { name: "coder", worker_runtime: "hermes", default_model: "gpt-5.5", description: "" },
     { name: "premium", worker_runtime: "claude-cli", default_model: "claude-fable-5", description: "" },
+  ],
+  models: [
+    { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+    { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
+    { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "API-Modelle" },
   ],
   lanes: [
     {
@@ -37,77 +43,66 @@ const fixture: LanesResponse = {
 };
 
 const noopActions = {
-  onActivate: vi.fn(),
+  onSelect: vi.fn(),
+  onApply: vi.fn(),
+  onCreate: vi.fn(),
   onDelete: vi.fn(),
-  onSave: vi.fn(),
 };
 
-describe("LanesPanel", () => {
-  it("renders both lane presets with the active marker on the active lane", () => {
+describe("LanesEditor (einfache Modell-Schaltung)", () => {
+  it("zeigt Preset-Dropdown mit aktiv-Markierung und Übernehmen-Button", () => {
     const html = renderToStaticMarkup(
-      <LanesPanel data={fixture} busy={false} actions={noopActions} onCreate={vi.fn()} />,
+      <LanesEditor data={fixture} lane={fixture.lanes[1]} busy={false} actions={noopActions} />,
     );
     expect(html).toContain("api-standard");
     expect(html).toContain("max-abo");
-    expect(html).toContain("Aktiv");
-    // The inactive lane offers activation; the active one must not.
-    expect(html).toContain("Aktivieren");
-    expect(html).toContain("claude-fable-5");
+    expect(html).toContain("(aktiv)");
+    // inaktives Preset gewählt → ein Klick übernimmt es
+    expect(html).toContain("Übernehmen");
   });
 
-  it("sorts profile rows and renders runtime selects", () => {
+  it("rendert pro Rolle genau ein Modell-Dropdown mit sprechenden Namen", () => {
     const html = renderToStaticMarkup(
-      <LanesPanel data={fixture} busy={false} actions={noopActions} onCreate={vi.fn()} />,
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
-    expect(html).toContain("claude-cli");
-    expect(html).toContain("hermes");
-    // Editor inputs carry the lane's mapped profile names.
-    expect(html).toContain('value="coder"');
-    expect(html).toContain('value="premium"');
+    // Rollen aus dem Katalog + nicht-technische Hinweise
+    expect(html).toContain("Schreibt Code");
+    expect(html).toContain("Schwere Spezialfälle");
+    // Gruppierte, sprechende Modell-Optionen statt Freitext
+    expect(html).toContain("Claude (Max-Abo)");
+    expect(html).toContain("Claude Fable 5");
+    expect(html).toContain("Qwen 3.7 Max");
+    expect(html).toContain("Standard (Claude Fable 5)");
+    // Kein roher Runtime-Select mehr
+    expect(html).not.toContain(">Runtime<");
   });
 
-  it("renders the empty state when no lanes exist", () => {
+  it("Übernehmen ist auf der aktiven Lane ohne Änderungen deaktiviert (zeigt Aktiv)", () => {
     const html = renderToStaticMarkup(
-      <LanesPanel
-        data={{ lanes: [], count: 0, active_id: null, profiles: [] }}
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toMatch(/disabled[^>]*>.*Aktiv/s);
+  });
+
+  it("Presets-Sektion: anlegen + Löschen mit Inline-Confirm", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Auswahl als Preset speichern");
+    expect(html).toContain("Name für neues Preset");
+    expect(html).not.toContain("wirklich löschen?");
+
+    const armed = renderToStaticMarkup(
+      <LanesEditor
+        data={fixture}
+        lane={fixture.lanes[0]}
         busy={false}
         actions={noopActions}
-        onCreate={vi.fn()}
+        initialPendingDelete="lane_2"
       />,
-    );
-    expect(html).toContain("Keine Lanes");
-  });
-});
-
-describe("LaneCard (S4: mobil + Zwei-Schritt-Confirm)", () => {
-  const lane = fixture.lanes[1]; // max-abo, inaktiv → Aktivieren + Löschen
-
-  it("rendert die gestapelte Karte mit Feld-Labels (mobil) und ohne Speichern-Geist", () => {
-    const html = renderToStaticMarkup(
-      <LaneCard lane={lane} busy={false} actions={noopActions} />,
-    );
-    // Label-über-Feld (unterhalb sm sichtbar, ab sm per sm:hidden weg)
-    expect(html).toContain("sm:hidden");
-    expect(html).toContain(">Profil<");
-    expect(html).toContain(">Runtime<");
-    expect(html).toContain(">Modell<");
-    // armed-Schritt 1: Aktionen da, kein Confirm, kein dirty-loses Speichern
-    expect(html).toContain("Aktivieren");
-    expect(html).toContain("Löschen");
-    expect(html).not.toContain("Bestätigen");
-    expect(html).not.toContain("Speichern");
-  });
-
-  it("armed → zeigt Inline-Confirm mit Bestätigen/Abbrechen statt window.confirm", () => {
-    const armed = renderToStaticMarkup(
-      <LaneCard lane={lane} busy={false} actions={noopActions} initialPending="delete" />,
     );
     expect(armed).toContain("wirklich löschen?");
     expect(armed).toContain("Bestätigen");
     expect(armed).toContain("Abbrechen");
-    const armedActivate = renderToStaticMarkup(
-      <LaneCard lane={lane} busy={false} actions={noopActions} initialPending="activate" />,
-    );
-    expect(armedActivate).toContain("aktivieren? Gilt ab dem nächsten Worker-Spawn.");
   });
 });
