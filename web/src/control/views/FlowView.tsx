@@ -9,7 +9,7 @@
  * honest guard. NO mock/demo data — a quiet empty state shows when no runs
  * exist for a stage.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -65,6 +65,35 @@ const MAX_CARDS = 12;
 const MAX_DELIVERED = 8;
 const VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000;
 
+// Sekunden-Uhr als externer Store: `Date.now()` direkt im Render verletzt die
+// react-hooks-Purity-Regel (Komponenten müssen idempotent rendern). Der Store
+// tickt alle 10s und weckt nur Komponenten, die ihn abonniert haben — die
+// "vor X"-Labels bleiben damit auch auf einem idle Board lebendig.
+const CLOCK_TICK_MS = 10_000;
+let clockNowSeconds = Math.floor(Date.now() / 1000);
+const clockListeners = new Set<() => void>();
+let clockTimer: number | null = null;
+function subscribeClock(listener: () => void): () => void {
+  clockListeners.add(listener);
+  if (clockTimer == null) {
+    clockNowSeconds = Math.floor(Date.now() / 1000);
+    clockTimer = window.setInterval(() => {
+      clockNowSeconds = Math.floor(Date.now() / 1000);
+      for (const l of clockListeners) l();
+    }, CLOCK_TICK_MS);
+  }
+  return () => {
+    clockListeners.delete(listener);
+    if (clockListeners.size === 0 && clockTimer != null) {
+      window.clearInterval(clockTimer);
+      clockTimer = null;
+    }
+  };
+}
+function getClockNowSeconds(): number {
+  return clockNowSeconds;
+}
+
 function flowTaskDomId(taskId: string): string {
   return `flow-task-${encodeURIComponent(taskId)}`;
 }
@@ -89,6 +118,7 @@ export interface Enriched {
   activeVerifier?: boolean;
   activeRunId?: string | null;
   reviewRunState?: "active" | "approved" | "request_changes" | "pending";
+  reviewVerdictAt?: number | null;
   blockedKind?: string | null;
   blockedReason?: string | null;
   resultQualityLabel?: string | null;
@@ -137,9 +167,17 @@ function terminalVerifierGateKey(enriched: Enriched): string | null {
   return null;
 }
 
-function shouldExposeManualReviewFallback(enriched: Enriched, firstSeenAt: number | null | undefined, now: number): boolean {
+function shouldExposeManualReviewFallback(enriched: Enriched, now: number): boolean {
   if (enriched.activeVerifier) return false;
-  return terminalVerifierGateKey(enriched) != null && firstSeenAt != null && now - firstSeenAt >= VERIFIER_GATE_TERMINAL_GRACE_MS / 1000;
+  if (terminalVerifierGateKey(enriched) == null) return false;
+  // Zeitanker = Verdict-Zeitpunkt des Review-Runs (Server-`submitted_at`),
+  // nicht eine clientseitige "erste Sichtung": das ist rein ableitbar (keine
+  // Ref-/State-Mutation im Render — REQUEST_CHANGES-Befund Run 1018/1021)
+  // und überlebt Reloads. Ist das Verdict beim Öffnen der Seite schon älter
+  // als die Grace, ist der Übergang nachweislich ausgeblieben — der manuelle
+  // Pfad darf dann sofort erscheinen.
+  const verdictAt = enriched.reviewVerdictAt;
+  return verdictAt != null && verdictAt > 0 && now - verdictAt >= VERIFIER_GATE_TERMINAL_GRACE_MS / 1000;
 }
 
 function sameEnriched(a: Enriched, b: Enriched): boolean {
@@ -151,6 +189,7 @@ function sameEnriched(a: Enriched, b: Enriched): boolean {
     a.activeVerifier === b.activeVerifier &&
     a.activeRunId === b.activeRunId &&
     a.reviewRunState === b.reviewRunState &&
+    a.reviewVerdictAt === b.reviewVerdictAt &&
     a.blockedKind === b.blockedKind &&
     a.blockedReason === b.blockedReason &&
     a.resultQualityLabel === b.resultQualityLabel &&
@@ -971,7 +1010,10 @@ export function FlowView() {
   // board.data.now freezes on browser 304 revalidations (the cached body is
   // replayed verbatim), which froze every "vor X" label on an idle board —
   // anchor to the client clock, never regressing below the server stamp.
-  const now = Math.max(board.data?.now ?? 0, Math.floor(Date.now() / 1000));
+  // Die Client-Uhr kommt aus einem externen Store (useSyncExternalStore),
+  // nicht aus `Date.now()` im Render: Render muss idempotent bleiben.
+  const clientNow = useSyncExternalStore(subscribeClock, getClockNowSeconds);
+  const now = Math.max(board.data?.now ?? 0, clientNow);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Unter xl öffnet die Task-Auswahl die Receipt-Kette als Bottom-Sheet
   // (Desktop behält die sticky Seitenleiste; dort bleibt das Sheet unsichtbar).
@@ -996,14 +1038,16 @@ export function FlowView() {
   // die Auto-Wahl wird einmal getroffen und behalten, solange die Kette aktiv
   // bleibt. Vorher folgte sie jedem Urgency-Reorder des 8s-Polls, eine Kette
   // klappte zu, eine andere auf, und die Seite sprang unterm Finger weg.
-  const autoExpandRef = useRef<string | null>(null);
-  const effectiveExpanded = useMemo(() => {
-    if (expandedRoot != null) return expandedRoot || null;
-    if (!autoExpandRef.current || !chainBoard.active.some((c) => c.rootId === autoExpandRef.current)) {
-      autoExpandRef.current = chainBoard.active[0]?.rootId ?? null;
-    }
-    return autoExpandRef.current;
-  }, [expandedRoot, chainBoard.active]);
+  // Render-Phase-Anpassung (React-Doku "adjusting state when props change")
+  // statt Ref-Mutation im useMemo — Refs dürfen im Render weder gelesen noch
+  // geschrieben werden (react-hooks/refs).
+  const [autoExpand, setAutoExpand] = useState<string | null>(null);
+  const autoExpandValid = autoExpand != null && chainBoard.active.some((c) => c.rootId === autoExpand);
+  if (!autoExpandValid) {
+    const fallbackRoot = chainBoard.active[0]?.rootId ?? null;
+    if (fallbackRoot !== autoExpand) setAutoExpand(fallbackRoot);
+  }
+  const effectiveExpanded = expandedRoot != null ? (expandedRoot || null) : (autoExpandValid ? autoExpand : chainBoard.active[0]?.rootId ?? null);
 
   // Epic-Gruppierung (Toggle, default AUS — das Board sieht aus wie immer).
   const epics = useEpics();
@@ -1089,6 +1133,7 @@ export function FlowView() {
         activeVerifier: r.active_verifier,
         activeRunId: r.active_run_id,
         reviewRunState: r.review_run_state,
+        reviewVerdictAt: r.active_verifier ? null : r.submitted_at ?? null,
       };
     }
     for (const b of blocked.data?.blocked ?? []) {
@@ -1107,31 +1152,25 @@ export function FlowView() {
     return map;
   }, [workers.data, reviews.data, blocked.data, results.data]);
 
-  const verifierGateFirstSeenRef = useRef<Record<string, { key: string; firstSeenAt: number }>>({});
+  // Manueller Review-Fallback pro Task: rein abgeleitet aus Server-Daten
+  // (Verdict-Zeitstempel des Review-Runs), kein Client-Zustand. Solange der
+  // Verifier LÄUFT, bleibt das Gate exklusiv (shouldExposeManualReviewFallback
+  // gibt dann immer false zurück).
   const manualReviewFallbackById = useMemo<Record<string, boolean>>(() => {
     const fallback: Record<string, boolean> = {};
-    const visibleTerminalVerdicts = new Set<string>();
     for (const task of allTasks) {
       const enriched = enrichmentById[task.id] ?? EMPTY_ENRICHED;
-      const key = task.status === "review" ? terminalVerifierGateKey(enriched) : null;
-      if (!key) {
-        delete verifierGateFirstSeenRef.current[task.id];
-        continue;
-      }
-      visibleTerminalVerdicts.add(task.id);
-      const seen = verifierGateFirstSeenRef.current[task.id];
-      if (!seen || seen.key !== key) {
-        verifierGateFirstSeenRef.current[task.id] = { key, firstSeenAt: now };
-      }
-      fallback[task.id] = shouldExposeManualReviewFallback(enriched, verifierGateFirstSeenRef.current[task.id]?.firstSeenAt, now);
-    }
-    for (const taskId of Object.keys(verifierGateFirstSeenRef.current)) {
-      if (!visibleTerminalVerdicts.has(taskId)) delete verifierGateFirstSeenRef.current[taskId];
+      if (task.status !== "review" || terminalVerifierGateKey(enriched) == null) continue;
+      fallback[task.id] = shouldExposeManualReviewFallback(enriched, now);
     }
     return fallback;
   }, [allTasks, enrichmentById, now]);
 
-  const handledTaskParamRef = useRef<string | null>(null);
+  // One-Shot-Buchhaltung für ?task=-Deep-Links. `handledTaskParam` lebt als
+  // State (im Render lesbar — Refs sind das nicht, react-hooks/refs);
+  // `deepLinkScrolledRef` one-shottet die Scroll-/Fetch-Seite im Effekt.
+  const [handledTaskParam, setHandledTaskParam] = useState<string | null>(null);
+  const deepLinkScrolledRef = useRef<string | null>(null);
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
 
@@ -1141,7 +1180,8 @@ export function FlowView() {
     // markieren, sonst feuerte der Deep-Link-Effekt nach jedem Tap erneut und
     // scrollte die Karte in die Mitte (und kämpfte mit dem Rail-Scroll —
     // der "Seite springt beim Antippen"-Bug).
-    handledTaskParamRef.current = id;
+    setHandledTaskParam(id);
+    deepLinkScrolledRef.current = id;
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       next.set("task", id);
@@ -1265,33 +1305,44 @@ export function FlowView() {
   const hasAnyRun = allTasks.length > 0;
   const boardSourceErrors = board.data?.source_errors ?? [];
 
-  useEffect(() => {
-    if (!taskParam || allTasks.length === 0) return;
-    // One-shot per param value: the data deps below get a new identity on
-    // every 8s board poll, and re-running the filter/expand/scroll block on
-    // each tick yanked the page back to the card, re-expanded a manually
-    // collapsed chain and reverted manual project-filter choices.
-    if (handledTaskParamRef.current === taskParam) return;
+  // Deep-Link-Anwendung als Render-Phase-Anpassung (React-Doku "adjusting
+  // state when props change") statt setState im Effekt (react-hooks/
+  // set-state-in-effect). One-shot per param value: the data deps get a new
+  // identity on every 8s board poll, and re-running the filter/expand block
+  // on each tick yanked the page back to the card, re-expanded a manually
+  // collapsed chain and reverted manual project-filter choices.
+  if (taskParam && handledTaskParam !== taskParam && allTasks.length > 0) {
     const task = allTasks.find((item) => item.id === taskParam);
-    if (!task) return;
-    handledTaskParamRef.current = taskParam;
-    if (selectedId !== taskParam) {
-      setSelectedId(taskParam);
-      if (!taskDetail.detailById[taskParam]) void fetchDetail(taskParam);
+    if (task) {
+      setHandledTaskParam(taskParam);
+      if (selectedId !== taskParam) setSelectedId(taskParam);
+      const targetProject = projectKey(task.tenant);
+      if (projectFilter !== "all" && projectFilter !== targetProject) {
+        setProjectFilter(targetProject);
+      }
+      const targetChain = [...allChainBoard.active, ...allChainBoard.done].find(
+        (chain) => chain.rootId === taskParam || chain.members.some((member) => member.id === taskParam),
+      );
+      if (targetChain && expandedRoot !== targetChain.rootId) setExpandedRoot(targetChain.rootId);
+      // Echte Deep-Links (z.B. aus dem Inbox-Tab) sollen das Detail auf
+      // Handy/Tablet direkt zeigen — gleiche Mechanik wie ein Tap.
+      if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches && !detailSheetOpen) {
+        setDetailSheetOpen(true);
+      }
     }
-    const targetProject = projectKey(task.tenant);
-    if (projectFilter !== "all" && projectFilter !== targetProject) {
-      setProjectFilter(targetProject);
-    }
-    const targetChain = [...allChainBoard.active, ...allChainBoard.done].find(
-      (chain) => chain.rootId === taskParam || chain.members.some((member) => member.id === taskParam),
-    );
-    if (targetChain) setExpandedRoot(targetChain.rootId);
+  }
+
+  // Die impure Seite des Deep-Links (Detail-Fetch + Scroll) bleibt im Effekt;
+  // `deepLinkScrolledRef` one-shottet sie pro Wert, damit neue Identitäten
+  // der Daten-Deps (8s-Poll) NICHT erneut scrollen. Selbst gesetzte ?task=-
+  // Werte sind im Tap-Handler vormarkiert und scrollen nie.
+  useEffect(() => {
+    if (!taskParam || handledTaskParam !== taskParam) return;
+    if (deepLinkScrolledRef.current === taskParam) return;
+    deepLinkScrolledRef.current = taskParam;
+    if (!taskDetail.detailById[taskParam]) void fetchDetail(taskParam);
     scrollToFlowTask(taskParam);
-    // Echte Deep-Links (z.B. aus dem Inbox-Tab) sollen das Detail auf
-    // Handy/Tablet direkt zeigen — gleiche Mechanik wie ein Tap.
-    if (window.matchMedia("(max-width: 1279px)").matches) setDetailSheetOpen(true);
-  }, [allChainBoard, allTasks, fetchDetail, projectFilter, selectedId, taskDetail.detailById, taskParam]);
+  }, [taskParam, handledTaskParam, fetchDetail, taskDetail.detailById]);
 
   // Keep the receipt rail live while a non-terminal task is selected: re-fetch
   // its detail every 8s so runs/events/the verifier verdict stream in during a

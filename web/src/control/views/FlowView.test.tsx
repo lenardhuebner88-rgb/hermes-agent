@@ -105,12 +105,17 @@ describe("FlowView is live-wired, not mock", () => {
     // Ohne den One-Shot-Guard lief der Effekt bei jeder neuen Board-Identität
     // (8s-Poll) erneut: Scroll-Yank zur Karte, Re-Expand manuell eingeklappter
     // Ketten, Revert manuell gewählter Projekt-Filter.
-    expect(src).toMatch(/handledTaskParamRef\.current === taskParam\) return/);
-    expect(src).toMatch(/handledTaskParamRef\.current = taskParam/);
+    expect(src).toMatch(/handledTaskParam !== taskParam && allTasks\.length > 0/);
+    expect(src).toMatch(/setHandledTaskParam\(taskParam\)/);
+    expect(src).toMatch(/deepLinkScrolledRef\.current === taskParam\) return/);
   });
 
   it("anchors relative-time labels to the client clock, not the 304-frozen payload now", () => {
-    expect(src).toMatch(/Math\.max\(board\.data\?\.now \?\? 0, Math\.floor\(Date\.now\(\) \/ 1000\)\)/);
+    // Date.now() im Render verletzt react-hooks/purity — die Client-Uhr
+    // kommt aus einem externen Store, der Anker-Kontrakt bleibt derselbe.
+    expect(src).toMatch(/useSyncExternalStore\(subscribeClock, getClockNowSeconds\)/);
+    expect(src).toMatch(/Math\.max\(board\.data\?\.now \?\? 0, clientNow\)/);
+    expect(src).not.toMatch(/const now = Math\.max\(board\.data\?\.now \?\? 0, Math\.floor\(Date\.now\(\)/);
   });
 
   it("opens the flow-plan spec through the authenticated opener, not a raw anchor", () => {
@@ -120,10 +125,19 @@ describe("FlowView is live-wired, not mock", () => {
 
   it("keeps an active verifier exclusive but restores manual review actions after terminal-verdict grace", () => {
     expect(src).toMatch(/VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000/);
-    expect(src).toMatch(/verifierGateFirstSeenRef/);
     expect(src).toMatch(/activeVerifier[^\n]+return false/);
     expect(src).toMatch(/manualReviewFallbackById/);
     expect(src).toMatch(/Übergang ausgeblieben — manuell abnehmen/);
+  });
+
+  it("derives the terminal-verdict grace from the server verdict stamp, never from render-phase ref state", () => {
+    // REQUEST_CHANGES-Befund Run 1018/1021: Ref-Mutation im useMemo verletzt
+    // die react-hooks-Purity-Regel ("Cannot update ref during render").
+    // Der Zeitanker ist jetzt das submitted_at des Review-Runs — rein
+    // ableitbar, kein Client-Zustand, überlebt Reloads.
+    expect(src).not.toMatch(/verifierGateFirstSeenRef/);
+    expect(src).toMatch(/reviewVerdictAt: r\.active_verifier \? null : r\.submitted_at \?\? null/);
+    expect(src).toMatch(/now - verdictAt >= VERIFIER_GATE_TERMINAL_GRACE_MS \/ 1000/);
   });
 });
 
@@ -139,11 +153,13 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
   });
 
   it("marks self-set ?task= params as handled so the deep-link effect cannot re-scroll per tap", () => {
-    expect(src).toMatch(/handledTaskParamRef\.current = id;/);
+    expect(src).toMatch(/setHandledTaskParam\(id\);/);
+    expect(src).toMatch(/deepLinkScrolledRef\.current = id;/);
   });
 
   it("pins the auto-expanded chain across poll-tick urgency reorders", () => {
-    expect(src).toMatch(/autoExpandRef/);
+    expect(src).toMatch(/setAutoExpand\(fallbackRoot\)/);
+    expect(src).not.toMatch(/autoExpandRef/);
     expect(src).not.toMatch(/expandedRoot \?\? chainBoard\.active\[0\]/);
   });
 
