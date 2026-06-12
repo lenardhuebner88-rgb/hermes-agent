@@ -36,11 +36,13 @@ function watchPage(page: Page): PageWatch {
   };
 }
 
-const TABS: Array<{ path: string; probe: RegExp | string }> = [
-  { path: "/control", probe: /Hermes Control/ },
-  { path: "/control/flow", probe: /Flow Command Board|Lauf|Kanban/ },
-  { path: "/control/statistik", probe: /Statistik|Zuverlässigkeit|Kosten/ },
-  { path: "/control/bibliothek", probe: /Bibliothek|Regal|News/ },
+// probe = Hero-Eyebrow des Tabs; filter({ visible: true }) ist nötig, weil
+// dieselben Wörter auch in versteckten Nav-/Overflow-Links vorkommen.
+const TABS: Array<{ path: string; probe: string }> = [
+  { path: "/control", probe: "Hermes Control" },
+  { path: "/control/flow", probe: "Flow Command Board" },
+  { path: "/control/statistik", probe: "Statistik" },
+  { path: "/control/bibliothek", probe: "Bibliothek" },
 ];
 
 test.describe("Control Smoke (live)", () => {
@@ -48,34 +50,31 @@ test.describe("Control Smoke (live)", () => {
     test(`lädt ${tab.path} ohne Konsolen-/Netzwerkfehler`, async ({ page }) => {
       const watch = watchPage(page);
       await page.goto(tab.path);
-      await expect(page.getByText(tab.probe).first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText(tab.probe).filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
       // Polls kurz arbeiten lassen, damit kaputte Endpoints auffallen würden.
       await page.waitForTimeout(2_000);
       watch.assertClean();
     });
   }
 
-  test("Navigation: alle Primär-Tabs sind erreichbar und führen zum Ziel", async ({ page, isMobile }) => {
+  test("Navigation: alle Primär-Tabs sind erreichbar und führen zum Ziel", async ({ page }) => {
     const watch = watchPage(page);
     await page.goto("/control");
-    await expect(page.getByText(/Hermes Control/).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText("Hermes Control").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
 
-    const nav = isMobile
-      ? [
-          { name: "Flow", url: /\/control\/flow$/ },
-          { name: "Stats", url: /\/control\/statistik$/ },
-          { name: "Bibliothek", url: /\/control\/bibliothek$/ },
-          { name: "Start", url: /\/control$/ },
-        ]
-      : [
-          { name: /Flow/, url: /\/control\/flow$/ },
-          { name: /Statistik|Stats/, url: /\/control\/statistik$/ },
-          { name: "Bibliothek", url: /\/control\/bibliothek$/ },
-          { name: "Start", url: /\/control$/ },
-        ];
+    // Die Primär-Tabs sind BUTTONS (onNavigate), keine Links — Mobile
+    // (Bottom-Nav, mobileLabel) und Desktop (Tab-Leiste, label) tragen
+    // teils unterschiedliche Beschriftungen; der visible-Filter hält
+    // versteckte Varianten der jeweils anderen Breakpoints fern.
+    const nav = [
+      { name: /^Flow/, url: /\/control\/flow$/ },
+      { name: /^(Statistik|Stats)/, url: /\/control\/statistik$/ },
+      { name: /^Bibliothek/, url: /\/control\/bibliothek$/ },
+      { name: /^Start/, url: /\/control$/ },
+    ];
 
     for (const target of nav) {
-      await page.getByRole("link", { name: target.name, exact: typeof target.name === "string" }).first().click();
+      await page.getByRole("button", { name: target.name }).filter({ visible: true }).first().click();
       await expect(page).toHaveURL(target.url);
     }
     watch.assertClean();
