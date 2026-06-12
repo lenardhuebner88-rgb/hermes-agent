@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateLane,
   choiceFromEntry,
+  choiceOverrideLabel,
   deleteLane,
   editorRows,
   entryFromChoice,
   laneChoiceWarning,
+  laneProfileSpawnHealth,
   modelLabel,
   profilesFromEditorRows,
   smokeCheckLaneConfig,
@@ -119,6 +121,57 @@ describe("choice encoding", () => {
     expect(laneChoiceWarning("claude-cli|gpt-5.5", MODELS)).toContain("hermes");
     expect(laneChoiceWarning("hermes|gpt-5.5", MODELS)).toBeNull();
     expect(laneChoiceWarning("", MODELS)).toBeNull();
+  });
+});
+
+describe("readiness & override state", () => {
+  const catalog: LaneCatalogProfile[] = [
+    {
+      name: "coder",
+      worker_runtime: "hermes",
+      default_model: "gpt-5.5",
+      description: "",
+      kanban_spawn_health: "healthy",
+    },
+    { name: "premium", worker_runtime: "claude-cli", default_model: null, description: "" },
+  ];
+  const baseLane: Lane = {
+    id: "lane_1",
+    name: "test",
+    active: true,
+    builtin: false,
+    created_at: 0,
+    updated_at: 0,
+    profiles: {},
+  };
+
+  it("laneProfileSpawnHealth: Lane-Eintrag gewinnt über Katalog, String-Form wird normalisiert", () => {
+    expect(laneProfileSpawnHealth("coder", baseLane, catalog)).toEqual({ status: "healthy" });
+    const laneWithEvidence: Lane = {
+      ...baseLane,
+      profiles: {
+        coder: {
+          worker_runtime: "hermes",
+          model: null,
+          kanban_spawn_health: { status: "unhealthy", reason: "Probe rot" },
+        },
+      },
+    };
+    expect(laneProfileSpawnHealth("coder", laneWithEvidence, catalog)).toEqual({
+      status: "unhealthy",
+      reason: "Probe rot",
+    });
+    // keine Evidenz auf beiden Ebenen → null (Anzeige: ungeprüft)
+    expect(laneProfileSpawnHealth("premium", baseLane, catalog)).toBeNull();
+    expect(laneProfileSpawnHealth("fehlt", baseLane, catalog)).toBeNull();
+  });
+
+  it("choiceOverrideLabel: Standard → null, sonst sprechendes Modell-Label", () => {
+    expect(choiceOverrideLabel("", MODELS)).toBeNull();
+    expect(choiceOverrideLabel("claude-cli|", MODELS)).toBe("Claude (automatisch)");
+    expect(choiceOverrideLabel("hermes|gpt-5.5", MODELS)).toBe("GPT-5.5");
+    // unbekanntes Modell bleibt als Roh-Id sichtbar statt zu verschwinden
+    expect(choiceOverrideLabel("hermes|fremd-1", MODELS)).toBe("fremd-1");
   });
 });
 

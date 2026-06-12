@@ -125,10 +125,33 @@ export function effectiveRuntime(
   return profileRuntimeInfo(profile, lanes)?.worker_runtime ?? null;
 }
 
-function normalizeSpawnHealth(value: LaneProfileRuntimeInfo["kanban_spawn_health"]): LaneSpawnHealth | null {
+export function normalizeSpawnHealth(value: LaneProfileRuntimeInfo["kanban_spawn_health"]): LaneSpawnHealth | null {
   if (!value) return null;
   if (typeof value === "string") return { status: value };
   return { status: value.status, reason: value.reason ?? null };
+}
+
+/** Passive Spawn-Bereitschaft einer Editor-Zeile, ohne Live-Check:
+ *  Lane-Eintrag gewinnt, sonst Katalog-Profil, sonst null (keine Evidenz). */
+export function laneProfileSpawnHealth(
+  profile: string,
+  lane: Lane,
+  catalog: LaneCatalogProfile[],
+): LaneSpawnHealth | null {
+  return (
+    normalizeSpawnHealth(lane.profiles[profile]?.kanban_spawn_health) ??
+    normalizeSpawnHealth(catalog.find((p) => p.name === profile)?.kanban_spawn_health)
+  );
+}
+
+/** Override-Zustand einer Dropdown-Auswahl als Operator-Label:
+ *  null = Standard (kein Lane-Eintrag, Profil-Default greift),
+ *  sonst das Label des fest verdrahteten Modells. */
+export function choiceOverrideLabel(choice: string, models: LaneModelOption[]): string | null {
+  const entry = entryFromChoice(choice);
+  if (entry === null) return null;
+  if (!entry.model) return "Claude (automatisch)";
+  return modelLabel(entry.model, models);
 }
 
 function effectiveSpawnHealth(
