@@ -96,6 +96,9 @@ export interface TestFoundryTargetsResponse {
   targets: string[];
 }
 
+export const HERMES_RECENT_RESULTS_URL = "/api/plugins/kanban/runs/recent-results?limit=50&since_hours=48&outcome=completed";
+export const HERMES_REVIEW_VERDICTS_URL = "/api/plugins/kanban/tasks/review-verdicts?limit=50";
+
 export function testFoundryStatusPollIntervalMs(status: TestFoundryStatus | null): number | null {
   return status?.state === "running" ? 5000 : null;
 }
@@ -941,7 +944,7 @@ export function useHermesRecentResults() {
     "runs/recent-results",
     async () => parseOrThrow(
       RecentResultsResponseSchema,
-      await fetchJSON<unknown>("/api/plugins/kanban/runs/recent-results?limit=12&since_hours=48&outcome=completed"),
+      await fetchJSON<unknown>(HERMES_RECENT_RESULTS_URL),
       "runs/recent-results",
     ),
     20000,
@@ -1018,7 +1021,7 @@ export function useHermesReviewVerdicts() {
     "tasks/review-verdicts",
     async () => parseOrThrow(
       ReviewVerdictsResponseSchema,
-      await fetchJSON<unknown>("/api/plugins/kanban/tasks/review-verdicts?limit=12"),
+      await fetchJSON<unknown>(HERMES_REVIEW_VERDICTS_URL),
       "tasks/review-verdicts",
     ),
     20000,

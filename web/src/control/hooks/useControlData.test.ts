@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   countLibraryUnread,
+  HERMES_RECENT_RESULTS_URL,
+  HERMES_REVIEW_VERDICTS_URL,
   testFoundryStatusPollIntervalMs,
   type TestFoundryStatus,
 } from "./useControlData";
@@ -22,6 +24,13 @@ describe("useTestFoundry status polling", () => {
     expect(testFoundryStatusPollIntervalMs(status("idle"))).toBeNull();
     expect(testFoundryStatusPollIntervalMs(status("error"))).toBeNull();
     expect(testFoundryStatusPollIntervalMs(status("running"))).toBe(5000);
+  });
+});
+
+describe("Hermes Flow enrichment queries", () => {
+  it("requests the server-capped 50 review verdicts and recent results", () => {
+    expect(HERMES_REVIEW_VERDICTS_URL).toBe("/api/plugins/kanban/tasks/review-verdicts?limit=50");
+    expect(HERMES_RECENT_RESULTS_URL).toBe("/api/plugins/kanban/runs/recent-results?limit=50&since_hours=48&outcome=completed");
   });
 });
 
