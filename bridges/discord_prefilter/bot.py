@@ -20,6 +20,7 @@ from bridges.discord_prefilter.config import PrefilterConfig
 from bridges.discord_prefilter.escalate import run_hermes_oneshot
 from bridges.discord_prefilter.forward import build_forward_message
 from bridges.discord_prefilter.triage import Bucket, run_triage
+from bridges.discord_prefilter.wish import extract_wish, run_wish_create
 
 logger = logging.getLogger("discord_prefilter.bot")
 
@@ -67,9 +68,16 @@ def build_client(config: PrefilterConfig) -> discord.Client:
             if config.escalate_enabled else "off"
         )
         logger.info(
-            "pre-filter online as %s | locked to channel %s | model=%s | escalate=%s",
+            "pre-filter online as %s | locked to channel %s | model=%s | escalate=%s | allowlist=%d user(s)",
             client.user, config.channel_id, config.model, esc,
+            len(config.allowed_user_ids),
         )
+        if not config.allowed_user_ids:
+            logger.warning(
+                "no user allowlist configured (PREFILTER_ALLOWED_USERS / "
+                "DISCORD_ALLOWED_USERS) — failing CLOSED: every message is "
+                "ignored until an allowlist is set"
+            )
 
     @client.event
     async def on_message(message: discord.Message) -> None:  # noqa: D401
@@ -82,6 +90,15 @@ def build_client(config: PrefilterConfig) -> discord.Client:
         # Skip other bots unless explicitly allowed.
         if message.author.bot and not config.allow_bots:
             return
+        # User allowlist (S3) — channel membership alone is NOT authorization.
+        # Empty allowlist = fail closed (warned at startup), so a missing env
+        # var can never silently open the triage door to the whole channel.
+        if message.author.id not in config.allowed_user_ids:
+            logger.info(
+                "ignoring message from non-allowlisted user %s (%s)",
+                message.author.id, getattr(message.author, "display_name", "?"),
+            )
+            return
         # Only normal messages / replies (no pins, joins, system notices).
         if message.type not in (discord.MessageType.default, discord.MessageType.reply):
             return
@@ -90,6 +107,26 @@ def build_client(config: PrefilterConfig) -> discord.Client:
             return
 
         loop = asyncio.get_running_loop()
+
+        # --- "idee:" demand-funnel path (deterministic, no model spawn) ---
+        # A prefixed wish goes straight to Kanban triage instead of being
+        # classified/forwarded; nothing starts without the operator's tap.
+        wish = extract_wish(content)
+        if wish is not None:
+            author = getattr(message.author, "display_name", "") or str(message.author)
+            try:
+                ok, detail = await loop.run_in_executor(
+                    None, run_wish_create, wish, author, config
+                )
+            except Exception:  # never let the event loop die
+                logger.exception("wish create crashed")
+                ok, detail = False, "interner Fehler (siehe Log)"
+            if ok:
+                await message.reply(f"💡 Idee notiert → Kanban-triage (`{detail}`)")
+            else:
+                await message.reply(f"⚠️ Idee konnte nicht angelegt werden: {detail}")
+            return
+
         try:
             decision = await loop.run_in_executor(None, run_triage, content, config)
         except Exception:  # triage is fail-open, but never let the loop die

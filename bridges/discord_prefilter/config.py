@@ -20,6 +20,20 @@ def _truthy(val: Optional[str]) -> bool:
     return (val or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_user_ids(raw: Optional[str]) -> frozenset:
+    """Parse a comma/space/semicolon-separated list of Discord user ids.
+
+    Non-numeric fragments are ignored (a typo must not silently widen the
+    allowlist — worst case it narrows it, which fails closed).
+    """
+    ids = set()
+    for fragment in (raw or "").replace(";", ",").replace(" ", ",").split(","):
+        fragment = fragment.strip()
+        if fragment.isdigit():
+            ids.add(int(fragment))
+    return frozenset(ids)
+
+
 def _load_env_file(path: Path) -> None:
     """Seed os.environ from a ``KEY=VALUE`` file without clobbering real env.
 
@@ -80,6 +94,11 @@ class PrefilterConfig:
     escalate_timeout_s: int = 600
     allow_bots: bool = False
     react_on_noise: Optional[str] = None
+    # User allowlist (S3): only these Discord user ids reach triage. EMPTY
+    # means fail-closed — the bot ignores everyone and logs why. Loaded from
+    # PREFILTER_ALLOWED_USERS, falling back to the hub-wide
+    # DISCORD_ALLOWED_USERS so one operator setting covers both bots.
+    allowed_user_ids: frozenset = frozenset()
 
     # --- subprocess environments ------------------------------------------
 
@@ -166,6 +185,10 @@ class PrefilterConfig:
             escalate_timeout_s=int(os.environ.get("PREFILTER_ESCALATE_TIMEOUT_S", "600") or 600),
             allow_bots=_truthy(os.environ.get("PREFILTER_ALLOW_BOTS")),
             react_on_noise=os.environ.get("PREFILTER_NOISE_REACTION", "").strip() or None,
+            allowed_user_ids=_parse_user_ids(
+                os.environ.get("PREFILTER_ALLOWED_USERS")
+                or os.environ.get("DISCORD_ALLOWED_USERS")
+            ),
         )
         cfg.noise_matchers = build_noise_matchers(cfg.noise_patterns)
         return cfg
