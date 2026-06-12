@@ -2524,6 +2524,96 @@ class TestNewEndpoints:
         assert profiles["multi-agent"]["has_env"] is True
         assert profiles["multi-agent"]["skill_count"] == 1
 
+    def _reset_profiles_cache(self, monkeypatch, tmp_path):
+        """Start cache tests from a cold cache and a hermetic wrapper dir
+        (the real ~/.local/bin would make stat fingerprints racy)."""
+        from hermes_cli import web_server
+        import hermes_cli.profiles as profiles_mod
+
+        web_server._profiles_cache = None
+        wrapper_dir = tmp_path / "wrapper-bin"
+        wrapper_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(profiles_mod, "_get_wrapper_dir", lambda: wrapper_dir)
+
+    def test_profiles_list_second_request_served_from_cache(self, monkeypatch, tmp_path):
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
+
+        get_hermes_home().mkdir(parents=True, exist_ok=True)
+        self._reset_profiles_cache(monkeypatch, tmp_path)
+
+        calls = {"n": 0}
+        real_list = profiles_mod.list_profiles
+
+        def counting_list():
+            calls["n"] += 1
+            return real_list()
+
+        monkeypatch.setattr(profiles_mod, "list_profiles", counting_list)
+
+        first = self.client.get("/api/profiles")
+        second = self.client.get("/api/profiles")
+        assert first.status_code == 200 and second.status_code == 200
+        assert calls["n"] == 1, "second warm request must not rescan profiles"
+        assert second.json()["profiles"] == first.json()["profiles"]
+
+    def test_profiles_list_cache_invalidates_on_change_under_hermes_home(
+        self, monkeypatch, tmp_path
+    ):
+        # HERMES_HOME semantics: the list follows the profile tree under the
+        # default HERMES_HOME root; on-disk edits/additions there must
+        # invalidate the cached payload.
+        from hermes_constants import get_hermes_home
+
+        home = get_hermes_home()
+        home.mkdir(parents=True, exist_ok=True)
+        named = home / "profiles" / "cachetest"
+        named.mkdir(parents=True)
+        (named / "config.yaml").write_text(
+            "model:\n  provider: openrouter\n  default: model-a\n", encoding="utf-8"
+        )
+        self._reset_profiles_cache(monkeypatch, tmp_path)
+
+        first = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
+        assert first["cachetest"]["model"] == "model-a"
+
+        (named / "config.yaml").write_text(
+            "model:\n  provider: openrouter\n  default: model-b-changed\n", encoding="utf-8"
+        )
+        second = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
+        assert second["cachetest"]["model"] == "model-b-changed"
+
+        other = home / "profiles" / "cachetest2"
+        other.mkdir(parents=True)
+        third = [p["name"] for p in self.client.get("/api/profiles").json()["profiles"]]
+        assert "cachetest2" in third
+
+    def test_profiles_list_cache_hit_refreshes_gateway_liveness(self, monkeypatch, tmp_path):
+        # gateway_running can flip without any file changing (process death),
+        # so it is re-checked even when the payload comes from the cache.
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
+
+        get_hermes_home().mkdir(parents=True, exist_ok=True)
+        self._reset_profiles_cache(monkeypatch, tmp_path)
+
+        calls = {"n": 0}
+        real_list = profiles_mod.list_profiles
+
+        def counting_list():
+            calls["n"] += 1
+            return real_list()
+
+        monkeypatch.setattr(profiles_mod, "list_profiles", counting_list)
+
+        first = self.client.get("/api/profiles").json()["profiles"]
+        assert all(p["gateway_running"] is False for p in first)
+
+        monkeypatch.setattr(profiles_mod, "_check_gateway_running", lambda _dir: True)
+        second = self.client.get("/api/profiles").json()["profiles"]
+        assert calls["n"] == 1, "second request must be a cache hit"
+        assert all(p["gateway_running"] is True for p in second)
+
     def test_profiles_create_rename_delete_round_trip(self, monkeypatch):
         # Stub gateway service teardown so the test doesn't shell out to
         # launchctl/systemctl on the host.

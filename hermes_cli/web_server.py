@@ -6812,7 +6812,7 @@ def _cron_profile_dicts() -> List[Dict[str, Any]]:
     """Return dashboard profile records, falling back to a directory scan."""
     from hermes_cli import profiles as profiles_mod
     try:
-        return [_profile_to_dict(p) for p in profiles_mod.list_profiles()]
+        return _list_profile_dicts_cached(profiles_mod)
     except Exception:
         _log.exception("Failed to list profiles for cron dashboard; falling back to directory scan")
         return _fallback_profile_dicts(profiles_mod)
@@ -8842,6 +8842,94 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
     return profiles
 
 
+# ---------------------------------------------------------------------------
+# Profile-list cache — keeps GET /api/profiles off the SPA boot critical path.
+#
+# list_profiles() stats/parses every profile's config.yaml, rglobs its skills
+# tree and reverse-looks-up wrapper aliases; doing that per request serialized
+# the whole dashboard boot behind one slow call. The full scan only changes
+# when something under HERMES_HOME (or the wrapper dir) changes on disk, so we
+# fingerprint those inputs with cheap stat() calls and reuse the last payload
+# while the fingerprint holds. ``gateway_running`` is the one field that can
+# flip without any file changing (process death), so it is re-checked on every
+# cache hit — that check is a pid-file read, not a scan.
+# ---------------------------------------------------------------------------
+
+_PROFILES_CACHE_LOCK = threading.Lock()
+_profiles_cache: Optional[Dict[str, Any]] = None  # {"sig": tuple, "profiles": [dict]}
+
+# Files whose content feeds the /api/profiles payload, per profile dir.
+_PROFILE_SIG_FILES = ("config.yaml", "profile.yaml", "distribution.yaml", ".env", "gateway.pid")
+
+
+def _profiles_signature(profiles_mod) -> tuple:
+    """Cheap stat-level fingerprint of everything GET /api/profiles surfaces.
+
+    Anchored to the same roots ``list_profiles()`` scans (default HERMES_HOME
+    plus ``<root>/profiles/``), so profile create/delete/rename and config or
+    metadata edits all move the fingerprint. The skills dir mtime moves when a
+    skill is installed/removed (new/removed child dir), which is exactly when
+    ``skill_count`` changes. Wrapper-dir entries cover alias changes.
+    """
+    def _stat_sig(path: Path):
+        try:
+            st = path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _dir_sig(profile_dir: Path) -> tuple:
+        sig = tuple(_stat_sig(profile_dir / name) for name in _PROFILE_SIG_FILES)
+        return sig + (_stat_sig(profile_dir / "skills"),)
+
+    parts: List[Any] = []
+    default_home = profiles_mod._get_default_hermes_home()
+    parts.append((str(default_home), default_home.is_dir(), _dir_sig(default_home)))
+
+    profiles_root = profiles_mod._get_profiles_root()
+    parts.append((str(profiles_root), _stat_sig(profiles_root)))
+    if profiles_root.is_dir():
+        for entry in sorted(profiles_root.iterdir()):
+            if entry.is_dir() and profiles_mod._PROFILE_ID_RE.match(entry.name):
+                parts.append((entry.name, _dir_sig(entry)))
+
+    wrapper_dir = profiles_mod._get_wrapper_dir()
+    try:
+        parts.append(tuple(
+            (e.name, _stat_sig(e)) for e in sorted(wrapper_dir.iterdir())
+        ))
+    except OSError:
+        parts.append(())
+    return tuple(parts)
+
+
+def _invalidate_profiles_cache() -> None:
+    """Drop the cached /api/profiles payload (belt-and-braces next to the
+    stat fingerprint, for in-process mutations within mtime granularity)."""
+    global _profiles_cache
+    with _PROFILES_CACHE_LOCK:
+        _profiles_cache = None
+
+
+def _list_profile_dicts_cached(profiles_mod) -> List[Dict[str, Any]]:
+    """``list_profiles()`` as dashboard dicts, behind the stat-fingerprint cache."""
+    global _profiles_cache
+    sig = _profiles_signature(profiles_mod)
+    with _PROFILES_CACHE_LOCK:
+        cached = _profiles_cache
+    if cached is not None and cached["sig"] == sig:
+        profiles = [dict(p) for p in cached["profiles"]]
+        for p in profiles:
+            p["gateway_running"] = bool(
+                profiles_mod._check_gateway_running(Path(p["path"]))
+            )
+        return profiles
+    profiles = [_profile_to_dict(p) for p in profiles_mod.list_profiles()]
+    with _PROFILES_CACHE_LOCK:
+        _profiles_cache = {"sig": sig, "profiles": [dict(p) for p in profiles]}
+    return profiles
+
+
 def _resolve_profile_dir(name: str) -> Path:
     """Validate ``name`` and resolve to its directory or raise an HTTPException."""
     from hermes_cli import profiles as profiles_mod
@@ -8973,7 +9061,7 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
 async def list_profiles_endpoint():
     from hermes_cli import profiles as profiles_mod
     try:
-        return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
+        return {"profiles": _list_profile_dicts_cached(profiles_mod)}
     except Exception:
         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
         return {"profiles": _fallback_profile_dicts(profiles_mod)}
@@ -9077,6 +9165,7 @@ async def create_profile_endpoint(body: ProfileCreate):
             )
             hub_installs.append({"identifier": ident, "pid": None})
 
+    _invalidate_profiles_cache()
     return {
         "ok": True,
         "name": body.name,
@@ -9206,6 +9295,7 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
             status_code=500,
             detail=safe_detail(e, "Failed to rename profile", log=_log),
         )
+    _invalidate_profiles_cache()
     return {"ok": True, "name": body.new_name, "path": str(path)}
 
 
@@ -9226,6 +9316,7 @@ async def delete_profile_endpoint(name: str):
             status_code=500,
             detail=safe_detail(e, "Failed to delete profile", log=_log),
         )
+    _invalidate_profiles_cache()
     return {"ok": True, "path": str(path)}
 
 
@@ -9278,6 +9369,7 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
             status_code=500,
             detail=safe_detail(e, "Failed to update profile description", log=_log),
         )
+    _invalidate_profiles_cache()
     return {"ok": True, "description": text, "description_auto": False}
 
 
@@ -9300,6 +9392,7 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
             status_code=500,
             detail=safe_detail(e, "Failed to update profile model", log=_log),
         )
+    _invalidate_profiles_cache()
     return {"ok": True, "provider": provider, "model": model}
 
 
