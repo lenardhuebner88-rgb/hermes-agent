@@ -484,6 +484,71 @@ def test_upsert_recipe_requires_name():
     assert "error" in out
 
 
+# ─── fo_import_recipe (NextGen-2 F3) ─────────────────────────────────────────
+
+def test_import_recipe_posts_source_url_and_returns_discord_message():
+    captured = {}
+    recipe = {
+        "id": "rec-2",
+        "slug": "pikanter-dattel-frischkaese-dip",
+        "name": "Pikanter Dattel-Frischkäse-Dip",
+    }
+
+    def fake_request(method, url, **kw):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kw["json"]
+        captured["headers"] = kw["headers"]
+        return _resp(201, {"recipe": recipe, "alreadyImported": False})
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch("tools.family_organizer_tool.httpx.request", side_effect=fake_request):
+            out = json.loads(fo.fo_import_recipe(url="https://www.chefkoch.de/r/1?foo=bar"))
+    assert out["imported"] is True
+    assert out["alreadyImported"] is False
+    assert out["recipe"]["slug"] == "pikanter-dattel-frischkaese-dip"
+    assert out["url"] == "https://family-organizer-xi.vercel.app/recipes/pikanter-dattel-frischkaese-dip"
+    assert "Pikanter Dattel-Frischkäse-Dip" in out["message"]
+    assert out["url"] in out["message"]
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://fo.test/api/hermes/recipes"
+    assert captured["json"] == {"sourceUrl": "https://www.chefkoch.de/r/1?foo=bar"}
+    assert "X-Request-Id" in captured["headers"]
+
+
+def test_import_recipe_already_imported_returns_existing_link_message():
+    recipe = {"id": "rec-2", "slug": "dattel-dip", "name": "Dattel-Dip"}
+
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch(
+            "tools.family_organizer_tool.httpx.request",
+            return_value=_resp(200, {"recipe": recipe, "alreadyImported": True}),
+        ):
+            out = json.loads(fo.fo_import_recipe(url="https://www.chefkoch.de/r/1"))
+    assert out["imported"] is False
+    assert out["alreadyImported"] is True
+    assert "Schon im Rezeptbuch" in out["message"]
+    assert out["url"].endswith("/recipes/dattel-dip")
+
+
+def test_import_recipe_requires_https_url():
+    with patch.dict(os.environ, TOKEN_ENV):
+        out = json.loads(fo.fo_import_recipe(url="http://localhost:3000/rezept"))
+    assert "error" in out
+    assert "HTTPS" in out["error"]
+
+
+def test_import_recipe_api_error_is_calm_german():
+    with patch.dict(os.environ, TOKEN_ENV):
+        with patch(
+            "tools.family_organizer_tool.httpx.request",
+            return_value=_resp(400, {"error": {"code": "recipe_json_ld_missing"}}),
+        ):
+            out = json.loads(fo.fo_import_recipe(url="https://example.com/ohne-rezept"))
+    assert "error" in out
+    assert out["error"].startswith("Ich konnte das Rezept nicht importieren")
+
+
 # ─── fo_delete_recipe (0078, Confirm-on-Delete) ──────────────────────────────
 
 def test_delete_recipe_without_confirm_asks_first():
@@ -614,6 +679,7 @@ def test_tools_registered_under_family_organizer_toolset():
         "fo_delete_task",
         "fo_set_vacation",
         "fo_upsert_recipe",
+        "fo_import_recipe",
         "fo_delete_recipe",
         "fo_delete_vacation",
         "fo_list_lists",

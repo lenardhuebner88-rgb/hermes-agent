@@ -9,8 +9,9 @@ Audit werden **unverändert** wiederverwendet — diese Tür wird nicht geschwä
 
 Write-Actions: ``add_task_item`` (0077), ``set_presence`` (0077),
 ``create_event`` (Termin, 0081), ``add_birthday`` (Geburtstag, 0087),
-``set_meal_plan`` (Mittagessen, 0088) sowie **Update/Delete** von Listen-Items
-(0091: ``fo_update_task`` direkt, ``fo_delete_task`` mit Confirm-Rückfrage nach
+``set_meal_plan`` (Mittagessen, 0088), ``import_recipe`` (Rezept-Link,
+NextGen-2 F3) sowie **Update/Delete** von Listen-Items (0091:
+``fo_update_task`` direkt, ``fo_delete_task`` mit Confirm-Rückfrage nach
 ADR-0004 — Löschen nur mit Bestätigung). Dazu Read-Helfer (Listen, Anwesenheit)
 zum Auflösen von Listennamen und zum Beantworten von Fragen.
 
@@ -23,6 +24,7 @@ import logging
 import os
 import uuid
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import httpx  # noqa: F401 — module-level so tests can patch tools.family_organizer_tool.httpx
 
@@ -31,6 +33,7 @@ from tools.registry import registry, tool_error, tool_result
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:3000"
+PUBLIC_RECIPE_BASE_URL = "https://family-organizer-xi.vercel.app"
 _TIMEOUT = 10.0
 
 # Vertrag mit der FO-Hermes-API (src/app/api/hermes/_lib/schemas.ts).
@@ -574,6 +577,63 @@ def fo_upsert_recipe(
     return tool_result({"created": True, "recipe": (data or {}).get("recipe", {})})
 
 
+def _public_recipe_url(slug: str) -> str:
+    return f"{PUBLIC_RECIPE_BASE_URL}/recipes/{slug.strip('/')}"
+
+
+def _valid_https_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def fo_import_recipe(url: str) -> str:
+    """Importiere eine Rezept-URL direkt ins Rezeptbuch (NextGen-2 F3).
+
+    Ruft den bestehenden FO-Endpunkt ``POST /api/hermes/recipes`` im
+    ``sourceUrl``-Modus auf. Die FO-API erledigt SSRF-Guard, JSON-LD-Extraktion,
+    Dedupe, Foto-Kopie, Audit und Idempotenz. Der Tool gibt eine Discord-taugliche
+    deutsche Antwort mit Titel + ``/recipes/<slug>``-Link zurück.
+    """
+    source_url = (url or "").strip()
+    if not source_url:
+        return tool_error("url fehlt")
+    if not _valid_https_url(source_url):
+        return tool_error("url muss eine HTTPS-URL sein")
+    try:
+        data = _request(
+            "POST",
+            "/api/hermes/recipes",
+            write=True,
+            json_body={"sourceUrl": source_url},
+        ) or {}
+    except Exception as exc:
+        return tool_error(f"Ich konnte das Rezept nicht importieren: {exc}")
+
+    recipe = data.get("recipe") if isinstance(data, dict) else None
+    if not isinstance(recipe, dict) or not recipe.get("slug"):
+        return tool_error(
+            "Ich konnte das Rezept nicht importieren: Die API-Antwort war unvollständig."
+        )
+
+    recipe_url = _public_recipe_url(str(recipe.get("slug")))
+    name = str(recipe.get("name") or "Rezept")
+    already_imported = bool(data.get("alreadyImported"))
+    message = (
+        f"Schon im Rezeptbuch: {name} — {recipe_url}"
+        if already_imported
+        else f"Importiert: {name} — {recipe_url}"
+    )
+    return tool_result(
+        {
+            "imported": not already_imported,
+            "alreadyImported": already_imported,
+            "recipe": recipe,
+            "url": recipe_url,
+            "message": message,
+        }
+    )
+
+
 def fo_delete_recipe(name: str, confirm: bool = False) -> str:
     """Lösche ein Rezept aus dem Rezeptbuch (0078) — mit Confirm-Rückfrage.
 
@@ -1070,6 +1130,26 @@ FO_UPSERT_RECIPE_SCHEMA = {
     },
 }
 
+FO_IMPORT_RECIPE_SCHEMA = {
+    "name": "fo_import_recipe",
+    "description": (
+        "Importiere eine Rezept-URL direkt ins Rezeptbuch (NextGen-2 F3). "
+        "Nur HTTPS-URLs verwenden. Der bestehende FO-Endpunkt verarbeitet JSON-LD, "
+        "Dedupe und Foto-Kopie; die Antwort enthält einen deutschen Discord-Text "
+        "mit Rezepttitel und Link zu /recipes/<slug>."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "HTTPS-Rezept-URL, z. B. von Chefkoch.",
+            },
+        },
+        "required": ["url"],
+    },
+}
+
 FO_DELETE_RECIPE_SCHEMA = {
     "name": "fo_delete_recipe",
     "description": (
@@ -1302,6 +1382,15 @@ registry.register(
     ),
     check_fn=check_family_organizer_requirements,
     emoji="🍲",
+)
+
+registry.register(
+    name="fo_import_recipe",
+    toolset="family-organizer",
+    schema=FO_IMPORT_RECIPE_SCHEMA,
+    handler=lambda args, **kw: fo_import_recipe(url=args.get("url", "")),
+    check_fn=check_family_organizer_requirements,
+    emoji="🔗",
 )
 
 registry.register(
