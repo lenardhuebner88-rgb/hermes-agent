@@ -82,6 +82,11 @@ class TestMentionStrippedCommandDispatch:
 class TestAutoThreadingPreservesCommand:
     async def test_command_detected_after_auto_thread(self, discord_adapter, bot_user, monkeypatch):
         """@mention /help in channel with auto-thread → thread created AND command dispatched."""
+        monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_ALLOWED_CHANNELS", raising=False)
+        monkeypatch.delenv("DISCORD_IGNORED_CHANNELS", raising=False)
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
         monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
         fake_thread = make_fake_thread(thread_id=90001, name="help")
         msg = make_discord_message(
