@@ -8,7 +8,7 @@
  *   Reliability — /runs/reliability (pro Profil, min-n-gedämpft, 30d-Baseline)
  * Charts sind handgebaute SVG-Primitives (components/charts) — keine Lib.
  */
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
 import { de } from "../i18n/de";
 import { fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
@@ -206,6 +206,97 @@ function percentDelta(current: number, previous: number): string {
   return `${delta >= 0 ? "+" : "−"}${Math.abs(Math.round(delta * 100))} %`;
 }
 
+function profileCompletedRuns(profile: ReliabilityProfile): number {
+  const explicit = profile.outcomes.completed;
+  if (typeof explicit === "number") return explicit;
+  return profile.completed_rate == null ? 0 : Math.round(profile.completed_rate * profile.runs);
+}
+
+function weightedCompletedRate(profiles: ReliabilityProfile[]): number | null {
+  const runs = profiles.reduce((acc, p) => acc + p.runs, 0);
+  if (runs <= 0) return null;
+  const completed = profiles.reduce((acc, p) => acc + profileCompletedRuns(p), 0);
+  return completed / runs;
+}
+
+function fmtRoots(n: number) {
+  return `${n} Roots`;
+}
+
+function fmtTasks(n: number) {
+  return `${n} Tasks`;
+}
+
+export function StatsSignalPanel({ last7, reliabilityProfiles }: { last7: RunsDailyPoint[]; reliabilityProfiles: ReliabilityProfile[] }) {
+  const gradientId = useId().replace(/:/g, "");
+  const ringId = `${gradientId}-stats-signal-ring`;
+  const fillId = `${gradientId}-stats-signal-fill`;
+  const roots = last7.reduce((acc, p) => acc + p.done_roots, 0);
+  const tasks = last7.reduce((acc, p) => acc + p.done_tasks, 0);
+  const tokens = last7.reduce((acc, p) => acc + (p.output_tokens ?? 0), 0);
+  const completedRate = weightedCompletedRate(reliabilityProfiles);
+  const completedPct = completedRate == null ? null : Math.round(completedRate * 100);
+  const ring = completedPct == null ? 0 : Math.max(0, Math.min(100, completedPct));
+  const dash = `${ring} ${100 - ring}`;
+  const activeDays = last7.filter((p) => p.done_roots > 0 || p.done_tasks > 0).length;
+
+  return (
+    <FleetPanel eyebrow={de.stats.signal} meta={de.stats.signalHint} className="hc-stats-signal overflow-hidden">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(220px,.85fr)] lg:items-center">
+        <div className="space-y-3">
+          <p className="hc-hero-statement max-w-2xl text-2xl text-[var(--hc-text)] lg:text-3xl">
+            {de.stats.signalStatement(roots, tasks)}
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-xl border border-[var(--hc-border)] bg-white/[.035] p-3">
+              <span className="hc-eyebrow">{de.stats.signalRoots}</span>
+              <strong className="mt-2 block hc-mono text-lg text-[var(--hc-text)]">{fmtRoots(roots)}</strong>
+            </div>
+            <div className="rounded-xl border border-[var(--hc-border)] bg-white/[.035] p-3">
+              <span className="hc-eyebrow">{de.stats.signalTasks}</span>
+              <strong className="mt-2 block hc-mono text-lg text-[var(--hc-text)]">{fmtTasks(tasks)}</strong>
+            </div>
+            <div className="rounded-xl border border-[var(--hc-border)] bg-white/[.035] p-3">
+              <span className="hc-eyebrow">{de.stats.signalTokens}</span>
+              <strong className="mt-2 block hc-mono text-lg text-[var(--hc-text)]">{fmtTokens(tokens)} Tokens</strong>
+            </div>
+          </div>
+        </div>
+        <div className="relative mx-auto aspect-square w-full max-w-[17rem]">
+          <svg viewBox="0 0 120 120" className="h-full w-full" role="img" aria-label={de.stats.signalAria(completedPct)}>
+            <defs>
+              <linearGradient id={ringId} x1="10" y1="10" x2="110" y2="110" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stopColor="var(--hc-accent-strong)" />
+                <stop offset="55%" stopColor="var(--hc-accent)" />
+                <stop offset="100%" stopColor="var(--hc-cyan)" />
+              </linearGradient>
+              <radialGradient id={fillId} cx="50%" cy="42%" r="58%">
+                <stop offset="0%" stopColor="rgba(46,69,212,.18)" />
+                <stop offset="100%" stopColor="rgba(10,138,166,.02)" />
+              </radialGradient>
+            </defs>
+            <circle cx="60" cy="60" r="42" fill={`url(#${fillId})`} stroke="var(--hc-border)" strokeWidth="1" />
+            <circle cx="60" cy="60" r="46" fill="none" stroke="var(--hc-border)" strokeWidth="7" opacity=".75" />
+            <circle cx="60" cy="60" r="46" fill="none" stroke={`url(#${ringId})`} strokeWidth="7" strokeLinecap="round" pathLength="100" strokeDasharray={dash} transform="rotate(-90 60 60)" />
+            {last7.map((p, i) => {
+              const angle = (-120 + i * 40) * (Math.PI / 180);
+              const radius = 28 + Math.min(18, p.done_roots * 4 + p.done_tasks * 0.8);
+              const x = 60 + Math.cos(angle) * radius;
+              const y = 60 + Math.sin(angle) * radius;
+              return <circle key={`${p.date}-${i}`} cx={x.toFixed(1)} cy={y.toFixed(1)} r={p.done_roots > 0 ? 2.6 : 1.4} fill={p.done_roots > 0 ? "var(--hc-accent)" : "var(--hc-border-strong)"}><title>{`${dayLabel(p.date)} · ${p.done_roots} Roots · ${p.done_tasks} Tasks`}</title></circle>;
+            })}
+            <text x="60" y="57" textAnchor="middle" className="hc-mono" fill="var(--hc-text)" fontSize="18" fontWeight="700">{completedPct == null ? "—" : `${completedPct}%`}</text>
+            <text x="60" y="73" textAnchor="middle" className="hc-eyebrow" fill="var(--hc-text-dim)">{de.stats.signalRateShort}</text>
+          </svg>
+          <div className="pointer-events-none absolute inset-x-0 bottom-4 text-center hc-type-label hc-soft">
+            {de.stats.signalActiveDays(activeDays)}
+          </div>
+        </div>
+      </div>
+    </FleetPanel>
+  );
+}
+
 // Wochenvergleich: rollierende letzte 7 Kalendertage gegen die 7 Tage davor.
 // Frontend-only aus /runs/daily; keine Kalenderwochen, keine Backend-Erweiterung.
 export function WochenvergleichPanel({ series }: { series: RunsDailyPoint[] }) {
@@ -327,6 +418,7 @@ export function StatistikView() {
         <FleetEmptyState title={de.stats.empty} desc="" />
       ) : (
         <>
+          <StatsSignalPanel last7={last7} reliabilityProfiles={reliability.data?.profiles ?? []} />
           <WertBilanzPanel last7={last7} />
           <WochenvergleichPanel series={series} />
 
