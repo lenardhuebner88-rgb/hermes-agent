@@ -78,6 +78,27 @@ describe("FlowView review gate and RESULT artifacts", () => {
     expect(html).not.toContain("Ausliefern");
   });
 
+  it("post-approved review fixture restores manual action copy after grace fallback", () => {
+    const html = renderToStaticMarkup(
+      <FlowRunCard
+        task={{ ...baseTask, id: "t_review_approved_stale" }}
+        enriched={{ verdict: "APPROVED", reviewRunState: "approved" }}
+        selected={false}
+        busy={false}
+        now={200}
+        dispatchChoice={null}
+        manualReviewFallback
+        onSelect={noop}
+        onAct={noopAct}
+      />,
+    );
+
+    expect(html).toContain("Verifier APPROVED");
+    expect(html).toContain("Übergang ausgeblieben");
+    expect(html).toContain("Ausliefern");
+    expect(html).toContain("Nacharbeit");
+  });
+
   it("done artifact fixture shows a RESULT CTA target from metadata artifacts in the detail rail", () => {
     const detail: TaskDetailResponse = {
       task: { id: "t_result_artifact", title: "Spec-Draft fertig", status: "done", assignee: "coder", latest_summary: "RESULT.md gesichert" },
