@@ -145,3 +145,44 @@ def test_triage_decision_is_frozen_dataclass():
     d = TriageDecision(bucket=Bucket.NOISE, reply=None)
     assert d.bucket is Bucket.NOISE
     assert d.reply is None
+
+
+# --- run_triage: spawn-cmd contract ----------------------------------------
+
+
+def test_run_triage_cmd_excludes_memsearch(monkeypatch):
+    """The per-message classifier must not load the memsearch memory plugin
+    (Planspec 2026-06-12 memsearch-voll-rollout, T3): targeted --settings
+    disable on the cmd + MEMSEARCH_NO_WATCH belt in the env."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from bridges.discord_prefilter import triage as triage_mod
+    from bridges.discord_prefilter.config import PrefilterConfig
+
+    config = PrefilterConfig(
+        discord_token="x",
+        channel_id=1,
+        model="haiku",
+        claude_bin="/usr/bin/true",
+        noise_matchers=build_noise_matchers([]),
+    )
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return SimpleNamespace(returncode=0, stdout=_envelope(
+            json.dumps({"bucket": "escalate", "reply": None})
+        ), stderr="")
+
+    with mock.patch.object(triage_mod.subprocess, "run", fake_run):
+        triage_mod.run_triage("echte Aufgabe bitte", config)
+
+    cmd = captured["cmd"]
+    s_idx = cmd.index("--settings")
+    settings = json.loads(cmd[s_idx + 1])
+    assert settings["enabledPlugins"]["memsearch@memsearch-plugins"] is False
+    assert "--bare" not in cmd
+    assert captured["env"]["MEMSEARCH_NO_WATCH"] == "1"

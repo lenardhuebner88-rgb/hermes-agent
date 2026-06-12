@@ -198,6 +198,12 @@ def run_triage(message: str, config: "PrefilterConfig") -> TriageDecision:
         # flag is needed (and none is used, by design).
         "--tools",
         "",
+        # The classifier runs per Discord message — without this disable the
+        # user-global memsearch plugin would inject shared memories into every
+        # classification and spawn a haiku summarize per message (Planspec
+        # 2026-06-12 memsearch-voll-rollout, T3).
+        "--settings",
+        '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
     ]
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv built above

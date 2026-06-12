@@ -112,6 +112,9 @@ class PrefilterConfig:
         env = dict(os.environ)
         for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
             env.pop(key, None)
+        # Belt to the --settings plugin disable in triage.py: never let the
+        # memsearch watcher manage processes from a per-message classifier.
+        env["MEMSEARCH_NO_WATCH"] = "1"
         return env
 
     def hermes_env(self) -> dict:

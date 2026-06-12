@@ -10658,6 +10658,15 @@ def _spawn_claude_worker(
     for key in _WORKER_LANE_PROVIDER_KEYS | {"ANTHROPIC_API_KEY"}:
         env.pop(key, None)
 
+    # memsearch stays out of headless workers: the user-global memory plugin
+    # would inject shared session memories into the worker context at
+    # SessionStart and spawn a haiku summarize on every Stop — per worker,
+    # per turn. Suppress the watcher belt-and-suspenders via env; the actual
+    # plugin disable is the --settings flag on the cmd below (NOT --bare,
+    # which would also drop the guard-dangerous-ops PreToolUse hook the S2
+    # hardening relies on).
+    env["MEMSEARCH_NO_WATCH"] = "1"
+
     body = task.body or ""
     title = task.title or ""
     # Worker isolation (Phase 2, Entscheidung 1): the commit contract is
@@ -10725,6 +10734,10 @@ def _spawn_claude_worker(
         # workers too.
         "--disallowedTools", "WebFetch,WebSearch",
         "--output-format", "json",
+        # Keep the memsearch memory plugin out of worker sessions (see env
+        # comment above). enabledPlugins merges into user settings, so other
+        # plugins (superpowers, guard hooks) keep their normal state.
+        "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
     ]
     # Model routing: per-task override > active lane (F1) > per-profile default
     # (claude_model) > subscription default (omit --model). A profile can default

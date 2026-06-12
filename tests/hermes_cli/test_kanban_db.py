@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import sqlite3
 import sys
@@ -3687,6 +3688,38 @@ class TestClaudeCliWorkerSpawn:
         assert "chat" not in cmd
         # Env carries the kanban contract.
         assert captured["env"]["HERMES_KANBAN_TASK"] == task.id
+
+    def test_default_spawn_claude_excludes_memsearch(self, tmp_path, monkeypatch):
+        """Headless workers must not load the memsearch memory plugin:
+        the --settings disable AND the MEMSEARCH_NO_WATCH belt are both on
+        the spawn (Planspec 2026-06-12 memsearch-voll-rollout, T3)."""
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        self._set_home(monkeypatch, tmp_path, default_home)
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["env"] = kwargs.get("env", {})
+                self.pid = 7779
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder")
+
+        task = self._make_task(tmp_path, assignee="coder")
+        kb._default_spawn(task, str(tmp_path / "ws"))
+
+        cmd = captured["cmd"]
+        s_idx = cmd.index("--settings")
+        settings = json.loads(cmd[s_idx + 1])
+        assert settings["enabledPlugins"]["memsearch@memsearch-plugins"] is False
+        # --bare would also drop the guard-dangerous-ops PreToolUse hook (S2);
+        # the exclusion must stay a targeted plugin disable.
+        assert "--bare" not in cmd
+        assert captured["env"]["MEMSEARCH_NO_WATCH"] == "1"
 
     def test_default_spawn_claude_appends_model_override(self, tmp_path, monkeypatch):
         default_home = tmp_path / ".hermes"
