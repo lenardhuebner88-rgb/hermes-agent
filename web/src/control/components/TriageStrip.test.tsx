@@ -7,6 +7,7 @@ import {
   escalationPlan,
   type LanesRuntimeInfo,
 } from "../views/lanes/api";
+import { triageRequeueState } from "./TriageStrip";
 
 // „Nochmal stärker" muss auf jedem Profil wirklich stärker sein: auf
 // Nicht-claude-cli-Runtimes (ohne Anthropic-Key fiele der Worker still aufs
@@ -124,5 +125,29 @@ describe("escalationPlan", () => {
     });
 
     expect(escalationPatchSequence(plan)).toEqual([]);
+  });
+});
+
+// Ein „Nochmal"-Klick stellt nur auf ready — der Dispatch hängt am 60s-Tick
+// und der Lane-Kapazität. Ohne sichtbaren Requeue-Zustand sah der Button tot
+// aus (Operator-Befund 2026-06-12, t_748896f7: Karte blieb scheinbar
+// unverändert „blocked", obwohl der Klick gewirkt hatte).
+describe("triageRequeueState", () => {
+  it("ready → eingereiht-Plakette, Retry-Button entfällt", () => {
+    const state = triageRequeueState("ready");
+    expect(state.requeued).toBe(true);
+    expect(state.label).toContain("eingereiht");
+    expect(state.label).toContain("Lane");
+  });
+
+  it("scheduled → zurückgestellt-Plakette", () => {
+    const state = triageRequeueState("scheduled");
+    expect(state.requeued).toBe(true);
+    expect(state.label).toContain("zurückgestellt");
+  });
+
+  it("blocked/todo → normale Aktions-Buttons (kein Requeue-Zustand)", () => {
+    expect(triageRequeueState("blocked")).toEqual({ requeued: false, label: null });
+    expect(triageRequeueState("todo")).toEqual({ requeued: false, label: null });
   });
 });

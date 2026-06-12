@@ -25,6 +25,7 @@ const t = {
   retry: "Nochmal",
   escalate: "Nochmal stärker",
   retryHint: "stellt den Task wieder ready (gleiche Lane)",
+  escalateQueuedHint: "eskaliert die schon eingereihte Karte, bevor der Dispatcher sie zieht",
   confirm: "Bestätigen",
   cancel: "Abbrechen",
   done: (id: string) => `${id} wieder eingereiht.`,
@@ -32,6 +33,29 @@ const t = {
   doneReassigned: (id: string, model: string) =>
     `${id} auf premium umgehängt (${model}) und wieder eingereiht.`,
 };
+
+// Ein Klick auf „Nochmal" stellt den Task nur auf ready — dispatcht wird er
+// erst, wenn der 60s-Dispatcher-Tick UND die Lane-Kapazität (max_in_progress
+// pro Profil) es zulassen. Ohne sichtbaren Zustand sah das nach einem toten
+// Button aus (Operator-Befund 2026-06-12, t_748896f7): die Karte blieb
+// unverändert „blocked" in der Liste stehen. Darum spiegelt die Karte jetzt
+// den LIVE-Task-Status: eingereihte Karten zeigen eine Warte-Plakette statt
+// des sinnlosen Retry-Buttons (Eskalieren bleibt möglich — model_override
+// und Lane-Wechsel wirken auch vor dem Dispatch).
+export interface TriageRequeueState {
+  requeued: boolean;
+  label: string | null;
+}
+
+export function triageRequeueState(taskStatus: string): TriageRequeueState {
+  if (taskStatus === "ready") {
+    return { requeued: true, label: "wieder eingereiht — wartet auf Dispatcher-Tick + freie Lane" };
+  }
+  if (taskStatus === "scheduled") {
+    return { requeued: true, label: "zurückgestellt — wartet auf den geplanten Termin" };
+  }
+  return { requeued: false, label: null };
+}
 
 export interface TriageFailure {
   run_id: number;
@@ -147,6 +171,7 @@ export function TriageStrip() {
           {data.failures.map((f) => {
             const isPending = pending?.taskId === f.task_id ? pending : null;
             const escalation = escalationPlan(f.profile, lanes);
+            const requeue = triageRequeueState(f.task_status);
             return (
               <li key={f.task_id} className="rounded-md border border-red-500/20 px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2">
@@ -158,6 +183,11 @@ export function TriageStrip() {
                 </div>
                 {f.reason ? <p className="mt-1 line-clamp-2 text-[0.76rem] hc-dim">{f.reason}</p> : null}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {requeue.requeued ? (
+                    <span className="hc-mono inline-flex min-h-9 items-center rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[0.72rem] text-emerald-200">
+                      {requeue.label}
+                    </span>
+                  ) : null}
                   {isPending ? (
                     <>
                       <button
@@ -178,12 +208,17 @@ export function TriageStrip() {
                     </>
                   ) : (
                     <>
-                      <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "retry" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft hover:bg-white/5">
-                        <RotateCw className="h-3.5 w-3.5" />{t.retry}
-                      </button>
+                      {requeue.requeued ? null : (
+                        <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "retry" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft hover:bg-white/5">
+                          <RotateCw className="h-3.5 w-3.5" />{t.retry}
+                        </button>
+                      )}
                       <button type="button" disabled={busy} onClick={() => setPending({ taskId: f.task_id, kind: "escalate" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-amber-500/30 px-3 py-1 text-[0.78rem] text-amber-200 hover:bg-amber-500/10">
                         <Zap className="h-3.5 w-3.5" />{t.escalate}
                       </button>
+                      {requeue.requeued ? (
+                        <span className="text-[0.72rem] hc-dim">{t.escalateQueuedHint}</span>
+                      ) : null}
                     </>
                   )}
                 </div>
