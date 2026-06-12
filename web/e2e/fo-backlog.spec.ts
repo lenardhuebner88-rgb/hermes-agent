@@ -303,9 +303,7 @@ test.describe("FO backlog command UX", () => {
     expect(persisted).toMatchObject({ quickView: "stale", sortKey: "risk", filterRisk: "high" });
 
     await page.reload();
-    // Gleiche Boot-Stall-Toleranz wie gotoBacklog (15s, /api/profiles-Befund
-    // 2026-06-12) — der Reload bootet die SPA komplett neu.
-    await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "Stale" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("button", { name: "Risiko" })).toHaveClass(/border-cyan/);
     await expect(page.getByRole("button", { name: "high" })).toHaveClass(/border-cyan/);
