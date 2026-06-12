@@ -2431,9 +2431,14 @@ def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
     """Read the SQLite header page_count and compare against actual file size.
 
     Raises sqlite3.DatabaseError if the file is shorter than the header claims
-    (torn-extend corruption).
+    (torn-extend corruption). Skips WAL-mode connections: uncheckpointed WAL
+    commits and concurrent checkpoints can leave the main DB file temporarily
+    behind the logical page count that SQLite exposes via the connection.
     """
     try:
+        mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+        if mode_row and str(mode_row[0]).lower() == "wal":
+            return
         row = conn.execute("PRAGMA database_list").fetchone()
         if row is None:
             return

@@ -5450,6 +5450,7 @@ def test_write_txn_raises_on_truncated_file(tmp_path):
     from hermes_cli.kanban_db import connect, write_txn
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
+    conn.execute("PRAGMA journal_mode=DELETE")
     # Get actual page size so we can fake a smaller file
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     original_getsize = os.path.getsize
@@ -5466,6 +5467,31 @@ def test_write_txn_raises_on_truncated_file(tmp_path):
                     "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
                     "VALUES ('t_test02', 'test task 2', 'tester', 'todo', 0, 1234567890)"
                 )
+    conn.close()
+
+
+def test_write_txn_wal_mode_ignores_transient_main_file_size_lag(tmp_path):
+    """WAL commits must not treat an uncheckpointed main DB as torn-extend."""
+    from hermes_cli.kanban_db import connect, write_txn
+
+    db = tmp_path / "test.db"
+    conn = connect(db_path=db)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    original_getsize = os.path.getsize
+
+    def fake_getsize(path):
+        real_size = original_getsize(path)
+        return max(0, real_size - page_size)
+
+    with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
+        with write_txn(conn) as c:
+            c.execute(
+                "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                "VALUES ('t_wal001', 'wal task', 'tester', 'todo', 0, 1234567890)"
+            )
+    row = conn.execute("SELECT title FROM tasks WHERE id='t_wal001'").fetchone()
+    assert row["title"] == "wal task"
     conn.close()
 
 
@@ -5507,29 +5533,38 @@ def test_connect_sets_wal_autocheckpoint_100(tmp_path):
 def test_write_txn_check_reads_correct_header_fields(tmp_path):
     """Synthetic DB file with mismatched header page_count triggers the check."""
     import struct
-    from hermes_cli.kanban_db import connect, _check_file_length_invariant
+    from hermes_cli.kanban_db import _check_file_length_invariant
+
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _FakeConn:
+        def __init__(self, db_path: Path, page_size: int):
+            self._db_path = db_path
+            self._page_size = page_size
+
+        def execute(self, sql):
+            sql = sql.lower()
+            if "journal_mode" in sql:
+                return _Cursor(("delete",))
+            if "database_list" in sql:
+                return _Cursor((0, "main", str(self._db_path)))
+            if "page_size" in sql:
+                return _Cursor((self._page_size,))
+            raise AssertionError(f"unexpected SQL: {sql}")
+
     db = tmp_path / "synthetic.db"
-    conn = connect(db_path=db)
-    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-    conn.close()
-    # Now corrupt the file: claim N pages but truncate to N-1 pages
-    with open(db, "rb") as f:
-        data = bytearray(f.read())
-    # Read current page_count from header bytes 28-31
-    real_page_count = struct.unpack(">I", data[28:32])[0]
-    if real_page_count < 2:
-        # Need at least 2 pages to fake a truncation
-        pytest.skip("DB too small for synthetic truncation test")
-    # Truncate to N-1 pages
-    truncated = bytes(data[: (real_page_count - 1) * page_size])
-    with open(db, "wb") as f:
-        f.write(truncated)
-    # Now open and check — should raise
-    # We can't use connect() because _validate_sqlite_header may block; use a raw connection
-    raw_conn = sqlite3.connect(str(db), isolation_level=None)
+    page_size = 4096
+    header = bytearray(b"SQLite format 3\x00" + (b"\x00" * (page_size - 16)))
+    header[16:18] = struct.pack(">H", page_size)
+    header[28:32] = struct.pack(">I", 2)
+    db.write_bytes(header)
     with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
-        _check_file_length_invariant(raw_conn)
-    raw_conn.close()
+        _check_file_length_invariant(_FakeConn(db, page_size))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
