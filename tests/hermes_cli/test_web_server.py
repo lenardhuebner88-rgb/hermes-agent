@@ -2588,6 +2588,41 @@ class TestNewEndpoints:
         third = [p["name"] for p in self.client.get("/api/profiles").json()["profiles"]]
         assert "cachetest2" in third
 
+    def test_profiles_list_cache_invalidates_on_nested_skill_change(
+        self, monkeypatch, tmp_path
+    ):
+        # skill_count counts SKILL.md recursively; installing a skill under an
+        # EXISTING category dir moves only that subdir's mtime, not skills/
+        # itself — the fingerprint must still pick it up (regression: stale
+        # skill_count after `hermes skills install` into a known category).
+        from hermes_constants import get_hermes_home
+
+        home = get_hermes_home()
+        named = home / "profiles" / "skillcache"
+        category = named / "skills" / "software-development"
+        first_skill = category / "plan"
+        first_skill.mkdir(parents=True)
+        (first_skill / "SKILL.md").write_text("---\nname: plan\n---\n", encoding="utf-8")
+        self._reset_profiles_cache(monkeypatch, tmp_path)
+
+        first = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
+        assert first["skillcache"]["skill_count"] == 1
+
+        second_skill = category / "debug"
+        second_skill.mkdir()
+        (second_skill / "SKILL.md").write_text("---\nname: debug\n---\n", encoding="utf-8")
+
+        second = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
+        assert second["skillcache"]["skill_count"] == 2, (
+            "nested skill install must invalidate the /api/profiles cache"
+        )
+
+        # Removal under the existing category must invalidate as well.
+        (second_skill / "SKILL.md").unlink()
+        second_skill.rmdir()
+        third = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
+        assert third["skillcache"]["skill_count"] == 1
+
     def test_profiles_list_cache_hit_refreshes_gateway_liveness(self, monkeypatch, tmp_path):
         # gateway_running can flip without any file changing (process death),
         # so it is re-checked even when the payload comes from the cache.

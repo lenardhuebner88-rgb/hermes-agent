@@ -8867,9 +8867,12 @@ def _profiles_signature(profiles_mod) -> tuple:
 
     Anchored to the same roots ``list_profiles()`` scans (default HERMES_HOME
     plus ``<root>/profiles/``), so profile create/delete/rename and config or
-    metadata edits all move the fingerprint. The skills dir mtime moves when a
-    skill is installed/removed (new/removed child dir), which is exactly when
-    ``skill_count`` changes. Wrapper-dir entries cover alias changes.
+    metadata edits all move the fingerprint. ``skill_count`` counts SKILL.md
+    files recursively (``rglob``), and creating/removing a file or dir moves
+    its *parent* directory's mtime — so the skills part of the fingerprint
+    stats every directory in the skills tree, not just its root (a skill added
+    under an existing category dir leaves the root mtime untouched).
+    Wrapper-dir entries cover alias changes.
     """
     def _stat_sig(path: Path):
         try:
@@ -8878,9 +8881,22 @@ def _profiles_signature(profiles_mod) -> tuple:
         except OSError:
             return None
 
+    def _skills_tree_sig(skills_dir: Path) -> Optional[tuple]:
+        if not skills_dir.is_dir():
+            return None
+        parts: List[Any] = []
+        for dirpath, dirnames, _filenames in os.walk(skills_dir):
+            dirnames.sort()
+            try:
+                st = os.stat(dirpath)
+                parts.append((os.path.relpath(dirpath, skills_dir), st.st_mtime_ns))
+            except OSError:
+                parts.append((os.path.relpath(dirpath, skills_dir), None))
+        return tuple(parts)
+
     def _dir_sig(profile_dir: Path) -> tuple:
         sig = tuple(_stat_sig(profile_dir / name) for name in _PROFILE_SIG_FILES)
-        return sig + (_stat_sig(profile_dir / "skills"),)
+        return sig + (_skills_tree_sig(profile_dir / "skills"),)
 
     parts: List[Any] = []
     default_home = profiles_mod._get_default_hermes_home()
@@ -9059,12 +9075,14 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
 
 @app.get("/api/profiles")
 async def list_profiles_endpoint():
+    # to_thread: even the cached path stat-walks the skills trees (tens of ms),
+    # which must not block the event loop during SPA boot fan-out.
     from hermes_cli import profiles as profiles_mod
     try:
-        return {"profiles": _list_profile_dicts_cached(profiles_mod)}
+        return {"profiles": await asyncio.to_thread(_list_profile_dicts_cached, profiles_mod)}
     except Exception:
         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
+        return {"profiles": await asyncio.to_thread(_fallback_profile_dicts, profiles_mod)}
 
 
 @app.post("/api/profiles")
