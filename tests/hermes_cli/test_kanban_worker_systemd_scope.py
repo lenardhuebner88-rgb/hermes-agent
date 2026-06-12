@@ -28,10 +28,11 @@ def test_wraps_when_enabled_and_usable(monkeypatch):
     monkeypatch.setenv("HERMES_WORKER_SYSTEMD_SCOPE", "1")
     monkeypatch.setattr(kb, "_systemd_scope_usable", lambda: True)
     wrapped = kb._maybe_scope_worker_cmd(CMD)
-    assert wrapped[:6] == [
-        "systemd-run", "--user", "--scope", "--quiet", "--collect", "--",
+    assert wrapped[:7] == [
+        "systemd-run", "--user", "--scope", "--quiet", "--collect",
+        "--property=CPUWeight=30", "--",
     ]
-    assert wrapped[6:] == CMD
+    assert wrapped[7:] == CMD
 
 
 def test_no_wrap_when_probe_fails(monkeypatch):

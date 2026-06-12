@@ -10472,8 +10472,13 @@ def _maybe_scope_worker_cmd(cmd: list[str]) -> list[str]:
         return cmd
     if not _systemd_scope_usable():
         return cmd
+    # CPUWeight=30 (default 100): under contention the kernel gives worker
+    # scopes ~1/10 of the dashboard's share (its unit runs at CPUWeight=300),
+    # so a worker's test gate can no longer starve interactive /control
+    # requests. Idle machine = workers still get full speed.
     return [
-        "systemd-run", "--user", "--scope", "--quiet", "--collect", "--",
+        "systemd-run", "--user", "--scope", "--quiet", "--collect",
+        "--property=CPUWeight=30", "--",
     ] + cmd
 
 
