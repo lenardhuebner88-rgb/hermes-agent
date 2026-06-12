@@ -11,6 +11,7 @@ import {
   escalationPlan,
   type LanesRuntimeInfo,
 } from "../views/lanes/api";
+import { triageRequeueState } from "./triage";
 
 // Phase F (Programm 3): Fehler-Triage mit Ein-Klick-Eskalation. Gescheiterte
 // Runs der letzten 48h werden eine Queue mit Aktionen statt ein Suchauftrag:
@@ -33,29 +34,6 @@ const t = {
   doneReassigned: (id: string, model: string) =>
     `${id} auf premium umgehängt (${model}) und wieder eingereiht.`,
 };
-
-// Ein Klick auf „Nochmal" stellt den Task nur auf ready — dispatcht wird er
-// erst, wenn der 60s-Dispatcher-Tick UND die Lane-Kapazität (max_in_progress
-// pro Profil) es zulassen. Ohne sichtbaren Zustand sah das nach einem toten
-// Button aus (Operator-Befund 2026-06-12, t_748896f7): die Karte blieb
-// unverändert „blocked" in der Liste stehen. Darum spiegelt die Karte jetzt
-// den LIVE-Task-Status: eingereihte Karten zeigen eine Warte-Plakette statt
-// des sinnlosen Retry-Buttons (Eskalieren bleibt möglich — model_override
-// und Lane-Wechsel wirken auch vor dem Dispatch).
-export interface TriageRequeueState {
-  requeued: boolean;
-  label: string | null;
-}
-
-export function triageRequeueState(taskStatus: string): TriageRequeueState {
-  if (taskStatus === "ready") {
-    return { requeued: true, label: "wieder eingereiht — wartet auf Dispatcher-Tick + freie Lane" };
-  }
-  if (taskStatus === "scheduled") {
-    return { requeued: true, label: "zurückgestellt — wartet auf den geplanten Termin" };
-  }
-  return { requeued: false, label: null };
-}
 
 export interface TriageFailure {
   run_id: number;
