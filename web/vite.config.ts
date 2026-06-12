@@ -133,7 +133,8 @@ export default defineConfig({
     exclude: ["node_modules/**", "dist/**", "e2e/**"],
     // Lastdeckel: ungedeckelt flutet vitest alle 12 Kerne und kollidiert mit
     // parallelen Worker-Gates/Builds (Load-Spike 2026-06-12). Wert wie im
-    // Family Organizer nach derselben Lektion.
+    // Family Organizer nach derselben Lektion. minWorkers muss in vitest 2.x
+    // explizit unter den Deckel, sonst RangeError gegen das CPU-Default-Minimum.
     minWorkers: 1,
     maxWorkers: 4,
   },

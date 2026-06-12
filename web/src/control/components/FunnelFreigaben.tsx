@@ -5,6 +5,7 @@ import { fmtClock } from "../lib/derive";
 import { FleetPanel } from "./fleet/atoms";
 import { ToneCallout } from "./atoms";
 import { Markdown } from "./Markdown";
+import { Overlay } from "./Overlay";
 import { funnelDraftEditRequest } from "./funnelDraftEditRequest";
 
 // Demand-Funnel Freigabe-Queue: fertige Drafts aus dem Wunsch-Trichter
@@ -216,7 +217,7 @@ export function FunnelFreigaben() {
           busy={modalBusy}
           onEditTextChange={setEditText}
           onOperatorNoteChange={setOperatorNote}
-          onClose={() => setEditingDraft(null)}
+          onClose={() => { if (!modalBusy) setEditingDraft(null); }}
           onSave={() => void handleSaveEdit()}
           onRevise={() => void handleRevise()}
           onBuild={() => void handleBuildFinal()}
@@ -346,8 +347,8 @@ export function DraftEditDialog({
   onBuild: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="funnel-draft-edit-title">
-      <div className="max-h-[94vh] w-full max-w-3xl overflow-hidden rounded-t-2xl border border-white/10 bg-[var(--hc-panel)] shadow-2xl sm:rounded-2xl">
+    <Overlay ariaLabel={t.editTitle} closeDisabled={busy} maxWidthClassName="max-w-3xl" onClose={onClose}>
+      <div className="-mx-4 -mt-4 overflow-hidden rounded-t-2xl sm:rounded-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
           <div className="min-w-0">
             <p className="hc-mono text-[0.68rem] uppercase tracking-[0.18em] hc-dim">{SOURCE_LABEL[draft.created_by] ?? draft.created_by} · {draft.id}</p>
@@ -390,6 +391,6 @@ export function DraftEditDialog({
           </button>
         </div>
       </div>
-    </div>
+    </Overlay>
   );
 }
