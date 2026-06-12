@@ -7,7 +7,7 @@ import {
   escalationPlan,
   type LanesRuntimeInfo,
 } from "../views/lanes/api";
-import { triageRequeueState } from "./TriageStrip";
+import { triageRequeueState } from "./triage";
 
 // „Nochmal stärker" muss auf jedem Profil wirklich stärker sein: auf
 // Nicht-claude-cli-Runtimes (ohne Anthropic-Key fiele der Worker still aufs
