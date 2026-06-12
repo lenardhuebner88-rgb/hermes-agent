@@ -52,6 +52,16 @@ export const de = {
     weekCompareOutTokens: "Out-Tokens",
     weekCompareMeasuredCost: "gemessene $",
     weekCompareNoPrior: "—",
+    // Signalbild: editorialer Überblick mit Abschlussring + Wochenpunkte.
+    signal: "Signalbild",
+    signalHint: "Woche · Abschlussrate · Burn in einem Instrument",
+    signalStatement: (roots: number, tasks: number) => `${roots} Roots / ${tasks} Tasks — sichtbar als Flotten-Takt statt Zahlenwand.`,
+    signalRoots: "Roots",
+    signalTasks: "Tasks",
+    signalTokens: "Token-Burn",
+    signalRateShort: "Abschluss",
+    signalActiveDays: (n: number) => `${n}/7 aktive Tage`,
+    signalAria: (pct: number | null) => pct == null ? "Abschlussrate unbekannt" : `Abschlussrate ${pct} %`,
     // Epic-Kompaktübersicht (eine Zeile pro offenem Epic).
     epics: "Offene Epics",
     epicsHint: "Fortschritt + Token-Burn pro Vorhaben · aus dem Live-Rollup",

@@ -363,6 +363,25 @@ body:has([data-control]) header[role="banner"] { display: none; }
 }
 .hc-fleet-pod-value small { font-size: 0.8rem; color: var(--hc-text-dim); font-weight: 500; }
 
+/* Stats signal instrument — a focal editorial card for /control/statistik:
+   soft chart-paper wash, ultramarine edge, and a radial command graph. */
+.hc-stats-signal {
+  position: relative;
+  border-color: color-mix(in srgb, var(--hc-accent) 24%, var(--hc-border));
+  background:
+    radial-gradient(95% 120% at 82% 12%, rgba(46,69,212,.10), transparent 48%),
+    radial-gradient(70% 85% at 100% 90%, rgba(10,138,166,.08), transparent 56%),
+    linear-gradient(180deg, #ffffff 0%, var(--hc-panel-card) 100%);
+}
+.hc-stats-signal::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  border-radius: inherit;
+  background: var(--hc-aurora);
+}
+
 /* Quiet empty state — dashed hairline box, calm copy. `.ok` greens the title. */
 .hc-fleet-empty {
   display: flex; flex-direction: column; gap: 0.4rem;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBreakdownPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
+import { CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
 import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 
 const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
@@ -119,6 +119,30 @@ describe("WochenvergleichPanel", () => {
   });
 });
 
+describe("StatsSignalPanel", () => {
+  it("rendert ein visuelles Signalbild mit typografischer Hero-Zahl und gewichteter Abschlussrate", () => {
+    const html = renderToStaticMarkup(
+      <StatsSignalPanel
+        last7={[
+          dailyPoint({ done_roots: 2, done_tasks: 5, output_tokens: 1200 }),
+          dailyPoint({ done_roots: 3, done_tasks: 7, output_tokens: 1800 }),
+        ]}
+        reliabilityProfiles={[
+          { profile: "coder", runs: 8, tasks: 8, outcomes: { completed: 6 }, completed_rate: 0.75, failed_rate: 0.125, retries: 1, retry_rate: 0.125, judged: 2, approved: 2, rejected: 0, approve_rate: 1, low_sample: false },
+          { profile: "verifier", runs: 2, tasks: 2, outcomes: { completed: 1 }, completed_rate: 0.5, failed_rate: 0, retries: 0, retry_rate: 0, judged: 0, approved: 0, rejected: 0, approve_rate: null, low_sample: true },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("Signalbild");
+    expect(html).toContain("hc-stats-signal");
+    expect(html).toContain("hc-hero-statement");
+    expect(html).toContain("aria-label=\"Abschlussrate 70 %\"");
+    expect(html).toContain("5 Roots");
+    expect(html).toContain("12 Tasks");
+    expect(html).toContain("3 k Tokens");
+  });
+});
 
 describe("WertBilanzPanel (T5)", () => {
   it("summiert die Woche pro Klasse", () => {
