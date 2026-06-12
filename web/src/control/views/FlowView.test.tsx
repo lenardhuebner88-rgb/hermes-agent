@@ -117,6 +117,14 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/DeliverableOpenButton url=\{specUrl\}/);
     expect(src).not.toMatch(/href=\{specUrl\}/);
   });
+
+  it("keeps an active verifier exclusive but restores manual review actions after terminal-verdict grace", () => {
+    expect(src).toMatch(/VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000/);
+    expect(src).toMatch(/verifierGateFirstSeenRef/);
+    expect(src).toMatch(/activeVerifier[^\n]+return false/);
+    expect(src).toMatch(/manualReviewFallbackById/);
+    expect(src).toMatch(/Übergang ausgeblieben — manuell abnehmen/);
+  });
 });
 
 describe("FlowView mobile compaction + scroll stability (Variante B)", () => {

@@ -63,6 +63,7 @@ import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
 
 const MAX_CARDS = 12;
 const MAX_DELIVERED = 8;
+const VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000;
 
 function flowTaskDomId(taskId: string): string {
   return `flow-task-${encodeURIComponent(taskId)}`;
@@ -130,6 +131,17 @@ function reviewGateStatus(enriched: Enriched): string | null {
   return null;
 }
 
+function terminalVerifierGateKey(enriched: Enriched): string | null {
+  if (enriched.activeVerifier) return null;
+  if (enriched.reviewRunState === "approved" || enriched.reviewRunState === "request_changes") return enriched.reviewRunState;
+  return null;
+}
+
+function shouldExposeManualReviewFallback(enriched: Enriched, firstSeenAt: number | null | undefined, now: number): boolean {
+  if (enriched.activeVerifier) return false;
+  return terminalVerifierGateKey(enriched) != null && firstSeenAt != null && now - firstSeenAt >= VERIFIER_GATE_TERMINAL_GRACE_MS / 1000;
+}
+
 function sameEnriched(a: Enriched, b: Enriched): boolean {
   return (
     a.workerProfile === b.workerProfile &&
@@ -169,22 +181,27 @@ interface FlowDispatchChoice extends HeldFlowDispatchGuard {
   taskId: string;
 }
 
-function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStatus, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
+function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStatus, manualReviewFallback, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: {
   status: BoardTask["status"]; busy: boolean; error?: string; dispatchChoice?: FlowDispatchChoice | null;
-  verifierGateStatus?: string | null;
+  verifierGateStatus?: string | null; manualReviewFallback?: boolean;
   onReleaseChain?: () => void; onDispatchSingle?: () => void; onCancelDispatchChoice?: () => void; onAct: (action: StageAction) => void;
 }) {
   const [pending, setPending] = useState<StageAction | null>(null);
   const actions = stageActions(status);
   const guard = stageGuard(status);
   const reviewIsVerifierDriven = status === "review" && verifierGateStatus;
+  const reviewActionsLockedByActiveVerifier = reviewIsVerifierDriven && !manualReviewFallback;
   return (
     <div className="mt-2.5" onClick={(e) => e.stopPropagation()}>
       {reviewIsVerifierDriven ? (
-        <p className="flex items-center gap-1.5 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 hc-type-label text-cyan-100">
-          <ShieldCheck className="h-3 w-3" />{verifierGateStatus}
-        </p>
-      ) : dispatchChoice ? (
+        <div className="space-y-1.5">
+          <p className="flex items-center gap-1.5 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 hc-type-label text-cyan-100">
+            <ShieldCheck className="h-3 w-3" />{verifierGateStatus}
+          </p>
+          {manualReviewFallback ? <p className="hc-type-label hc-soft">Übergang ausgeblieben — manuell abnehmen</p> : null}
+        </div>
+      ) : null}
+      {reviewActionsLockedByActiveVerifier ? null : dispatchChoice ? (
         <div className="rounded-md border border-emerald-400/30 bg-emerald-400/10 p-2">
           <p className="hc-type-label text-emerald-100">{de.flow.singleDispatch.prompt}</p>
           <p className="mt-1 hc-type-label hc-soft">{de.flow.singleDispatch.heldSiblings(dispatchChoice.heldSiblingIds.length)}</p>
@@ -225,7 +242,7 @@ function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStat
 }
 
 interface FlowRunCardProps {
-  task: BoardTask; enriched: Enriched; selected: boolean; busy: boolean; error?: string; now: number; dispatchChoice?: FlowDispatchChoice | null;
+  task: BoardTask; enriched: Enriched; selected: boolean; busy: boolean; error?: string; now: number; dispatchChoice?: FlowDispatchChoice | null; manualReviewFallback?: boolean;
   onSelect: (id: string) => void; onReleaseChain?: () => void; onDispatchSingle?: () => void; onCancelDispatchChoice?: () => void; onAct: (task: BoardTask, action: StageAction) => void;
 }
 
@@ -242,6 +259,7 @@ function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
     a.error === b.error &&
     a.now === b.now &&
     a.dispatchChoice === b.dispatchChoice &&
+    a.manualReviewFallback === b.manualReviewFallback &&
     a.onSelect === b.onSelect &&
     a.onReleaseChain === b.onReleaseChain &&
     a.onDispatchSingle === b.onDispatchSingle &&
@@ -251,7 +269,7 @@ function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
   );
 }
 
-export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
+export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, manualReviewFallback, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
   const role = roleChip(enriched.workerProfile ?? task.assignee, task.status === "review" ? "verification" : null);
   const isBlocked = task.status === "blocked";
   const isReview = task.status === "review";
@@ -306,6 +324,7 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
         error={error}
         dispatchChoice={dispatchChoice}
         verifierGateStatus={verifierGate}
+        manualReviewFallback={manualReviewFallback}
         onReleaseChain={onReleaseChain}
         onDispatchSingle={onDispatchSingle}
         onCancelDispatchChoice={onCancelDispatchChoice}
@@ -1088,6 +1107,30 @@ export function FlowView() {
     return map;
   }, [workers.data, reviews.data, blocked.data, results.data]);
 
+  const verifierGateFirstSeenRef = useRef<Record<string, { key: string; firstSeenAt: number }>>({});
+  const manualReviewFallbackById = useMemo<Record<string, boolean>>(() => {
+    const fallback: Record<string, boolean> = {};
+    const visibleTerminalVerdicts = new Set<string>();
+    for (const task of allTasks) {
+      const enriched = enrichmentById[task.id] ?? EMPTY_ENRICHED;
+      const key = task.status === "review" ? terminalVerifierGateKey(enriched) : null;
+      if (!key) {
+        delete verifierGateFirstSeenRef.current[task.id];
+        continue;
+      }
+      visibleTerminalVerdicts.add(task.id);
+      const seen = verifierGateFirstSeenRef.current[task.id];
+      if (!seen || seen.key !== key) {
+        verifierGateFirstSeenRef.current[task.id] = { key, firstSeenAt: now };
+      }
+      fallback[task.id] = shouldExposeManualReviewFallback(enriched, verifierGateFirstSeenRef.current[task.id]?.firstSeenAt, now);
+    }
+    for (const taskId of Object.keys(verifierGateFirstSeenRef.current)) {
+      if (!visibleTerminalVerdicts.has(taskId)) delete verifierGateFirstSeenRef.current[taskId];
+    }
+    return fallback;
+  }, [allTasks, enrichmentById, now]);
+
   const handledTaskParamRef = useRef<string | null>(null);
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
@@ -1117,6 +1160,9 @@ export function FlowView() {
   }, [fetchDetail, setSelectedTask, taskDetail.detailById]);
   const clearDispatchChoice = useCallback(() => setDispatchChoice(null), []);
   const runTaskAction = useCallback((taskId: string, action: StageAction) => {
+    // Terminal verifier fallback can race the verifier's own status PATCH; the
+    // backend PATCH is idempotent toward the requested target status, so the
+    // losing side observes an already-transitioned card on the next board poll.
     void runAction(taskId, action.target, action.key === "rework" ? { block_reason: "Operator-Nacharbeit aus dem Flow-Board" } : undefined);
     if (selectedId === taskId) void fetchDetail(taskId);
   }, [runAction, selectedId, fetchDetail]);
@@ -1203,6 +1249,7 @@ export function FlowView() {
         error={errorById[task.id] || undefined}
         now={now}
         dispatchChoice={taskDispatchChoice}
+        manualReviewFallback={manualReviewFallbackById[task.id]}
         onSelect={selectTask}
         onReleaseChain={onReleaseChain}
         onDispatchSingle={onDispatchSingle}
@@ -1210,7 +1257,7 @@ export function FlowView() {
         onAct={onAct}
       />
     );
-  }, [dispatchChoice, busyId, checkingDispatchId, flowRelease.busyId, enrichmentById, selectedId, errorById, now, selectTask, onReleaseChain, onDispatchSingle, clearDispatchChoice, onAct]);
+  }, [dispatchChoice, busyId, checkingDispatchId, flowRelease.busyId, enrichmentById, selectedId, errorById, now, manualReviewFallbackById, selectTask, onReleaseChain, onDispatchSingle, clearDispatchChoice, onAct]);
 
   const selectedTask = selectedId ? allTasks.find((t) => t.id === selectedId) : undefined;
   const selectedStatus = selectedTask?.status;

@@ -134,6 +134,7 @@ export default defineConfig({
     // Lastdeckel: ungedeckelt flutet vitest alle 12 Kerne und kollidiert mit
     // parallelen Worker-Gates/Builds (Load-Spike 2026-06-12). Wert wie im
     // Family Organizer nach derselben Lektion.
+    minWorkers: 1,
     maxWorkers: 4,
   },
 } as ViteConfigWithVitest);
