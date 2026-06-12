@@ -9,7 +9,7 @@ import { useHermesWorkers } from "../hooks/useControlData";
 import { fmtClock, fmtDur, nowSec } from "../lib/derive";
 import { taskStatusLabel } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";
-import { pickAnswer, type ResearchDetail } from "./ResearchView.helpers";
+import { buildResearchIdempotencyKey, pickAnswer, type ResearchDetail } from "./ResearchView.helpers";
 
 // Phase C (Programm 3): Recherche-Tab — der Operator beauftragt Wissen wie
 // einen Worker: Frage → Modellwahl → Task (tenant=research) → Antwort
@@ -180,7 +180,7 @@ export function ResearchView(_props: { density?: Density }) {
           tenant: "research",
           priority: depth === "gründlich" ? 1 : 0,
           model_override: model.trim() || null,
-          idempotency_key: `research-${crypto.randomUUID()}`,
+          idempotency_key: buildResearchIdempotencyKey(),
           notify_home: false,
         }),
       });

@@ -6,6 +6,14 @@ export interface ResearchDetail {
   comments?: TaskComment[];
 }
 
+export function buildResearchIdempotencyKey(): string {
+  const maybeCrypto = typeof crypto !== "undefined" ? crypto : null;
+  const randomPart = typeof maybeCrypto?.randomUUID === "function"
+    ? maybeCrypto.randomUUID()
+    : `${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+  return `research-${randomPart}`;
+}
+
 /** Antwort = letzter Kommentar (Receipt-Muster), sonst result. Exportiert für den Test. */
 export function pickAnswer(detail: ResearchDetail): { body: string; author: string | null; at: number | null } | null {
   const comments = detail.comments ?? [];

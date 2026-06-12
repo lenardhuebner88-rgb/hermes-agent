@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ResearchEntry, type ResearchCard } from "./ResearchView";
-import { pickAnswer } from "./ResearchView.helpers";
+import { buildResearchIdempotencyKey, pickAnswer } from "./ResearchView.helpers";
 
 // Härtung (e): pickAnswer war exportiert aber ungetestet; ResearchEntry
 // bekommt Render-Tests nach RunTimelineView-Muster (statisch, initialer
@@ -14,6 +14,11 @@ const card = (over: Partial<ResearchCard>): ResearchCard => ({
   created_at: 1781161012,
   latest_summary: null,
   ...over,
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("pickAnswer", () => {
@@ -36,6 +41,16 @@ describe("pickAnswer", () => {
     ).toBe("R");
     expect(pickAnswer({ task: { id: "t", title: "x", status: "done", result: null }, comments: [] })).toBeNull();
     expect(pickAnswer({ task: null, comments: [] })).toBeNull();
+  });
+});
+
+describe("buildResearchIdempotencyKey", () => {
+  it("nutzt einen Fallback wenn crypto.randomUUID vorhanden aber keine Funktion ist", () => {
+    vi.stubGlobal("crypto", { randomUUID: "not-a-function" });
+    vi.spyOn(Math, "random").mockReturnValue(0.123456789);
+    vi.spyOn(Date, "now").mockReturnValue(1781298000000);
+
+    expect(buildResearchIdempotencyKey()).toBe("research-4fzzzxjylrx-mqbeu5c0");
   });
 });
 
