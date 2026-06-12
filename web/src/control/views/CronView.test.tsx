@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { CronView, jobTone } from "./CronView";
+import { CronView } from "./CronView";
+import { jobTone } from "./CronView.helpers";
 import type { CronJob } from "../lib/types";
 
 const baseJob: CronJob = {

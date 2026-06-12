@@ -113,7 +113,7 @@ describe("FlowView is live-wired, not mock", () => {
   it("anchors relative-time labels to the client clock, not the 304-frozen payload now", () => {
     // Date.now() im Render verletzt react-hooks/purity — die Client-Uhr
     // kommt aus einem externen Store, der Anker-Kontrakt bleibt derselbe.
-    expect(src).toMatch(/useSyncExternalStore\(subscribeClock, getClockNowSeconds\)/);
+    expect(src).toMatch(/useClientNowSeconds\(\)/);
     expect(src).toMatch(/Math\.max\(board\.data\?\.now \?\? 0, clientNow\)/);
     expect(src).not.toMatch(/const now = Math\.max\(board\.data\?\.now \?\? 0, Math\.floor\(Date\.now\(\)/);
   });

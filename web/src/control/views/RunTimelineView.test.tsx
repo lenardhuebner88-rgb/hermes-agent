@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   RunTimelinePanel,
-  eventTone,
   type RunTimelineResponse,
   type TimelineItem,
 } from "./RunTimelineView";
+import { eventTone } from "./RunTimelineView.helpers";
 
 function item(partial: Partial<TimelineItem> & { kind: string; at: number }): TimelineItem {
   return {

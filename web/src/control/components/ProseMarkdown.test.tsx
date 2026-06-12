@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProseMarkdown } from "./ProseMarkdown";
-import { pickAnswer } from "../views/ResearchView";
+import { pickAnswer } from "../views/ResearchView.helpers";
 
 describe("ProseMarkdown (Phase C)", () => {
   it("rendert GFM: Überschrift, Tabelle, Code-Block", () => {

@@ -427,7 +427,9 @@ export function LanesView(_props: { density?: Density }) {
   }, []);
 
   useEffect(() => {
-    void reload();
+    // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip), s.o.
+    const firstLoad = window.setTimeout(() => void reload(), 0);
+    return () => window.clearTimeout(firstLoad);
   }, [reload]);
 
   // Selbstheilung: schlägt der Erstload fehl (z. B. "Failed to fetch" am

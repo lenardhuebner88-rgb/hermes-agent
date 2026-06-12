@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
 import { WifiOff } from "lucide-react";
 import type { SystemHealthResponse } from "../lib/types";
+import { useClientNowSeconds } from "../lib/clock";
 
 export function OfflineStaleBanner({ health }: {
   health: {
@@ -10,17 +10,13 @@ export function OfflineStaleBanner({ health }: {
     lastUpdated: number | null;
   };
 }) {
-  const [, forceTick] = useState(0);
+  // Geteilte 10s-Uhr statt eigenem 1s-forceTick: Date.now() im Render ist
+  // impure (react-hooks/purity), und der Banner braucht keine Sekunden-Auflösung.
+  const clientNow = useClientNowSeconds();
   const visible = Boolean(health.error || health.isStale);
 
-  useEffect(() => {
-    if (!visible) return;
-    const timer = window.setInterval(() => forceTick((tick) => tick + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [visible]);
-
   if (!visible) return null;
-  const age = health.lastUpdated == null ? "noch nie" : `vor ${Math.max(0, Math.floor(Date.now() / 1000) - health.lastUpdated)}s`;
+  const age = health.lastUpdated == null ? "noch nie" : `vor ${Math.max(0, clientNow - health.lastUpdated)}s`;
   const label = health.error ? "Health-Poll fehlgeschlagen" : "Health-Daten sind stale";
 
   return (

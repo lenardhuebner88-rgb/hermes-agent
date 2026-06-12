@@ -26,7 +26,9 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
   injiziert ihr Token via `window.__HERMES_SESSION_TOKEN__`; bare Loopback-curl = 401).
 
 ## Gates (vor Deploy/Push)
-- Frontend: `cd web && npx tsc --noEmit && npx vitest run && npm run build`
+- Frontend: `cd web && npm run lint:control && npx tsc --noEmit && npx vitest run && npm run build`
+  (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
+  Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
 - Python: `scripts/run_tests.sh` (mit pytest-timeout) + `ruff`
 
 ## Skills

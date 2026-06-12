@@ -15,6 +15,14 @@ if [ "${1:-}" = "--smoke" ]; then
 fi
 cd "$(dirname "$0")/.."
 
+echo "[deploy] lint gate (fork-eigener Code: src/control + vite.config.ts + e2e) ..."
+# eslint ist seit 2026-06-12 offizielles Gate für den fork-eigenen Frontend-
+# Code: der Verifier prüft Lint, die Worker-Gates taten es nicht — diese
+# Asymmetrie hat t_748896f7 in einen Dauerblock geschickt. Scope bewusst NUR
+# fork-eigene Pfade; Upstream-Dateien (src/App.tsx, src/components/…) bleiben
+# diff-relativ beim Verifier (Sync-Disziplin, keine Legacy-Aufräum-Pflicht).
+( cd web && npm run lint:control )
+
 echo "[deploy] building frontend bundle (web/) ..."
 ( cd web && npm run build )
 

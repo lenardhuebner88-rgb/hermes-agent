@@ -6,6 +6,7 @@ import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { fmtClock, fmtDur } from "../lib/derive";
 import type { ToneName } from "../lib/types";
 import type { Density } from "../hooks/useDensity";
+import { eventTone } from "./RunTimelineView.helpers";
 
 // F3 night-sprint: flacher Trace-Vorläufer — alle Events eines Runs als
 // Zeitleiste mit relativen Dauer-Balken und Status-Farben. Strings lokal,
@@ -50,38 +51,6 @@ export interface RunTimelineResponse {
   truncated: boolean;
 }
 
-const RED_KINDS = new Set([
-  "error", "crashed", "timed_out", "spawn_failed", "gave_up", "stale",
-  "completion_blocked_hallucination", "suspected_hallucinated_references",
-  "iteration_budget_exhausted",
-]);
-const AMBER_KINDS = new Set([
-  "reclaimed", "claim_rejected", "claim_extended", "respawn_guarded",
-  "budget_held", "role_fit_held", "auto_continuation_scheduled",
-  "auto_continuation_exhausted", "auto_continuation_disabled",
-]);
-const GREEN_KINDS = new Set([
-  "completed", "spawned", "claimed", "promoted", "unblocked",
-  "run_started", "submitted_for_review", "workflow_step_advanced",
-]);
-
-/** Farbcode laut Plan: grün=ok · rot=error · gelb=retry · grau=blocked/neutral. */
-export function eventTone(item: Pick<TimelineItem, "kind" | "payload">): ToneName {
-  const kind = item.kind;
-  if (kind === "run_ended") {
-    const outcome = String(
-      (item.payload as Record<string, unknown> | null)?.outcome ?? "",
-    ).toLowerCase();
-    if (outcome === "completed") return "emerald";
-    if (outcome === "blocked" || outcome === "") return "zinc";
-    return "red";
-  }
-  if (RED_KINDS.has(kind)) return "red";
-  if (AMBER_KINDS.has(kind)) return "amber";
-  if (kind === "blocked") return "zinc";
-  if (GREEN_KINDS.has(kind)) return "emerald";
-  return "zinc";
-}
 
 function payloadSnippet(item: TimelineItem): string | null {
   const p = item.payload;
@@ -187,7 +156,9 @@ export function RunTimelineView(_props: { density?: Density }) {
   }, [runId]);
 
   useEffect(() => {
-    void load();
+    // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip), s.o.
+    const firstLoad = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(firstLoad);
   }, [load]);
 
   return (

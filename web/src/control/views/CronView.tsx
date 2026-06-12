@@ -7,9 +7,9 @@ import { Led, StatusPill, ToneCallout } from "../components/atoms";
 import { Disclosure, Stat } from "../components/primitives";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { fmtAge, fmtClock, nowSec } from "../lib/derive";
-import type { CronJob, ToneName } from "../lib/types";
-import type { DotKind } from "../lib/tones";
+import type { CronJob } from "../lib/types";
 import type { Density } from "../hooks/useDensity";
+import { jobTone } from "./CronView.helpers";
 
 const t = de.crons;
 
@@ -26,15 +26,6 @@ function fmtWhen(value: number | string | null): string {
   return epoch == null ? t.never : fmtClock(epoch);
 }
 
-type JobTone = { tone: ToneName; dot: DotKind; label: string };
-
-export function jobTone(job: CronJob): JobTone {
-  if (job.last_delivery_error) return { tone: "red", dot: "error", label: t.deliveryError };
-  if (job.last_error) return { tone: "red", dot: "error", label: t.runError };
-  if (!job.enabled) return { tone: "amber", dot: "warn", label: t.disabled };
-  if (job.state === "paused" || job.paused_at) return { tone: "amber", dot: "warn", label: t.paused };
-  return { tone: "emerald", dot: "live", label: job.last_status || t.scheduled };
-}
 
 function CronJobCard({ job, controls, output }: {
   job: CronJob;

@@ -19,5 +19,15 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Bewusst ungenutzte Parameter/Variablen tragen das etablierte
+      // `_`-Präfix (z.B. `_props` in den Control-Views) — Standard-Konvention
+      // von typescript-eslint, hier explizit aktiviert.
+      '@typescript-eslint/no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+      }],
+    },
   },
 ])

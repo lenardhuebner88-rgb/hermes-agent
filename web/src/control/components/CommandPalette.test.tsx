@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildCommandPaletteItems, filterCommandPaletteItems, type CommandPaletteSnapshots } from "./CommandPalette";
+import { buildCommandPaletteItems, filterCommandPaletteItems, type CommandPaletteSnapshots } from "./commandPaletteItems";
 import type { Worker } from "../lib/types";
 
 const noop = vi.fn();

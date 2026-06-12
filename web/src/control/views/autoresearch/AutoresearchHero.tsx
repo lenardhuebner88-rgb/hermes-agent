@@ -13,7 +13,8 @@ import type { AutoresearchReadinessSummary } from "../../lib/autoresearchReadine
 import type { Proposal, ToneName } from "../../lib/types";
 import { StatusPill, ToneCallout } from "../../components/atoms";
 import { Card, Text } from "../../components/primitives";
-import { CockpitSectionNav, Metric, ReadinessPanel, reviewStepToneClass } from "./panels";
+import { CockpitSectionNav, Metric, ReadinessPanel } from "./panels";
+import { reviewStepToneClass } from "./panels.helpers";
 import { OperatorActionsDisclosure } from "./OperatorActionsDisclosure";
 
 type Recommendation = ReturnType<typeof getAutoresearchRecommendation>;

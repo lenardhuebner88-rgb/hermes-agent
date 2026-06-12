@@ -9,7 +9,7 @@
  * honest guard. NO mock/demo data — a quiet empty state shows when no runs
  * exist for a stage.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -60,39 +60,11 @@ import { RoleChip } from "../components/fleet/atoms";
 import { EpicCreate } from "../components/fleet/EpicCreate";
 import { FlowCapture } from "../components/fleet/FlowCapture";
 import { WorkerCard, type WorkerActionKey } from "../components/WorkerCard";
+import { useClientNowSeconds } from "../lib/clock";
 
 const MAX_CARDS = 12;
 const MAX_DELIVERED = 8;
 const VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000;
-
-// Sekunden-Uhr als externer Store: `Date.now()` direkt im Render verletzt die
-// react-hooks-Purity-Regel (Komponenten müssen idempotent rendern). Der Store
-// tickt alle 10s und weckt nur Komponenten, die ihn abonniert haben — die
-// "vor X"-Labels bleiben damit auch auf einem idle Board lebendig.
-const CLOCK_TICK_MS = 10_000;
-let clockNowSeconds = Math.floor(Date.now() / 1000);
-const clockListeners = new Set<() => void>();
-let clockTimer: number | null = null;
-function subscribeClock(listener: () => void): () => void {
-  clockListeners.add(listener);
-  if (clockTimer == null) {
-    clockNowSeconds = Math.floor(Date.now() / 1000);
-    clockTimer = window.setInterval(() => {
-      clockNowSeconds = Math.floor(Date.now() / 1000);
-      for (const l of clockListeners) l();
-    }, CLOCK_TICK_MS);
-  }
-  return () => {
-    clockListeners.delete(listener);
-    if (clockListeners.size === 0 && clockTimer != null) {
-      window.clearInterval(clockTimer);
-      clockTimer = null;
-    }
-  };
-}
-function getClockNowSeconds(): number {
-  return clockNowSeconds;
-}
 
 function flowTaskDomId(taskId: string): string {
   return `flow-task-${encodeURIComponent(taskId)}`;
@@ -1013,7 +985,7 @@ export function FlowView() {
   // anchor to the client clock, never regressing below the server stamp.
   // Die Client-Uhr kommt aus einem externen Store (useSyncExternalStore),
   // nicht aus `Date.now()` im Render: Render muss idempotent bleiben.
-  const clientNow = useSyncExternalStore(subscribeClock, getClockNowSeconds);
+  const clientNow = useClientNowSeconds();
   const now = Math.max(board.data?.now ?? 0, clientNow);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Unter xl öffnet die Task-Auswahl die Receipt-Kette als Bottom-Sheet

@@ -103,7 +103,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   bibliothek: () => import("./views/BibliothekView"),
 };
 
-export function prefetchControlView(tab: ControlTab): void {
+function prefetchControlView(tab: ControlTab): void {
   // Prefetch ist best-effort — ein Netzfehler hier darf nichts kaputt machen;
   // der echte Klick lädt den Chunk über Suspense erneut.
   void viewImporters[tab]?.().catch(() => {});
