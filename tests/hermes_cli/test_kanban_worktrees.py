@@ -193,6 +193,62 @@ def test_provision_scratch_unchanged(kanban_home, tmp_path):
     assert not kwt.is_provisioned_path(ws)
 
 
+def test_provision_scratch_code_role_backstops_to_default_workdir(kanban_home, repo):
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="dashboard code task", assignee="coder")
+        task = kb.claim_task(conn, tid)
+        resolved = kb.resolve_workspace(task)
+        ws = kwt.provision_for_task(conn, task, resolved)
+        assert kwt.is_provisioned_path(ws)
+        assert task.workspace_kind == "dir"
+        row = conn.execute(
+            "SELECT workspace_kind, workspace_path, branch_name FROM tasks "
+            "WHERE id = ?", (tid,)
+        ).fetchone()
+        assert row["workspace_kind"] == "dir"
+        assert row["workspace_path"] == str(ws)
+        assert row["branch_name"] == f"kanban/{tid}"
+        assert len(_events(conn, tid, "worktree_provisioned")) == 1
+
+
+def test_provision_scratch_non_code_role_stays_scratch(kanban_home, repo):
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="research task", assignee="research")
+        task = kb.claim_task(conn, tid)
+        resolved = kb.resolve_workspace(task)
+        ws = kwt.provision_for_task(conn, task, resolved)
+    assert ws == Path(resolved)
+    assert not kwt.is_provisioned_path(ws)
+
+
+def test_provision_scratch_non_repo_default_workdir_stays_scratch(
+    kanban_home, tmp_path
+):
+    plain = tmp_path / "plain-workdir"
+    plain.mkdir()
+    kb.write_board_metadata(None, default_workdir=str(plain))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="code task", assignee="coder")
+        task = kb.claim_task(conn, tid)
+        resolved = kb.resolve_workspace(task)
+        ws = kwt.provision_for_task(conn, task, resolved)
+    assert ws == Path(resolved)
+    assert not kwt.is_provisioned_path(ws)
+
+
+def test_provision_scratch_unassigned_stays_scratch(kanban_home, repo):
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="unassigned capture")
+        task = kb.claim_task(conn, tid)
+        resolved = kb.resolve_workspace(task)
+        ws = kwt.provision_for_task(conn, task, resolved)
+    assert ws == Path(resolved)
+    assert not kwt.is_provisioned_path(ws)
+
+
 def test_provision_recreates_vanished_worktree(kanban_home, repo):
     with kb.connect() as conn:
         tid = kb.create_task(

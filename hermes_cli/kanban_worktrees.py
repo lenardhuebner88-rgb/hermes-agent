@@ -129,6 +129,37 @@ def isolation_mode() -> str:
     return "off"
 
 
+def scratch_code_redirect(task, board: Optional[str] = None) -> Optional[Path]:
+    """Isolation backstop for scratch CODE tasks.
+
+    Scratch tasks bypass worktree provisioning entirely, but a code-role
+    worker (``kanban.review_gate.code_roles``) routinely cd's into the
+    project repo anyway and edits it UNISOLATED — that is how t_4cc0fe1b
+    (2026-06-12) left an approved-but-uncommitted diff in the live checkout.
+    When the board declares a ``default_workdir`` that is a git repo, treat
+    the scratch task as a ``dir`` task on that repo so the normal worktree +
+    merge-back pipeline applies. Non-code roles and boards without a
+    ``default_workdir`` keep today's scratch behavior byte-identical.
+    """
+    from hermes_cli import kanban_db as kb
+
+    assignee = (getattr(task, "assignee", None) or "").strip().lower()
+    if not assignee:
+        return None
+    try:
+        if assignee not in kb._review_gate_config()["code_roles"]:
+            return None
+        workdir = kb.read_board_metadata(board).get("default_workdir")
+    except Exception:
+        return None
+    if not workdir:
+        return None
+    path = Path(str(workdir)).expanduser()
+    if not path.is_dir() or repo_root_for(path) is None:
+        return None
+    return path
+
+
 def split_provisioned_path(path) -> Optional[tuple[Path, str, Path]]:
     """``(repo_root, root_id, worktree_path)`` when *path* points INTO a
     dispatcher-provisioned worktree (``<repo>/.worktrees/kanban/<root_id>``,
@@ -366,12 +397,27 @@ def provision_for_task(
     ``dir`` tasks whose path is not a git repo. Raises ``WorktreeError``
     on git failures — the dispatcher records a spawn failure, exactly like
     a ``resolve_workspace`` error.
+
+    Exception to the scratch no-op: a scratch task assigned to a CODE role
+    on a board whose ``default_workdir`` is a git repo gets redirected there
+    (see :func:`scratch_code_redirect`) — those workers cd into the repo and
+    edit it regardless of their scratch dir, so leaving them unprovisioned
+    means unisolated writes to the live checkout.
     """
     from hermes_cli import kanban_db as kb
 
     kind = task.workspace_kind or "scratch"
     if kind not in ("dir", "worktree"):
-        return Path(resolved)
+        redirect = scratch_code_redirect(task, board)
+        if redirect is None:
+            return Path(resolved)
+        resolved = redirect
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET workspace_kind = 'dir' WHERE id = ?",
+                (task.id,),
+            )
+        task.workspace_kind = "dir"
 
     resolved = Path(resolved)
     provisioned = split_provisioned_path(resolved)
