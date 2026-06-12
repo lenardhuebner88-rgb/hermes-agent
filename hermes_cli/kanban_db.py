@@ -10704,7 +10704,13 @@ def _spawn_claude_worker(
         "on completion; listed workspace files are copied to "
         "~/.hermes/reports/by-task/ first, anything unlisted is gone.\n"
         "3. If you cannot finish, run: hermes kanban block "
-        '"$HERMES_KANBAN_TASK" "<reason>" instead.'
+        '"$HERMES_KANBAN_TASK" "<reason>" instead.\n\n'
+        "PROVIDER RULE: Never call anthropic/* or openai/gpt-5* models via "
+        "--provider openrouter. claude-fable-5 runs on the claude-cli lane "
+        "only; gpt-5.5 runs on the Codex lane only. If the task requires "
+        "such a model and you are not on the right lane, block with an "
+        "explanation. Every paid external API call must be disclosed in the "
+        "task (cost + provider)."
     )
 
     cmd = [

@@ -79,6 +79,17 @@ Rules:
   - Never add invented requirements the user didn't hint at.
   - No preamble, no closing remarks, no code fences around the JSON.
   - Output only the JSON object and nothing else.
+
+Provider & cost rules (MANDATORY):
+  - If the task calls external paid APIs or LLM providers (benchmarks,
+    model comparisons, provider sweeps, API-key usage), the spec body
+    MUST contain a section **Kosten & Provider:** that names the
+    models/providers involved and gives a rough expected cost estimate.
+  - Premium models (`anthropic/*`, `openai/gpt-5*`) MUST NOT be
+    proposed via OpenRouter (`--provider openrouter`). They run
+    exclusively on their native lanes (claude-cli for claude-fable-5,
+    Codex lane for gpt-5.5). If the task needs these models, note the
+    correct lane; never suggest OpenRouter as a routing path for them.
 """
 
 

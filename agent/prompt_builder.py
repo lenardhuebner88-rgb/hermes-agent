@@ -272,7 +272,17 @@ KANBAN_GUIDANCE = (
     "specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
     "for short reasoning subtasks inside your own run; board tasks are for "
-    "cross-agent handoffs that outlive one API loop."
+    "cross-agent handoffs that outlive one API loop.\n"
+    "\n"
+    "## Provider routing\n"
+    "\n"
+    "Never call premium models via OpenRouter — no `anthropic/*` and no "
+    "`openai/gpt-5*` with `--provider openrouter`. `claude-fable-5` runs "
+    "exclusively on the claude-cli lane; `gpt-5.5` runs exclusively on the "
+    "Codex lane. If a task requires one of these models and you are not on "
+    "the correct lane, block the task with an explanation instead of "
+    "re-routing through OpenRouter. Every use of a paid external API must "
+    "be disclosed in the task (cost estimate and provider name)."
 )
 
 # Worker isolation (Entscheidung 1): appended to KANBAN_GUIDANCE ONLY when

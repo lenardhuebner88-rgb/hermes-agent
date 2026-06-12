@@ -23,6 +23,59 @@ MAX_AGE_DAYS = 30
 
 _KEY_LIMIT = 120
 
+# --- Spend-Disclosure-Gate --------------------------------------------------
+# Erkennt Drafts, die externe bezahlte Modelle/Provider nennen, aber keinen
+# expliziten Kosten-Abschnitt enthalten.
+
+_SPEND_SIGNAL_RE = re.compile(
+    r"openrouter|benchmark|api[- ]?key|anthropic/|openai/|gpt-5|"
+    r"fable-5|claude-fable|deepseek|qwen|minimax|"
+    r"provider[- ]?sweep|modellvergleich|model[- ]?comparison",
+    re.IGNORECASE,
+)
+
+# Markdown-tolerant: matcht auch "**Kosten & Provider:**", "## Kosten:",
+# "- Kosten: …" — nicht aber "Kostenlos:" (\b) oder beliebigen Fließtext.
+_COST_DISCLOSURE_RE = re.compile(
+    r"^[\s>*#-]*(?:\*\*)?\s*(?:Kosten|Budget|Cost)\b[^:\n]{0,40}:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def spend_disclosure_missing(title: str, text: Optional[str]) -> bool:
+    """True, wenn der Draft Spend-Signale enthält, aber keinen Kosten-Abschnitt.
+
+    Reine Text-Variante; der Freigabe-Pfad nutzt
+    :func:`_spend_disclosure_missing_task`, die zusätzlich alle Kommentare
+    des Tasks als Disclosure-Quelle akzeptiert.
+    """
+    haystack = f"{title or ''}\n{text or ''}"
+    if not _SPEND_SIGNAL_RE.search(haystack):
+        return False
+    return not bool(_COST_DISCLOSURE_RE.search(haystack))
+
+
+def _spend_disclosure_missing_task(
+    conn: sqlite3.Connection,
+    task: "kb.Task",
+    text: Optional[str],
+) -> bool:
+    """Spend-Gate auf Task-Ebene: Signal im Titel/kanonischen Draft,
+    Disclosure zählt aus Titel, Draft, Task-Body und JEDEM Kommentar.
+
+    Kommentare unter der ``_DRAFT_EXCERPT_MIN``-Schwelle ersetzen den
+    kanonischen Draft nicht — eine kurze Zeile ``Kosten: …`` erfüllt damit
+    das Gate, ohne die Spec im freigegebenen Kind-Task zu verdrängen.
+    """
+    if not spend_disclosure_missing(task.title or "", text):
+        return False
+    if _COST_DISCLOSURE_RE.search(task.body or ""):
+        return False
+    rows = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ?", (task.id,),
+    ).fetchall()
+    return not any(_COST_DISCLOSURE_RE.search(r["body"] or "") for r in rows)
+
 
 def wish_key(text: str) -> str:
     """Stabiler Dedupe-Key: ``wish:`` + lowercase, Whitespace kollabiert."""
@@ -194,6 +247,7 @@ def draft_dict(conn: sqlite3.Connection, task: kb.Task) -> dict:
         "draft_text": text,
         "operator_edited": bool(text and text.startswith(OPERATOR_EDIT_MARKER)),
         "revision_of": _revision_of(task.body),
+        "spend_alert": _spend_disclosure_missing_task(conn, task, text),
     }
 
 
@@ -267,6 +321,16 @@ def approve_draft(
     mit Begründung, wenn der Task kein freigabefähiger Draft ist.
     """
     task = _require_funnel_draft(conn, task_id)
+
+    # Spend-Disclosure-Gate: Draft nennt externe Modelle/Provider → expliziter
+    # Kosten-Abschnitt ist Pflicht, bevor die Freigabe greift.
+    if _spend_disclosure_missing_task(conn, task, draft_text(conn, task_id)):
+        raise ValueError(
+            "Draft nennt externe Modelle/Provider, aber keinen Kosten-Abschnitt. "
+            "Ergänze am Ursprungs-Task eine kurze Kommentar-Zeile "
+            "'Kosten: … — Provider/Modelle: …' (oder bearbeite den Draft) "
+            "und gib dann erneut frei."
+        )
 
     # Präfix idempotent halten: tippt die Familie den Wunsch selbst schon als
     # "Umsetzen: …", darf der Build-Titel nicht weiter stapeln.

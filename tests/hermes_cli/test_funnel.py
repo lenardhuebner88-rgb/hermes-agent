@@ -345,3 +345,138 @@ def test_request_revision_requeues_unlinked_root_and_archives_old(conn):
     drafts = funnel.list_drafts(conn)
     assert [d["id"] for d in drafts] == [new_id]
     assert drafts[0]["draft_text"].startswith("# Revised PlanSpec")
+
+
+# --- Spend-Disclosure-Gate --------------------------------------------------
+
+_SPEND_DRAFT = (
+    "# Benchmark-Spec\n\n"
+    "Vergleiche anthropic/claude-fable-5 vs openai/gpt-5.5 via openrouter. "
+    + "x" * 150
+)
+
+_SPEND_DRAFT_WITH_DISCLOSURE = (
+    "# Benchmark-Spec\n\n"
+    "Vergleiche anthropic/claude-fable-5 vs openai/gpt-5.5 via openrouter.\n\n"
+    "Kosten: ~2€, Provider/Modelle: deepseek via openrouter\n\n"
+    + "x" * 150
+)
+
+_NORMAL_DRAFT = "# Normale Spec\n\nKeine externen Provider. " + "x" * 150
+
+
+def _make_done_draft_body(conn, *, draft: str, title: str = "wunsch") -> str:
+    """Hilfsfunktion: Funnel-Root mit beliebigem Draft-Kommentar."""
+    tid = funnel.create_wish(conn, title=title, body="b", created_by="family")
+    kb.add_comment(conn, tid, author="coder-claude", body=draft)
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (int(time.time()), tid),
+        )
+    return tid
+
+
+def test_spend_disclosure_missing_detects_signal_without_disclosure():
+    assert funnel.spend_disclosure_missing("Benchmark openrouter", "Vergleich gpt-5.5") is True
+
+
+def test_spend_disclosure_missing_false_when_disclosure_present():
+    assert funnel.spend_disclosure_missing(
+        "Benchmark openrouter",
+        "Vergleich gpt-5.5\n\nKosten: ~1€",
+    ) is False
+
+
+def test_spend_disclosure_missing_false_without_signal():
+    assert funnel.spend_disclosure_missing("Normaler Task", "kein Provider hier") is False
+
+
+def test_approve_blocks_spend_draft_without_disclosure(conn):
+    tid = _make_done_draft_body(conn, draft=_SPEND_DRAFT, title="Benchmark openrouter")
+    with pytest.raises(ValueError, match="Kosten"):
+        funnel.approve_draft(conn, tid)
+    # Task bleibt unfreigegeben — kein Build-Kind darf entstehen.
+    assert conn.execute(
+        "SELECT 1 FROM task_links WHERE parent_id = ?", (tid,),
+    ).fetchone() is None
+
+
+def test_approve_passes_spend_draft_with_disclosure(conn):
+    tid = _make_done_draft_body(conn, draft=_SPEND_DRAFT_WITH_DISCLOSURE,
+                                title="Benchmark mit Kosten-Abschnitt")
+    new_id = funnel.approve_draft(conn, tid)
+    assert new_id is not None
+    assert kb.get_task(conn, new_id).status == "ready"
+
+
+def test_approve_passes_normal_draft_without_signal(conn):
+    tid = _make_done_draft_body(conn, draft=_NORMAL_DRAFT)
+    new_id = funnel.approve_draft(conn, tid)
+    assert new_id is not None
+
+
+def test_draft_dict_spend_alert_true_for_spend_signal_without_disclosure(conn):
+    tid = _make_done_draft_body(conn, draft=_SPEND_DRAFT, title="Benchmark openrouter")
+    task = kb.get_task(conn, tid)
+    d = funnel.draft_dict(conn, task)
+    assert d["spend_alert"] is True
+
+
+def test_draft_dict_spend_alert_false_with_disclosure(conn):
+    tid = _make_done_draft_body(conn, draft=_SPEND_DRAFT_WITH_DISCLOSURE,
+                                title="Benchmark mit Disclosure")
+    task = kb.get_task(conn, tid)
+    d = funnel.draft_dict(conn, task)
+    assert d["spend_alert"] is False
+
+
+def test_draft_dict_spend_alert_false_without_signal(conn):
+    tid = _make_done_draft_body(conn, draft=_NORMAL_DRAFT)
+    task = kb.get_task(conn, tid)
+    d = funnel.draft_dict(conn, task)
+    assert d["spend_alert"] is False
+
+
+def test_cost_disclosure_accepts_markdown_formats():
+    """Insbesondere das vom Specifier-Prompt vorgeschriebene Format."""
+    for line in (
+        "**Kosten & Provider:** deepseek via openrouter, ~2 EUR",
+        "## Kosten & Provider:",
+        "- Kosten: ~2 EUR",
+        "**Kosten:** ~2 EUR",
+        "Budget: 5 EUR",
+    ):
+        assert funnel.spend_disclosure_missing(
+            "Benchmark openrouter", f"Spec…\n{line}\n",
+        ) is False, line
+
+
+def test_cost_disclosure_rejects_kostenlos_and_prose():
+    for text in (
+        "Kostenlos: alles lokal",
+        "Das kostet nichts, openrouter wird erwähnt",
+    ):
+        assert funnel.spend_disclosure_missing("Benchmark openrouter", text) is True, text
+
+
+def test_short_cost_comment_unblocks_approve_and_keeps_spec(conn):
+    """Heilungsweg aus der Fehlermeldung: kurzer Kommentar (<120 Zeichen)
+    erfüllt das Gate, ersetzt aber den kanonischen Draft NICHT — das
+    Build-Kind bekommt weiterhin die Spec, nicht die Kosten-Zeile."""
+    tid = _make_done_draft_body(conn, draft=_SPEND_DRAFT, title="Benchmark openrouter")
+    with pytest.raises(ValueError, match="Kosten"):
+        funnel.approve_draft(conn, tid)
+
+    note = "Kosten: ~2 € — Provider/Modelle: deepseek via openrouter"
+    assert len(note) < 120
+    kb.add_comment(conn, tid, author="operator", body=note)
+
+    assert funnel.draft_text(conn, tid).startswith("# Benchmark-Spec")
+    task = kb.get_task(conn, tid)
+    assert funnel.draft_dict(conn, task)["spend_alert"] is False
+
+    new_id = funnel.approve_draft(conn, tid)
+    child = kb.get_task(conn, new_id)
+    assert "# Benchmark-Spec" in (child.body or "")
+    assert note not in (child.body or "")
