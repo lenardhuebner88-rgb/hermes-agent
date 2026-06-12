@@ -1,7 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
 import { DraftEditDialog, FreigabenList, type FunnelDraft } from "./FunnelFreigaben";
 import { funnelDraftEditRequest } from "./funnelDraftEditRequest";
+
+vi.mock("./Overlay", () => ({
+  Overlay: ({
+    ariaLabel,
+    children,
+    closeDisabled,
+    maxWidthClassName,
+  }: {
+    ariaLabel: string;
+    children: ReactNode;
+    closeDisabled?: boolean;
+    maxWidthClassName?: string;
+  }) => (
+    <div data-overlay="true" data-aria-label={ariaLabel} data-close-disabled={String(Boolean(closeDisabled))} data-max-width={maxWidthClassName ?? ""}>
+      {children}
+    </div>
+  ),
+}));
 
 const draft = (over: Partial<FunnelDraft> = {}): FunnelDraft => ({
   id: "t_aaa",
@@ -96,6 +115,28 @@ describe("DraftEditDialog", () => {
     expect(html).toContain("Finale Version bauen");
     expect(html).toContain("Inhalt des vollständigen Drafts");
     expect(html).toContain("Bitte ACs ergänzen");
+    expect(html).toContain('data-overlay="true"');
+    expect(html).toContain('data-max-width="max-w-3xl"');
+  });
+
+  it("sperrt Overlay-Close während Save/Revision/Build busy ist", () => {
+    const html = renderToStaticMarkup(
+      <DraftEditDialog
+        draft={draft()}
+        editText="# Draft\nInhalt des vollständigen Drafts"
+        operatorNote=""
+        busy={true}
+        onEditTextChange={noop}
+        onOperatorNoteChange={noop}
+        onClose={noop}
+        onSave={noop}
+        onRevise={noop}
+        onBuild={noop}
+      />,
+    );
+
+    expect(html).toContain('data-close-disabled="true"');
+    expect(html).toContain("disabled");
   });
 
   it("rendert einen konkreten Fehler im Popup statt nur hinter dem Overlay", () => {

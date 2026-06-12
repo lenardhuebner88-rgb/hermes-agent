@@ -15,13 +15,26 @@
  */
 import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { cn } from "@/lib/utils";
 
-export function Overlay({ onClose, ariaLabel, children }: { onClose: () => void; ariaLabel: string; children: ReactNode }) {
+export function Overlay({
+  onClose,
+  ariaLabel,
+  children,
+  closeDisabled = false,
+  maxWidthClassName = "max-w-md",
+}: {
+  onClose: () => void;
+  ariaLabel: string;
+  children: ReactNode;
+  closeDisabled?: boolean;
+  maxWidthClassName?: string;
+}) {
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeDisabled) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [closeDisabled, onClose]);
 
   // Scroll-Lock: solange ein Overlay offen ist, scrollt der Hintergrund nicht mit.
   useEffect(() => {
@@ -37,13 +50,16 @@ export function Overlay({ onClose, ariaLabel, children }: { onClose: () => void;
     // display:contents, weil [data-control] selbst min-height/background setzt
     // und als echte Box das Layout kaputt machen würde; so vererbt es nur.
     <div data-control className="contents">
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={onClose} role="presentation">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-center sm:p-4" onClick={() => { if (!closeDisabled) onClose(); }} role="presentation">
       <div
         role="dialog"
         aria-modal="true"
         aria-label={ariaLabel}
         onClick={(e) => e.stopPropagation()}
-        className="hc-surface-card max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-b-none rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] sm:rounded-2xl sm:pb-4"
+        className={cn(
+          "hc-surface-card max-h-[85dvh] w-full overflow-y-auto overscroll-contain rounded-b-none rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] sm:rounded-2xl sm:pb-4",
+          maxWidthClassName,
+        )}
       >
         {children}
       </div>
