@@ -1039,6 +1039,27 @@ def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
         assert kb.get_task(conn, c).status == "ready"
 
 
+def test_archived_parent_does_not_satisfy_dependency(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="a")
+        child = kb.create_task(
+            conn, title="child", assignee="a", parents=[parent],
+        )
+
+        kb.archive_task(conn, parent)
+        assert kb.recompute_ready(conn) == 0
+        task = kb.get_task(conn, child)
+        assert task is not None
+        assert task.status == "todo"
+
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        conn.commit()
+        assert kb.claim_task(conn, child, claimer="host:1") is None
+        task = kb.get_task(conn, child)
+        assert task is not None
+        assert task.status == "todo"
+
+
 # ---------------------------------------------------------------------------
 # Atomic claim (CAS)
 # ---------------------------------------------------------------------------
@@ -4000,14 +4021,8 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
         )
 
 
-def test_archive_task_triggers_recompute_ready_for_dependents(kanban_home):
-    """Archiving a parent must immediately unblock its children.
-
-    ``recompute_ready()`` already treats ``archived`` parents as satisfied
-    dependencies, just like ``done``. Regression: ``archive_task()`` updated
-    the parent row but never ran the ready-promotion pass, so children stayed
-    stuck in ``todo`` until a later dispatcher tick.
-    """
+def test_archive_task_does_not_satisfy_dependent_children(kanban_home):
+    """Archiving a parent does not count as dependency completion."""
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="obsolete parent")
         child = kb.create_task(conn, title="child", parents=[parent])
@@ -4015,10 +4030,9 @@ def test_archive_task_triggers_recompute_ready_for_dependents(kanban_home):
         assert kb.get_task(conn, child).status == "todo"
         assert kb.archive_task(conn, parent) is True
 
-        assert kb.get_task(conn, child).status == "ready", (
-            "child should promote to ready immediately after its last blocking "
-            "parent is archived"
-        )
+        task = kb.get_task(conn, child)
+        assert task is not None
+        assert task.status == "todo"
 
 # ---------------------------------------------------------------------------
 # _add_column_if_missing / _migrate_add_optional_columns idempotency (#21708)
