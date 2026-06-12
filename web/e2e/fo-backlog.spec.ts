@@ -38,11 +38,8 @@ function watchPage(page: Page): PageWatch {
 
 async function gotoBacklog(page: Page) {
   await page.goto("/control/backlog");
-  // 15s statt der 5s-Defaults: der SPA-Boot hängt aktuell ~5s hinter
-  // /api/profiles (list_profiles-Hot-Path, Befund 2026-06-12 — eigener
-  // Perf-Slice). Die Suite prüft UX-Verhalten, nicht Boot-Latenz.
-  await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("tr[data-fo-row]").first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible();
+  await expect(page.locator("tr[data-fo-row]").first()).toBeVisible();
 }
 
 async function activeRowIds(page: Page): Promise<string[]> {
@@ -157,7 +154,7 @@ test.describe("FO backlog command UX", () => {
       const routePage = await context.newPage();
       const watch = watchPage(routePage);
       await routePage.goto(route.path);
-      await expect(routePage.locator("[data-control]")).toBeVisible({ timeout: 15_000 });
+      await expect(routePage.locator("[data-control]")).toBeVisible();
       await expect(routePage).toHaveURL(new RegExp(route.path.replaceAll("/", "\\/")));
       await expect(routePage.getByText("Failed to fetch", { exact: false })).toHaveCount(0);
       await watch.assertClean();
