@@ -4288,6 +4288,37 @@ def test_lanes_profile_catalog_cached_between_requests(client, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_lanes_catalog_includes_kanban_spawn_health(client, monkeypatch):
+    """GET /lanes muss pro Katalog-Profil kanban_spawn_health liefern — das
+    Frontend (TriageStrip-Eskalation) blockt sonst jede Eskalation mit
+    'keine Kanban-Spawn-Health im Lane-Katalog'."""
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+    monkeypatch.setattr(mod, "_claude_worker_available", lambda: True)
+
+    r = client.get("/api/plugins/kanban/lanes")
+    assert r.status_code == 200, r.text
+    catalog = {p["name"]: p for p in r.json()["profiles"]}
+    assert catalog["coder"]["kanban_spawn_health"]["status"] == "healthy"
+    assert catalog["research"]["kanban_spawn_health"]["status"] == "healthy"
+
+
+def test_lanes_catalog_spawn_health_unhealthy_without_claude_binary(client, monkeypatch):
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+    monkeypatch.setattr(mod, "_claude_worker_available", lambda: False)
+
+    r = client.get("/api/plugins/kanban/lanes")
+    assert r.status_code == 200, r.text
+    catalog = {p["name"]: p for p in r.json()["profiles"]}
+    health = catalog["coder"]["kanban_spawn_health"]
+    assert health["status"] == "unhealthy"
+    assert "claude" in (health["reason"] or "")
+    assert catalog["research"]["kanban_spawn_health"]["status"] == "healthy"
+
+
 def test_lanes_spawn_check_reports_healthy_hermes_combo(client):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
