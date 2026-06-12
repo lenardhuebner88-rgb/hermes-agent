@@ -1563,6 +1563,23 @@ class GatewayKanbanWatchersMixin:
             )
             failure_limit = _kb.DEFAULT_FAILURE_LIMIT
 
+        auto_retry_blocked = bool(kanban_cfg.get("auto_retry_blocked", False))
+        raw_auto_retry_backoff = kanban_cfg.get(
+            "auto_retry_blocked_backoff_seconds",
+            _kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+        )
+        try:
+            auto_retry_blocked_backoff_seconds = int(raw_auto_retry_backoff)
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: invalid kanban.auto_retry_blocked_backoff_seconds=%r; using default %d",
+                raw_auto_retry_backoff,
+                _kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+            )
+            auto_retry_blocked_backoff_seconds = _kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
+        if auto_retry_blocked_backoff_seconds < 0:
+            auto_retry_blocked_backoff_seconds = _kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
+
         # Read stale_timeout_seconds — 0 disables stale detection.
         raw_stale = kanban_cfg.get("dispatch_stale_timeout_seconds", 0)
         try:
@@ -1767,6 +1784,8 @@ class GatewayKanbanWatchersMixin:
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     daily_token_cap_per_profile=daily_token_cap_per_profile,
                     daily_cost_cap_usd=daily_cost_cap_usd,
+                    auto_retry_blocked=auto_retry_blocked,
+                    auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
                 )
                 # Poll Mission-Control for any in-flight OpenClaw dispatches on
                 # this board and close their kanban tasks to done/blocked. Runs

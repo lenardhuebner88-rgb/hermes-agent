@@ -216,6 +216,7 @@ export interface BoardTask {
   completed_at: number | null;
   branch_name: string | null;
   latest_summary: string | null;
+  auto_retry_count?: number;
   link_counts: { parents: number; children: number };
   comment_count: number;
   progress: { done: number; total: number } | null;

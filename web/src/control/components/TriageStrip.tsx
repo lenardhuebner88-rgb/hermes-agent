@@ -45,6 +45,8 @@ export interface TriageFailure {
   ended_at: number;
   task_status: string;
   model_override: string | null;
+  auto_retry_count?: number;
+  auto_retry_limit?: number;
 }
 
 interface FailuresResponse {
@@ -157,6 +159,7 @@ export function TriageStrip() {
                   <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">{f.title}</span>
                   <span className="hc-mono shrink-0 rounded-full border border-red-500/30 px-2 py-0.5 text-[0.68rem] text-red-200">{f.outcome}</span>
                   <span className="hc-mono shrink-0 text-[0.72rem] hc-soft">{f.profile ? (profileLabel[f.profile] ?? f.profile) : "—"}</span>
+                  {(f.auto_retry_count ?? 0) > 0 ? <span className="hc-mono shrink-0 rounded-full border border-amber-400/30 px-2 py-0.5 text-[0.68rem] text-amber-200">Auto {Math.min(f.auto_retry_count ?? 0, f.auto_retry_limit ?? 2)}/{f.auto_retry_limit ?? 2}</span> : null}
                   <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(f.ended_at)}</span>
                 </div>
                 {f.reason ? <p className="mt-1 line-clamp-2 text-[0.76rem] hc-dim">{f.reason}</p> : null}

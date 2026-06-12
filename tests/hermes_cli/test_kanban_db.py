@@ -2340,6 +2340,201 @@ def test_dispatch_spawns_verdict_only_reviewer(
         assert kb.get_task(conn, t).status == "running"
 
 
+
+def test_dispatch_auto_retry_blocked_is_opt_in(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="transient MCP unavailable")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        row = conn.execute(
+            "SELECT status, auto_retry_count FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["status"] == "blocked"
+        assert row["auto_retry_count"] == 0
+
+
+
+def test_dispatch_auto_retries_blocked_after_backoff_with_feedback_comment(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="transient MCP unavailable")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 299)
+        early = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+        assert early.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 1)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count, model_override FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 1
+        assert row["model_override"] is None
+        comments = kb.list_comments(conn, t)
+        assert comments[-1].author == "dispatcher"
+        assert "transient MCP unavailable" in comments[-1].body
+        events = [e for e in kb.list_events(conn, t) if e.kind == "auto_retried"]
+        assert len(events) == 1
+        assert events[0].payload["attempt"] == 1
+
+
+
+def test_dispatch_auto_retry_second_attempt_escalates(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        conn.execute("UPDATE tasks SET auto_retry_count = 1 WHERE id = ?", (t,))
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="tool crashed")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 2)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count, assignee, model_override FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 2
+        assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
+        assert row["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retried"][-1]
+        assert event.payload["escalated"] is True
+        assert event.payload["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
+
+
+
+def test_dispatch_auto_retry_stops_after_limit(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        conn.execute("UPDATE tasks SET auto_retry_count = 2 WHERE id = ?", (t,))
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="still broken")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        assert [e.kind for e in kb.list_events(conn, t)].count("auto_retry_exhausted") == 1
+
+
+
+def test_dispatch_auto_retry_leaves_question_blocks_untouched(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential should I use?")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["blocked_kind"] == "operator_question"
+
+
+
+def test_dispatch_auto_retry_respects_failure_breaker(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="crashy")
+        conn.execute("UPDATE tasks SET consecutive_failures = 3 WHERE id = ?", (t,))
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(
+            conn, auto_retry_blocked=True, failure_limit=3, max_spawn=0,
+        )
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["reason"] == "failure_limit"
+
+
+
+def test_dispatch_auto_retry_completes_when_result_comment_arrived_after_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="MCP unreachable")
+        monkeypatch.setattr(kb.time, "time", lambda: base + 60)
+        kb.add_comment(conn, t, "research", "RESULT: full answer delivered here")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task.status == "done"
+        assert "full answer" in (task.result or "")
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_completed"][-1]
+        assert event.payload["source"] == "result_comment"
+
+
+def test_dispatch_auto_retry_result_comment_does_not_wait_for_backoff(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="MCP unreachable")
+        monkeypatch.setattr(kb.time, "time", lambda: base + 60)
+        kb.add_comment(conn, t, "research", "RESULT: complete answer arrived fast")
+
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "done"
+        assert "complete answer" in (task.result or "")
+
+
+
 def test_dispatch_max_spawn_counts_existing_running_tasks(
     kanban_home, all_assignees_spawnable
 ):

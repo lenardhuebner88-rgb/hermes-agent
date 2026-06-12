@@ -2747,11 +2747,25 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
             _kanban_cfg.get("max_spawn")
         )
+        auto_retry_blocked = bool(_kanban_cfg.get("auto_retry_blocked", False))
+        try:
+            auto_retry_blocked_backoff_seconds = int(
+                _kanban_cfg.get(
+                    "auto_retry_blocked_backoff_seconds",
+                    kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            auto_retry_blocked_backoff_seconds = kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
+        if auto_retry_blocked_backoff_seconds < 0:
+            auto_retry_blocked_backoff_seconds = kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
     except Exception:
         default_assignee = None
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
+        auto_retry_blocked = False
+        auto_retry_blocked_backoff_seconds = kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn,
@@ -2761,6 +2775,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            auto_retry_blocked=auto_retry_blocked,
+            auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2769,6 +2785,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "timed_out": res.timed_out,
             "stale": res.stale,
             "auto_blocked": res.auto_blocked,
+            "auto_retried_blocked": [
+                {"task_id": tid, "attempt": attempt}
+                for (tid, attempt) in res.auto_retried_blocked
+            ],
             "promoted": res.promoted,
             "spawned": [
                 {"task_id": tid, "assignee": who, "workspace": ws}
@@ -2796,6 +2816,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     print(f"Auto-blocked: {len(res.auto_blocked)}")
     if res.auto_blocked:
         print(f"  {', '.join(res.auto_blocked)}")
+    print(f"Auto-retried blocked: {len(res.auto_retried_blocked)}")
+    for tid, attempt in res.auto_retried_blocked:
+        print(f"  - {tid}  attempt {attempt}/{kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
     for tid, who, ws in res.spawned:
