@@ -7,8 +7,20 @@ const fixture: LanesResponse = {
   count: 2,
   active_id: "lane_1",
   profiles: [
-    { name: "coder", worker_runtime: "hermes", default_model: "gpt-5.5", description: "" },
-    { name: "premium", worker_runtime: "claude-cli", default_model: "claude-fable-5", description: "" },
+    {
+      name: "coder",
+      worker_runtime: "hermes",
+      default_model: "gpt-5.5",
+      description: "",
+      kanban_spawn_health: "healthy",
+    },
+    {
+      name: "premium",
+      worker_runtime: "claude-cli",
+      default_model: "claude-fable-5",
+      description: "",
+      kanban_spawn_health: { status: "unhealthy", reason: "claude-cli Login fehlt" },
+    },
   ],
   models: [
     { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
@@ -104,6 +116,68 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
     expect(html).toMatch(/disabled[^>]*>.*Aktiv/s);
+  });
+
+  it("zeigt passive Spawn-Bereitschaft pro Rolle als Dot + Klartext-Hinweis", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    // coder healthy → grüner Dot; premium unhealthy → Warn-Dot + Hinweis
+    expect(html).toContain("hc-led-live");
+    expect(html).toContain("hc-led-warn");
+    expect(html).toContain("Spawn-Bereitschaft: bereit");
+    expect(html).toContain("Spawn-Bereitschaft: gestört");
+  });
+
+  it("zeigt Override-Chip mit Modell-Label bzw. Standard-Chip pro Rolle", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    // coder hat einen Lane-Eintrag (hermes|gpt-5.5) → aktiver Override
+    expect(html).toContain("Override · GPT-5.5");
+    // premium ohne Lane-Eintrag → expliziter Standard-Zustand
+    expect(html).toContain(">Standard<");
+  });
+
+  it("fasst Bereitschaft + Overrides im Panel-Meta zusammen", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("1/2 bereit · 1 Override");
+  });
+
+  it("skaliert: 12 Rollen bleiben als Dot-Spalte mit Summen-Meta scannbar", () => {
+    const crowded: LanesResponse = {
+      ...fixture,
+      profiles: Array.from({ length: 12 }, (_, i) => ({
+        name: `worker-${i}`,
+        worker_runtime: "hermes" as const,
+        default_model: "gpt-5.5",
+        description: "",
+        kanban_spawn_health:
+          i % 3 === 0
+            ? ("healthy" as const)
+            : i % 3 === 1
+              ? { status: "unhealthy" as const, reason: "Spawn-Probe rot" }
+              : undefined,
+      })),
+      lanes: [{ ...fixture.lanes[0], profiles: {} }],
+    };
+    const html = renderToStaticMarkup(
+      <LanesEditor data={crowded} lane={crowded.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect((html.match(/hc-led-live/g) ?? []).length).toBe(4);
+    expect((html.match(/hc-led-warn/g) ?? []).length).toBe(4);
+    expect((html.match(/hc-led-idle/g) ?? []).length).toBe(4);
+    expect(html).toContain("4/12 bereit · 0 Overrides");
+  });
+
+  it("Presets-Liste nennt den Override-Umfang jedes Presets", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    // beide Fixture-Lanes mappen je genau 1 Profil
+    expect((html.match(/1 Override</g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 
   it("Presets-Sektion: anlegen + Löschen mit Inline-Confirm", () => {

@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, Check, Plus, Trash2 } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
-import { StatusPill, ToneCallout } from "../components/atoms";
+import { Led, StatusPill, ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import type { Density } from "../hooks/useDensity";
+import type { DotKind } from "../lib/tones";
 import {
   activateLane,
+  choiceOverrideLabel,
   createLane,
   deleteLane,
   editorRows,
   entryFromChoice,
   laneChoiceWarning,
+  laneProfileSpawnHealth,
   loadLanes,
   profilesFromEditorRows,
   smokeCheckLaneConfig,
@@ -20,6 +23,7 @@ import {
   type Lane,
   type LaneModelOption,
   type LaneSpawnCheckResult,
+  type LaneSpawnHealth,
   type LaneSpawnHealthStatus,
   type LanesResponse,
 } from "./lanes/api";
@@ -57,6 +61,16 @@ const t = {
   smokeWarn: "Worker-Check warnt",
   smokeError: "Worker-Check Fehler",
   smokeUnavailable: "Worker-Check nicht verfügbar",
+  overrideChip: "Override",
+  defaultChip: "Standard",
+  readinessTitle: (state: string) => `Spawn-Bereitschaft: ${state}`,
+  readinessReady: "bereit",
+  readinessChecking: "wird geprüft",
+  readinessWarn: "gestört",
+  readinessError: "Check-Fehler",
+  readinessUnknown: "ungeprüft",
+  readySummary: (ready: number, total: number) => `${ready}/${total} bereit`,
+  overrideSummary: (n: number) => (n === 1 ? "1 Override" : `${n} Overrides`),
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -154,6 +168,37 @@ function rowSmokeLabel(state: RowCheckState): string {
   return t.smokeError;
 }
 
+interface RowReadiness {
+  kind: DotKind;
+  /** Kurzlabel für Dot-Title + Zeilen-Hinweis. */
+  label: string;
+  /** Zählt in der Panel-Zusammenfassung als bereit. */
+  ready: boolean;
+  /** true sobald irgendeine Evidenz (passiv oder Live-Check) vorliegt. */
+  known: boolean;
+}
+
+/** EINE sichtbare Bereitschaft pro Zeile: ein frischer Worker-Check gewinnt
+ *  über die passive Katalog-/Lane-Evidenz (kanban_spawn_health), damit Dot
+ *  und Check-Ergebnis einander nie widersprechen. */
+function rowReadiness(
+  check: RowCheckState | undefined,
+  passive: LaneSpawnHealth | null,
+): RowReadiness {
+  if (check) {
+    if (check.status === "checking") return { kind: "ready", label: t.readinessChecking, ready: false, known: true };
+    if (check.status === "healthy") return { kind: "live", label: t.readinessReady, ready: true, known: true };
+    if (check.status === "error") return { kind: "error", label: t.readinessError, ready: false, known: true };
+    return { kind: "warn", label: t.readinessWarn, ready: false, known: true };
+  }
+  if (passive) {
+    if (passive.status === "healthy") return { kind: "live", label: t.readinessReady, ready: true, known: true };
+    if (passive.status === "unhealthy") return { kind: "warn", label: t.readinessWarn, ready: false, known: true };
+    return { kind: "idle", label: t.readinessUnknown, ready: false, known: true };
+  }
+  return { kind: "idle", label: t.readinessUnknown, ready: false, known: false };
+}
+
 function resolveRowCheckEntry(row: EditorRow, data: LanesResponse) {
   const explicit = entryFromChoice(row.choice);
   if (explicit?.worker_runtime) {
@@ -193,6 +238,28 @@ export function LanesEditor({
   );
   const hasWrongWorkerChoice = Object.values(rowWarnings).some(Boolean);
   const applyDisabled = busy || hasWrongWorkerChoice || (!dirty && lane.active);
+
+  // Bereitschaft + Override-Zustand pro Zeile — passiv scannbar, ohne dass der
+  // Operator erst jede Zeile einzeln per Worker-Check anstoßen muss.
+  const readiness = useMemo(
+    () =>
+      Object.fromEntries(
+        rows.map((row) => [
+          row.profile,
+          rowReadiness(rowChecks[row.profile], laneProfileSpawnHealth(row.profile, lane, data.profiles)),
+        ]),
+      ) as Record<string, RowReadiness>,
+    [rows, rowChecks, lane, data.profiles],
+  );
+  const overrideCount = rows.filter((row) => row.choice !== "").length;
+  const readinessKnown = rows.some((row) => readiness[row.profile]?.known);
+  const readyCount = rows.filter((row) => readiness[row.profile]?.ready).length;
+  const profilesMeta = [
+    readinessKnown ? t.readySummary(readyCount, rows.length) : null,
+    t.overrideSummary(overrideCount),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const runRowCheck = useCallback(async (row: EditorRow) => {
     const entry = resolveRowCheckEntry(row, data);
@@ -268,21 +335,46 @@ export function LanesEditor({
         </div>
       </FleetPanel>
 
-      {/* Rollen-Liste: pro Profil genau EIN Modell-Dropdown. */}
-      <FleetPanel eyebrow={t.profilesPanel}>
+      {/* Rollen-Liste: pro Profil genau EIN Modell-Dropdown. Bereitschaft (Dot)
+          und Override-Zustand (Chip) sind passiv pro Zeile scannbar. */}
+      <FleetPanel eyebrow={t.profilesPanel} meta={profilesMeta}>
         <ul className="divide-y divide-[var(--hc-border)]">
-          {rows.map((row, i) => (
+          {rows.map((row, i) => {
+            const ready = readiness[row.profile];
+            const override = choiceOverrideLabel(row.choice, models);
+            return (
             <li
               key={row.profile}
               className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
             >
-              <div className="min-w-0">
-                <div className="truncate text-sm text-white" title={row.description}>
-                  {row.profile}
+              <div className="flex min-w-0 items-start gap-2">
+                <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
+                  <Led kind={ready.kind} size={8} />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="truncate text-sm text-white" title={row.description}>
+                      {row.profile}
+                    </span>
+                    {override !== null ? (
+                      <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
+                        {t.overrideChip} · {override}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
+                        {t.defaultChip}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
+                    {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
+                    {ready.known && !ready.ready ? (
+                      <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
+                        {t.readinessTitle(ready.label)}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-                {ROLE_HINTS[row.profile] ? (
-                  <div className="text-xs hc-dim">{ROLE_HINTS[row.profile]}</div>
-                ) : null}
               </div>
               <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
                 <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
@@ -301,7 +393,7 @@ export function LanesEditor({
                     }}
                   />
                   <Button
-                    size="xs"
+                    size="sm"
                     ghost
                     className="hc-hit justify-center"
                     disabled={busy || rowChecks[row.profile]?.status === "checking"}
@@ -315,18 +407,21 @@ export function LanesEditor({
                   <ToneCallout tone="amber">{rowWarnings[row.profile]}</ToneCallout>
                 ) : null}
                 {rowChecks[row.profile] ? (
-                  <div className="flex flex-wrap items-center justify-end gap-2 text-xs hc-soft">
+                  <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 text-xs hc-soft sm:justify-end">
                     <StatusPill
                       tone={rowSmokeTone(rowChecks[row.profile].status)}
                       label={rowSmokeLabel(rowChecks[row.profile])}
                       size="sm"
                     />
-                    <span>{rowChecks[row.profile].reason}</span>
+                    <span className="min-w-0 max-w-full break-words sm:text-right">
+                      {rowChecks[row.profile].reason}
+                    </span>
                   </div>
                 ) : null}
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </FleetPanel>
 
@@ -335,15 +430,20 @@ export function LanesEditor({
         <ul className="divide-y divide-[var(--hc-border)]">
           {data.lanes.map((l) => (
             <li key={l.id} className="flex flex-wrap items-center gap-2 py-2 first:pt-0 last:pb-0">
-              <span className="text-sm text-white">{l.name}</span>
+              <span className="min-w-0 break-words text-sm text-white">{l.name}</span>
               {l.active ? <StatusPill tone="emerald" label={t.active} size="sm" /> : null}
               {l.builtin ? (
                 <span className="rounded bg-white/5 px-1.5 py-0.5 text-xs hc-dim">{t.builtin}</span>
               ) : null}
+              <span className="text-xs hc-dim">
+                {Object.keys(l.profiles).length > 0
+                  ? t.overrideSummary(Object.keys(l.profiles).length)
+                  : t.defaultChip}
+              </span>
               {!l.active ? (
                 pendingDelete === l.id ? (
-                  <span className="ml-auto inline-flex flex-wrap items-center gap-2">
-                    <span className="hc-type-label hc-soft">{t.confirmDelete(l.name)}</span>
+                  <span className="ml-auto inline-flex min-w-0 flex-wrap items-center justify-end gap-2">
+                    <span className="hc-type-label hc-soft min-w-0 break-words">{t.confirmDelete(l.name)}</span>
                     <button
                       type="button"
                       disabled={busy}
@@ -389,7 +489,7 @@ export function LanesEditor({
             className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:w-64 sm:text-sm"
           />
           <Button
-            size="xs"
+            size="sm"
             ghost
             className="hc-hit"
             disabled={busy || newName.trim() === ""}
@@ -486,7 +586,7 @@ export function LanesView(_props: { density?: Density }) {
         <ToneCallout tone="red">
           <span className="flex items-center justify-between gap-3">
             <span>{error}</span>
-            <Button size="xs" ghost className="hc-hit" onClick={() => void reload()} disabled={busy}>
+            <Button size="sm" ghost className="hc-hit" onClick={() => void reload()} disabled={busy}>
               {t.retry}
             </Button>
           </span>
