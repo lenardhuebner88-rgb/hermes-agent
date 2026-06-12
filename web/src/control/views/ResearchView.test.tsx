@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ResearchEntry, pickAnswer, type ResearchCard } from "./ResearchView";
+import { ResearchEntry, type ResearchCard } from "./ResearchView";
+import { pickAnswer } from "./ResearchView.helpers";
 
 // Härtung (e): pickAnswer war exportiert aber ungetestet; ResearchEntry
 // bekommt Render-Tests nach RunTimelineView-Muster (statisch, initialer

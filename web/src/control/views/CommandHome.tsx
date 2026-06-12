@@ -12,7 +12,7 @@
  * Everything is real, polled data (no mocks). One screen instead of the
  * inbox+overview+pulse triple that all re-rendered slices of the same sources.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ArrowRight, ChevronRight, Inbox as InboxIcon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -56,7 +56,10 @@ export function CommandHome({ density }: { density: Density }) {
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
-  const [surfaceFilter, setSurfaceFilter] = useState<InboxSurface | null>(() => surfaceFromParam(searchParams.get("surface")));
+  // Der Surface-Filter lebt NUR im URL-Param (?surface=) — abgeleitet statt
+  // als State-Spiegel (der frühere Sync-Effect verletzte react-hooks/
+  // set-state-in-effect und konnte mit Taps um den Zustand konkurrieren).
+  const surfaceFilter = surfaceFromParam(searchParams.get("surface"));
   const fix = useFixRedispatch();
   const now = board.data?.now ?? nowSec();
 
@@ -74,12 +77,7 @@ export function CommandHome({ density }: { density: Density }) {
   const top = inbox.items[0];
   const rest = (surfaceFilter ? inbox.items.filter((i) => i.surface === surfaceFilter) : inbox.items).slice(top && !surfaceFilter ? 1 : 0);
 
-  useEffect(() => {
-    setSurfaceFilter(surfaceFromParam(searchParams.get("surface")));
-  }, [searchParams]);
-
   const chooseSurfaceFilter = (id: InboxSurface | null) => {
-    setSurfaceFilter(id);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       if (id) next.set("surface", id);

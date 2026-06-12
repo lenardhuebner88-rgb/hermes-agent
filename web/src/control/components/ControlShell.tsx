@@ -6,6 +6,7 @@ import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
 import { Overlay } from "./Overlay";
+import { useClientNowSeconds } from "../lib/clock";
 
 export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek";
 
@@ -212,30 +213,32 @@ function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
 }
 
 function MoreNav() {
-  const menu = useDismissibleMenu<HTMLDetailsElement>();
+  // Destrukturiert statt `menu.ref`/`menu.open`: react-hooks/refs erkennt nur
+  // direkte Ref-Bezeichner als JSX-Durchreichung, keine Property-Zugriffe.
+  const { open, setOpen, ref } = useDismissibleMenu<HTMLDetailsElement>();
   return (
     // hidden lg:block: unter lg übernimmt der "Mehr"-Bottom-Tab (MoreSheet);
     // max-h + overflow: auch kleine Desktop-Fenster erreichen alle Einträge.
-    <details ref={menu.ref} open={menu.open} onToggle={(event) => menu.setOpen(event.currentTarget.open)} className="group relative hidden lg:block">
+    <details ref={ref} open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="group relative hidden lg:block">
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft hover:bg-white/5"><MoreHorizontal className="h-4 w-4" />Mehr</summary>
       <div className="absolute right-0 top-12 z-50 hidden max-h-[70dvh] w-56 overflow-y-auto overscroll-contain rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl group-open:block">
-        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
         <div className="my-1.5 border-t border-[var(--hc-border)]" />
-        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
       </div>
     </details>
   );
 }
 
 function RailMoreNav() {
-  const menu = useDismissibleMenu();
+  const { open, setOpen, ref } = useDismissibleMenu();
   return (
-    <div ref={menu.ref} className="group relative">
-      <button type="button" title="Mehr" aria-label="Mehr" aria-expanded={menu.open} onClick={() => menu.setOpen((open) => !open)} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><MoreHorizontal className="h-5 w-5" /></button>
-      <div className={cn("absolute left-12 top-0 z-50 w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100", menu.open ? "visible opacity-100" : "invisible opacity-0")}>
-        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+    <div ref={ref} className="group relative">
+      <button type="button" title="Mehr" aria-label="Mehr" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><MoreHorizontal className="h-5 w-5" /></button>
+      <div className={cn("absolute left-12 top-0 z-50 w-56 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100", open ? "visible opacity-100" : "invisible opacity-0")}>
+        {moreTabs.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
         <div className="my-1.5 border-t border-[var(--hc-border)]" />
-        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => menu.setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
+        {secondaryNav.map((item) => { const Icon = item.icon; return <Link key={item.path} to={item.path} onClick={() => setOpen(false)} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hc-soft hover:bg-white/5 hover:text-white"><Icon className="h-4 w-4" />{item.label}</Link>; })}
       </div>
     </div>
   );
@@ -261,7 +264,8 @@ function StatusDots({ health }: { health: Props["health"] }) {
   const gateway = health.data?.subsystems.gateway.status ?? (health.error ? "offline" : "unknown");
   const dashboard = health.data?.overall ?? (health.error ? "offline" : "unknown");
   const stale = Boolean(health.isStale);
-  const checked = health.lastUpdated ? `Zuletzt aktuell vor ${Math.max(0, Math.floor(Date.now() / 1000) - health.lastUpdated)}s` : "Noch kein Health-Signal";
+  const clientNow = useClientNowSeconds();
+  const checked = health.lastUpdated ? `Zuletzt aktuell vor ${Math.max(0, clientNow - health.lastUpdated)}s` : "Noch kein Health-Signal";
   const title = [health.error, checked].filter(Boolean).join(" · ");
   return (
     <div title={title} className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs hc-soft md:flex">

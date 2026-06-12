@@ -6,7 +6,7 @@ import { de } from "../../i18n/de";
 import type { AutoresearchRun, Proposal } from "../../lib/types";
 import { StatusPill } from "../../components/atoms";
 import { Disclosure, Panel, Stagger, StaggerItem, Text } from "../../components/primitives";
-import { reviewStepToneClass } from "./panels";
+import { reviewStepToneClass } from "./panels.helpers";
 
 export function RunsList({ runs, proposals }: { runs: AutoresearchRun[]; proposals: Proposal[] }) {
   const totalTokens = sumRunTokens(runs);

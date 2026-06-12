@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { CATEGORY_LABEL, groupBySeries } from "./BibliothekView.helpers";
 import {
-  CATEGORY_LABEL,
   ItemRow,
   SavedSearchShelf,
   TopicFollowCard,
   TopicFollowSection,
-  groupBySeries,
   type LibraryItem,
   type LibrarySavedSearch,
   type LibraryTopic,

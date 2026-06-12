@@ -142,9 +142,15 @@ export function IssuesView(_props: { density?: Density }) {
   }, []);
 
   useEffect(() => {
-    void load();
+    // Erst-Load per setTimeout(0) statt direkt im Effect-Body — Hauskonvention
+    // (TriageStrip): synchrones setState im Effect verletzt react-hooks/
+    // set-state-in-effect und kaskadiert Renders.
+    const firstLoad = window.setTimeout(() => void load(), 0);
     const id = window.setInterval(() => void load(), 60000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(firstLoad);
+      window.clearInterval(id);
+    };
   }, [load]);
 
   return (

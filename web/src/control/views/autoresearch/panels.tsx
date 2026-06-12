@@ -22,6 +22,7 @@ import type { AutoresearchRun, ToneName } from "../../lib/types";
 import { StatusPill } from "../../components/atoms";
 import { Card, Disclosure, SkeletonCard, Stat, Stagger, StaggerItem, Text } from "../../components/primitives";
 import type { AutoresearchActionHint } from "../../lib/autoresearchActionPlan";
+import { reviewStepToneClass } from "./panels.helpers";
 
 export function Metric({ label, value }: { label: string; value: string }) {
   return <Stat label={label} value={value} />;
@@ -336,16 +337,6 @@ export function LoopPresetPicker({ selectedId, disabled, onSelect }: { selectedI
   );
 }
 
-export function reviewStepToneClass(tone: ToneName): string {
-  switch (tone) {
-    case "emerald": return "border-emerald-500/20 bg-emerald-500/10";
-    case "cyan": return "border-cyan-500/20 bg-cyan-500/10";
-    case "amber": return "border-amber-500/20 bg-amber-500/10";
-    case "violet": return "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]";
-    case "red": return "border-red-500/20 bg-red-500/10";
-    default: return "border-white/10 bg-black/20";
-  }
-}
 
 export function TargetingPreview({ summary }: { summary: ResearchLoopStartSummary }) {
   return (
@@ -414,7 +405,7 @@ export function LastRun({ status, latestRun }: { status: ReturnType<typeof useAu
   );
 }
 
-export function formatLastRunRawPayload(value: unknown): string | null {
+function formatLastRunRawPayload(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
   try { return JSON.stringify(value, null, 2); } catch { return null; }
@@ -468,11 +459,11 @@ export function DeepAuditFindings({ findings, proposals }: { findings: DeepAudit
   );
 }
 
-export function deepAuditSeverityLabel(severity: DeepAuditFinding["severity"]): string {
+function deepAuditSeverityLabel(severity: DeepAuditFinding["severity"]): string {
   switch (severity) { case "critical": return "Kritisch"; case "high": return "Hoch"; case "medium": return "Mittel"; case "low": return "Niedrig"; }
 }
 
-export function deepAuditCategoryLabel(category: string): string {
+function deepAuditCategoryLabel(category: string): string {
   switch (category) { case "bug_risk": return "Bug-Risiko"; case "security": return "Sicherheit"; case "contradiction": return "Widerspruch"; case "missing_section": return "Lücke"; case "operational_risk": return "Betriebsrisiko"; default: return category || "Audit"; }
 }
 

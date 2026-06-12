@@ -5,7 +5,7 @@ import { fetchJSON } from "@/lib/api";
 // aus der LanesView (F1) als Komponente gehoben. Freitext bleibt erlaubt;
 // Vorschläge = statischer Katalog + live default_models aus GET /lanes
 // (profiles[] kommt dynamisch aus den Profil-Configs).
-export const MODEL_SUGGESTIONS = [
+const MODEL_SUGGESTIONS = [
   "claude-fable-5",
   "claude-opus-4-8",
   "claude-sonnet-4-6",
@@ -28,7 +28,7 @@ interface LanesCatalogResponse {
 }
 
 /** Live-Modelle aus den Profil-Configs, dedupliziert gegen den Katalog. */
-export function mergeSuggestions(
+function mergeSuggestions(
   base: string[], profiles: LanesCatalogProfile[],
 ): string[] {
   const seen = new Set(base);

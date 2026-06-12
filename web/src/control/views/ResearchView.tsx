@@ -9,6 +9,7 @@ import { useHermesWorkers } from "../hooks/useControlData";
 import { fmtClock, fmtDur, nowSec } from "../lib/derive";
 import { taskStatusLabel } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";
+import { pickAnswer, type ResearchDetail } from "./ResearchView.helpers";
 
 // Phase C (Programm 3): Recherche-Tab — der Operator beauftragt Wissen wie
 // einen Worker: Frage → Modellwahl → Task (tenant=research) → Antwort
@@ -56,24 +57,7 @@ interface BoardLike {
   columns: { name: string; tasks: ResearchCard[] }[];
 }
 
-interface TaskComment { author: string | null; body: string; created_at: number }
 
-interface ResearchDetail {
-  task: { id: string; title: string; body?: string | null; result?: string | null; status: string } | null;
-  comments?: TaskComment[];
-}
-
-/** Antwort = letzter Kommentar (Receipt-Muster), sonst result. Exportiert für den Test. */
-export function pickAnswer(detail: ResearchDetail): { body: string; author: string | null; at: number | null } | null {
-  const comments = detail.comments ?? [];
-  if (comments.length > 0) {
-    const last = comments[comments.length - 1];
-    return { body: last.body, author: last.author, at: last.created_at };
-  }
-  const result = detail.task?.result?.trim();
-  if (result) return { body: result, author: null, at: null };
-  return null;
-}
 
 export function ResearchEntry({ card, now }: { card: ResearchCard; now: number }) {
   const [open, setOpen] = useState(false);
@@ -169,9 +153,13 @@ export function ResearchView(_props: { density?: Density }) {
   }, []);
 
   useEffect(() => {
-    void loadHistory();
+    // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip), s.o.
+    const firstLoad = window.setTimeout(() => void loadHistory(), 0);
     const id = window.setInterval(() => void loadHistory(), 10000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(firstLoad);
+      window.clearInterval(id);
+    };
   }, [loadHistory]);
 
   const submit = useCallback(async () => {

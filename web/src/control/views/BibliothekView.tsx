@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
@@ -6,6 +6,7 @@ import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
+import { CATEGORY_LABEL, groupBySeries } from "./BibliothekView.helpers";
 
 // Phase D/E (Programm 3): Bibliothek — der Lesesaal. Zeitungs-Metapher statt
 // Tabellen-Metapher: „Heute"-Frontpage (Neuestes pro Kategorie), Kategorie-
@@ -40,15 +41,6 @@ const t = {
   savedApply: "Suche öffnen",
 };
 
-export const CATEGORY_LABEL: Record<string, string> = {
-  news: "News",
-  briefings: "Briefings",
-  recherchen: "Recherchen",
-  familie: "Familie",
-  arbeit: "Arbeit & Receipts",
-  receipts: "Receipts",
-  wartung: "Wartung",
-};
 
 export interface LibraryItem {
   id: string;
@@ -104,19 +96,6 @@ interface LibrarySavedSearchesResponse {
 
 const LAST_VISIT_KEY = "hc-bibliothek-last-visit";
 
-/** Serien-Gruppierung fürs Regal (exportiert für den Test). */
-export function groupBySeries(items: LibraryItem[]): { seriesId: string; series: string; meta: string; items: LibraryItem[] }[] {
-  const groups = new Map<string, { seriesId: string; series: string; meta: string; items: LibraryItem[] }>();
-  for (const item of items) {
-    let g = groups.get(item.series_id);
-    if (!g) {
-      g = { seriesId: item.series_id, series: item.series, meta: item.series_meta, items: [] };
-      groups.set(item.series_id, g);
-    }
-    g.items.push(item);
-  }
-  return [...groups.values()].sort((a, b) => (b.items[0]?.ts ?? 0) - (a.items[0]?.ts ?? 0));
-}
 
 export function ItemRow({ item, unreadSince, onOpen }: { item: LibraryItem; unreadSince: number; onOpen: (item: LibraryItem) => void }) {
   return (
@@ -219,14 +198,24 @@ function ReadingView({ item, neighbors, onNavigate, onBack }: {
 }) {
   const [detail, setDetail] = useState<LibraryDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Reset beim Item-Wechsel als Render-Phase-Anpassung (React-Doku
+  // "adjusting state when props change") statt setState im Effect-Body.
+  const [detailFor, setDetailFor] = useState<string>(item.id);
+  if (detailFor !== item.id) {
+    setDetailFor(item.id);
+    setDetail(null);
+    setError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
-    setDetail(null);
     void (async () => {
       try {
         const d = await fetchJSON<LibraryDetail>(`/api/library/item?id=${encodeURIComponent(item.id)}`);
-        if (!cancelled) setError(null), setDetail(d);
+        if (!cancelled) {
+          setError(null);
+          setDetail(d);
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
@@ -258,14 +247,15 @@ export function BibliothekView(_props: { density?: Density }) {
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState<LibraryItem | null>(null);
   // Ungelesen v1: Zeitstempel des letzten Besuchs aus localStorage; beim
-  // Mount einfrieren, dann sofort fortschreiben.
-  const unreadSinceRef = useRef<number>(0);
-  if (unreadSinceRef.current === 0) {
+  // Mount einfrieren (Lazy-Initializer), das Fortschreiben passiert im
+  // Mount-Effekt (localStorage-Write + Date.now sind impure → nicht im Render).
+  const [unreadSince] = useState<number>(() => {
     const raw = typeof window !== "undefined" ? window.localStorage.getItem(LAST_VISIT_KEY) : null;
-    unreadSinceRef.current = raw ? Number(raw) || 1 : 1;
+    return raw ? Number(raw) || 1 : 1;
+  });
+  useEffect(() => {
     try { window.localStorage.setItem(LAST_VISIT_KEY, String(Math.floor(Date.now() / 1000))); } catch { /* private mode */ }
-  }
-  const unreadSince = unreadSinceRef.current;
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -317,10 +307,17 @@ export function BibliothekView(_props: { density?: Density }) {
   }, []);
 
   useEffect(() => {
-    void load();
-    void loadPreferences();
+    // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip): synchrones
+    // setState im Effect-Body verletzt react-hooks/set-state-in-effect.
+    const firstLoad = window.setTimeout(() => {
+      void load();
+      void loadPreferences();
+    }, 0);
     const id = window.setInterval(() => void load(), 60000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(firstLoad);
+      window.clearInterval(id);
+    };
   }, [load, loadPreferences]);
 
   const items = useMemo(() => data?.items ?? [], [data]);
