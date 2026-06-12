@@ -1,8 +1,179 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 const STORAGE_KEY = "fo-backlog-view-v1";
 const QUICK_VIEWS: Array<string | RegExp> = ["Commission-ready", /Grooming n.tig/, "Stale", "Ohne Owner", "Alle"];
 const DRAWER_SECTIONS = ["Decision / Why now", "Acceptance Criteria", "Current Evidence / Last Proof", "Blockers"];
+
+// FO-Backlog-Fixture (t_278af546): Der CandidateCompareStrip rendert per Design
+// erst ab 2 aktiven ranked-Kandidaten (BacklogSections.tsx: `topCandidates.length
+// <= 1 → null`). Gegen das LIVE-Backlog hing die Suite damit von der aktuellen
+// Kandidatenzahl ab (<2 ranked → Strip fehlt → rote Tests). Wie in
+// control-triage.spec.ts mocken wir deshalb NUR die FO-Backlog-Datenschicht per
+// page.route (Liste + Detail) und fahren weiter die echte SPA auf :9119 —
+// deterministisch, egal ob das Live-Backlog 0, 1 oder >=2 Kandidaten hat.
+const BACKLOG_API = "**/api/family-organizer/backlog";
+const BACKLOG_DETAIL_API = "**/api/family-organizer/backlog/*";
+const FIXTURE_NOW = 1_781_222_400; // 2026-06-12T00:00:00Z — fix, damit Age/Stale-Ableitungen stabil sind
+
+// 4 aktive Items (now/next/in_progress/blocked) + 1 done: deckt alle Quick-Views
+// (ready/groom/stale/unowned) und den Stale+High-Risk-Filterpfad des Tests ab.
+// Server-Facts (freshness/age_days/quality_issues/readiness) sind gesetzt, damit
+// keine Client-Heuristik gegen die echte Uhr rechnet.
+const FIXTURE_ITEMS = [
+  {
+    id: "0901",
+    title: "Kalender-Sync: DB-Migrationspfad absichern",
+    status: "now",
+    owner: "piet",
+    risk: "high",
+    area: "db",
+    updated: "2026-06-10",
+    lane: null,
+    result: null,
+    stale: false,
+    excerpt: "Migrationspfad für den Kalender-Sync gegen Teilausfälle härten.",
+    source_path: "backlog/items/0901-kalender-sync-migration.md",
+    missing_acceptance: false,
+    missing_next_action: false,
+    age_days: 2,
+    freshness: "fresh",
+    quality_issues: [],
+    readiness: "ready",
+  },
+  {
+    id: "0902",
+    title: "Einkaufslisten-Offline-Queue stabilisieren",
+    status: "next",
+    owner: "claude",
+    risk: "high",
+    area: "shopping",
+    updated: "2026-05-18",
+    lane: null,
+    result: null,
+    stale: true,
+    excerpt: "Offline-Mutationen gehen bei Reconnect verloren.",
+    source_path: "backlog/items/0902-offline-queue.md",
+    missing_acceptance: true,
+    missing_next_action: false,
+    age_days: 25,
+    freshness: "stale",
+    quality_issues: [
+      { code: "missing_acceptance", severity: "risk" },
+      { code: "stale_update", severity: "risk" },
+    ],
+    readiness: "needs_grooming",
+  },
+  {
+    id: "0903",
+    title: "Küchen-Display: Wochenplan-Karte",
+    status: "in_progress",
+    owner: "unassigned",
+    risk: "medium",
+    area: "kitchen",
+    updated: "2026-06-04",
+    lane: null,
+    result: null,
+    stale: false,
+    excerpt: "Wochenplan als Karte auf dem Küchen-Tablet.",
+    source_path: "backlog/items/0903-wochenplan-karte.md",
+    missing_acceptance: false,
+    missing_next_action: true,
+    age_days: 8,
+    freshness: "aging",
+    quality_issues: [{ code: "missing_next_action", severity: "risk" }],
+    readiness: "needs_grooming",
+  },
+  {
+    id: "0904",
+    title: "Admin: Geburtstags-Reminder konfigurierbar",
+    status: "blocked",
+    owner: "codex",
+    risk: "low",
+    area: "admin",
+    updated: "2026-06-11",
+    lane: null,
+    result: null,
+    stale: false,
+    excerpt: "Reminder-Vorlauf pro Familienmitglied einstellbar machen.",
+    source_path: "backlog/items/0904-geburtstags-reminder.md",
+    missing_acceptance: false,
+    missing_next_action: false,
+    age_days: 1,
+    freshness: "fresh",
+    quality_issues: [],
+    readiness: "blocked",
+  },
+  {
+    id: "0999",
+    title: "Anwesenheits-Badge im Header",
+    status: "done",
+    owner: "piet",
+    risk: "low",
+    area: "process",
+    updated: "2026-06-09",
+    lane: null,
+    result: "Shipped — Badge live auf dem Küchen-Tablet.",
+    stale: false,
+    excerpt: "Erledigt.",
+    source_path: "backlog/items/0999-anwesenheits-badge.md",
+    missing_acceptance: false,
+    missing_next_action: false,
+    age_days: 3,
+    freshness: "fresh",
+    quality_issues: [],
+    readiness: "ready",
+  },
+];
+
+function backlogPayload() {
+  return {
+    schema: "fo-backlog-v2",
+    checked_at: FIXTURE_NOW,
+    items: FIXTURE_ITEMS,
+    counts: { now: 1, next: 1, in_progress: 1, blocked: 1, later: 0, done: 1 },
+    contract_health: {
+      source_count: FIXTURE_ITEMS.length,
+      counted_sum: FIXTURE_ITEMS.length,
+      unknown_statuses: [],
+      invalid_risk_count: 0,
+      invalid_owner_count: 0,
+      unowned_count: 1,
+      stale_count: 1,
+      missing_acceptance_count: 1,
+      missing_next_action_count: 1,
+      invalid_area_count: 0,
+    },
+    source: { dir: "backlog/items", ref: "e2e-fixture", count: FIXTURE_ITEMS.length },
+    error: null,
+  };
+}
+
+function detailPayload(id: string) {
+  const item = FIXTURE_ITEMS.find((candidate) => candidate.id === id) ?? FIXTURE_ITEMS[0];
+  return {
+    ...item,
+    result: item.result,
+    body: `${item.excerpt}\n\nAkzeptanzkriterien:\n- Kriterium A\n- Kriterium B`,
+    decision: [`Jetzt, weil ${item.area} ein sichtbarer Operator-Pfad ist.`],
+    acceptance_criteria: ["Kriterium A ist erfüllt.", "Kriterium B ist per Test belegt."],
+    proofs: item.status === "done" ? ["2026-06-09 Gate grün, deployt."] : ["2026-06-10 vitest grün (Fixture)."],
+    blockers: item.status === "blocked" ? ["Wartet auf Operator-Entscheid zum Reminder-Vorlauf."] : [],
+    next_action: "Spec vollständig lesen und Umsetzung vorbereiten.",
+    source_path: item.source_path,
+    source_ref: `${item.source_path}@e2e-fixture`,
+    links: [],
+  };
+}
+
+async function installBacklogMocks(page: Page) {
+  await page.route(BACKLOG_API, async (route: Route) => {
+    await route.fulfill({ json: backlogPayload() });
+  });
+  await page.route(BACKLOG_DETAIL_API, async (route: Route) => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop() ?? "");
+    await route.fulfill({ json: detailPayload(id) });
+  });
+}
 
 type PageWatch = {
   consoleErrors: string[];
@@ -67,8 +238,9 @@ test.describe("FO backlog command UX", () => {
     }, STORAGE_KEY);
   });
 
-  test("renders live v2 data and supports commandable queue interactions", async ({ page }) => {
+  test("renders fixture-backed v2 data and supports commandable queue interactions", async ({ page }) => {
     const watch = watchPage(page);
+    await installBacklogMocks(page);
 
     await gotoBacklog(page);
 
@@ -134,17 +306,25 @@ test.describe("FO backlog command UX", () => {
     expect(persisted).toMatchObject({ quickView: "stale", sortKey: "risk", filterRisk: "high" });
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible();
+    // Gleiche Boot-Stall-Toleranz wie gotoBacklog (15s, /api/profiles-Befund
+    // 2026-06-12) — der Reload bootet die SPA komplett neu.
+    await expect(page.getByRole("heading", { name: /Backlog/ })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Stale" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("button", { name: "Risiko" })).toHaveClass(/border-cyan/);
     await expect(page.getByRole("button", { name: "high" })).toHaveClass(/border-cyan/);
 
-    const compareStrip = page.getByLabel("Top-Kandidaten vergleichen");
+    // Fixture-deterministisch: 4 aktive Kandidaten → Strip rendert die Top 3,
+    // Rang 1 ist das now/high/db-Item 0901 (rankFoItems-Gewichte). Locator über
+    // das Heading statt getByLabel: das Section-Primitive setzt kein aria-label.
+    const compareStrip = page
+      .locator("section")
+      .filter({ has: page.getByRole("heading", { name: "Top-Kandidaten vergleichen" }) });
     await expect(compareStrip).toBeVisible();
+    await expect(compareStrip.getByText("#1 · 0901")).toBeVisible();
     const reasonChips = compareStrip.getByText(/Status now|Status next|L.uft|Hohes Risiko|Wichtiger Bereich|Lange offen|Kein Owner|Stale|Akzeptanz fehlt|Next Action fehlt|Grooming n.tig|Vertragsdrift/);
     expect(await reasonChips.count()).toBeGreaterThan(0);
     const commissionButtons = compareStrip.getByRole("button", { name: /N.chsten beauftragen|kopiert/ });
-    expect(await commissionButtons.count()).toBeGreaterThan(0);
+    expect(await commissionButtons.count()).toBe(3);
 
     await watch.assertClean();
   });
@@ -167,6 +347,7 @@ test.describe("FO backlog command UX", () => {
 
   test("keeps the mobile backlog usable at 390px", async ({ page }) => {
     const watch = watchPage(page);
+    await installBacklogMocks(page);
     await page.setViewportSize({ width: 390, height: 844 });
 
     await gotoBacklog(page);
@@ -204,8 +385,11 @@ test.describe("FO backlog command UX", () => {
     expect(overflow.offenders, `horizontal overflow offenders: ${overflow.offenders.join(", ")}`).toEqual([]);
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
 
-    const bottomNav = page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "Family Organizer" }) });
+    // Mobile Bottom-Nav = Spine-Tabs + "Mehr" (Nav-Redesign 2026-06-11; der
+    // Family-Organizer-Eintrag lebt seitdem im Mehr-Sheet, nicht als eigener Tab).
+    const bottomNav = page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "Mehr" }) });
     await expect(bottomNav).toBeVisible();
+    await expect(bottomNav.getByRole("button", { name: "Start" })).toBeVisible();
     const navBox = await bottomNav.boundingBox();
     expect(navBox?.y ?? 0).toBeGreaterThan(700);
 
