@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Eye, Lock, OctagonX, RotateCw, ScrollText, Send, Zap } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Eye, Lock, OctagonX, RotateCw, ScrollText, Send, Zap } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { cn } from "@/lib/utils";
@@ -32,6 +32,9 @@ interface Props {
    *  der Aufrufer routet; die Karte kennt nur den Aktions-Schlüssel. */
   onAction?: (runId: string, action: WorkerActionKey) => void | Promise<void>;
   actionBusy?: boolean;
+  /** Kompakt-Modus: nur Kopfzeile (Profil · Status · Laufzeit/Budget) sichtbar,
+   *  Stats/Meter/Aktionen erst nach Aufklappen. Problemfälle starten offen. */
+  collapsible?: boolean;
 }
 
 export type WorkerActionKey = "terminate" | "unlock" | "nudge" | "restart" | "dispatch";
@@ -100,10 +103,16 @@ function actionIcon(key: WorkerActionKey) {
   return <Zap className="h-4 w-4" />;
 }
 
-export function WorkerCard({ worker, health, density, now, inspectLoading, onInspect, onAction, actionBusy }: Props) {
+export function WorkerCard({ worker, health, density, now, inspectLoading, onInspect, onAction, actionBusy, collapsible = false }: Props) {
   // Welche Aktion gerade auf Bestätigung wartet (eine zur Zeit).
   const [confirming, setConfirming] = useState<WorkerActionKey | null>(null);
   const [logOpen, setLogOpen] = useState(false);
+  const runaway = workerRunaway(worker, now);
+  // Aufklapp-Zustand im Kompakt-Modus: Problemfälle starten offen. Bewusst nur
+  // der INITIALWERT — kein Auto-Aufklappen pro Poll-Tick, genau diese
+  // Layout-Sprünge soll der Kompakt-Modus beseitigen.
+  const [open, setOpen] = useState(() => runaway.level !== "none" || health.key !== "healthy");
+  const expanded = !collapsible || open;
   const inspect = worker.inspect ?? null;
   const remaining = workerRemaining(worker, now);
   const runtime = workerRuntime(worker, now);
@@ -116,7 +125,6 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   const overP90 = etaP90 != null && runtime > etaP90;
   const hasHeartbeat = worker.last_heartbeat_at > 0;
   const heartbeatAge = workerHeartbeatAge(worker, now);
-  const runaway = workerRunaway(worker, now);
   // Die situativ wahrscheinlichste Aktion steht vorn; ein Runaway-Kandidat
   // bekommt "Beenden" als Primärvorschlag.
   const primary: WorkerActionKey =
@@ -128,19 +136,51 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   const orderedActions: WorkerActionKey[] = [primary, ...ACTION_ORDER.filter((a) => a !== primary)];
   const stuckReason = hasHeartbeat ? de.worker.stuckReason(fmtDur(heartbeatAge)) : de.worker.expiredReason;
   const problemText = worker.block_reason || (health.key === "offline" ? de.worker.offlineReason : health.key === "stuck" ? stuckReason : null);
+  // Mini-Balken der Kopfzeile: Budget-Anteil (bevorzugt), sonst ETA-Anteil.
+  const headerMeterPct = worker.max_runtime_seconds > 0
+    ? Math.min(1, runtime / worker.max_runtime_seconds)
+    : etaP50 != null && etaP50 > 0 ? Math.min(1, runtime / etaP50) : null;
+
+  const runawayBadge = runaway.level !== "none" ? (
+    <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", runaway.level === "critical" ? "border-red-500/40 bg-red-500/10 text-red-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200")}>
+      <AlertTriangle className="h-3 w-3" />{runaway.level === "critical" ? de.worker.runawayCritical : de.worker.runawayWarn}
+    </span>
+  ) : null;
 
   return (
-    <article className={cn("hc-surface-card space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-red-500/40", runaway.level === "warn" && "border-amber-500/40")}>
+    <article className={cn("hc-surface-card", collapsible ? "space-y-3 p-3" : "space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-red-500/40", runaway.level === "warn" && "border-amber-500/40")}>
+      {collapsible ? (
+        <button type="button" aria-expanded={expanded} onClick={() => setOpen((v) => !v)} className="block w-full text-left">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]">{profileLabel[worker.profile] ?? worker.profile}</span>
+            {runawayBadge}
+            <span className="ml-auto inline-flex items-center gap-1.5">
+              <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
+              {expanded ? <ChevronDown className="h-3.5 w-3.5 hc-soft" /> : <ChevronRight className="h-3.5 w-3.5 hc-soft" />}
+            </span>
+          </div>
+          <h3 className="mt-1.5 line-clamp-1 text-sm font-semibold leading-snug text-white">{worker.task_title}</h3>
+          <p className="mt-1 truncate hc-mono hc-type-label hc-dim">
+            ⏱ {fmtDur(runtime)}
+            {worker.max_runtime_seconds > 0 ? ` / ${fmtDur(worker.max_runtime_seconds)}` : ""}
+            {note ? ` · ${note}` : ""}
+          </p>
+          {headerMeterPct != null ? (
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10">
+              <div
+                className={cn("h-full rounded-full", runaway.level === "critical" ? "bg-red-400" : runaway.level === "warn" || overP90 ? "bg-amber-400" : "bg-cyan-400")}
+                style={{ width: `${Math.round(headerMeterPct * 100)}%` }}
+              />
+            </div>
+          ) : null}
+        </button>
+      ) : (
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-2 py-0.5 text-xs text-[var(--hc-accent-text)]">{profileLabel[worker.profile] ?? worker.profile}</span>
             <span className="rounded-full border border-white/10 px-2 py-0.5 text-xs hc-soft">{taskStatusLabel[worker.task_status] ?? worker.task_status}</span>
-            {runaway.level !== "none" ? (
-              <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", runaway.level === "critical" ? "border-red-500/40 bg-red-500/10 text-red-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200")}>
-                <AlertTriangle className="h-3 w-3" />{runaway.level === "critical" ? de.worker.runawayCritical : de.worker.runawayWarn}
-              </span>
-            ) : null}
+            {runawayBadge}
           </div>
           <h3 className="line-clamp-2 text-base font-semibold leading-snug text-white">{worker.task_title}</h3>
           {note ? (
@@ -153,7 +193,21 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         </div>
         <StatusPill tone={health.tone} label={health.label} dot={health.dot} />
       </div>
+      )}
 
+      {!expanded ? (
+        problemText || runaway.level !== "none" ? (
+          <p className="line-clamp-2 hc-type-label text-amber-200">{problemText ?? runaway.reasons.join(" · ")}</p>
+        ) : null
+      ) : (
+      <>
+      {collapsible && note ? (
+        <Text variant="label" className="hc-soft">
+          <span className="hc-eyebrow mr-1.5">{de.worker.doingNow}:</span>
+          {note}
+          {noteAge != null ? <span className="hc-dim"> · {de.worker.noteAge(fmtDur(noteAge))}</span> : null}
+        </Text>
+      ) : null}
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
         <Stat label={de.worker.runtime} value={fmtDur(runtime)} />
         <Stat label={de.worker.heartbeat} value={hasHeartbeat ? fmtDur(heartbeatAge) : "—"} tone={hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S ? "amber" : undefined} />
@@ -247,6 +301,8 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
         </Text>
       ) : null}
       {logOpen ? <WorkerLogTail taskId={worker.task_id} /> : null}
+      </>
+      )}
     </article>
   );
 }

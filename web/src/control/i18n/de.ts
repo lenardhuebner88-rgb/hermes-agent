@@ -142,6 +142,7 @@ export const de = {
     emptyDesc: "Sobald in Kanban Aufgaben angelegt oder Worker gestartet werden, erscheinen sie hier in ihrer Stufe — keine Demo-Daten.",
     stageEmpty: "Nichts in dieser Stufe.",
     selectedChain: "Receipt-Kette",
+    detailClose: "Detail schließen",
     noSelection: "Wähle einen Lauf, um seine echten Receipts, Runs und Events zu sehen.",
     noReceipts: "Noch keine Receipts für diesen Run",
     noReceiptsDesc: "Sobald der Worker läuft, Belege produziert oder ein Verifier urteilt, erscheinen Runs und Events hier.",

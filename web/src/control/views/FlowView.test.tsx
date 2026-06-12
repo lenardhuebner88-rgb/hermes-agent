@@ -118,3 +118,37 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).not.toMatch(/href=\{specUrl\}/);
   });
 });
+
+describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
+  it("opens the receipt rail as a bottom sheet instead of auto-scrolling to a stacked rail", () => {
+    // Der frühere railRef-Scroll schob die Seite bei jedem Tap ans Seitenende.
+    expect(src).not.toMatch(/railRef/);
+    expect(src).toMatch(/function FlowDetailSheet/);
+    expect(src).toMatch(/setDetailSheetOpen\(true\)/);
+    // Desktop behält die sticky Seitenleiste; das Sheet bleibt dort versteckt.
+    expect(src).toMatch(/hidden xl:block/);
+    expect(src).toMatch(/xl:hidden/);
+  });
+
+  it("marks self-set ?task= params as handled so the deep-link effect cannot re-scroll per tap", () => {
+    expect(src).toMatch(/handledTaskParamRef\.current = id;/);
+  });
+
+  it("pins the auto-expanded chain across poll-tick urgency reorders", () => {
+    expect(src).toMatch(/autoExpandRef/);
+    expect(src).not.toMatch(/expandedRoot \?\? chainBoard\.active\[0\]/);
+  });
+
+  it("keeps the worker sort deterministic across payload reorders", () => {
+    expect(src).toMatch(/a\.started_at - b\.started_at/);
+    expect(src).toMatch(/a\.run_id\.localeCompare\(b\.run_id\)/);
+  });
+
+  it("hides the explainer copy on phones but keeps it for sm+", () => {
+    expect(src).toMatch(/hidden sm:inline/);
+  });
+
+  it("collapses worker cards to compact headers in the worker strip", () => {
+    expect(src).toMatch(/collapsible/);
+  });
+});
