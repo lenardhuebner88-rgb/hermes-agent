@@ -68,6 +68,10 @@ import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { AuthWidget } from "@/components/AuthWidget";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
+import { ProfileProvider } from "@/contexts/ProfileProvider";
+import { useProfileScope } from "@/contexts/useProfileScope";
+import { ProfileSwitcher } from "@/components/ProfileSwitcher";
+import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
 // Route pages are lazy-loaded (code-split): the initial bundle for any landing
@@ -519,6 +523,7 @@ export default function App() {
   }, []);
 
   return (
+    <ProfileProvider>
     <div
       data-layout-variant={layoutVariant}
       className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black text-text-primary antialiased"
@@ -573,6 +578,7 @@ export default function App() {
       )}
 
       <PluginSlot name="header-banner" />
+      <ProfileScopeBanner />
 
       <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", !isControlRoute && "pt-14 lg:pt-0")}>
         <div className="flex min-h-0 min-w-0 flex-1">
@@ -646,6 +652,8 @@ export default function App() {
                 )}
               </Button>
             </div>
+
+            <ProfileSwitcher collapsed={isDesktopCollapsed} />
 
             <nav
               className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden border-t border-current/10 py-2"
@@ -773,6 +781,7 @@ export default function App() {
                 )}
               >
                 <Suspense fallback={<RouteLoadingFallback />}>
+                  <ProfileKeyedRoutes>
                   <Routes>
                     {routes.map(({ key, path, element }) => (
                       <Route key={key} path={path} element={element} />
@@ -784,6 +793,7 @@ export default function App() {
                       }
                     />
                   </Routes>
+                  </ProfileKeyedRoutes>
                 </Suspense>
 
                 {embeddedChat &&
@@ -840,7 +850,23 @@ export default function App() {
 
       <PluginSlot name="overlay" />
     </div>
+    </ProfileProvider>
   );
+}
+
+/**
+ * Remounts the entire routed page tree when the global management profile
+ * changes. Pages load their data on mount; without this, a page opened
+ * under profile A would keep showing A's state while writes (via the
+ * fetchJSON ?profile= injection) silently targeted the newly selected
+ * profile B — the exact stale-target footgun the switcher exists to kill.
+ * Keying by profile resets every page's local state so it refetches under
+ * the new scope. The persistent ChatPage host below handles its own
+ * remount (channel keyed on scopedProfile).
+ */
+function ProfileKeyedRoutes({ children }: { children: ReactNode }) {
+  const { profile } = useProfileScope();
+  return <div key={profile || "__own__"} className="contents">{children}</div>;
 }
 
 function SidebarNavLink({

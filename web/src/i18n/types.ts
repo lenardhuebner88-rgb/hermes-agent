@@ -111,6 +111,10 @@ export interface Translations {
     statusOverview: string;
     system: string;
     webUi: string;
+    /** Optional — fall back to English literals until translated. */
+    managingProfile?: string;
+    currentProfileOption?: string;
+    managingProfileBanner?: string;
   };
 
   // ── Status page ──
@@ -405,6 +409,8 @@ export interface Translations {
     modelSaved?: string;
     modelSelect?: string;
     actions?: string;
+    manageSkills?: string;
+    activeSetHint?: string;
   };
 
   // ── Skills page ──
@@ -426,6 +432,10 @@ export interface Translations {
     setupNeeded: string;
     disabledForCli: string;
     more: string;
+    /** Optional — fall back to English literals until translated. */
+    profileSelector?: string;
+    currentProfile?: string;
+    managingProfile?: string;
   };
 
   // ── Config page ──
