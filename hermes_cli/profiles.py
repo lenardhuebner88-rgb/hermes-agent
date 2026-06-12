@@ -422,6 +422,13 @@ def remove_wrapper_script(name: str) -> bool:
     return False
 
 
+# Wrapper scripts written by create_wrapper_script are well under 1 KiB.
+# ~/.local/bin also holds real binaries (uv, rclone, … — hundreds of MB);
+# anything bigger than this cannot be one of our wrappers, and reading it
+# just to look for the needle costs hundreds of ms per file.
+_WRAPPER_MAX_BYTES = 4096
+
+
 def find_alias_for_profile(profile_name: str) -> Optional[str]:
     """Return the alias name of the wrapper that activates *profile_name*, or None.
 
@@ -453,6 +460,8 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
         if not is_windows and entry.suffix:
             continue
         try:
+            if entry.stat().st_size > _WRAPPER_MAX_BYTES:
+                continue
             content = entry.read_text()
         except (OSError, UnicodeDecodeError):
             continue

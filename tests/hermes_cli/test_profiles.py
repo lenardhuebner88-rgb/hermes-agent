@@ -763,6 +763,28 @@ class TestFindAliasForProfile:
         # The .bat extension must be stripped from the returned alias name.
         assert find_alias_for_profile("steve") == "qiaobusi"
 
+    def test_skips_files_larger_than_wrapper_limit(self, profile_env, monkeypatch):
+        # ~/.local/bin holds real binaries (uv, rclone, …) that can be
+        # hundreds of MB; reading them per profile per request is what made
+        # GET /api/profiles take seconds. Anything over _WRAPPER_MAX_BYTES
+        # cannot be one of our wrappers and must be skipped without a read —
+        # even if it happens to contain the needle.
+        monkeypatch.setattr("sys.platform", "darwin")
+        from hermes_cli.profiles import (
+            _WRAPPER_MAX_BYTES,
+            _get_wrapper_dir,
+            create_wrapper_script,
+            find_alias_for_profile,
+        )
+        wrapper_dir = _get_wrapper_dir()
+        wrapper_dir.mkdir(parents=True, exist_ok=True)
+        big = "#!/bin/sh\nexec hermes -p steve \"$@\"\n" + "#" * (_WRAPPER_MAX_BYTES + 1)
+        (wrapper_dir / "bigbinary").write_text(big)
+        assert find_alias_for_profile("steve") is None
+        # A real (small) wrapper alongside the oversized file is still found.
+        create_wrapper_script("steve")
+        assert find_alias_for_profile("steve") == "steve"
+
     def test_list_profiles_surfaces_custom_alias(self, profile_env, monkeypatch):
         monkeypatch.setattr("sys.platform", "darwin")
         from hermes_cli.profiles import (
