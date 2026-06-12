@@ -575,10 +575,13 @@ def test_no_commits_is_clean_and_removes_worktree(repo):
 def test_affected_pytest_module_mapping(repo):
     (repo / "tests" / "hermes_cli").mkdir(parents=True)
     (repo / "tests" / "hermes_cli" / "test_kanban_db.py").write_text("")
+    (repo / "tests" / "stress").mkdir(parents=True)
+    (repo / "tests" / "stress" / "test_atypical_scenarios.py").write_text("")
     mods = kwt._affected_pytest_modules(
         repo,
         ["hermes_cli/kanban_db.py", "hermes_cli/no_tests.py",
-         "web/src/x.ts", "tests/hermes_cli/test_kanban_db.py"],
+         "web/src/x.ts", "tests/hermes_cli/test_kanban_db.py",
+         "tests/stress/test_atypical_scenarios.py"],
     )
     assert mods == ["tests/hermes_cli/test_kanban_db.py"]
 

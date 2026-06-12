@@ -589,6 +589,11 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
         if not f.endswith(".py"):
             continue
         name = Path(f).name
+        if f.startswith("tests/stress/") and name.startswith("test_"):
+            # Stress scripts use their own @scenario registry / main(), not
+            # pytest test functions. Feeding them to pytest returns exit 5
+            # ("no tests ran") and falsely parks otherwise valid chains.
+            continue
         if f.startswith("tests/") and name.startswith("test_"):
             if (repo_root / f).is_file():
                 modules.add(f)
