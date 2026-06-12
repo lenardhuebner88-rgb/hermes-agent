@@ -10,7 +10,7 @@
  * exist for a stage.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -895,6 +895,48 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
   );
 }
 
+// Bottom-Sheet für die Receipt-Kette unter xl (Handy/Tablet): ersetzt das
+// frühere Auto-Scrollen zur unten gestapelten Leiste — der Tap holt das Detail
+// zum Operator statt den Operator ans Seitenende zu schieben.
+function FlowDetailSheet({ taskId, onClose, children }: { taskId: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    // Hintergrund-Scroll sperren, solange das Sheet offen ist (nur dort, wo es
+    // sichtbar ist — unter xl; auf Desktop rendert das Sheet gar nicht erst).
+    const prevOverflow = document.body.style.overflow;
+    if (window.matchMedia("(max-width: 1279px)").matches) document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 xl:hidden">
+      <button type="button" aria-label={de.flow.detailClose} onClick={onClose} className="absolute inset-0 bg-black/60" />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={de.flow.selectedChain}
+        className="absolute inset-x-0 bottom-0 flex max-h-[85dvh] flex-col rounded-t-2xl border border-b-0 border-[var(--hc-border)] bg-[var(--hc-panel)] shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-[var(--hc-border)] px-4 py-2.5">
+          <span className="hc-mono hc-type-label hc-dim truncate">{taskId}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={de.flow.detailClose}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[var(--hc-border)] hc-soft transition hover:border-[var(--hc-border-strong)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 export function FlowView() {
   const [searchParams, setSearchParams] = useSearchParams();
   const taskParam = searchParams.get("task")?.trim() || null;
@@ -912,6 +954,9 @@ export function FlowView() {
   // anchor to the client clock, never regressing below the server stamp.
   const now = Math.max(board.data?.now ?? 0, Math.floor(Date.now() / 1000));
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Unter xl öffnet die Task-Auswahl die Receipt-Kette als Bottom-Sheet
+  // (Desktop behält die sticky Seitenleiste; dort bleibt das Sheet unsichtbar).
+  const [detailSheetOpen, setDetailSheetOpen] = useState(false);
   const [dispatchChoice, setDispatchChoice] = useState<FlowDispatchChoice | null>(null);
   const [checkingDispatchId, setCheckingDispatchId] = useState<string | null>(null);
 
@@ -928,8 +973,18 @@ export function FlowView() {
   const chainBoard = useMemo(() => buildChains(filteredTasks), [filteredTasks]);
   const allChainBoard = useMemo(() => buildChains(allTasks), [allTasks]);
   const [expandedRoot, setExpandedRoot] = useState<string | null>(null);
-  // Ohne manuelle Wahl ist die dringendste Kette aufgeklappt.
-  const effectiveExpanded = expandedRoot ?? chainBoard.active[0]?.rootId ?? null;
+  // Ohne manuelle Wahl ist die dringendste Kette aufgeklappt — aber GEPINNT:
+  // die Auto-Wahl wird einmal getroffen und behalten, solange die Kette aktiv
+  // bleibt. Vorher folgte sie jedem Urgency-Reorder des 8s-Polls, eine Kette
+  // klappte zu, eine andere auf, und die Seite sprang unterm Finger weg.
+  const autoExpandRef = useRef<string | null>(null);
+  const effectiveExpanded = useMemo(() => {
+    if (expandedRoot != null) return expandedRoot || null;
+    if (!autoExpandRef.current || !chainBoard.active.some((c) => c.rootId === autoExpandRef.current)) {
+      autoExpandRef.current = chainBoard.active[0]?.rootId ?? null;
+    }
+    return autoExpandRef.current;
+  }, [expandedRoot, chainBoard.active]);
 
   // Epic-Gruppierung (Toggle, default AUS — das Board sieht aus wie immer).
   const epics = useEpics();
@@ -968,7 +1023,12 @@ export function FlowView() {
     () =>
       (workers.data?.workers ?? [])
         .map((w) => ({ ...w, inspect: inspectByRun[w.run_id] ?? w.inspect }))
-        .sort((a, b) => workerSortRank(b, now) - workerSortRank(a, now)),
+        // Deterministischer Tie-Break (Start, dann run_id): die Kartenreihen-
+        // folge darf nicht mit der Payload-Reihenfolge des Polls wackeln.
+        .sort((a, b) =>
+          workerSortRank(b, now) - workerSortRank(a, now) ||
+          a.started_at - b.started_at ||
+          a.run_id.localeCompare(b.run_id)),
     [workers.data, inspectByRun, now],
   );
   const workersReload = workers.reload;
@@ -1028,13 +1088,17 @@ export function FlowView() {
     return map;
   }, [workers.data, reviews.data, blocked.data, results.data]);
 
-  const railRef = useRef<HTMLDivElement>(null);
   const handledTaskParamRef = useRef<string | null>(null);
   const reloadBoard = board.reload;
   const fetchDetail = taskDetail.fetch;
 
   const setSelectedTask = useCallback((id: string) => {
     setSelectedId(id);
+    // Selbst gesetzte ?task=-Werte sind KEINE Deep-Links: vorab als behandelt
+    // markieren, sonst feuerte der Deep-Link-Effekt nach jedem Tap erneut und
+    // scrollte die Karte in die Mitte (und kämpfte mit dem Rail-Scroll —
+    // der "Seite springt beim Antippen"-Bug).
+    handledTaskParamRef.current = id;
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       next.set("task", id);
@@ -1045,10 +1109,10 @@ export function FlowView() {
   const selectTask = useCallback((id: string) => {
     setSelectedTask(id);
     if (!taskDetail.detailById[id]) void fetchDetail(id);
-    // On mobile/tablet the receipt rail stacks below the board (xl breakpoint),
-    // so a tap would otherwise change something off-screen — bring it into view.
+    // Unter xl liegt die Receipt-Leiste nicht mehr unten auf der Seite —
+    // statt Auto-Scroll ans Seitenende öffnet das Detail als Bottom-Sheet.
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches) {
-      window.setTimeout(() => railRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+      setDetailSheetOpen(true);
     }
   }, [fetchDetail, setSelectedTask, taskDetail.detailById]);
   const clearDispatchChoice = useCallback(() => setDispatchChoice(null), []);
@@ -1177,6 +1241,9 @@ export function FlowView() {
     );
     if (targetChain) setExpandedRoot(targetChain.rootId);
     scrollToFlowTask(taskParam);
+    // Echte Deep-Links (z.B. aus dem Inbox-Tab) sollen das Detail auf
+    // Handy/Tablet direkt zeigen — gleiche Mechanik wie ein Tap.
+    if (window.matchMedia("(max-width: 1279px)").matches) setDetailSheetOpen(true);
   }, [allChainBoard, allTasks, fetchDetail, projectFilter, selectedId, taskDetail.detailById, taskParam]);
 
   // Keep the receipt rail live while a non-terminal task is selected: re-fetch
@@ -1196,8 +1263,10 @@ export function FlowView() {
         eyebrow={de.flow.eyebrow}
         count={loadingFirst ? "—" : counts.running}
         countHint={!hasAnyRun ? de.flow.heroHintCalm : counts.running > 0 ? de.flow.heroHint(counts.running) : de.flow.heroHintParked}
-        title={!hasAnyRun && !loadingFirst ? de.flow.heroLeadCalm : counts.running > 0 ? de.flow.heroLead(counts.running) : de.flow.heroLeadParked}
-        subtitle={de.flow.subtitle}
+        // Auf dem Handy trägt schon Zahl + countHint die Aussage — Statement-
+        // Zeile und Erklär-Subtitle sind dort nur Scrollweg (Operator-Wunsch).
+        title={<span className="hidden sm:inline">{!hasAnyRun && !loadingFirst ? de.flow.heroLeadCalm : counts.running > 0 ? de.flow.heroLead(counts.running) : de.flow.heroLeadParked}</span>}
+        subtitle={<span className="hidden sm:inline">{de.flow.subtitle}</span>}
         tone={counts.blocked > 0 ? "amber" : counts.running > 0 ? "cyan" : hasAnyRun ? "violet" : "emerald"}
         status={board.lastUpdated ? {
           label: fresh.stale ? de.flow.paused : de.flow.updated(fresh.label.replace("vor ", "")),
@@ -1248,7 +1317,7 @@ export function FlowView() {
           Flotte (geladen, kein Fehler, keine Läufe), entfällt das Panel —
           den Ruhe-Zustand trägt schon der Hero (Schaltzentrale statt Wand). */}
       {workerList.length === 0 && !workers.error && !workerActionError && workers.data != null ? null : (
-      <FleetPanel eyebrow={de.flow.workersHeading} meta={de.flow.workersHint}>
+      <FleetPanel eyebrow={de.flow.workersHeading} meta={<span className="hidden sm:inline">{de.flow.workersHint}</span>}>
         {workers.error ? <ToneCallout tone="red">{workers.error}</ToneCallout> : null}
         {workerActionError ? <div className="mb-3"><ToneCallout tone="red">{workerActionError}</ToneCallout></div> : null}
         {workerList.length && errorByRun[workerList[0].run_id] ? <div className="mb-3"><ToneCallout tone="amber">{de.worker.actionFailed}: {errorByRun[workerList[0].run_id]}</ToneCallout></div> : null}
@@ -1264,6 +1333,7 @@ export function FlowView() {
                 worker={worker}
                 health={workerHealth(worker, now)}
                 density="airy"
+                collapsible
                 now={now}
                 inspectLoading={loadingRun === worker.run_id}
                 onInspect={inspect}
@@ -1283,15 +1353,17 @@ export function FlowView() {
           <div className="min-w-0 space-y-5">
             {/* Projekt-Filter (tenant-Achse) */}
             {projects.length > 1 ? (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="hc-eyebrow mr-1">{de.flow.projects}</span>
+              // Mobil eine wischbare Zeile statt vieler Wrap-Zeilen (das
+              // Chip-Feld wuchs auf ~8 Zeilen); ab sm wie gehabt umbrechend.
+              <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0 sm:pb-0">
+                <span className="hc-eyebrow mr-1 shrink-0">{de.flow.projects}</span>
                 {[{ key: "all", label: de.flow.projectAll, count: allTasks.filter((t) => t.status !== "archived").length }, ...projects].map((p) => (
                   <button
                     key={p.key}
                     type="button"
                     onClick={() => setProjectFilter(p.key)}
                     className={cn(
-                      "inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs transition",
+                      "inline-flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs transition",
                       projectFilter === p.key
                         ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
                         : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
@@ -1405,7 +1477,10 @@ export function FlowView() {
               </>
             )}
           </div>
-          <div ref={railRef} className="scroll-mt-4">
+          {/* Desktop (xl+): sticky Seitenleiste wie gehabt. Darunter ersetzt
+              das Bottom-Sheet die früher unten gestapelte Leiste — die Seite
+              wird kürzer und der Tap-Scroll ans Seitenende entfällt. */}
+          <div className="hidden xl:block">
             <FlowReceiptRail
               taskId={selectedId}
               task={selectedTask}
@@ -1424,6 +1499,26 @@ export function FlowView() {
           </div>
         </div>
       )}
+
+      {detailSheetOpen && selectedId ? (
+        <FlowDetailSheet taskId={selectedId} onClose={() => setDetailSheetOpen(false)}>
+          <FlowReceiptRail
+            taskId={selectedId}
+            task={selectedTask}
+            detail={taskDetail.detailById[selectedId]}
+            enriched={enrichmentById[selectedId]}
+            loading={taskDetail.loadingId === selectedId}
+            error={taskDetail.errorById[selectedId]}
+            now={now}
+            boardTasks={allTasks}
+            snapshotLabel={board.lastUpdated ? (fresh.stale ? de.flow.paused : fresh.label) : "unbekannt"}
+            onRelease={onReleasePlan}
+            releaseBusy={flowRelease.busyId === selectedId}
+            releaseError={flowRelease.errorById[selectedId]}
+            released={releasedById[selectedId]}
+          />
+        </FlowDetailSheet>
+      ) : null}
     </div>
   );
 }
