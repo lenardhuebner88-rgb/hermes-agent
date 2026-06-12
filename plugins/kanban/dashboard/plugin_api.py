@@ -2834,6 +2834,10 @@ def list_lanes_endpoint(
     try:
         lanes = kanban_db.list_lanes(conn)
         profiles = _lane_profile_catalog()
+        profiles = [
+            {**p, "kanban_spawn_health": _profile_spawn_health(p, profiles)}
+            for p in profiles
+        ]
         return {
             "lanes": lanes,
             "count": len(lanes),
@@ -2873,6 +2877,29 @@ def _lane_model_runtime(model: Optional[str], profiles: list[dict]) -> Optional[
     if model.startswith("claude-"):
         return "claude-cli"
     return None
+
+
+def _profile_spawn_health(profile: dict, profiles: list[dict]) -> dict:
+    """Spawn-Health eines Katalog-Profils für GET /lanes.
+
+    Gleiche Prüf-Seams wie POST /lanes/spawn-check (Model↔Runtime-Widerspruch,
+    claude-Binary), aber auf den Katalog-Defaults des Profils — das Frontend
+    erwartet das Feld pro Profil und disabled sonst die Triage-Eskalation.
+    """
+    runtime = profile.get("worker_runtime") or "hermes"
+    model = profile.get("default_model")
+    model_runtime = _lane_model_runtime(model, profiles)
+    if model_runtime and model_runtime != runtime:
+        return {
+            "status": "unhealthy",
+            "reason": f"Model {model!r} belongs to {model_runtime}, but profile runtime is {runtime}",
+        }
+    if runtime == "claude-cli" and not _claude_worker_available():
+        return {
+            "status": "unhealthy",
+            "reason": "`claude` executable is not available for claude-cli workers",
+        }
+    return {"status": "healthy", "reason": None}
 
 
 def _claude_worker_available() -> bool:
