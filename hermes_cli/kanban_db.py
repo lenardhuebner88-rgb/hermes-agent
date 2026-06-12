@@ -159,6 +159,13 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # Config wiring is intentionally deferred; task-level max_continuations wins.
 DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 
+# Opt-in blocked-run auto-retry policy. Defaults are code-level constants;
+# gateway/daemon config decides whether the policy runs at all.
+DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS = 5 * 60
+DEFAULT_AUTO_RETRY_BLOCKED_LIMIT = 2
+AUTO_RETRY_ESCALATION_MODEL = "claude-fable-5"
+AUTO_RETRY_ESCALATION_PROFILE = "premium"
+
 
 # Sentinel exit code a kanban worker uses to signal "I bailed because the
 # provider rate-limited / exhausted quota, not because the task failed."
@@ -884,6 +891,7 @@ class Task:
     epic_id: Optional[str] = None
     # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
     kind: Optional[str] = None
+    auto_retry_count: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -980,6 +988,9 @@ class Task:
             ),
             kind=(
                 row["kind"] if "kind" in keys else None
+            ),
+            auto_retry_count=(
+                row["auto_retry_count"] if "auto_retry_count" in keys else 0
             ),
         )
 
@@ -1190,7 +1201,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     epic_id              TEXT,
     -- Optional coarse work classification stamped by the decomposer or CLI.
     -- NULL = unknown/unspecified.
-    kind                 TEXT
+    kind                 TEXT,
+    -- Bounded, opt-in automatic retry count for worker-blocked runs.
+    auto_retry_count     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1366,7 +1379,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # _rebuild_drifted_tables) changes WITHOUT a matching SCHEMA_SQL change —
 # e.g. a new data backfill or event-kind rename. Schema changes themselves
 # already invalidate the stamp via the SCHEMA_SQL hash below.
-_SCHEMA_GENERATION = 1
+_SCHEMA_GENERATION = 2
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -2099,6 +2112,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     if "kind" not in cols:
         _add_column_if_missing(conn, "tasks", "kind", "kind TEXT")
+    if "auto_retry_count" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "auto_retry_count",
+            "auto_retry_count INTEGER NOT NULL DEFAULT 0",
+        )
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -7460,6 +7480,9 @@ class DispatchResult:
     stays in ``ready`` (advisory, re-evaluated each tick), NOT blocked. Caps
     default OFF (None) → this bucket is always empty → byte-identical to the
     pre-C1 dispatcher. Surfaces in the decision-queue as a ``budget_held`` row."""
+    auto_retried_blocked: list[tuple[str, int]] = field(default_factory=list)
+    """Opt-in blocked-run auto-retries performed this tick as
+    ``(task_id, attempt)`` pairs."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -9231,6 +9254,240 @@ def reviewer_role_fit_hold_reason(
     return None
 
 
+_AUTO_RETRY_QUESTION_RE = re.compile(
+    r"(\?|\bwhich\b|\bchoose\b|\bdecision\b|\bdecide\b|\boperator\b|"
+    r"\bhuman\b|\bcredential\b|\bapproval\b|\bmissing credentials?\b|"
+    r"\bfrage\b|\bentscheidung\b|\bentscheiden\b|\bfreigabe\b)",
+    re.IGNORECASE,
+)
+
+
+def _blocked_kind_for_auto_retry(reason: Optional[str]) -> str:
+    text = (reason or "").strip()
+    if text and _AUTO_RETRY_QUESTION_RE.search(text):
+        return "operator_question"
+    return "retryable"
+
+
+def _latest_blocked_run_for_auto_retry(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, profile, summary, error, ended_at
+          FROM task_runs
+         WHERE task_id = ?
+           AND outcome = 'blocked'
+           AND ended_at IS NOT NULL
+         ORDER BY ended_at DESC, id DESC
+         LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+
+
+def _latest_result_comment_after(
+    conn: sqlite3.Connection, task_id: str, after_ts: int,
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT author, body, created_at
+          FROM task_comments
+         WHERE task_id = ?
+           AND created_at > ?
+           AND author NOT IN ('dispatcher', 'operator', 'dashboard', 'user')
+           AND (
+             body LIKE 'RESULT:%'
+             OR body LIKE 'Result:%'
+             OR body LIKE '%\nRESULT:%'
+             OR body LIKE '%\nResult:%'
+             OR body LIKE 'Ergebnis:%'
+             OR body LIKE '%\nErgebnis:%'
+           )
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1
+        """,
+        (task_id, int(after_ts)),
+    ).fetchone()
+
+
+def _append_auto_retry_event_once(
+    conn: sqlite3.Connection, task_id: str, kind: str, payload: dict,
+) -> None:
+    latest = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if latest is not None and latest["kind"] == kind:
+        try:
+            if json.loads(latest["payload"] or "{}") == payload:
+                return
+        except Exception:
+            pass
+    _append_event(conn, task_id, kind, payload)
+
+
+def auto_retry_blocked_tasks(
+    conn: sqlite3.Connection,
+    *,
+    backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+    retry_limit: int = DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
+) -> list[tuple[str, int]]:
+    """Opt-in dispatcher tick for bounded automatic retries of blocked tasks."""
+    now = int(time.time())
+    backoff_seconds = max(0, int(backoff_seconds))
+    retry_limit = max(0, int(retry_limit))
+    retried: list[tuple[str, int]] = []
+    rows = conn.execute(
+        """
+        SELECT id, assignee, consecutive_failures, max_retries, auto_retry_count
+          FROM tasks
+         WHERE status = 'blocked'
+         ORDER BY priority DESC, created_at ASC
+        """
+    ).fetchall()
+    for row in rows:
+        task_id = row["id"]
+        blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
+        if blocked_run is None:
+            continue
+        ended_at = int(blocked_run["ended_at"] or 0)
+        reason = (
+            (blocked_run["summary"] or "").strip()
+            or (blocked_run["error"] or "").strip()
+        )
+        result_comment = _latest_result_comment_after(conn, task_id, ended_at)
+        if result_comment is not None:
+            body = str(result_comment["body"] or "")
+            if complete_task(
+                conn,
+                task_id,
+                result=body,
+                summary=body.strip().splitlines()[0][:400],
+                metadata={
+                    "auto_retry": {
+                        "source": "result_comment",
+                        "blocked_run_id": int(blocked_run["id"]),
+                        "comment_author": result_comment["author"],
+                    }
+                },
+            ):
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "auto_retry_completed",
+                        {"source": "result_comment", "blocked_run_id": int(blocked_run["id"])},
+                    )
+            continue
+        if ended_at + backoff_seconds > now:
+            continue
+        blocked_kind = _blocked_kind_for_auto_retry(reason)
+        if blocked_kind != "retryable":
+            with write_txn(conn):
+                _append_auto_retry_event_once(
+                    conn,
+                    task_id,
+                    "auto_retry_skipped",
+                    {
+                        "reason": "blocked_kind",
+                        "blocked_kind": blocked_kind,
+                        "blocked_run_id": int(blocked_run["id"]),
+                    },
+                )
+            continue
+        failures = int(row["consecutive_failures"] or 0)
+        task_limit = row["max_retries"]
+        effective_failure_limit = (
+            int(task_limit) if task_limit is not None else int(failure_limit)
+        )
+        if failures >= effective_failure_limit:
+            with write_txn(conn):
+                _append_auto_retry_event_once(
+                    conn,
+                    task_id,
+                    "auto_retry_skipped",
+                    {"reason": "failure_limit", "failures": failures},
+                )
+            continue
+        current_count = int(row["auto_retry_count"] or 0)
+        if current_count >= retry_limit:
+            with write_txn(conn):
+                _append_auto_retry_event_once(
+                    conn,
+                    task_id,
+                    "auto_retry_exhausted",
+                    {"attempts": current_count, "limit": retry_limit},
+                )
+            continue
+        attempt = current_count + 1
+        escalated = attempt >= 2
+        with write_txn(conn):
+            latest = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if latest is None or latest["status"] != "blocked":
+                continue
+            if escalated:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status = 'ready',
+                           auto_retry_count = ?,
+                           assignee = ?,
+                           model_override = ?,
+                           claim_lock = NULL,
+                           claim_expires = NULL,
+                           worker_pid = NULL
+                     WHERE id = ? AND status = 'blocked'
+                    """,
+                    (
+                        attempt,
+                        AUTO_RETRY_ESCALATION_PROFILE,
+                        AUTO_RETRY_ESCALATION_MODEL,
+                        task_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status = 'ready',
+                           auto_retry_count = ?,
+                           claim_lock = NULL,
+                           claim_expires = NULL,
+                           worker_pid = NULL
+                     WHERE id = ? AND status = 'blocked'
+                    """,
+                    (attempt, task_id),
+                )
+            feedback = (
+                f"Auto-Retry {attempt}/{retry_limit} after blocked run "
+                f"{blocked_run['id']}. Previous block reason: "
+                f"{(reason or '(none)')[:500]}"
+            )
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, "dispatcher", feedback, now),
+            )
+            payload = {
+                "attempt": attempt,
+                "limit": retry_limit,
+                "blocked_run_id": int(blocked_run["id"]),
+                "reason": (reason or "")[:500] or None,
+                "escalated": escalated,
+            }
+            if escalated:
+                payload["model_override"] = AUTO_RETRY_ESCALATION_MODEL
+                payload["assignee"] = AUTO_RETRY_ESCALATION_PROFILE
+            _append_event(conn, task_id, "auto_retried", payload)
+        retried.append((task_id, attempt))
+    return retried
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -9246,6 +9503,8 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     daily_token_cap_per_profile: Optional[int] = None,
     daily_cost_cap_usd: Optional[float] = None,
+    auto_retry_blocked: bool = False,
+    auto_retry_blocked_backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -9302,6 +9561,12 @@ def dispatch_once(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    if auto_retry_blocked:
+        result.auto_retried_blocked = auto_retry_blocked_tasks(
+            conn,
+            backoff_seconds=auto_retry_blocked_backoff_seconds,
+            failure_limit=failure_limit,
+        )
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
     # Count tasks already running so max_spawn enforces concurrency rather
@@ -11953,7 +12218,8 @@ def runs_failures(
     for row in conn.execute(
         f"SELECT r.id AS run_id, r.task_id, r.profile, r.outcome, r.ended_at, "
         f"       COALESCE(NULLIF(TRIM(r.error), ''), r.summary) AS reason, "
-        f"       t.title, t.status AS task_status, t.assignee, t.model_override "
+        f"       t.title, t.status AS task_status, t.assignee, t.model_override, "
+        f"       t.auto_retry_count "
         f"FROM task_runs r JOIN tasks t ON t.id = r.task_id "
         f"WHERE r.outcome IN ({placeholders}) AND r.ended_at IS NOT NULL "
         f"  AND r.ended_at >= ? AND t.status IN ({status_ph}) "
@@ -11973,6 +12239,8 @@ def runs_failures(
             "ended_at": int(row["ended_at"]),
             "task_status": row["task_status"],
             "model_override": row["model_override"],
+            "auto_retry_count": int(row["auto_retry_count"] or 0),
+            "auto_retry_limit": DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
         }
     failures = sorted(by_task.values(), key=lambda f: -f["ended_at"])
     return {

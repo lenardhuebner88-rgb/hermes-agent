@@ -2139,6 +2139,10 @@ DEFAULT_CONFIG = {
         # same task/profile (spawn_failed, timed_out, or crashed). Reassignment
         # resets the streak for the new profile.
         "failure_limit": 2,
+        # Opt-in Dogfood: automatically retry worker-blocked tasks after a
+        # short backoff, except human/operator-question blocks. Defaults OFF.
+        "auto_retry_blocked": False,
+        "auto_retry_blocked_backoff_seconds": 300,
         # Worker stdout/stderr logs rotate at spawn time. Defaults preserve
         # the historical 2 MiB + one-backup behavior; long-running workers can
         # raise these to keep more early failure evidence.

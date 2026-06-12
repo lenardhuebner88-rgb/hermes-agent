@@ -107,6 +107,7 @@ export const BoardTaskSchema = z.object({
   completed_at: z.coerce.number().nullable().catch(null),
   branch_name: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
+  auto_retry_count: z.coerce.number().catch(0),
   link_counts: z.object({ parents: z.coerce.number().catch(0), children: z.coerce.number().catch(0) }).catch({ parents: 0, children: 0 }),
   comment_count: z.coerce.number().catch(0),
   progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
