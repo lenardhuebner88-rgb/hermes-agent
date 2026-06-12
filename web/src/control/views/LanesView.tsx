@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Plus, Trash2 } from "lucide-react";
+import { Activity, Check, Plus, Trash2 } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { StatusPill, ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
@@ -9,13 +9,18 @@ import {
   createLane,
   deleteLane,
   editorRows,
+  entryFromChoice,
+  laneChoiceWarning,
   loadLanes,
   profilesFromEditorRows,
+  smokeCheckLaneConfig,
   updateLane,
   FALLBACK_MODELS,
   type EditorRow,
   type Lane,
   type LaneModelOption,
+  type LaneSpawnCheckResult,
+  type LaneSpawnHealthStatus,
   type LanesResponse,
 } from "./lanes/api";
 
@@ -46,6 +51,12 @@ const t = {
   emptyDesc: "Beim ersten Laden werden api-standard und max-abo angelegt.",
   loading: "Lade Modelle …",
   retry: "Erneut versuchen",
+  workerCheck: "Worker-Check",
+  workerCheckRunning: "Prüfe …",
+  smokeOk: "Worker-Check ok",
+  smokeWarn: "Worker-Check warnt",
+  smokeError: "Worker-Check Fehler",
+  smokeUnavailable: "Worker-Check nicht verfügbar",
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -124,6 +135,35 @@ interface EditorActions {
   onDelete: (lane: Lane) => void;
 }
 
+type RowCheckState =
+  | { status: "checking"; reason: string }
+  | (LaneSpawnCheckResult & { status: LaneSpawnHealthStatus })
+  | { status: "error"; reason: string; dispatcher_path?: null; resolved_model?: null };
+
+function rowSmokeTone(status: RowCheckState["status"]): "emerald" | "amber" | "rose" | "zinc" {
+  if (status === "healthy") return "emerald";
+  if (status === "unhealthy" || status === "unknown") return "amber";
+  if (status === "error") return "rose";
+  return "zinc";
+}
+
+function rowSmokeLabel(state: RowCheckState): string {
+  if (state.status === "checking") return t.workerCheckRunning;
+  if (state.status === "healthy") return t.smokeOk;
+  if (state.status === "unhealthy" || state.status === "unknown") return t.smokeWarn;
+  return t.smokeError;
+}
+
+function resolveRowCheckEntry(row: EditorRow, data: LanesResponse) {
+  const explicit = entryFromChoice(row.choice);
+  if (explicit?.worker_runtime) {
+    return { worker_runtime: explicit.worker_runtime, model: explicit.model ?? null };
+  }
+  const profile = data.profiles.find((p) => p.name === row.profile);
+  if (!profile) return null;
+  return { worker_runtime: profile.worker_runtime, model: profile.default_model ?? null };
+}
+
 /** Pure presentation editor — exported for tests (rendered with fixtures).
  *  Gets remounted (key) when the selected lane changes, so rows/dirty reset. */
 export function LanesEditor({
@@ -143,10 +183,58 @@ export function LanesEditor({
   const [rows, setRows] = useState<EditorRow[]>(() => editorRows(lane, data.profiles, models));
   const [dirty, setDirty] = useState(false);
   const [newName, setNewName] = useState("");
+  const [rowChecks, setRowChecks] = useState<Record<string, RowCheckState>>({});
   // Inline-Zwei-Schritt fürs Löschen (FlowView-Muster) statt window.confirm.
   const [pendingDelete, setPendingDelete] = useState<string | null>(initialPendingDelete);
 
-  const applyDisabled = busy || (!dirty && lane.active);
+  const rowWarnings = useMemo(
+    () => Object.fromEntries(rows.map((row) => [row.profile, laneChoiceWarning(row.choice, models)])),
+    [rows, models],
+  );
+  const hasWrongWorkerChoice = Object.values(rowWarnings).some(Boolean);
+  const applyDisabled = busy || hasWrongWorkerChoice || (!dirty && lane.active);
+
+  const runRowCheck = useCallback(async (row: EditorRow) => {
+    const entry = resolveRowCheckEntry(row, data);
+    const warning = laneChoiceWarning(row.choice, models);
+    if (warning) {
+      setRowChecks((prev) => ({
+        ...prev,
+        [row.profile]: {
+          status: "unhealthy",
+          reason: warning,
+          dispatcher_path: entry?.worker_runtime ?? "hermes",
+          resolved_model: entry?.model ?? null,
+        },
+      }));
+      return;
+    }
+    if (!entry) {
+      setRowChecks((prev) => ({
+        ...prev,
+        [row.profile]: {
+          status: "unknown",
+          reason: `${t.smokeUnavailable}: Profil fehlt im Lane-Katalog`,
+          dispatcher_path: "hermes",
+          resolved_model: null,
+        },
+      }));
+      return;
+    }
+    setRowChecks((prev) => ({
+      ...prev,
+      [row.profile]: { status: "checking", reason: "Spawn-/Worker-Pfad wird geprüft" },
+    }));
+    try {
+      const result = await smokeCheckLaneConfig(row.profile, entry);
+      setRowChecks((prev) => ({ ...prev, [row.profile]: result }));
+    } catch (e) {
+      setRowChecks((prev) => ({
+        ...prev,
+        [row.profile]: { status: "error", reason: e instanceof Error ? e.message : String(e) },
+      }));
+    }
+  }, [data, models]);
 
   return (
     <div className="space-y-4">
@@ -196,15 +284,47 @@ export function LanesEditor({
                   <div className="text-xs hc-dim">{ROLE_HINTS[row.profile]}</div>
                 ) : null}
               </div>
-              <ModelSelect
-                row={row}
-                models={models}
-                disabled={busy}
-                onChange={(choice) => {
-                  setRows(rows.map((r, j) => (j === i ? { ...r, choice } : r)));
-                  setDirty(true);
-                }}
-              />
+              <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+                  <ModelSelect
+                    row={row}
+                    models={models}
+                    disabled={busy}
+                    onChange={(choice) => {
+                      setRows(rows.map((r, j) => (j === i ? { ...r, choice } : r)));
+                      setDirty(true);
+                      setRowChecks((prev) => {
+                        const next = { ...prev };
+                        delete next[row.profile];
+                        return next;
+                      });
+                    }}
+                  />
+                  <Button
+                    size="xs"
+                    ghost
+                    className="hc-hit justify-center"
+                    disabled={busy || rowChecks[row.profile]?.status === "checking"}
+                    onClick={() => void runRowCheck(row)}
+                  >
+                    <Activity className="h-3.5 w-3.5" />
+                    {rowChecks[row.profile]?.status === "checking" ? t.workerCheckRunning : t.workerCheck}
+                  </Button>
+                </div>
+                {rowWarnings[row.profile] ? (
+                  <ToneCallout tone="amber">{rowWarnings[row.profile]}</ToneCallout>
+                ) : null}
+                {rowChecks[row.profile] ? (
+                  <div className="flex flex-wrap items-center justify-end gap-2 text-xs hc-soft">
+                    <StatusPill
+                      tone={rowSmokeTone(rowChecks[row.profile].status)}
+                      label={rowSmokeLabel(rowChecks[row.profile])}
+                      size="sm"
+                    />
+                    <span>{rowChecks[row.profile].reason}</span>
+                  </div>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>

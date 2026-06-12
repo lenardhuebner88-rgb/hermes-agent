@@ -16,6 +16,11 @@ export interface LaneSpawnHealth {
   reason?: string | null;
 }
 
+export interface LaneSpawnCheckResult extends LaneSpawnHealth {
+  dispatcher_path: LaneRuntime;
+  resolved_model: string | null;
+}
+
 export interface LaneProfileEntry {
   worker_runtime: LaneRuntime | null;
   model: string | null;
@@ -261,6 +266,21 @@ export function deleteLane(laneId: string): Promise<{ deleted: string }> {
   );
 }
 
+export function smokeCheckLaneConfig(
+  profile: string,
+  entry: Pick<LaneProfileEntry, "worker_runtime" | "model">,
+): Promise<LaneSpawnCheckResult> {
+  return fetchJSON<LaneSpawnCheckResult>(`${BASE}/spawn-check`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      profile,
+      worker_runtime: entry.worker_runtime,
+      model: entry.model ?? null,
+    }),
+  });
+}
+
 // --- choice helpers (pure; unit-tested) -------------------------------------
 //
 // The simple editor shows ONE dropdown per profile. Its value encodes
@@ -297,6 +317,21 @@ export function entryFromChoice(
   const runtime = choice.slice(0, sep) as LaneRuntime;
   const model = choice.slice(sep + 1);
   return { worker_runtime: runtime, model: model === "" ? null : model };
+}
+
+/** Operator-visible guard for persisted/free-form runtime/model combinations
+ *  that contradict the curated model catalog. Unknown models stay fail-soft:
+ *  the backend smoke check can still provide a clearer reason. */
+export function laneChoiceWarning(choice: string, models: LaneModelOption[]): string | null {
+  if (!choice) return null;
+  const sep = choice.indexOf("|");
+  if (sep <= 0) return null;
+  const runtime = choice.slice(0, sep) as LaneRuntime;
+  const model = choice.slice(sep + 1);
+  if (!model) return null;
+  const expected = models.find((m) => m.id === model)?.runtime ?? null;
+  if (!expected || expected === runtime) return null;
+  return `Worker-/Modell-Kombination passt nicht: ${model} gehört zu ${expected}, ausgewählt ist ${runtime}.`;
 }
 
 /** Operator-facing label for a model id (falls back to the raw id). */

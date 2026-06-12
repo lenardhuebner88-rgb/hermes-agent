@@ -5,8 +5,10 @@ import {
   deleteLane,
   editorRows,
   entryFromChoice,
+  laneChoiceWarning,
   modelLabel,
   profilesFromEditorRows,
+  smokeCheckLaneConfig,
   type Lane,
   type LaneCatalogProfile,
   type LaneModelOption,
@@ -60,6 +62,27 @@ describe("lanes api client", () => {
     expect(url).toContain("/api/plugins/kanban/lanes/lane_abc");
     expect(init.method).toBe("DELETE");
   });
+
+  it("smokeCheckLaneConfig posts the selected profile/runtime/model combo", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: "healthy",
+      reason: "ok",
+      dispatcher_path: "hermes",
+      resolved_model: "gpt-5.5",
+    }));
+
+    const result = await smokeCheckLaneConfig("coder", { worker_runtime: "hermes", model: "gpt-5.5" });
+
+    expect(result.status).toBe("healthy");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/plugins/kanban/lanes/spawn-check");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      profile: "coder",
+      worker_runtime: "hermes",
+      model: "gpt-5.5",
+    });
+  });
 });
 
 const MODELS: LaneModelOption[] = [
@@ -89,6 +112,13 @@ describe("choice encoding", () => {
   it("modelLabel prefers the catalog label and falls back to the id", () => {
     expect(modelLabel("gpt-5.5", MODELS)).toBe("GPT-5.5");
     expect(modelLabel("unbekannt-9", MODELS)).toBe("unbekannt-9");
+  });
+
+  it("warns when a persisted choice pairs a model with the wrong runtime", () => {
+    expect(laneChoiceWarning("hermes|claude-fable-5", MODELS)).toContain("claude-cli");
+    expect(laneChoiceWarning("claude-cli|gpt-5.5", MODELS)).toContain("hermes");
+    expect(laneChoiceWarning("hermes|gpt-5.5", MODELS)).toBeNull();
+    expect(laneChoiceWarning("", MODELS)).toBeNull();
   });
 });
 

@@ -77,6 +77,28 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
     expect(html).not.toContain(">Runtime<");
   });
 
+  it("zeigt pro Rolle einen Worker-Check-Button", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html.match(/Worker-Check/g)).toHaveLength(2);
+  });
+
+  it("warnt und blockiert Übernehmen bei offensichtlich falscher Runtime-/Modell-Kombination", () => {
+    const badLane = {
+      ...fixture.lanes[1],
+      active: false,
+      profiles: {
+        coder: { worker_runtime: "hermes" as const, model: "claude-fable-5" },
+      },
+    };
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={badLane} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Worker-/Modell-Kombination passt nicht");
+    expect(html).toMatch(/disabled[^>]*>.*Übernehmen/s);
+  });
+
   it("Übernehmen ist auf der aktiven Lane ohne Änderungen deaktiviert (zeigt Aktiv)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,

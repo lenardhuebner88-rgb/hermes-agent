@@ -4286,3 +4286,57 @@ def test_lanes_profile_catalog_cached_between_requests(client, monkeypatch):
     assert client.get("/api/plugins/kanban/lanes").status_code == 200
     assert client.get("/api/plugins/kanban/lanes").status_code == 200
     assert calls["n"] == 1
+
+
+def test_lanes_spawn_check_reports_healthy_hermes_combo(client):
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+
+    r = client.post(
+        "/api/plugins/kanban/lanes/spawn-check",
+        json={"profile": "research", "worker_runtime": "hermes", "model": "gpt-5.4"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "status": "healthy",
+        "reason": "Hermes worker profile is available",
+        "dispatcher_path": "hermes",
+        "resolved_model": "gpt-5.4",
+    }
+
+
+def test_lanes_spawn_check_rejects_obvious_model_runtime_mismatch(client):
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+
+    r = client.post(
+        "/api/plugins/kanban/lanes/spawn-check",
+        json={"profile": "research", "worker_runtime": "hermes", "model": "claude-fable-5"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "unhealthy"
+    assert data["dispatcher_path"] == "hermes"
+    assert data["resolved_model"] == "claude-fable-5"
+    assert "belongs to claude-cli" in data["reason"]
+
+
+def test_lanes_spawn_check_reports_unknown_profile(client):
+    _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
+    mod = _plugin_module()
+    mod._lane_profile_cache = None
+
+    r = client.post(
+        "/api/plugins/kanban/lanes/spawn-check",
+        json={"profile": "ghost", "worker_runtime": "hermes", "model": "gpt-5.4"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "unhealthy"
+    assert data["dispatcher_path"] == "hermes"
+    assert "Profile 'ghost' is not in the lane catalog" in data["reason"]

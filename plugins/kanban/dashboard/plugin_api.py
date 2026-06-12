@@ -49,7 +49,7 @@ import time
 from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
@@ -2848,6 +2848,94 @@ def list_lanes_endpoint(
 class LaneBody(BaseModel):
     name: Optional[ShortText] = None
     profiles: Optional[dict] = None
+
+
+class LaneSpawnCheckBody(BaseModel):
+    profile: ShortText
+    worker_runtime: Literal["hermes", "claude-cli"]
+    model: Optional[ShortText] = None
+
+
+def _lane_model_runtime(model: Optional[str], profiles: list[dict]) -> Optional[str]:
+    """Return the curated runtime for ``model`` when known.
+
+    Unknown models are intentionally fail-soft; profile defaults can be added
+    by ``_lane_model_catalog`` and genuinely custom provider ids still need the
+    real worker path to decide whether they work.
+    """
+    model = (model or "").strip()
+    if not model:
+        return None
+    for item in _lane_model_catalog(profiles):
+        if item.get("id") == model:
+            runtime = item.get("runtime")
+            return runtime if runtime in {"hermes", "claude-cli"} else None
+    if model.startswith("claude-"):
+        return "claude-cli"
+    return None
+
+
+def _claude_worker_available() -> bool:
+    import shutil
+
+    binary = kanban_db._claude_worker_bin()
+    if os.path.sep in binary:
+        return os.path.exists(binary)
+    return shutil.which(binary) is not None
+
+
+@router.post("/lanes/spawn-check")
+def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
+    """Read-only Lane worker/model health check for the dashboard.
+
+    This mirrors the dispatcher's lane seams without creating a task or
+    touching the board: profile must exist in the lean lane catalog, the
+    selected model must not contradict the selected worker runtime, and the
+    claude-cli path must have an executable available.
+    """
+    profiles = _lane_profile_catalog()
+    profile = next((p for p in profiles if p.get("name") == payload.profile), None)
+    dispatcher_path = payload.worker_runtime
+    resolved_model = payload.model or (profile or {}).get("default_model") or None
+
+    if profile is None:
+        return {
+            "status": "unhealthy",
+            "reason": f"Profile {payload.profile!r} is not in the lane catalog",
+            "dispatcher_path": dispatcher_path,
+            "resolved_model": resolved_model,
+        }
+
+    model_runtime = _lane_model_runtime(resolved_model, profiles)
+    if model_runtime and model_runtime != dispatcher_path:
+        return {
+            "status": "unhealthy",
+            "reason": f"Model {resolved_model!r} belongs to {model_runtime}, but selected worker runtime is {dispatcher_path}",
+            "dispatcher_path": dispatcher_path,
+            "resolved_model": resolved_model,
+        }
+
+    if dispatcher_path == "claude-cli":
+        if not _claude_worker_available():
+            return {
+                "status": "unhealthy",
+                "reason": "`claude` executable is not available for claude-cli workers",
+                "dispatcher_path": dispatcher_path,
+                "resolved_model": resolved_model,
+            }
+        return {
+            "status": "healthy",
+            "reason": "Claude CLI worker executable is available",
+            "dispatcher_path": dispatcher_path,
+            "resolved_model": resolved_model,
+        }
+
+    return {
+        "status": "healthy",
+        "reason": "Hermes worker profile is available",
+        "dispatcher_path": dispatcher_path,
+        "resolved_model": resolved_model,
+    }
 
 
 @router.post("/lanes")
