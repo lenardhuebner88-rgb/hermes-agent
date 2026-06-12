@@ -46,8 +46,24 @@ def scenario(name):
     def wrap(fn):
         def run():
             home = tempfile.mkdtemp(prefix=f"hermes_atyp_{name}_")
-            os.environ["HERMES_HOME"] = home
-            os.environ["HOME"] = home
+            env_overrides = {
+                "HERMES_HOME": home,
+                "HOME": home,
+                # Kanban workers inherit live-board pins from the dispatcher.
+                # These stress scenarios are supposed to exercise an isolated
+                # temp HERMES_HOME, so drop inherited kanban path/board pins
+                # before importing kanban_db.
+                "HERMES_KANBAN_DB": None,
+                "HERMES_KANBAN_BOARD": None,
+                "HERMES_KANBAN_WORKSPACES_ROOT": None,
+                "HERMES_SANDBOX_MODE": None,
+            }
+            previous_env = {key: os.environ.get(key) for key in env_overrides}
+            for key, value in env_overrides.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
             for m in list(sys.modules.keys()):
                 if m.startswith(("hermes_cli", "plugins", "gateway")):
                     del sys.modules[m]
@@ -68,6 +84,11 @@ def scenario(name):
                 traceback.print_exc()
                 print(f"  ✗ ERROR: {msg}")
             finally:
+                for key, value in previous_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
                 try:
                     shutil.rmtree(home)
                 except Exception:
@@ -1001,8 +1022,11 @@ def _(home, kb):
 
     # Huge title
     r = client.post("/api/plugins/kanban/tasks", json={"title": "x" * 10000})
-    # Should succeed — kernel doesn't cap title length
-    assert r.status_code == 200
+    # The kernel doesn't cap title length, but the dashboard REST model
+    # deliberately caps short UI fields at 512 chars.
+    assert r.status_code == 422, (
+        f"huge title should 422, got {r.status_code}: {r.text}"
+    )
 
     # Unicode + emoji
     r = client.post("/api/plugins/kanban/tasks", json={
