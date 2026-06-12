@@ -37,6 +37,14 @@ def make_spawn_fn(home: str):
             "HERMES_KANBAN_WORKSPACE": workspace,
             "PATH": f"{os.path.dirname(PY)}:{os.environ.get('PATH','')}",
         }
+        if task.current_run_id is not None:
+            env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
+        else:
+            env.pop("HERMES_KANBAN_RUN_ID", None)
+        if task.claim_lock:
+            env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+        else:
+            env.pop("HERMES_KANBAN_CLAIM_LOCK", None)
         log_f = open(log_path, "ab")
         proc = subprocess.Popen(
             [PY, FAKE_WORKER],
@@ -55,6 +63,20 @@ def main():
     home = tempfile.mkdtemp(prefix="hermes_e2e_")
     os.environ["HERMES_HOME"] = home
     os.environ["HOME"] = home
+    os.environ["HERMES_SANDBOX_MODE"] = "1"
+    for inherited in (
+        "HERMES_KANBAN_DB",
+        "HERMES_KANBAN_BOARD",
+        "HERMES_KANBAN_WORKSPACES_ROOT",
+        "HERMES_KANBAN_TASK",
+        "HERMES_KANBAN_RUN_ID",
+        "HERMES_KANBAN_CLAIM_LOCK",
+    ):
+        os.environ.pop(inherited, None)
+    # The crash scenario below kills the worker and immediately runs one
+    # dispatcher reap pass; disable the production launch grace so the test
+    # can assert the crash path without sleeping for DEFAULT_CRASH_GRACE_SECONDS.
+    os.environ["HERMES_KANBAN_CRASH_GRACE_SECONDS"] = "0"
     sys.path.insert(0, WT)
     from hermes_cli import kanban_db as kb
 
@@ -95,16 +117,25 @@ exec {PY} -m hermes_cli.main "$@"
         spawned_pids.append(task.worker_pid)
         print(f"  task {tid}: pid={task.worker_pid} status={task.status}")
 
-    # Wait for all workers to complete (up to 10s).
+    # Wait for all workers to complete (up to 10s). Use a fresh read
+    # connection on each poll: this is the same DB-observation contract the
+    # dashboard/dispatcher tick uses, and it avoids a long-lived pre-spawn
+    # connection holding an old WAL read snapshot while child processes write.
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        statuses = [kb.get_task(conn, tid).status for tid in tids]
+        with kb.connect_closing() as poll_conn:
+            statuses = [
+                (task.status if (task := kb.get_task(poll_conn, tid)) else None)
+                for tid in tids
+            ]
         if all(s == "done" for s in statuses):
             break
         time.sleep(0.2)
 
     print()
     failures = []
+    conn.close()
+    conn = kb.connect()
     for tid in tids:
         task = kb.get_task(conn, tid)
         runs = kb.list_runs(conn, tid)

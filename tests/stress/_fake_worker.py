@@ -12,28 +12,48 @@ import subprocess
 import time
 
 
+def run_kanban_cli(args, *, expect_stdout: str):
+    """Run the real CLI and fail loudly if it did not report success."""
+
+    proc = subprocess.run(
+        ["hermes", "kanban", *args],
+        capture_output=True,
+        text=True,
+    )
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        print(proc.stderr, end="")
+    if proc.returncode != 0 or expect_stdout not in proc.stdout:
+        raise RuntimeError(
+            "kanban CLI failed: "
+            f"args={args!r} rc={proc.returncode} "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+
+
 def main():
     tid = os.environ["HERMES_KANBAN_TASK"]
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "")
 
     # Announce via CLI (goes through real argparse + init_db + etc)
-    subprocess.run(
-        ["hermes", "kanban", "heartbeat", tid, "--note", "started"],
-        check=True, capture_output=True,
+    run_kanban_cli(
+        ["heartbeat", tid, "--note", "started"],
+        expect_stdout="Heartbeat recorded",
     )
 
     # Simulate work with periodic heartbeats
     for i in range(3):
         time.sleep(0.3)
-        subprocess.run(
-            ["hermes", "kanban", "heartbeat", tid, "--note", f"progress {i+1}/3"],
-            check=True, capture_output=True,
+        run_kanban_cli(
+            ["heartbeat", tid, "--note", f"progress {i+1}/3"],
+            expect_stdout="Heartbeat recorded",
         )
 
     # Complete with structured handoff
-    subprocess.run(
+    run_kanban_cli(
         [
-            "hermes", "kanban", "complete", tid,
+            "complete", tid,
             "--summary", f"real-subprocess worker finished {tid}",
             "--metadata", json.dumps({
                 "workspace": workspace,
@@ -41,7 +61,7 @@ def main():
                 "iterations": 3,
             }),
         ],
-        check=True, capture_output=True,
+        expect_stdout="Completed",
     )
 
 
