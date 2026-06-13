@@ -7262,6 +7262,32 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
+def _repo_root_for_row(workspace_kind, workspace_path) -> Optional[str]:
+    """Effective repo_root for a ready row WITHOUT claiming/provisioning,
+    for kanban.serialize_by_repo. Returns the SHARED integration target (the
+    main checkout) — for a path inside a provisioned worktree that is the
+    repo_root the integrator merges INTO, never the per-task worktree path.
+    scratch / anything that does not resolve to a repo returns None and never
+    participates in the lock. Fail-soft: any error -> None."""
+    try:
+        if workspace_kind not in {"dir", "worktree"}:
+            return None
+        if not workspace_path:
+            return None
+        p = str(workspace_path)
+        if not os.path.isabs(p):
+            return None
+        from hermes_cli import kanban_worktrees as _kwt
+        sp = _kwt.split_provisioned_path(p)
+        if sp is not None:
+            # split_provisioned_path returns (repo_root, root_id, worktree_path)
+            return str(sp[0])
+        rr = _kwt.repo_root_for(p)
+        return str(rr) if rr else None
+    except Exception:
+        return None
+
+
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
@@ -7470,6 +7496,11 @@ class DispatchResult:
     subsequent tick when the assignee has capacity. Separate bucket so
     telemetry / dashboards can show "this profile is busy" vs
     "task is genuinely stuck"."""
+    skipped_repo_serialized: list[tuple[str, str]] = field(default_factory=list)
+    """Ready tasks deferred this tick because another non-terminal task holds the
+    same resolved repo_root (kanban.serialize_by_repo). Each entry is
+    (task_id, repo_root). NOT a failure — picked up once the holder reaches
+    done/archived. Empty when serialize_by_repo is False."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -9535,6 +9566,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    serialize_by_repo: bool = True,
     daily_token_cap_per_profile: Optional[int] = None,
     daily_cost_cap_usd: Optional[float] = None,
     auto_retry_blocked: bool = False,
@@ -9619,7 +9651,8 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee, workflow_template_id, current_step_key FROM tasks "
+        "SELECT id, assignee, workflow_template_id, current_step_key, "
+        "workspace_kind, workspace_path FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -9658,6 +9691,23 @@ def dispatch_once(
             "GROUP BY assignee"
         ):
             _per_profile_running[prow["assignee"]] = int(prow["n"])
+
+    # serialize_by_repo (A+C): a per-resolved-repo_root in-flight lock beside the
+    # per-profile cap. Seed from every NON-TERMINAL task that is NOT itself a fresh
+    # ready candidate — i.e. exclude 'done','archived' AND 'ready'. Excluding 'ready'
+    # is what lets the first ready candidate for an idle repo claim (it re-adds itself
+    # on claim, step 3d); INCLUDING 'review' and 'blocked' is the fix for the
+    # 0167-0171 wave (a task parked in review/blocked must keep holding its repo so
+    # N+1 never branches from a stale main). Empty set + flag off => strict no-op.
+    _repo_locked: set[str] = set()
+    if serialize_by_repo:
+        for irow in conn.execute(
+            "SELECT workspace_kind, workspace_path FROM tasks "
+            "WHERE status NOT IN ('done', 'archived', 'ready')"
+        ):
+            _rr = _repo_root_for_row(irow["workspace_kind"], irow["workspace_path"])
+            if _rr:
+                _repo_locked.add(_rr)
 
     # C1 (N-C1) budget gate preflight. Caps default OFF (None) → both branches
     # are skipped, ``_budget_capped_profiles`` stays empty and
@@ -9720,6 +9770,13 @@ def dispatch_once(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
+        # serialize_by_repo: resolve this candidate's repo_root once and reuse it
+        # at the guard (3d) and every claim-success re-add. Computed here (above the
+        # openclaw branch) so it is in scope at ALL claim paths, including openclaw.
+        _cand_repo = (
+            _repo_root_for_row(row["workspace_kind"], row["workspace_path"])
+            if serialize_by_repo else None
+        )
         # K8 workflow-step routing (D7 L2): a task opted into a workflow
         # template is routed by its CURRENT STEP, not the static assignee
         # column. Resolve the step's role and — when it differs — persist it to
@@ -9826,6 +9883,8 @@ def dispatch_once(
                     _per_profile_running[claimed.assignee] = (
                         _per_profile_running.get(claimed.assignee, 0) + 1
                     )
+                if serialize_by_repo and _cand_repo:
+                    _repo_locked.add(_cand_repo)
             except Exception as exc:
                 # Mirror the local-spawn failure path: release the claim,
                 # count the failure, auto-block after the limit. A missing
@@ -9874,6 +9933,24 @@ def dispatch_once(
                     (row["id"], row_assignee, current)
                 )
                 continue
+        # serialize_by_repo guard: another non-terminal task holds this repo_root
+        # this tick -> defer THIS candidate (continue, never break: other repos must
+        # still flow). Emit ONE deduped repo_serialized event (role_fit_held pattern).
+        if serialize_by_repo and _cand_repo and _cand_repo in _repo_locked:
+            result.skipped_repo_serialized.append((row["id"], _cand_repo))
+            if not dry_run:
+                latest = conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if latest is None or latest["kind"] != "repo_serialized":
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "repo_serialized",
+                            {"repo_root": _cand_repo},
+                        )
+            continue
         # C1 (N-C1) budget hold: a daily cap is hit. Board-wide $ cap holds
         # every assigned ready task; per-profile token cap holds only that
         # profile's tasks. The task stays in ``ready`` (advisory hold, like the
@@ -9971,6 +10048,8 @@ def dispatch_once(
                 _per_profile_running[row_assignee] = (
                     _per_profile_running.get(row_assignee, 0) + 1
                 )
+            if serialize_by_repo and _cand_repo:
+                _repo_locked.add(_cand_repo)
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -10039,6 +10118,8 @@ def dispatch_once(
                 _per_profile_running[claimed.assignee] = (
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
+            if serialize_by_repo and _cand_repo:
+                _repo_locked.add(_cand_repo)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),

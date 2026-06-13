@@ -1635,6 +1635,10 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        serialize_by_repo = bool(kanban_cfg.get("serialize_by_repo", True))
+        if not serialize_by_repo:
+            logger.info("kanban dispatcher: serialize_by_repo=False (per-repo lock OFF)")
+
         # Read C1 budget caps (N-C1). Both default OFF (None) — the dispatcher
         # never holds on budget unless the operator sets a positive value, so
         # this is purely opt-in and the no-cap path is byte-identical to before.
@@ -1782,6 +1786,7 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    serialize_by_repo=serialize_by_repo,
                     daily_token_cap_per_profile=daily_token_cap_per_profile,
                     daily_cost_cap_usd=daily_cost_cap_usd,
                     auto_retry_blocked=auto_retry_blocked,
