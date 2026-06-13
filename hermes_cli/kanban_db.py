@@ -2693,6 +2693,23 @@ def create_task(
         board_meta = read_board_metadata(board_slug)
         board_default = board_meta.get("default_workdir")
         if board_default:
+            # E1 (wrong-workspace guard, #0167-0171 root cause): a code-role task
+            # that would silently inherit the board default_workdir (the Hermes
+            # repo) instead of an explicit workspace_path is refused at creation
+            # time. Reading the review-gate code_roles is wrapped fail-open so a
+            # config error never blocks non-FO/legacy task creation; only an
+            # affirmatively-code-role task raises. Non-code roles keep inheriting.
+            try:
+                is_code_role = assignee in _review_gate_config()["code_roles"]
+            except Exception:
+                is_code_role = False
+            if is_code_role:
+                raise ValueError(
+                    f"code-role task ({assignee!r}) has no explicit workspace_path and would "
+                    f"fall back to the board default_workdir ({board_default!r}). Refusing to "
+                    f"provision a code task in the Hermes repo. Pass workspace_path explicitly "
+                    f"(e.g. /home/piet/projects/family-organizer for FO tasks)."
+                )
             workspace_path = str(board_default)
 
     # Retry once on the extremely unlikely id collision.

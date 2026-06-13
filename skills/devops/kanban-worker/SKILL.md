@@ -24,6 +24,14 @@ Your workspace kind determines how you should behave inside `$HERMES_KANBAN_WORK
 | `dir:<path>` | Shared persistent directory | Other runs will read what you write. Treat it like long-lived state. Path is guaranteed absolute (the kernel rejects relative paths). |
 | `worktree` | Git worktree at the resolved path | If `.git` doesn't exist, run `git worktree add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo first, then cd and work normally. Commit work here. |
 
+> **Task-creation contract (for whoever ENQUEUES code tasks, not the worker).** A code-role
+> task (`coder`/`premium`/any role in `kanban.review_gate.code_roles`) with `workspace_kind`
+> `dir`/`worktree` **must** be created with an explicit `workspace_path` — for Family-Organizer
+> work that is `workspace_path=/home/piet/projects/family-organizer`. Code tasks that omit it and
+> would silently inherit the board `default_workdir` (the Hermes repo) are **refused at
+> `create_task` time** (the E1 wrong-workspace guard, born from the 0167–0171 mis-provisioning).
+> Non-code roles still inherit the board default as before.
+
 ## Tenant isolation
 
 If `$HERMES_TENANT` is set, the task belongs to a tenant namespace. When reading or writing persistent memory, prefix memory entries with the tenant so context doesn't leak across tenants:
