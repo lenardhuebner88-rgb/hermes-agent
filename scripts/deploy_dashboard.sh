@@ -29,31 +29,31 @@ echo "[deploy] building frontend bundle (web/) ..."
 echo "[deploy] restarting hermes-dashboard.service ..."
 systemctl --user restart hermes-dashboard.service
 
-# wait for it to come back
+# wait for it to come back — poll the public liveness route (real backend code,
+# no auth in any mode) rather than the SPA, so we wait on the Python process.
 for i in $(seq 1 15); do
-  if curl -s -o /dev/null --max-time 2 http://127.0.0.1:9119/control/autoresearch; then break; fi
+  if curl -s -o /dev/null --max-time 2 http://127.0.0.1:9119/api/status; then break; fi
   sleep 1
 done
 
-LB=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:9119/control/autoresearch || echo 000)
-TN=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Host: huebners.tail50819a.ts.net" http://127.0.0.1:9119/control/autoresearch || echo 000)
+# SPA reachability + DNS-rebinding host-guard. Accept 200 (loopback/--insecure
+# mode → token-gated SPA) OR 302 (gated/OAuth mode → SPA redirects to /login;
+# the route IS served and the auth gate is live). Prod binds 0.0.0.0, so even
+# loopback is gated → both legitimately 302. 403 (host guard blocked the tailnet
+# Host), 000 (down) or 5xx are unhealthy. --max-redirs 0: read the raw code.
+LB=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --max-redirs 0 http://127.0.0.1:9119/control || echo 000)
+TN=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --max-redirs 0 -H "Host: huebners.tail50819a.ts.net" http://127.0.0.1:9119/control || echo 000)
 echo "[deploy] health: loopback=$LB tailnet_guard=$TN  service=$(systemctl --user is-active hermes-dashboard.service)"
-# Deeper-than-liveness check: a real, token-gated API route must return valid
-# data after restart — proving the backend + auth-token path work end-to-end,
-# not just that the SPA HTML loads. The proposals API lives under /api/; the
-# bare /autoresearch/proposals path falls through to the SPA catch-all and
-# returns HTML (which used to fail this check on *every* deploy). Loopback runs
-# non-gated, so the SPA injects the ephemeral session token into the /control
-# HTML as window.__HERMES_SESSION_TOKEN__; extract it and pass it as the
-# X-Hermes-Session-Token header (a bare curl to the /api/ route 401s).
-TOKEN=$(curl -fsS --max-time 8 http://127.0.0.1:9119/control | grep -oP 'window\.__HERMES_SESSION_TOKEN__="\K[^"]+' | head -n1 || true)
-if [ -z "$TOKEN" ]; then
-  echo "[deploy] FAILED — could not extract session token from /control HTML (gated mode or service down?)"
-  exit 1
-fi
-PAYLOAD_OK=$(curl -fsS --max-time 8 -H "X-Hermes-Session-Token: $TOKEN" http://127.0.0.1:9119/api/autoresearch/proposals | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("count"); o=d.get("open_count"); assert isinstance(c, int) and isinstance(o, int); print(f"count={c} open_count={o}")' 2>/tmp/hermes-deploy-payload.err || true)
+# Deeper-than-liveness check that works in BOTH auth modes: /api/status is in
+# PUBLIC_API_PATHS (bypasses the loopback token gate AND the OAuth cookie gate),
+# yet its handler runs real backend code — check_config_version, get_running_pid,
+# gateway config read — so a 200 + valid JSON proves the Python backend (not just
+# the static SPA) is alive after restart. The old probe scraped an ephemeral
+# session token from /control HTML, which is NOT injected in gated mode → it
+# false-failed on every prod deploy. (truth = API payload, mode-agnostic)
+PAYLOAD_OK=$(curl -fsS --max-time 8 http://127.0.0.1:9119/api/status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, dict) and d.get("version"); v=d.get("version"); g=d.get("gateway_running"); c=d.get("config_version"); print(f"version={v} gateway_running={g} config_version={c}")' 2>/tmp/hermes-deploy-payload.err || true)
 if [ -z "$PAYLOAD_OK" ]; then
-  echo "[deploy] FAILED — /api/autoresearch/proposals did not return valid count/open_count JSON"
+  echo "[deploy] FAILED — /api/status did not return valid JSON (backend down?)"
   cat /tmp/hermes-deploy-payload.err || true
   exit 1
 fi
@@ -76,9 +76,10 @@ if [ "$SMOKE" = "1" ]; then
   echo "[deploy] smoke screenshot: $shot"
 fi
 
-if [ "$LB" = "200" ] && [ "$TN" = "200" ]; then
+# 200 (non-gated) or 302 (gated → /login) both mean the SPA + auth gate are up.
+if { [ "$LB" = "200" ] || [ "$LB" = "302" ]; } && { [ "$TN" = "200" ] || [ "$TN" = "302" ]; }; then
   echo "[deploy] OK — live + mobile reachable"
 else
-  echo "[deploy] FAILED — check: systemctl --user status hermes-dashboard.service"
+  echo "[deploy] FAILED — loopback=$LB tailnet_guard=$TN (want 200 or 302); check: systemctl --user status hermes-dashboard.service"
   exit 1
 fi
