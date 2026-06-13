@@ -5,7 +5,7 @@ export const de = {
     staleUnknown: "Daten nicht frisch",
     error: "Quelle meldet Fehler",
   },
-  tabs: { overview: "Übersicht", inbox: "Postfach", pulse: "Puls", workstreams: "Ströme", hermes: "Hermes", flow: "Flow", statistik: "Statistik", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons" },
+  tabs: { overview: "Übersicht", inbox: "Postfach", pulse: "Puls", workstreams: "Ströme", hermes: "Hermes", flow: "Flow", statistik: "Statistik", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons", schmiede: "Prompt-Schmiede" },
   stats: {
     eyebrow: "Statistik",
     title: "Liefert die Flotte?",

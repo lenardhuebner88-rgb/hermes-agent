@@ -61,6 +61,9 @@ const ResearchView = lazy(() =>
 const BibliothekView = lazy(() =>
   import("./views/BibliothekView").then((m) => ({ default: m.BibliothekView })),
 );
+const SchmiedeView = lazy(() =>
+  import("./views/SchmiedeView").then((m) => ({ default: m.SchmiedeView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -76,6 +79,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/lanes")) return "lanes";
   if (pathname.includes("/control/research")) return "research";
   if (pathname.includes("/control/bibliothek")) return "bibliothek";
+  if (pathname.includes("/control/schmiede")) return "schmiede";
   // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
   // Rail-Highlight bleibt dort, eigener Tab existiert bewusst nicht.
   if (pathname.includes("/control/runs/")) return "workstreams";
@@ -101,6 +105,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   lanes: () => import("./views/LanesView"),
   research: () => import("./views/ResearchView"),
   bibliothek: () => import("./views/BibliothekView"),
+  schmiede: () => import("./views/SchmiedeView"),
 };
 
 function prefetchControlView(tab: ControlTab): void {
@@ -123,6 +128,7 @@ const tabPath: Record<ControlTab, string> = {
   lanes: "/control/lanes",
   research: "/control/research",
   bibliothek: "/control/bibliothek",
+  schmiede: "/control/schmiede",
 };
 
 // Shown briefly while a lazy-loaded control view chunk downloads (first visit
@@ -225,6 +231,7 @@ export default function ControlPage() {
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />
             <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
+            <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
             <Route path="*" element={<Navigate to="/control" replace />} />
           </Routes>
           </Suspense>
