@@ -1854,11 +1854,12 @@ def _model_flow_kimi(config, current_model=""):
 
     # Step 3: Model selection — show appropriate models for the endpoint
     if is_coding_plan:
-        # Coding Plan models (kimi-k2.6 first)
+        # Coding Plan models (subscription endpoint advertises K2.7 Code as
+        # the stable ``kimi-for-coding`` model id).
         model_list = [
+            "kimi-for-coding",
             "kimi-k2.6",
             "kimi-k2.5",
-            "kimi-for-coding",
             "kimi-k2-thinking",
             "kimi-k2-thinking-turbo",
         ]
