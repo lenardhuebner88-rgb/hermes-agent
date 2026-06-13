@@ -1,0 +1,164 @@
+import { useCallback, useEffect, useState } from "react";
+import { BookOpen, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
+import { fetchJSON } from "@/lib/api";
+import { FleetEmptyState } from "../../components/fleet/atoms";
+import { ToneCallout } from "../../components/atoms";
+import { toneClasses } from "../../lib/tones";
+import {
+  sectionsLabel,
+  totalDocs,
+  type KnowledgeCatalog,
+  type KnowledgeCollection,
+  type KnowledgeDoc,
+} from "./knowledge.helpers";
+import { KnowledgeReader } from "./KnowledgeReader";
+
+/** Sammlungs-Icon als statisches JSX (Backend liefert nur den Namen). Bewusst
+ *  ein Switch statt dynamischer Komponenten-Auflösung → react-hooks/static-
+ *  components-konform und für jeden Namen explizit. */
+function CollectionGlyph({ name, className }: { name: string; className?: string }) {
+  switch (name) {
+    case "Landmark":
+      return <Landmark className={className} />;
+    case "Workflow":
+      return <Workflow className={className} />;
+    case "Sparkles":
+      return <Sparkles className={className} />;
+    case "Users":
+      return <Users className={className} />;
+    case "Newspaper":
+      return <Newspaper className={className} />;
+    default:
+      return <BookOpen className={className} />;
+  }
+}
+
+const t = {
+  searchPlaceholder: "Im Nachschlagewerk suchen — Titel, Text, Tags …",
+  searchAria: "Im Nachschlagewerk suchen",
+  loadError: "Nachschlagewerk konnte nicht geladen werden.",
+  loading: "Lade Nachschlagewerk …",
+  emptyTitle: "Kein Treffer",
+  emptyDesc: "Keine Sammlung enthält diesen Suchbegriff. Tipp anpassen oder Suche leeren.",
+  hitsFor: (n: number, q: string) => `${n} Treffer für „${q}“`,
+  docs: (n: number) => `${n} ${n === 1 ? "Dokument" : "Dokumente"}`,
+};
+
+/** Eine Doc-Karte im Regal. Exportiert für Unit-Tests. */
+export function DocCard({ doc, onOpen }: { doc: KnowledgeDoc; onOpen: (doc: KnowledgeDoc) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(doc)}
+      className="hc-surface-card flex h-full flex-col gap-2 p-4 text-left transition-colors hover:bg-white/5"
+    >
+      <h4 className="text-[0.95rem] font-semibold leading-snug text-white">{doc.title}</h4>
+      <p className="line-clamp-2 flex-1 text-[0.8rem] leading-relaxed hc-soft">{doc.summary}</p>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] hc-dim">
+        <span className="hc-mono truncate">{doc.source_ref}</span>
+        {doc.heading_count > 0 ? <span>· {sectionsLabel(doc.heading_count)}</span> : null}
+      </div>
+      {doc.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {doc.tags.map((tag) => (
+            <span key={tag} className="rounded-full border border-white/10 px-1.5 py-0.5 text-[0.6rem] hc-dim">{tag}</span>
+          ))}
+        </div>
+      ) : null}
+    </button>
+  );
+}
+
+/** Eine Sammlung (ein Regal): Akzent-Icon, Titel, Beschreibung, Doc-Raster.
+ *  Exportiert für Unit-Tests. */
+export function CollectionSection({ collection, onOpen }: { collection: KnowledgeCollection; onOpen: (doc: KnowledgeDoc) => void }) {
+  return (
+    <section className="hc-surface-card p-4 sm:p-5">
+      <header className="mb-4 flex items-start gap-3">
+        <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${toneClasses(collection.accent)}`}>
+          <CollectionGlyph name={collection.icon} className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <h3 className="text-[1.02rem] font-semibold text-white">{collection.title}</h3>
+            <span className="hc-mono text-[0.7rem] hc-dim">{t.docs(collection.docs.length)}</span>
+          </div>
+          <p className="mt-0.5 text-[0.8rem] leading-relaxed hc-soft">{collection.description}</p>
+        </div>
+      </header>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {collection.docs.map((doc) => (
+          <DocCard key={doc.id} doc={doc} onOpen={onOpen} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function KnowledgeShelf() {
+  const [catalog, setCatalog] = useState<KnowledgeCatalog | null>(null);
+  const [q, setQ] = useState("");
+  const [reading, setReading] = useState<KnowledgeDoc | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async (query: string) => {
+    try {
+      const params = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+      const res = await fetchJSON<KnowledgeCatalog>(`/api/library/knowledge${params}`);
+      setCatalog(res);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  // Erst-Load sofort, Such-Eingaben entprellt (250 ms) — Hauskonvention
+  // setTimeout statt synchronem setState im Effect-Body.
+  useEffect(() => {
+    const handle = window.setTimeout(() => void load(q), q.trim() ? 250 : 0);
+    return () => window.clearTimeout(handle);
+  }, [q, load]);
+
+  if (reading) {
+    const collectionTitle =
+      catalog?.collections.find((c) => c.id === reading.collection)?.title ?? "";
+    return <KnowledgeReader doc={reading} collectionTitle={collectionTitle} onBack={() => setReading(null)} />;
+  }
+
+  const collections = catalog?.collections ?? [];
+  const searching = q.trim().length > 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 hc-dim" />
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={t.searchPlaceholder}
+          aria-label={t.searchAria}
+          className="w-full rounded-lg border border-[var(--hc-border)] bg-black/25 py-2 pl-9 pr-3 text-sm text-white placeholder:hc-dim"
+        />
+      </div>
+
+      {error ? <ToneCallout tone="red">{t.loadError}<br />{error}</ToneCallout> : null}
+
+      {searching && catalog ? (
+        <p className="text-[0.78rem] hc-dim">{t.hitsFor(totalDocs(collections), q.trim())}</p>
+      ) : null}
+
+      {catalog === null && !error ? (
+        <p className="text-sm hc-dim">{t.loading}</p>
+      ) : collections.length === 0 ? (
+        <FleetEmptyState title={t.emptyTitle} desc={t.emptyDesc} />
+      ) : (
+        <div className="space-y-4">
+          {collections.map((collection) => (
+            <CollectionSection key={collection.id} collection={collection} onOpen={setReading} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

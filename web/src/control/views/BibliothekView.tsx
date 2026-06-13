@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Library, Newspaper } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
@@ -7,22 +8,28 @@ import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
 import { CATEGORY_LABEL, groupBySeries } from "./BibliothekView.helpers";
+import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 
-// Phase D/E (Programm 3): Bibliothek — der Lesesaal. Zeitungs-Metapher statt
-// Tabellen-Metapher: „Heute"-Frontpage (Neuestes pro Kategorie), Kategorie-
-// Regale (Serie = Abo eines Crons, Ausgaben chronologisch), Lese-Ansicht mit
-// gerendertem Markdown und ←/→ innerhalb der Serie. Read-only; Ungelesen-
-// Status lebt rein im localStorage (kein Server-State).
+// Bibliothek = zwei klar getrennte Bereiche (Programm 3, Next-Level):
+//   • Nachschlagewerk (Wissen/Kanon) — kuratiertes, thema-geordnetes Referenz-
+//     wissen (Canon, Orchestrierung, Skills, Rollen). Zum Nachschlagen.
+//   • Lesesaal (Ausgaben) — alles zeitlich Produzierte (Digests, Recherchen,
+//     Receipts), Zeitungs-Metapher, chronologisch.
+// Ein gemeinsamer Hero mit Segmented-Control schaltet zwischen beiden; jeder
+// Bereich bringt seine eigenen Filter/Suche mit.
 const t = {
   eyebrow: "Bibliothek",
-  title: "Der Lesesaal",
-  subtitle: "Alles, was Hermes produziert, menschenlesbar an einem Ort — Digests, Recherchen, Receipts.",
+  modeWissen: "Nachschlagewerk",
+  modeLesesaal: "Lesesaal",
+  wissenTitle: "Nachschlagewerk",
+  wissenSubtitle: "Das dauerhafte Wissen des Servers — sauber geordnet zum Nachschlagen, für Agents und dich.",
+  lesesaalTitle: "Der Lesesaal",
+  lesesaalSubtitle: "Alles, was Hermes produziert, menschenlesbar an einem Ort — Digests, Recherchen, Receipts.",
   searchPlaceholder: "Suche in Titel + Text …",
   frontpage: "Heute",
-  all: "Alle",
   empty: "Noch nichts zu lesen.",
-  emptyDesc: "Sobald Crons/Recherchen Ausgaben produzieren, füllt sich die Bibliothek.",
-  loadError: "Bibliothek konnte nicht geladen werden.",
+  emptyDesc: "Sobald Crons/Recherchen Ausgaben produzieren, füllt sich der Lesesaal.",
+  loadError: "Lesesaal konnte nicht geladen werden.",
   newBadge: "neu",
   issues: (n: number) => `${n} Ausgaben`,
   back: "← Übersicht",
@@ -237,7 +244,10 @@ function ReadingView({ item, neighbors, onNavigate, onBack }: {
   );
 }
 
-export function BibliothekView(_props: { density?: Density }) {
+// Lesesaal (Ausgaben) — der bisherige Bibliothek-Inhalt, unverändert in Logik.
+// Der Hero lebt jetzt im Eltern-`BibliothekView`; die Filter (Kategorie-Chips +
+// Suche) sitzen darum in einer eigenen Filterleiste statt im Hero.
+function LesesaalBody() {
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [data, setData] = useState<LibraryListResponse | null>(null);
@@ -357,7 +367,7 @@ export function BibliothekView(_props: { density?: Density }) {
 
   return (
     <div className="space-y-4">
-      <Hero eyebrow={t.eyebrow} title={t.title} subtitle={t.subtitle} count={data?.count ?? "—"} countHint={t.issues(data?.count ?? 0)} tone="amber">
+      <div className="hc-surface-card p-3">
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => { setCategory(null); setReading(null); }} className={`inline-flex min-h-9 items-center rounded-full border px-3 py-1 text-[0.78rem] ${!category ? "border-[var(--hc-accent-border)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft"}`}>{t.frontpage}</button>
           {(data?.categories ?? []).map((c) => (
@@ -375,7 +385,7 @@ export function BibliothekView(_props: { density?: Density }) {
             className="min-w-48 flex-1 rounded-md border border-[var(--hc-border)] bg-black/25 px-3 py-1.5 text-sm text-white placeholder:hc-dim"
           />
         </div>
-      </Hero>
+      </div>
 
       <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
       <SavedSearchShelf searches={savedSearches} onApply={applySavedSearch} />
@@ -414,6 +424,52 @@ export function BibliothekView(_props: { density?: Density }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+type Mode = "wissen" | "lesesaal";
+
+function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
+  const tab = (value: Mode, label: string, Icon: typeof Library) => (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={mode === value}
+      onClick={() => onChange(value)}
+      className={`inline-flex min-h-9 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[0.8rem] font-medium transition-colors ${
+        mode === value
+          ? "bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-sm"
+          : "hc-soft hover:bg-white/5"
+      }`}
+    >
+      <Icon className="h-4 w-4" />
+      {label}
+    </button>
+  );
+  return (
+    <div role="tablist" aria-label={t.eyebrow} className="inline-flex items-center gap-1 rounded-full border border-[var(--hc-border)] bg-black/20 p-1">
+      {tab("wissen", t.modeWissen, Library)}
+      {tab("lesesaal", t.modeLesesaal, Newspaper)}
+    </div>
+  );
+}
+
+export function BibliothekView({ density }: { density?: Density }) {
+  const [mode, setMode] = useState<Mode>("wissen");
+  const wissen = mode === "wissen";
+  return (
+    <div className="space-y-4">
+      <Hero
+        eyebrow={t.eyebrow}
+        title={wissen ? t.wissenTitle : t.lesesaalTitle}
+        subtitle={wissen ? t.wissenSubtitle : t.lesesaalSubtitle}
+        tone={wissen ? "cyan" : "amber"}
+        density={density}
+      >
+        <ModeSwitch mode={mode} onChange={setMode} />
+      </Hero>
+      {wissen ? <KnowledgeShelf /> : <LesesaalBody />}
     </div>
   );
 }

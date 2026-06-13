@@ -752,7 +752,7 @@ def register_library_routes(app: Any) -> None:
     bewusst NIE in PUBLIC_API_PATHS."""
     from fastapi import Body, HTTPException, Query
 
-    from hermes_cli import library_state
+    from hermes_cli import library_knowledge, library_state
 
     @app.get("/api/library/items")
     async def library_items(  # type: ignore[unused-variable]
@@ -775,6 +775,25 @@ def register_library_routes(app: Any) -> None:
         if item is None:
             raise HTTPException(status_code=404, detail="item not found")
         return item.as_dict(with_body=True)
+
+    # --- Wissen/Kanon (Nachschlagewerk) — kuratiertes Referenzwissen ---------
+    @app.get("/api/library/knowledge")
+    async def library_knowledge_catalog(  # type: ignore[unused-variable]
+        q: Optional[str] = Query(None, max_length=200),
+    ):
+        return await asyncio.to_thread(library_knowledge.list_knowledge, q)
+
+    @app.get("/api/library/knowledge/doc")
+    async def library_knowledge_doc(  # type: ignore[unused-variable]
+        id: str = Query(..., max_length=160),
+    ):
+        try:
+            doc = await asyncio.to_thread(library_knowledge.read_knowledge_doc, id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if doc is None:
+            raise HTTPException(status_code=404, detail="knowledge doc not found")
+        return doc
 
     @app.get("/api/library/saved-searches")
     async def library_saved_searches():  # type: ignore[unused-variable]
