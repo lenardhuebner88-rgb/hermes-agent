@@ -4267,7 +4267,10 @@ def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
     assert catalog["research"]["worker_runtime"] == "hermes"
     assert catalog["research"]["default_model"] == "gpt-5.4"
     # The curated model catalog still picks up live profile defaults.
-    assert "gpt-5.4" in {m["id"] for m in data["models"]}
+    model_ids = {m["id"] for m in data["models"]}
+    assert "gpt-5.4" in model_ids
+    # Newly curated Kimi K2.7 is offered in the Lanes dropdown alongside K2.6.
+    assert "moonshotai/kimi-k2.7" in model_ids
 
 
 def test_lanes_profile_catalog_cached_between_requests(client, monkeypatch):

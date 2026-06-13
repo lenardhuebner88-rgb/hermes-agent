@@ -22,9 +22,11 @@ from unittest.mock import patch
 
 from hermes_cli.models import (
     _MODELS_DEV_PREFERRED,
+    _PROVIDER_MODELS,
     _merge_with_models_dev,
     provider_model_ids,
 )
+from hermes_cli.model_switch import list_authenticated_providers
 
 
 class TestMergeHelper:
@@ -95,6 +97,26 @@ class TestProviderModelIdsPreferred:
             out = provider_model_ids("opencode-zen")
         assert "claude-opus-4-7" in out
         assert "kimi-k2.6" in out
+
+    def test_kimi_coding_curated_floor_includes_kimi_k27(self):
+        """Kimi K2.7 is in the offline curated floor used by pickers."""
+        assert _PROVIDER_MODELS["kimi-coding"][0] == "kimi-k2.7"
+        assert "kimi-k2.7" in provider_model_ids("kimi-coding")
+
+    def test_authenticated_kimi_picker_merges_curated_floor_into_cached_models(self, monkeypatch):
+        """Gateway/Lanes picker rows must surface newly curated Kimi models even with an old cache."""
+        monkeypatch.setenv("KIMI_API_KEY", "test-kimi-key")
+        mdev = {"kimi-for-coding": {"env": ["KIMI_API_KEY"], "models": {}}}
+
+        with (
+            patch("agent.models_dev.fetch_models_dev", return_value=mdev),
+            patch("hermes_cli.models.cached_provider_model_ids", return_value=["kimi-k2.6"]),
+        ):
+            rows = list_authenticated_providers(max_models=10)
+
+        kimi = next(row for row in rows if row["slug"] == "kimi-coding")
+        assert kimi["models"][:2] == ["kimi-k2.6", "kimi-k2.7"]
+        assert "kimi-k2.7" in kimi["models"]
 
 
 class TestOpenRouterAndNousUnchanged:

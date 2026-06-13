@@ -12,6 +12,7 @@ const MODEL_SUGGESTIONS = [
   "gpt-5.5",
   "gpt-5.4",
   "kimi-for-coding",
+  "kimi-k2.7",
   "kimi-k2.6",
   "qwen3.7-max",
 ];

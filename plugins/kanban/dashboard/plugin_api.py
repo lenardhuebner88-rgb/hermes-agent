@@ -2724,6 +2724,7 @@ _LANE_MODEL_CATALOG: list[dict] = [
     {"id": "gpt-5.4", "label": "GPT-5.4", "runtime": "hermes", "group": "API-Modelle"},
     {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "runtime": "hermes", "group": "API-Modelle"},
     {"id": "qwen/qwen3.7-max", "label": "Qwen 3.7 Max", "runtime": "hermes", "group": "API-Modelle"},
+    {"id": "moonshotai/kimi-k2.7", "label": "Kimi K2.7", "runtime": "hermes", "group": "API-Modelle"},
     {"id": "moonshotai/kimi-k2.6", "label": "Kimi K2.6", "runtime": "hermes", "group": "API-Modelle"},
     {"id": "kimi-for-coding", "label": "Kimi for Coding", "runtime": "hermes", "group": "API-Modelle"},
 ]

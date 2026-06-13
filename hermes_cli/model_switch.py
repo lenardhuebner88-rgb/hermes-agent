@@ -1334,6 +1334,24 @@ def list_authenticated_providers(
             live = [current_model]
         curated["lmstudio"] = live
 
+    def _append_curated_floor(model_ids: list[str], *provider_keys: str) -> list[str]:
+        """Append curated-only models behind a cached/live list.
+
+        Kimi's picker path is often served from provider_models_cache.json.
+        When Hermes ships a new curated Kimi model, a still-fresh cache entry
+        must not hide it from the Dashboard Lanes tab or gateway /model picker.
+        """
+        merged = list(model_ids or [])
+        seen = {str(mid).lower() for mid in merged}
+        for key in provider_keys:
+            for mid in curated.get(key, []) or []:
+                norm = str(mid).lower()
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                merged.append(mid)
+        return merged
+
     # --- 1. Check Hermes-mapped providers ---
     from hermes_cli.models import _AGGREGATOR_PROVIDERS as _AGG_PROVIDERS
     from hermes_cli.providers import ALIASES as _PROVIDER_ALIAS_TABLE
@@ -1395,6 +1413,8 @@ def list_authenticated_providers(
         # disk caching to keep the picker open snappy. Falls back to the
         # curated static list when the live fetcher returns nothing.
         model_ids = cached_provider_model_ids(hermes_id)
+        if model_ids and hermes_id in {"kimi-coding", "kimi-coding-cn", "moonshot"}:
+            model_ids = _append_curated_floor(model_ids, hermes_id)
         if not model_ids:
             model_ids = curated.get(hermes_id, [])
             if hermes_id in _MODELS_DEV_PREFERRED:
@@ -1558,6 +1578,8 @@ def list_authenticated_providers(
             # curated dict (with models.dev merge for preferred providers)
             # when the live fetcher comes up empty.
             model_ids = cached_provider_model_ids(hermes_slug)
+            if model_ids and hermes_slug in {"kimi-coding", "kimi-coding-cn", "moonshot"}:
+                model_ids = _append_curated_floor(model_ids, hermes_slug, pid)
             if not model_ids:
                 model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
                 if hermes_slug in _MODELS_DEV_PREFERRED:
@@ -1635,6 +1657,8 @@ def list_authenticated_providers(
         else:
             # Unified pathway — same as sections 1 and 2.
             _cp_model_ids = cached_provider_model_ids(_cp.slug)
+            if _cp_model_ids and _cp.slug in {"kimi-coding", "kimi-coding-cn", "moonshot"}:
+                _cp_model_ids = _append_curated_floor(_cp_model_ids, _cp.slug)
             if not _cp_model_ids:
                 _cp_model_ids = curated.get(_cp.slug, [])
         _cp_total = len(_cp_model_ids)
