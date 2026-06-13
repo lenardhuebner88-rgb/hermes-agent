@@ -596,6 +596,14 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.WorkerGateError as gate_err:
+                return tool_error(
+                    f"kanban_complete blocked: worker gate failed on "
+                    f"`{gate_err.command}` (exit {gate_err.returncode}). Your task "
+                    f"is still in-flight (no state change). Fix the failure in your "
+                    f"workspace, then call kanban_complete again.\n\n"
+                    f"--- failing output (tail) ---\n{gate_err.output_tail}"
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"

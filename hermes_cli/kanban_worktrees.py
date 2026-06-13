@@ -82,6 +82,32 @@ def _is_ignorable_dirty_path(path: str) -> bool:
 # work without an npm ci (monorepo: .bin lives in the ROOT node_modules).
 _NODE_MODULES_LINKS = ("node_modules", "web/node_modules")
 
+FO_REPO_PATH = Path("/home/piet/projects/family-organizer")
+
+
+def _is_fo_repo(repo_root: Path) -> bool:
+    """True if repo_root is the Family-Organizer node repo. Path-equality
+    first (cheap), then a package.json marker (scripts.build startswith
+    'next build') so a moved/cloned checkout still matches. startswith (not
+    ==) is robust to future flags like 'next build --turbo'. Any error -> False."""
+    try:
+        rr = Path(repo_root).resolve()
+    except Exception:
+        return False
+    try:
+        if rr == FO_REPO_PATH.resolve():
+            return True
+    except Exception:
+        pass
+    try:
+        with open(rr / "package.json", "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        build = ((data.get("scripts") or {}).get("build") or "")
+        return isinstance(build, str) and build.startswith("next build")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
 GIT_TIMEOUT_SECONDS = 120
 MERGE_TIMEOUT_SECONDS = 300
 # Must comfortably exceed a worst-case post-merge gate (ruff 300s +
@@ -661,6 +687,27 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
     return True, "; ".join(notes)
 
 
+def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
+    """FO post-merge integration gate: ONE `npm run build` (the heavy gate that
+    runs once at integration; lint/backlog:check/test are the worker gate, D).
+    ``changed_files`` is accepted for signature-compatibility with
+    default_quick_gate but unused — the build is whole-repo."""
+    npm_bin = shutil.which("npm") or "npm"
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv
+            [npm_bin, "run", "build"], cwd=str(repo_root),
+            capture_output=True, text=True, timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "build: TIMEOUT after 900s"
+    except FileNotFoundError:
+        return False, f"build: command not found ({npm_bin})"
+    if proc.returncode != 0:
+        tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
+        return False, f"build: exit {proc.returncode}\n{tail}"
+    return True, "npm run build ok"
+
+
 def integrate_chain(
     repo_root: Path,
     wt_path: Path,
@@ -802,7 +849,9 @@ def integrate_chain(
             merge_commit = _git(repo_root, "rev-parse", "HEAD")
 
             # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
-            gate = gate_runner or default_quick_gate
+            gate = gate_runner or (
+                fo_integration_gate if _is_fo_repo(repo_root) else default_quick_gate
+            )
             try:
                 ok, detail = gate(repo_root, diff_files)
             except Exception as exc:  # a broken gate must not pass silently

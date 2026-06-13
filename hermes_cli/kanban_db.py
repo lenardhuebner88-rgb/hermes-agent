@@ -76,6 +76,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import datetime as _dt
 import sqlite3
@@ -4873,6 +4874,19 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class WorkerGateError(Exception):
+    """Raised by _submit_for_review when the enforced light worker gate
+    (kanban.worker_gate) fails. The submission is aborted and the task stays
+    in-flight (running/ready) — same fail-safe shape as HallucinatedCardsError.
+    Carries the failing command, exit code, and the tail of combined output."""
+
+    def __init__(self, command: str, returncode: int, output_tail: str):
+        self.command = command
+        self.returncode = returncode
+        self.output_tail = output_tail
+        super().__init__(f"worker gate failed on {command!r} (exit {returncode})")
+
+
 # ---------------------------------------------------------------------------
 # Review gate (Phase 2: independent verification before 'done')
 # ---------------------------------------------------------------------------
@@ -4956,6 +4970,65 @@ def _review_gate_config() -> dict:
         "code_roles": code_roles,
         "acceptance_roles": acceptance_roles,
         "verifier_profile": verifier_profile,
+    }
+
+
+def _worker_gate_config() -> dict:
+    """Resolve kanban.worker_gate from the ROOT config.yaml (mirrors
+    _review_gate_config). Workers run under HERMES_HOME=<root>/profiles/<name>,
+    so a plain load_config would read the profile, not the board policy — read
+    the root config explicitly via get_default_hermes_root(). Returns:
+      {enabled: bool, repos: {<abs repo_root>: [cmd,...]}, default: [cmd,...],
+       timeout: int, code_roles: frozenset}
+    Defaults when absent: enabled=False, empty repos, default=[], timeout=900,
+    code_roles=_DEFAULT_REVIEW_CODE_ROLES. Repo keys normalized via Path.resolve()."""
+    wg: dict = {}
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            candidate = ((root_cfg.get("kanban") or {}).get("worker_gate") or {})
+            if isinstance(candidate, dict):
+                wg = candidate
+    except Exception:
+        wg = {}
+    repos_raw = wg.get("repos") if isinstance(wg.get("repos"), dict) else {}
+    repos: dict[str, list[str]] = {}
+    for k, v in repos_raw.items():
+        try:
+            key = str(Path(str(k)).resolve())
+        except Exception:
+            continue
+        if isinstance(v, (list, tuple)):
+            repos[key] = [str(c) for c in v if str(c).strip()]
+    default_cmds = wg.get("default")
+    default_list = (
+        [str(c) for c in default_cmds if str(c).strip()]
+        if isinstance(default_cmds, (list, tuple)) else []
+    )
+    roles = wg.get("code_roles")
+    if isinstance(roles, (list, tuple)) and roles:
+        code_roles = frozenset(
+            str(r).strip().lower() for r in roles if str(r).strip()
+        )
+    else:
+        code_roles = frozenset(_DEFAULT_REVIEW_CODE_ROLES)
+    timeout = wg.get("timeout")
+    try:
+        timeout = int(timeout) if timeout is not None else 900
+        if timeout <= 0:
+            timeout = 900
+    except (TypeError, ValueError):
+        timeout = 900
+    return {
+        "enabled": bool(wg.get("enabled", False)),
+        "repos": repos,
+        "default": default_list,
+        "timeout": timeout,
+        "code_roles": code_roles,
     }
 
 
@@ -5201,6 +5274,51 @@ def _submit_for_review(
         ) else dict(diff_snapshot)
     else:
         run_metadata = metadata
+    # D (worker gate): enforce the light repo gate (e.g. lint && backlog:check &&
+    # test) at this DB commit boundary, BEFORE the review transition. subprocess
+    # runs OUTSIDE the write txn (like the diff snapshot above). config disabled /
+    # role not code-bearing / no commands for the repo => skip (byte-identical to
+    # today). On the first non-zero command: write a worker_gate_blocked audit
+    # event in its own short txn, then raise WorkerGateError WITHOUT entering the
+    # review txn -> the task stays running/ready (same fail-safe as the
+    # hallucination gate). && semantics: stop at the first failure.
+    _wg = _worker_gate_config()
+    if _wg["enabled"]:
+        _wg_row = conn.execute(
+            "SELECT assignee, workspace_path FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        _wg_assignee = (_wg_row["assignee"] or "").strip().lower() if _wg_row else ""
+        _wg_ws = _wg_row["workspace_path"] if _wg_row else None
+        if _wg_assignee in _wg["code_roles"] and _wg_ws and os.path.isdir(_wg_ws):
+            try:
+                _wg_key = str(Path(_wg_ws).resolve())
+            except Exception:
+                _wg_key = _wg_ws
+            _wg_cmds = _wg["repos"].get(_wg_key, _wg["default"])
+            for _cmd in _wg_cmds:
+                try:
+                    _proc = subprocess.run(
+                        shlex.split(_cmd), cwd=_wg_ws,
+                        capture_output=True, text=True,
+                        timeout=_wg["timeout"], check=False,
+                    )
+                except (OSError, subprocess.SubprocessError) as _exc:
+                    _tail = f"{_cmd}: {_exc}"[-4000:]
+                    with write_txn(conn):
+                        _append_event(
+                            conn, task_id, "worker_gate_blocked",
+                            {"command": _cmd, "returncode": -1, "output_tail": _tail},
+                        )
+                    raise WorkerGateError(_cmd, -1, _tail)
+                if _proc.returncode != 0:
+                    _tail = ((_proc.stdout or "") + (_proc.stderr or ""))[-4000:]
+                    with write_txn(conn):
+                        _append_event(
+                            conn, task_id, "worker_gate_blocked",
+                            {"command": _cmd, "returncode": _proc.returncode,
+                             "output_tail": _tail},
+                        )
+                    raise WorkerGateError(_cmd, _proc.returncode, _tail)
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
