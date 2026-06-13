@@ -82,10 +82,12 @@ def test_generate_returns_prompt_from_model(monkeypatch):
     data = resp.json()
     assert data["fallback"] is False
     assert data["prompt"] == "GENERATED PROMPT TEXT"
-    # Cost guard: generator model is server-fixed to free Gemini Flash, NOT the caller's modelId.
-    assert captured["provider"] == "gemini"
-    assert captured["model"] == "gemini-3-flash-preview"
-    assert captured["max_tokens"] == 1200
+    # Cost/latency guard: generator is server-fixed to gpt-5.5 via the Codex OAuth
+    # subscription lane with low reasoning effort, NOT the caller's modelId.
+    assert captured["provider"] == "openai-codex"
+    assert captured["model"] == "gpt-5.5"
+    assert captured["max_tokens"] == 1500
+    assert captured["extra_body"]["reasoning"]["effort"] == "low"
     # The caller's target model is only a hint in the system prompt, never the generator.
     system_msg = captured["messages"][0]["content"]
     assert "/goal" in system_msg.lower() or "transcript" in system_msg.lower()

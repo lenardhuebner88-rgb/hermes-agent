@@ -8,12 +8,15 @@ Both live under /api/ → gated by the blanket auth_middleware (session token), 
 intentionally NOT in PUBLIC_API_PATHS. The catalog is a Python constant
 (hermes_cli/promptforge_catalog.py).
 
-Cost safety: the generator model is SERVER-FIXED to the free Gemini Flash tier
-(provider="gemini", model="gemini-3-flash-preview"). The caller cannot select the
+Cost safety: the generator model is SERVER-FIXED to GPT-5.5 via the ChatGPT Codex
+OAuth backend (provider="openai-codex", model="gpt-5.5") — a subscription lane, not
+per-token billing, so there is no key-burn exposure. The caller cannot select the
 generator model — the `modelId` in the request is only the *target* model the
-generated prompt is meant to run on, surfaced as a hint in the output. max_tokens is
-capped. On any LLM failure the endpoint returns `fallback: true` with no prompt, and
-the frontend falls back to its deterministic local composer.
+generated prompt is meant to run on, surfaced as a hint in the output. reasoning
+effort is pinned to "low" (prompt-writing needs no deep reasoning; keeps the
+interactive latency bounded — high effort on this lane can run many minutes) and
+max_tokens is capped. On any LLM failure the endpoint returns `fallback: true` with
+no prompt, and the frontend falls back to its deterministic local composer.
 """
 from __future__ import annotations
 
@@ -24,11 +27,15 @@ from pydantic import BaseModel
 
 from hermes_cli.promptforge_catalog import PROMPTFORGE_CATALOG
 
-# Server-fixed free generator model — do NOT let callers override (key-burn guard).
-_GEN_PROVIDER = "gemini"
-_GEN_MODEL = "gemini-3-flash-preview"
-_GEN_MAX_TOKENS = 1200
-_GEN_TIMEOUT = 40.0
+# Server-fixed generator model — do NOT let callers override (cost/abuse guard).
+# openai-codex = ChatGPT Codex OAuth subscription backend (not metered per token).
+_GEN_PROVIDER = "openai-codex"
+_GEN_MODEL = "gpt-5.5"
+_GEN_MAX_TOKENS = 1500
+_GEN_TIMEOUT = 120.0
+# Low reasoning effort: prompt-writing is not a deep-reasoning task, and high effort
+# on the Codex lane can run several minutes — unusable for an interactive button.
+_GEN_REASONING_EFFORT = "low"
 
 
 class PromptForgeGenBody(BaseModel):
@@ -150,9 +157,9 @@ def register_promptforge_routes(app: Any) -> None:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": problem},
                 ],
-                temperature=0.4,
                 max_tokens=_GEN_MAX_TOKENS,
                 timeout=_GEN_TIMEOUT,
+                extra_body={"reasoning": {"effort": _GEN_REASONING_EFFORT}},
             )
             return str(resp.choices[0].message.content or "").strip()
 
