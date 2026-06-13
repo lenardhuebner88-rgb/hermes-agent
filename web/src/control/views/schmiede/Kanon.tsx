@@ -4,7 +4,7 @@ import type { PromptForgeCatalog } from "./catalog";
 
 export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
   return (
-    <div className="grid gap-4">
+    <div className="grid min-w-0 gap-4">
       <FleetPanel eyebrow="12-Block-Taxonomie">
         <ul className="grid gap-2 text-sm">
           {catalog.blocks.map((b) => (
@@ -15,7 +15,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
               </div>
               <p className="mt-1 hc-soft text-xs">{b.description}</p>
               <div className="mt-1.5 flex items-start justify-between gap-2">
-                <code className="hc-mono whitespace-pre-wrap text-xs text-white/80">{b.body}</code>
+                <code className="hc-mono min-w-0 flex-1 whitespace-pre-wrap break-words text-xs text-white/80">{b.body}</code>
                 <CopyButton text={b.body} label="Kopieren" copiedLabel="Kopiert" />
               </div>
               <p className="mt-1 hc-dim text-[10px]">{b.source}</p>
@@ -32,7 +32,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
                 <span className="font-medium text-white">{t.label}</span>
                 <CopyButton text={t.rawTemplate} label="Kopieren" copiedLabel="Kopiert" />
               </div>
-              <pre className="hc-mono mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-xs text-white/85">{t.rawTemplate}</pre>
+              <pre className="hc-mono mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 text-xs text-white/85">{t.rawTemplate}</pre>
               <p className="mt-1 hc-dim text-[10px]">{t.source}</p>
             </div>
           ))}
@@ -48,7 +48,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
                 <CopyButton text={m.rawPreset} label="Kopieren" copiedLabel="Kopiert" />
               </div>
               <p className="mt-1 hc-soft text-xs">{m.description}</p>
-              <pre className="hc-mono mt-1.5 whitespace-pre-wrap rounded bg-black/30 p-2 text-xs text-white/85">{m.rawPreset}</pre>
+              <pre className="hc-mono mt-1.5 whitespace-pre-wrap break-words rounded bg-black/30 p-2 text-xs text-white/85">{m.rawPreset}</pre>
               <p className="mt-1 hc-dim text-[10px]">{m.source}</p>
             </div>
           ))}

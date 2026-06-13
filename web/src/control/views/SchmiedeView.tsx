@@ -20,7 +20,7 @@ export function SchmiedeView(_props: { density?: Density }) {
       ) : error && !data ? (
         <FleetPanel eyebrow="Fehler"><FleetEmptyState title="Katalog nicht erreichbar" desc={error} /></FleetPanel>
       ) : data ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
           <Konfigurator catalog={data} />
           <Kanon catalog={data} />
         </div>
