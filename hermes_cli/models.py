@@ -56,7 +56,8 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("qwen/qwen3.7-plus",                      ""),
     ("qwen/qwen3.6-35b-a3b",                   ""),
     # MoonshotAI
-    ("moonshotai/kimi-k2.6",                   "recommended"),
+    ("moonshotai/kimi-k2.7",                   "recommended"),
+    ("moonshotai/kimi-k2.6",                   ""),
     # MiniMax
     ("minimax/minimax-m3",                     ""),
     # Z-AI
@@ -177,6 +178,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen/qwen3.7-plus",
         "qwen/qwen3.6-35b-a3b",
         # MoonshotAI
+        "moonshotai/kimi-k2.7",
         "moonshotai/kimi-k2.6",
         # MiniMax
         "minimax/minimax-m3",
@@ -280,6 +282,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-oss-120b",
     ],
     "kimi-coding": [
+        "kimi-k2.7",
         "kimi-k2.6",
         "kimi-k2.5",
         "kimi-for-coding",
@@ -289,6 +292,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "kimi-k2-0905-preview",
     ],
     "kimi-coding-cn": [
+        "kimi-k2.7",
         "kimi-k2.6",
         "kimi-k2.5",
         "kimi-k2-thinking",
@@ -300,6 +304,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "step-3.5-flash-2603",
     ],
     "moonshot": [
+        "kimi-k2.7",
         "kimi-k2.6",
         "kimi-k2.5",
         "kimi-k2-thinking",
