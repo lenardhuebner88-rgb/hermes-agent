@@ -24,16 +24,16 @@ interface Detector {
 // ids + labels MUST stay in sync with the catalog `heuristic[]` rows (the
 // catalog provides documentation; the predicates below cannot live in JSON).
 const DETECTORS: Detector[] = [
-  { id: "done-when", label: "Hat Done-When", appliesTo: ["*"], rationale: "größter Einzel-Hebel", test: (p) => /done[- ]when|completion condition|finished when|done:/i.test(p) },
+  { id: "done-when", label: "Hat Done-When", appliesTo: ["*"], rationale: "größter Einzel-Hebel", test: (p) => /done[- ]when|completion condition|finished when|(^|\n)\s*done:/i.test(p) },
   { id: "stop-condition", label: "Hat Stop-Bedingung", appliesTo: ["*"], rationale: "verhindert Drift/stilles Falsch-Handeln", test: (p) => /\bstop\b|\bhalt\b|ask before|wait for (explicit )?confirmation|stop after/i.test(p) },
-  { id: "scope-limited", label: "Scope begrenzt (Datei/Verzeichnis)", appliesTo: ["*"], rationale: "verhindert Scope-Creep", test: (p) => /scope:|only (make|touch|modify|change)|do not touch|outside|within .*(dir|directory|src)|files? (in|recently)/i.test(p) },
+  { id: "scope-limited", label: "Scope begrenzt (Datei/Verzeichnis)", appliesTo: ["*"], rationale: "verhindert Scope-Creep", test: (p) => /scope:|only (make|touch|modify|change)|do not touch|(do not|don'?t|n'?t) [^\n]*outside|outside (the )?(scope|project|repo|dir)|within .*(dir|directory|src)|files? (in|recently)/i.test(p) },
   { id: "plan-first", label: "Plan-First vor Code", appliesTo: ["feature", "bugfix"], rationale: "Reasoning-first hebt Patch-Qualität", test: (p) => /reason first|before (writing )?code|propose a (written )?plan|wait for approval|\(no code\)/i.test(p) },
   { id: "output-format", label: "Output-Format spezifiziert", appliesTo: ["*"], rationale: "maschinen-verarbeitbar", test: (p) => /output:|output format|numbered list|\bjson\b|\byaml\b|\bxml\b|frontmatter|format:/i.test(p) },
   { id: "read-only", label: "Read-Only-Pledge", appliesTo: ["audit"], rationale: "sonst wird Audit zum ungewollten Fix", test: (p) => /do not modify|read[- ]only|don'?t (change|edit|modify)|no file changes/i.test(p) },
   { id: "behavior-preservation", label: "Behavior-Preservation-Pledge", appliesTo: ["refactor"], rationale: "sonst stilles Verhaltens-Drift", test: (p) => /without changing behavior|behavior[- ]preserv|characterization test|same observable behavior/i.test(p) },
   { id: "regression-test", label: "Regression-Test verlangt", appliesTo: ["bugfix"], rationale: "sonst kehrt der Bug zurück", test: (p) => /regression test|add a .{0,15}test|previously failing test/i.test(p) },
   { id: "clarification-gate", label: "Clarification-Gate", appliesTo: ["feature", "research"], rationale: "gegen stille Fehlinterpretation", test: (p) => /clarifying question|ask .{0,20}question|if .{0,30}ambiguous|surface it|surface the/i.test(p) },
-  { id: "severity-label", label: "Severity-Label", appliesTo: ["audit"], rationale: "sonst unpriorisierte Findings", test: (p) => /severity|\[critical|critical\s*\|\s*high|priorit/i.test(p) },
+  { id: "severity-label", label: "Severity-Label", appliesTo: ["audit"], rationale: "sonst unpriorisierte Findings", test: (p) => /severity|\[critical|critical\s*\|\s*high|prioriti(zed|ze) (report|findings|list)/i.test(p) },
 ];
 
 export function score(promptText: string, taskTypeId: string): HeuristicResult {

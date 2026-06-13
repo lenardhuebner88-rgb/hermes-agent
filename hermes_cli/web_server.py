@@ -12065,8 +12065,8 @@ from hermes_cli.vault_provenance_view import register_vault_provenance_routes  #
 register_vault_provenance_routes(app)
 
 # Read-only Prompt-Schmiede catalog (static curated agent-control prompts served
-# from hermes_cli/data/promptforge_catalog.json). Under /api/ → inherits the
-# session-token gate; never in PUBLIC_API_PATHS. See hermes_cli/promptforge_view.py.
+# from the in-code constant hermes_cli/promptforge_catalog.py). Under /api/ →
+# inherits the session-token gate; never in PUBLIC_API_PATHS. See promptforge_view.py.
 from hermes_cli.promptforge_view import register_promptforge_routes  # noqa: E402
 register_promptforge_routes(app)
 

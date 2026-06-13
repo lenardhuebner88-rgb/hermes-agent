@@ -33,7 +33,10 @@ function wrapForTarget(core: string, target: Target, selection: ForgeSelection, 
   const modelHint = selection.modelId
     ? `# Model: ${selection.modelId} (set via your CLI's model flag)`
     : "";
-  const head = (lines: string[]) => [modelHint, ...lines].filter(Boolean).join("\n");
+  // Prepend the model hint only when set; keep the inner "" entries — they are
+  // intentional blank-line spacers in the wrap arrays below (a blanket
+  // filter(Boolean) would glue the directive line straight onto the body).
+  const head = (lines: string[]) => (modelHint ? [modelHint, ...lines] : lines).join("\n");
 
   switch (target.wrapMode) {
     case "completion-condition": {
