@@ -109,6 +109,9 @@ class TestMatrixVoiceMessageDetection:
         self.adapter._user_id = "@bot:example.org"
         self.adapter._startup_ts = 0.0
         self.adapter._dm_rooms = {}
+        # These tests exercise media handling, not mention-gating: deliver the
+        # non-mentioned group-room audio event instead of dropping it.
+        self.adapter._require_mention = False
         self.adapter._message_handler = AsyncMock()
         # Mock _mxc_to_http to return a fake HTTP URL
         self.adapter._mxc_to_http = lambda url: f"https://matrix.example.org/_matrix/media/v3/download/{url[6:]}"
@@ -220,6 +223,9 @@ class TestMatrixVoiceCacheFallback:
         self.adapter._user_id = "@bot:example.org"
         self.adapter._startup_ts = 0.0
         self.adapter._dm_rooms = {}
+        # These tests exercise cache-fallback, not mention-gating: deliver the
+        # non-mentioned group-room audio event instead of dropping it.
+        self.adapter._require_mention = False
         self.adapter._message_handler = AsyncMock()
         self.adapter._mxc_to_http = lambda url: f"https://matrix.example.org/_matrix/media/v3/download/{url[6:]}"
         self.adapter._client = MagicMock()
