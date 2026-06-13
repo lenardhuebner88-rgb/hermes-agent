@@ -9,7 +9,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 //   1. blocked-Karte → beide Buttons sichtbar, Zwei-Schritt-Confirm.
 //   2. „Nochmal" → PATCH {status:"ready"} + Erfolgsmeldung + Requeue-Plakette,
 //      der sinnlose Retry-Button verschwindet, Eskalieren bleibt.
-//   3. „Nochmal stärker" → PATCH {model_override:"claude-fable-5"}.
+//   3. „Nochmal stärker" → PATCH {model_override:"claude-opus-4-8"}.
 
 const TASK_ID = "t_e2e_triage";
 const FAILURES_API = "**/api/plugins/kanban/runs/failures*";
@@ -140,9 +140,9 @@ test.describe("Fehler-Triage Buttons (Flow-Tab)", () => {
 
     // Eskalation = model_override-PATCH + Requeue-PATCH (escalationPatchSequence).
     await expect.poll(() => mocks.patches).toEqual([
-      { model_override: "claude-fable-5" },
+      { model_override: "claude-opus-4-8" },
       { status: "ready" },
     ]);
-    await expect(page.getByText(`${TASK_ID} eskaliert auf claude-fable-5 und wieder eingereiht.`)).toBeVisible();
+    await expect(page.getByText(`${TASK_ID} eskaliert auf claude-opus-4-8 und wieder eingereiht.`)).toBeVisible();
   });
 });

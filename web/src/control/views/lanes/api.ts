@@ -73,7 +73,7 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 // the React component so Fast Refresh can keep component files component-only.
 const TRIAGE_RETRY_LABEL = "Nochmal";
 
-export const ESCALATION_MODEL = "claude-fable-5";
+export const ESCALATION_MODEL = "claude-opus-4-8"; // claude-fable-5 z.Zt. gesperrt
 export const ESCALATION_PROFILE = "premium";
 
 interface LaneProfileRuntimeInfo {
@@ -314,7 +314,7 @@ export function smokeCheckLaneConfig(
 
 /** Fallback catalog when the backend payload carries no `models` yet. */
 export const FALLBACK_MODELS: LaneModelOption[] = [
-  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
+  { id: "claude-fable-5", label: "Claude Fable 5 (gesperrt)", runtime: "claude-cli", group: "Claude (Max-Abo)" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)" },
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
 ];

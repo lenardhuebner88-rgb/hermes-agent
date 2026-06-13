@@ -49,7 +49,7 @@ class TestLaneCrud:
         # max-abo maps its profiles onto the claude CLI runtime.
         max_abo = next(l for l in lanes if l["name"] == "max-abo")
         assert max_abo["profiles"]["premium"]["worker_runtime"] == "claude-cli"
-        assert max_abo["profiles"]["premium"]["model"] == "claude-fable-5"
+        assert max_abo["profiles"]["premium"]["model"] == "claude-opus-4-8"
         assert max_abo["profiles"]["coder-claude"]["model"] == "claude-opus-4-8"
 
     def test_seeding_is_idempotent(self, kanban_home):

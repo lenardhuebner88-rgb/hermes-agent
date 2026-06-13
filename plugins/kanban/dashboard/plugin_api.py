@@ -2716,7 +2716,7 @@ def close_epic_endpoint(
 # go through the claude-cli runtime (Max-Abo), everything else through the
 # hermes runtime (API providers).
 _LANE_MODEL_CATALOG: list[dict] = [
-    {"id": "claude-fable-5", "label": "Claude Fable 5", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
+    {"id": "claude-fable-5", "label": "Claude Fable 5 (gesperrt)", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
     {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
     {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
     {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},

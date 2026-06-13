@@ -163,7 +163,7 @@ DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 # gateway/daemon config decides whether the policy runs at all.
 DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS = 5 * 60
 DEFAULT_AUTO_RETRY_BLOCKED_LIMIT = 2
-AUTO_RETRY_ESCALATION_MODEL = "claude-fable-5"
+AUTO_RETRY_ESCALATION_MODEL = "claude-opus-4-8"  # claude-fable-5 z.Zt. gesperrt
 AUTO_RETRY_ESCALATION_PROFILE = "premium"
 
 
@@ -12812,7 +12812,7 @@ _LANE_SEED_API_STANDARD = {
     "research": {"worker_runtime": "hermes", "model": "kimi-k2.6"},
     "verifier": {"worker_runtime": "hermes", "model": "gpt-5.5"},
     "coder-claude": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
-    "premium": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+    "premium": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
 }
 _LANE_SEED_MAX_ABO = {
     "coder": {"worker_runtime": "claude-cli", "model": None},
@@ -12821,7 +12821,7 @@ _LANE_SEED_MAX_ABO = {
     "research": {"worker_runtime": "claude-cli", "model": None},
     "verifier": {"worker_runtime": "claude-cli", "model": None},
     "coder-claude": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
-    "premium": {"worker_runtime": "claude-cli", "model": "claude-fable-5"},
+    "premium": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
 }
 
 

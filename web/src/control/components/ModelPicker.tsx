@@ -6,7 +6,6 @@ import { fetchJSON } from "@/lib/api";
 // Vorschläge = statischer Katalog + live default_models aus GET /lanes
 // (profiles[] kommt dynamisch aus den Profil-Configs).
 const MODEL_SUGGESTIONS = [
-  "claude-fable-5",
   "claude-opus-4-8",
   "claude-sonnet-4-6",
   "claude-haiku-4-5",
