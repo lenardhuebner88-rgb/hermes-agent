@@ -8,7 +8,7 @@ export function SchmiedeView(_props: { density?: Density }) {
   const { data, error, loading } = usePromptForgeCatalog();
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <header>
         <p className="hc-eyebrow">Prompt-Schmiede</p>
         <h2 className="mt-1 text-xl font-semibold text-white">Best-Practice-Prompts für Agent-Steuerbefehle</h2>

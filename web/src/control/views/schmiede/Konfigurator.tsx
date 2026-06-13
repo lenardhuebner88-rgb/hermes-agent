@@ -31,7 +31,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
     setSelection((s) => ({ ...s, slots: { ...s.slots, ...patch } }));
 
   return (
-    <div className="grid min-w-0 gap-4">
+    <div className="grid min-w-0 grid-cols-1 gap-4">
       <FleetPanel eyebrow="Konfigurator">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Ziel-CLI">
@@ -47,7 +47,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
             <Select value={selection.modelId} onChange={(v) => set({ modelId: v })} options={modelList.map((m) => ({ value: m.id, label: m.label }))} />
           </Field>
         </div>
-        <div className="mt-3 grid gap-3">
+        <div className="mt-3 grid grid-cols-1 gap-3">
           <Field label="Aufgabe (Datei + Symptom + Outcome)">
             <textarea className={`${INPUT_CLS} min-h-[64px]`} value={selection.slots.task} onChange={(e) => setSlot({ task: e.target.value })} placeholder="z.B. auth.ts: Login-Race → deterministische Session-Erstellung" />
           </Field>
@@ -75,7 +75,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
       </FleetPanel>
 
       <FleetPanel eyebrow="Qualitäts-Score" meta={<span className="hc-mono text-sm">{rating.score} / {rating.max}</span>}>
-        <ul className="grid gap-1 text-sm">
+        <ul className="grid grid-cols-1 gap-1 text-sm">
           {rating.checks.map((c) => (
             <li key={c.id} className="flex items-center gap-2">
               <span className={c.status === "pass" ? "text-emerald-400" : c.status === "fail" ? "text-rose-400" : "hc-dim"}>
@@ -94,7 +94,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="grid gap-1 text-sm">
+    <label className="grid grid-cols-1 gap-1 text-sm">
       <span className="hc-eyebrow">{label}</span>
       {children}
     </label>

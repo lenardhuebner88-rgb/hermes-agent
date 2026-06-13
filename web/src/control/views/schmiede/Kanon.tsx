@@ -4,9 +4,9 @@ import type { PromptForgeCatalog } from "./catalog";
 
 export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
   return (
-    <div className="grid min-w-0 gap-4">
+    <div className="grid min-w-0 grid-cols-1 gap-4">
       <FleetPanel eyebrow="12-Block-Taxonomie">
-        <ul className="grid gap-2 text-sm">
+        <ul className="grid grid-cols-1 gap-2 text-sm">
           {catalog.blocks.map((b) => (
             <li key={b.id} className="rounded-md border border-white/5 bg-black/20 p-2">
               <div className="flex items-center justify-between gap-2">
@@ -25,7 +25,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
       </FleetPanel>
 
       <FleetPanel eyebrow="Rohe Vorlagen (Kanon)">
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 gap-3">
           {catalog.taskTypes.map((t) => (
             <div key={t.id} className="rounded-md border border-white/5 bg-black/20 p-2">
               <div className="flex items-center justify-between gap-2">
@@ -40,7 +40,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
       </FleetPanel>
 
       <FleetPanel eyebrow="Modus-Presets">
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 gap-3">
           {catalog.modes.map((m) => (
             <div key={m.id} className="rounded-md border border-white/5 bg-black/20 p-2">
               <div className="flex items-center justify-between gap-2">
