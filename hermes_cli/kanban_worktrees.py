@@ -762,6 +762,35 @@ def integrate_chain(
                     + ", ".join(overlap[:10])
                 )
 
+            # (a2) Rebase the chain branch onto the live target HEAD inside its
+            # OWN worktree (B1), so the following merge is FF/conflict-free.
+            # Reuse `cur` (the frozen, already-validated merge target) — do NOT
+            # git fetch: repo_root is a LOCAL checkout, `cur`/HEAD is the live
+            # local tip, and this integrator never pushes. (If a chain branch
+            # could legitimately diverge from a REMOTE, escalate — do not add a
+            # network fetch here.)
+            if not (wt_path.exists() and (wt_path / ".git").exists()):
+                return parked("chain worktree missing before rebase")
+            target_head = _git(repo_root, "rev-parse", cur)
+            try:
+                _git(wt_path, "rebase", target_head, timeout=MERGE_TIMEOUT_SECONDS)
+            except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                # Conflict (or timeout): abort cleanly so the worktree returns to
+                # its pre-rebase committed state, then signal rebase_conflict so
+                # complete_task routes the task back to the coder (NOT a park).
+                _git(wt_path, "rebase", "--abort", check=False)
+                return {
+                    "action": "rebase_conflict",
+                    "branch": branch,
+                    "reason": (
+                        f"rebase of {branch} onto {cur} hit a conflict "
+                        f"(aborted, returned to coder): {exc}"
+                    ),
+                    "target": cur,
+                }
+            # Successful rebase: fall through to the existing merge block. The
+            # --no-ff merge stays (preserves the merge-commit audit trail).
+
             # (b) the merge itself; conflicts → abort + park.
             msg = f"kanban: merge {branch} (worker-isolation integrator)"
             try:
@@ -873,6 +902,7 @@ def maybe_integrate_on_complete(
             kind = {
                 "merged": "integration_merged",
                 "clean": "integration_clean",
+                "rebase_conflict": "integration_rebase_conflict",
             }.get(outcome["action"], "integration_parked")
             kb._append_event(conn, task_id, kind, outcome)
     except Exception:

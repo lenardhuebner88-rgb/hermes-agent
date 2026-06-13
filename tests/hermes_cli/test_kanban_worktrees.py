@@ -475,19 +475,46 @@ def test_nonoverlapping_dirty_file_does_not_park(repo):
     assert (repo / "unrelated.txt").read_text() == "manual session\n"
 
 
-def test_merge_conflict_aborts_and_parks(repo):
+def test_rebase_conflict_aborts_and_returns_to_coder(repo):
+    # B1: the pre-merge rebase catches the conflict FIRST (before the merge), so
+    # a branch that conflicts with the advanced main is routed back to the coder
+    # via a ``rebase_conflict`` outcome instead of a silent ``parked``.
     info = _provisioned_chain(repo, "t_cfl", relpath="a.txt",
                               content="branch version\n")
     _commit_in(repo, "a.txt", "main version\n", msg="conflicting main commit")
     head_before = _git(repo, "rev-parse", "HEAD")
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
                               gate_runner=_ok_gate)
-    assert out["action"] == "parked"
+    assert out["action"] == "rebase_conflict"
     assert "conflict" in out["reason"]
-    # Aborted cleanly: HEAD unchanged, no MERGE_HEAD left behind.
+    assert out["target"] == "main"
+    # main HEAD unchanged (the rebase ran in the chain worktree; the merge
+    # never ran), no MERGE_HEAD left behind.
     assert _git(repo, "rev-parse", "HEAD") == head_before
     git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
     assert not (git_dir / "MERGE_HEAD").exists()
+    # Rebase aborted cleanly: no rebase state in the chain worktree, tree clean.
+    wt_git_dir = Path(_git(info["path"], "rev-parse", "--absolute-git-dir"))
+    assert not (wt_git_dir / "rebase-merge").exists()
+    assert not (wt_git_dir / "rebase-apply").exists()
+    assert _git(info["path"], "status", "--porcelain") == ""
+
+
+def test_rebase_onto_advanced_main_then_merges(repo):
+    # B1: main advances with an unrelated, non-overlapping commit AFTER the chain
+    # branched. The pre-merge rebase replays the chain onto the new main, so the
+    # merge lands cleanly and history contains BOTH commits (no conflict, no park).
+    info = _provisioned_chain(repo, "t_ff", relpath="feature.py",
+                              content="VALUE = 1\n")
+    _commit_in(repo, "unrelated.txt", "advanced\n", msg="unrelated main commit")
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_ok_gate)
+    assert out["action"] == "merged"
+    assert out.get("merge_commit")
+    log = _git(repo, "log", "--oneline")
+    assert "unrelated main commit" in log
+    assert (repo / "feature.py").exists()
+    assert (repo / "unrelated.txt").exists()
 
 
 def test_target_mismatch_parks(repo):
@@ -620,23 +647,38 @@ def test_complete_task_integrates_then_done(kanban_home, repo, monkeypatch):
     assert receipt and merged_events[0]["merge_commit"][:12] in receipt[0]["body"]
 
 
-def test_complete_task_parks_on_failed_integration(kanban_home, repo, monkeypatch):
+def test_complete_task_rebase_conflict_returns_to_coder(kanban_home, repo, monkeypatch):
+    # B1: a conflicting integration is caught by the pre-merge rebase and routed
+    # back to the coder as a REQUEST_CHANGES fix-run (NOT a dead park). The chain
+    # re-enters the review loop instead of sitting blocked with an integration park.
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     with kb.connect() as conn:
         tid, ws = _provisioned_task(conn, repo)
         _commit_in(ws, "a.txt", "branch version\n", msg=f"kanban({tid}): work")
-    # Conflicting commit on main AFTER the claim → merge conflict → park.
+    # Conflicting commit on main AFTER the claim → rebase conflict → coder re-run.
     _commit_in(repo, "a.txt", "main version\n", msg="conflicting")
     with kb.connect() as conn:
         assert kb.complete_task(conn, tid, result="done")
         task = kb.get_task(conn, tid)
+        rebase_conflict_events = _events(conn, tid, "integration_rebase_conflict")
+        returned_events = _events(conn, tid, "rebase_conflict_returned")
         parked_events = _events(conn, tid, "integration_parked")
-        blocked_events = _events(conn, tid, "blocked")
+        verdict_row = conn.execute(
+            "SELECT verdict FROM task_runs WHERE task_id = ? "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
     assert task.status == "blocked"  # decision queue, not done
-    assert len(parked_events) == 1
-    assert "conflict" in parked_events[0]["reason"]
-    assert blocked_events and "integration parked" in blocked_events[0]["reason"]
-    # Park preserved the worktree + branch for the operator.
+    # Routed to the coder, not parked: the integrator recorded a rebase-conflict
+    # event and the router recorded the coder-return; no integration_parked.
+    assert len(rebase_conflict_events) == 1
+    assert len(returned_events) == 1
+    assert "conflict" in returned_events[0]["reason"]
+    assert parked_events == []
+    # REQUEST_CHANGES verdict → respawn guard re-runs the coder (not suppressed
+    # as 'recent_success').
+    assert verdict_row is not None and verdict_row["verdict"] == "REQUEST_CHANGES"
+    # Worktree + branch preserved for the coder fix.
     assert ws.exists()
     assert _git(repo, "branch", "--list", f"kanban/{tid}").strip() != ""
 

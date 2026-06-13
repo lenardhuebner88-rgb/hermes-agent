@@ -5881,6 +5881,10 @@ def complete_task(
             "worker-isolation integration hook failed for %s",
             task_id, exc_info=True,
         )
+    if _wt_outcome and _wt_outcome.get("action") == "rebase_conflict":
+        return _route_rebase_conflict_to_coder(
+            conn, task_id, _wt_outcome, expected_run_id=expected_run_id,
+        )
     if _wt_outcome and _wt_outcome.get("action") == "parked":
         return _park_integration(
             conn, task_id, _wt_outcome, expected_run_id=expected_run_id,
@@ -6522,6 +6526,83 @@ def edit_completed_task_result(
             },
             run_id=run_id,
         )
+    return True
+
+
+def _route_rebase_conflict_to_coder(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: dict,
+    *,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Route a chain whose pre-merge rebase hit a conflict back to the CODER
+    as a REQUEST_CHANGES fix-run (B1), NOT a dead park. The branch was NOT
+    merged; the rebase was cleanly aborted (worktree is clean). Unlike
+    :func:`_park_integration`, the closing run gets a REQUEST_CHANGES verdict
+    UNCONDITIONALLY, so the respawn guard does not suppress the task as
+    'recent_success' — it re-enters the review loop as a coder fix-run. The
+    ``assignee`` column is left untouched (stays the coder)."""
+    branch = outcome.get("branch", "?")
+    target = outcome.get("target", "?")
+    reason = (
+        f"rebase conflict integrating {branch} onto {target} "
+        "(aborted cleanly, returned to coder)"
+    )
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'blocked',
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'blocked',
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked')
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn, task_id,
+            outcome="completed", status="blocked",
+            summary=reason, metadata=outcome,
+        )
+        _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
+        _append_event(
+            conn, task_id, "rebase_conflict_returned",
+            {"reason": reason, "branch": outcome.get("branch")},
+            run_id=run_id,
+        )
+    # add_comment opens its own BEGIN IMMEDIATE -> must be OUTSIDE the txn.
+    try:
+        add_comment(
+            conn, task_id, "integrator",
+            f"🔁 Rebase-Konflikt beim Integrieren von `{branch}` auf `{target}`.\n"
+            "Der Branch wurde NICHT gemergt; der Rebase wurde sauber abgebrochen "
+            "(Worktree ist clean).\n"
+            f"Bitte im Chain-Worktree `git rebase {target}` ausführen, die "
+            "Konflikte auflösen, committen (gate grün halten: npm run lint && "
+            "npm run backlog:check && npm test) und erneut zur Review abgeben.",
+        )
+    except Exception:
+        _log.debug("rebase-conflict coder comment failed", exc_info=True)
     return True
 
 
