@@ -59,67 +59,113 @@ function detail(overrides: Partial<BacklogDetail> & { id: string }): BacklogDeta
   };
 }
 
-// --- computeNextFoTaskId ---
+// --- computeNextFoTaskId — readiness semantics ---
 
 describe("computeNextFoTaskId", () => {
   it("returns null for empty list", () => {
     expect(computeNextFoTaskId([])).toBeNull();
   });
 
-  it("picks the only now item", () => {
-    const items = [item({ id: "0001", status: "now", updated: "2026-06-01" })];
-    expect(computeNextFoTaskId(items)).toBe("0001");
-  });
+  // New readiness semantics: the primary gate is readiness==='ready',
+  // NOT the old status-tier (now > next).
 
-  it("prefers now over next", () => {
+  it("picks a readiness=ready item over any non-ready item regardless of status", () => {
+    // server says 'ready' on a 'next' item — trumps a 'now' that has quality issues
     const items = [
-      item({ id: "0002", status: "next", updated: "2026-01-01" }),
-      item({ id: "0001", status: "now", updated: "2026-06-01" }),
+      item({ id: "0001", status: "now", owner: "unassigned", readiness: "needs_grooming" }),
+      item({ id: "0002", status: "next", readiness: "ready", age_days: 2 }),
     ];
-    expect(computeNextFoTaskId(items)).toBe("0001");
+    expect(computeNextFoTaskId(items)).toBe("0002");
   });
 
-  it("among multiple now items picks oldest updated", () => {
+  it("readiness=ready with no quality issues (v1 fallback) is chosen over needs_grooming", () => {
+    // No server readiness field → falls back to client heuristic.
+    // Item with risk issues → needs_grooming; clean item → ready.
     const items = [
-      item({ id: "0002", status: "now", updated: "2026-06-02" }),
-      item({ id: "0001", status: "now", updated: "2026-05-01" }),
+      item({ id: "0001", status: "now", owner: "unassigned", missing_acceptance: true }),
+      item({ id: "0002", status: "next", owner: "claude" }),
     ];
-    expect(computeNextFoTaskId(items)).toBe("0001");
+    // v1: 0001 has unclear_owner-risk (in_progress only) but missing_acceptance → needs_grooming
+    // Actually 0001 is 'now' not 'in_progress', so unclear_owner doesn't fire.
+    // missing_acceptance does fire → needs_grooming.
+    // 0002 is clean → ready.
+    expect(readinessForFoItem(items[0])).toBe("needs_grooming");
+    expect(readinessForFoItem(items[1])).toBe("ready");
+    expect(computeNextFoTaskId(items)).toBe("0002");
   });
 
-  it("falls back to next when no now items", () => {
+  it("excluded statuses (stale, blocked, in_progress, later) are never returned as primary", () => {
+    // All excluded: should fall through to fallback, then null
     const items = [
-      item({ id: "0003", status: "later", updated: "2026-01-01" }),
-      item({ id: "0002", status: "next", updated: "2026-06-01" }),
-      item({ id: "0001", status: "next", updated: "2026-05-01" }),
-    ];
-    expect(computeNextFoTaskId(items)).toBe("0001");
-  });
-
-  it("skips done/later/in_progress for next-pick", () => {
-    const items = [
-      item({ id: "0001", status: "done" }),
-      item({ id: "0002", status: "later" }),
-      item({ id: "0003", status: "in_progress" }),
+      item({ id: "0001", status: "blocked", readiness: "blocked" }),
+      item({ id: "0002", status: "in_progress", readiness: "ready" }),
+      item({ id: "0003", status: "later", readiness: "ready" }),
+      item({ id: "0004", status: "done" }),
     ];
     expect(computeNextFoTaskId(items)).toBeNull();
   });
 
-  it("prefers non-stale over stale within same status", () => {
+  it("stale items are excluded even if readiness=ready", () => {
     const items = [
-      item({ id: "0001", status: "now", stale: true, updated: "2020-01-01" }),
-      item({ id: "0002", status: "now", stale: false, updated: "2026-06-01" }),
+      item({ id: "0001", status: "next", stale: true, readiness: "ready", age_days: 1 }),
     ];
-    expect(computeNextFoTaskId(items)).toBe("0002");
+    expect(computeNextFoTaskId(items)).toBeNull();
   });
 
-  it("uses queueState semantics and ignores unknown-status drift", () => {
+  it("stale via freshness='stale' is also excluded", () => {
     const items = [
-      item({ id: "0001", status: "readyish" as BacklogItem["status"], updated: "2026-01-01" }),
-      item({ id: "0002", status: "next", updated: "2026-06-01" }),
+      item({ id: "0001", status: "next", freshness: "stale", readiness: "ready", age_days: 14 }),
+    ];
+    expect(computeNextFoTaskId(items)).toBeNull();
+  });
+
+  it("among multiple ready items, lower age_days wins (fresher first); tie-break by id", () => {
+    const items = [
+      item({ id: "0003", status: "next", readiness: "ready", age_days: 5 }),
+      item({ id: "0001", status: "next", readiness: "ready", age_days: 2 }),
+      item({ id: "0002", status: "next", readiness: "ready", age_days: 2 }),
+    ];
+    // age_days 2 is lowest; 0001 < 0002 alphabetically → 0001 wins
+    expect(computeNextFoTaskId(items)).toBe("0001");
+  });
+
+  it("fallback: when no ready items, picks best non-stale non-drift non-excluded item", () => {
+    const items = [
+      item({ id: "0001", status: "now", missing_acceptance: true }),   // needs_grooming
+      item({ id: "0002", status: "next", missing_acceptance: true }),  // needs_grooming
+      item({ id: "0003", status: "later" }),                           // excluded
+    ];
+    // Both 0001 and 0002 have needs_grooming but are non-stale non-drift and their
+    // status is not in EXCLUDED_STATUSES. Fallback picks the lowest age_days (both 0
+    // from no age_days field); tie-break id → 0001.
+    const result = computeNextFoTaskId(items);
+    expect(result).not.toBeNull();
+    // Result must be 0001 or 0002 — both are valid fallbacks; 0001 wins on id tie-break.
+    expect(result).toBe("0001");
+  });
+
+  it("fallback never returns drift items", () => {
+    const items = [
+      item({ id: "0001", status: "readyish" as BacklogItem["status"] }),  // drift
     ];
     expect(queueStateForFoItem(items[0]).state).toBe("drift");
-    expect(computeNextFoTaskId(items)).toBe("0002");
+    expect(computeNextFoTaskId(items)).toBeNull();
+  });
+
+  it("later items are never chosen even in fallback", () => {
+    // 'later' is in EXCLUDED_STATUSES, so it must never appear
+    const items = [
+      item({ id: "0001", status: "later", readiness: "ready", age_days: 0 }),
+    ];
+    expect(computeNextFoTaskId(items)).toBeNull();
+  });
+
+  it("returns null when only done items remain", () => {
+    const items = [
+      item({ id: "0001", status: "done" }),
+      item({ id: "0002", status: "done" }),
+    ];
+    expect(computeNextFoTaskId(items)).toBeNull();
   });
 });
 
@@ -506,6 +552,19 @@ describe("readiness + quick views", () => {
     // unowned quick-view zeigt nur aktiv-ohne-Owner (in_progress), nicht die ruhige Queue.
     expect(matchesFoQuickView(unowned, "unowned")).toBe(true);
     expect(matchesFoQuickView(quietUnowned, "unowned")).toBe(false);
+  });
+
+  // Regression: v1-fallback bug — a clean `later` item has readinessForFoItem==="ready"
+  // but must NOT appear in the "ready" quick view (excluded-status guard).
+  it("matchesFoQuickView 'ready' never matches a later item even if v1-readiness is ready", () => {
+    const laterClean = item({ id: "idea", status: "later", owner: "claude" });
+    // Verify the v1 fallback actually does return "ready" for this item (precondition).
+    expect(readinessForFoItem(laterClean)).toBe("ready");
+    // The quick-view guard must block it.
+    expect(matchesFoQuickView(laterClean, "ready")).toBe(false);
+    // done/in_progress/blocked are also excluded.
+    expect(matchesFoQuickView(item({ id: "dn", status: "done" }), "ready")).toBe(false);
+    expect(matchesFoQuickView(item({ id: "ip", status: "in_progress", owner: "claude" }), "ready")).toBe(false);
   });
 
   it("owner-gap signals only fire for in_progress, never the quiet queue (unified claim model)", () => {

@@ -554,6 +554,61 @@ export function useBoard() {
   return usePolling<BoardResponse>("kanban/board", boardLoader, 8000);
 }
 
+// Derive which FO backlog items are already visible on the board (status IN
+// ready/running/blocked/review/triage/scheduled) via idempotency_key matching.
+// Returns a map { foItemId → FoBoardStatus } for fast O(1) lookup per row.
+// Uses the shared useBoard() poll — no extra request.
+export type FoBoardStatus = {
+  /** Board task id (not the FO backlog id). */
+  taskId: string;
+  /** Raw kanban status string. */
+  status: string;
+  /** Human-readable label for the badge in the FO tab. */
+  label: string;
+};
+
+const FO_BOARD_STATUSES = new Set(["ready", "running", "blocked", "review", "triage", "scheduled"]);
+const FO_STATUS_LABEL: Record<string, string> = {
+  running: "läuft",
+  ready: "wartet",
+  triage: "wartet",
+  scheduled: "wartet",
+  blocked: "blockiert",
+  review: "in Review",
+};
+
+// Pure helper: extract the FO backlog item id from a kanban idempotency_key.
+// Returns null for null/empty keys or keys without the "fo-backlog:" prefix.
+// Exported for unit tests — no behaviour change to useFoBoardStatus.
+export function extractFoIdFromIdempotencyKey(key: string | null | undefined): string | null {
+  if (!key) return null;
+  if (!key.startsWith("fo-backlog:")) return null;
+  const foId = key.slice("fo-backlog:".length);
+  return foId || null;
+}
+
+export function useFoBoardStatus(): Record<string, FoBoardStatus> {
+  const board = useBoard();
+  return useMemo(() => {
+    const data = board.data;
+    if (!data) return {};
+    const result: Record<string, FoBoardStatus> = {};
+    for (const col of data.columns) {
+      if (!FO_BOARD_STATUSES.has(col.name)) continue;
+      for (const task of col.tasks) {
+        const foId = extractFoIdFromIdempotencyKey(task.idempotency_key);
+        if (!foId) continue;
+        result[foId] = {
+          taskId: task.id,
+          status: task.status,
+          label: FO_STATUS_LABEL[task.status] ?? task.status,
+        };
+      }
+    }
+    return result;
+  }, [board.data]);
+}
+
 // Epics (Vorhaben-Ebene): Rollup pro Epic für die Flow-Gruppierung und die
 // Statistik-Kompaktübersicht. 15s — Epics ändern sich selten; ein Fehler hier
 // darf das Board nie blanken (die Gruppierung degradiert auf rohe IDs).
@@ -910,6 +965,52 @@ export function useFlowRelease(onDone?: () => void | Promise<void>) {
     }
   }, [onDone]);
   return { busyId, errorById, release };
+}
+
+// In-place dispatch of a parked FO task: PATCH /tasks/{id} with status="ready"
+// moves a task from scheduled/triage → ready so the dispatcher picks it up.
+// Keyed by Board task id (not the FO backlog id). Calls onDone() after success so
+// the caller can e.g. refresh the board snapshot.
+export type DispatchFoState = "idle" | "busy" | "done" | "error";
+
+export function useDispatchFoTask(onDone?: () => void | Promise<void>) {
+  const [stateById, setStateById] = useState<Record<string, DispatchFoState>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const dispatch = useCallback(async (taskId: string): Promise<{ ok: boolean; detail?: string }> => {
+    if (aliveRef.current) {
+      setStateById((prev) => ({ ...prev, [taskId]: "busy" }));
+      setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    }
+    try {
+      await fetchJSON<unknown>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "ready" }),
+        },
+      );
+      if (aliveRef.current) setStateById((prev) => ({ ...prev, [taskId]: "done" }));
+      await onDone?.();
+      return { ok: true };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) {
+        setStateById((prev) => ({ ...prev, [taskId]: "error" }));
+        setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      }
+      return { ok: false, detail };
+    }
+  }, [onDone]);
+  const reset = useCallback((taskId: string) => {
+    if (aliveRef.current) {
+      setStateById((prev) => ({ ...prev, [taskId]: "idle" }));
+      setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    }
+  }, []);
+  return { stateById, errorById, dispatch, reset };
 }
 
 // On-demand task detail (runs + events + deliverables) for the Flow board's live

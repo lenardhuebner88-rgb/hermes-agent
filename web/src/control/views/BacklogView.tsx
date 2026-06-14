@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { AnimatePresence } from "motion/react";
 
 import { de } from "../i18n/de";
-import { useBacklog, useBacklogDetail, useCommissionToFleet, type CommissionPayload } from "../hooks/useControlData";
+import { useBacklog, useBacklogDetail, useCommissionToFleet, useDispatchFoTask, useFoBoardStatus, type CommissionPayload } from "../hooks/useControlData";
 import { ToneCallout } from "../components/atoms";
 import {
   buildFoAuditPrompt,
@@ -89,6 +89,8 @@ export function BacklogView({ density }: { density: Density }) {
   const backlog = useBacklog();
   const { detailById, errorById, loadingId, fetch: fetchDetail } = useBacklogDetail();
   const fleet = useCommissionToFleet();
+  const boardStatusById = useFoBoardStatus();
+  const dispatch = useDispatchFoTask();
   const commissionItem = useCallback(
     (item: BacklogItem, detail?: BacklogDetail) =>
       void fleet.commission(item.id, buildCommissionPayload(item, detail), {
@@ -334,6 +336,9 @@ export function BacklogView({ density }: { density: Density }) {
             onOpen={setOpenId}
             onCommission={(item) => commissionItem(item, detailById[item.id])}
             commissionState={fleet.stateById}
+            boardStatusById={boardStatusById}
+            onDispatch={(taskId) => void dispatch.dispatch(taskId)}
+            dispatchStateByTaskId={dispatch.stateById}
           />
         </div>
       ) : (

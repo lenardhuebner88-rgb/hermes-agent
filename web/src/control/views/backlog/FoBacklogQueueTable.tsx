@@ -1,3 +1,4 @@
+import { ArrowRight, Check, Loader2, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusPill } from "../../components/atoms";
 import { CommissionButton } from "../../components/fleet/CommissionButton";
@@ -9,8 +10,55 @@ import {
   staleSignalForFoItem,
 } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState, DispatchFoState, FoBoardStatus } from "../../hooks/useControlData";
+import { de } from "../../i18n/de";
 import { OWNER_TONE, relLabel, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
+
+// Statuses where the operator needs to click "Freigeben" to move the task onto
+// the board. Running/review/done = already active or past, blocked = stuck.
+const DISPATCH_ELIGIBLE = new Set(["scheduled", "triage"]);
+
+function DispatchButton({
+  state,
+  onClick,
+}: {
+  state?: DispatchFoState;
+  onClick: (event: React.MouseEvent) => void;
+}) {
+  const busy = state === "busy";
+  const done = state === "done";
+  const err = state === "error";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy || done}
+      title={de.backlog.dispatchTitle}
+      aria-label={de.backlog.dispatchLabel}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border font-medium transition disabled:cursor-default",
+        "min-h-7 px-2.5 text-[11px]",
+        done
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+          : err
+            ? "border-red-500/40 text-red-200 hover:bg-red-500/10"
+            : "border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:brightness-110",
+      )}
+    >
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : done ? <Check className="h-3 w-3" /> : err ? <RotateCcw className="h-3 w-3" /> : <ArrowRight className="h-3 w-3" />}
+      {busy ? de.backlog.dispatchBusy : done ? de.backlog.dispatchDone : err ? de.backlog.dispatchRetry : de.backlog.dispatchLabel}
+    </button>
+  );
+}
+
+const BOARD_STATUS_TONE: Record<string, "emerald" | "cyan" | "amber" | "red" | "zinc"> = {
+  running: "emerald",
+  ready: "cyan",
+  triage: "zinc",
+  scheduled: "zinc",
+  blocked: "amber",
+  review: "cyan",
+};
 
 export function FoBacklogQueueTable({
   items,
@@ -21,6 +69,9 @@ export function FoBacklogQueueTable({
   onOpen,
   onCommission,
   commissionState = {},
+  boardStatusById = {},
+  onDispatch,
+  dispatchStateByTaskId = {},
 }: {
   items: BacklogItem[];
   nowSec: number;
@@ -30,6 +81,9 @@ export function FoBacklogQueueTable({
   onOpen: (id: string) => void;
   onCommission?: (item: BacklogItem) => void;
   commissionState?: Record<string, CommissionState>;
+  boardStatusById?: Record<string, FoBoardStatus>;
+  onDispatch?: (taskId: string) => void;
+  dispatchStateByTaskId?: Record<string, DispatchFoState>;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border border-[var(--hc-border)] bg-white/[.015]">
@@ -53,6 +107,7 @@ export function FoBacklogQueueTable({
             const queueState = queueStateForFoItem(item);
             const flags = qualityFlagsForFoItem(item, detail);
             const stale = staleSignalForFoItem(item, nowSec);
+            const boardStatus = boardStatusById[item.id];
             return (
               <tr
                 key={item.id}
@@ -95,7 +150,20 @@ export function FoBacklogQueueTable({
                 <td className="hidden px-3 py-2 xl:table-cell"><span className="block truncate hc-mono text-[11px] text-zinc-400">{sourceRef(item)}</span><span className="hc-mono text-[11px] text-zinc-500">{item.id}</span></td>
                 <td className="px-3 py-2">
                   <p className="line-clamp-3 text-sm text-zinc-100">{nextActionForFoItem(item, detail)}</p>
-                  {onCommission ? (
+                  {boardStatus ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <StatusPill
+                        tone={BOARD_STATUS_TONE[boardStatus.status] ?? "zinc"}
+                        label={`Im Board · ${boardStatus.label}`}
+                      />
+                      {DISPATCH_ELIGIBLE.has(boardStatus.status) && onDispatch ? (
+                        <DispatchButton
+                          state={dispatchStateByTaskId[boardStatus.taskId]}
+                          onClick={(event) => { event.stopPropagation(); onDispatch(boardStatus.taskId); }}
+                        />
+                      ) : null}
+                    </div>
+                  ) : onCommission ? (
                     <div className="mt-2">
                       <CommissionButton state={commissionState[item.id]} onClick={(event) => { event.stopPropagation(); onCommission(item); }} />
                     </div>

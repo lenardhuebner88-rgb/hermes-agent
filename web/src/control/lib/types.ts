@@ -233,6 +233,9 @@ export interface BoardTask {
   /** Resolved workspace path; a dispatcher-provisioned isolated worktree
    * lives under `<repo>/.worktrees/kanban/<root_id>`. */
   workspace_path?: string | null;
+  /** Stable dedup key set at creation — e.g. `fo-backlog:<id>` for FO tasks.
+   * Null for tasks created without one (older tasks or non-FO tasks). */
+  idempotency_key?: string | null;
 }
 
 /** True when the task runs in a dispatcher-provisioned isolated worktree

@@ -318,7 +318,9 @@ export function readinessForFoItem(item: BacklogItem): string {
 export function matchesFoQuickView(item: BacklogItem, view: FoQuickView): boolean {
   switch (view) {
     case "ready":
-      return readinessForFoItem(item) === "ready";
+      // Guard against the v1 fallback returning "ready" for excluded-status items
+      // (e.g. later/blocked/done) — those are never workable candidates.
+      return !EXCLUDED_STATUSES.has(item.status) && readinessForFoItem(item) === "ready";
     case "groom":
       return readinessForFoItem(item) === "needs_grooming";
     case "stale":
@@ -347,20 +349,42 @@ export function foHealthStripCounts(items: BacklogItem[], contractHealth?: Backl
   };
 }
 
+// Rank comparator for ready items: fresher (smaller age_days) first; tie-break by id.
+function compareReadyItems(a: BacklogItem, b: BacklogItem): number {
+  const ageA = typeof a.age_days === "number" ? a.age_days : (a.freshness === "stale" ? 999 : 0);
+  const ageB = typeof b.age_days === "number" ? b.age_days : (b.freshness === "stale" ? 999 : 0);
+  return ageA - ageB || a.id.localeCompare(b.id);
+}
+
+// Statuses that are never workable candidates for the active queue.
+// `later` items are idea-storage — never surfaced as "next task" even if their
+// computed readiness happens to be "ready" under the v1 client fallback.
+// Exported so readinessZones.ts and matchesFoQuickView can apply the same gate
+// without duplicating the set.
+export const EXCLUDED_STATUSES = new Set(["in_progress", "blocked", "done", "later"]);
+
 export function computeNextFoTaskId(items: BacklogItem[]): string | null {
-  const pick = (status: string) => {
-    const candidates = items.filter((it) => queueStateForFoItem(it).state === status && !it.stale);
-    if (candidates.length === 0) {
-      // fall back to stale items of this status if none non-stale
-      const stale = items.filter((it) => queueStateForFoItem(it).state === status);
-      if (stale.length === 0) return null;
-      stale.sort((a, b) => a.updated.localeCompare(b.updated) || a.id.localeCompare(b.id));
-      return stale[0].id;
-    }
-    candidates.sort((a, b) => a.updated.localeCompare(b.updated) || a.id.localeCompare(b.id));
-    return candidates[0].id;
-  };
-  return pick("now") ?? pick("next") ?? null;
+  // Primary: readiness==='ready', not stale, not blocked/done/in_progress/later.
+  const readyCandidates = items.filter(
+    (it) =>
+      readinessForFoItem(it) === "ready" &&
+      !isStale(it) &&
+      !EXCLUDED_STATUSES.has(it.status),
+  );
+  if (readyCandidates.length > 0) {
+    return [...readyCandidates].sort(compareReadyItems)[0].id;
+  }
+  // Fallback: best non-stale, non-excluded item that isn't drift/blocked.
+  const fallback = items.filter(
+    (it) =>
+      !isStale(it) &&
+      !EXCLUDED_STATUSES.has(it.status) &&
+      readinessForFoItem(it) !== "drift",
+  );
+  if (fallback.length > 0) {
+    return [...fallback].sort(compareReadyItems)[0].id;
+  }
+  return null;
 }
 
 export function buildFoCommissionPrompt(detail: BacklogDetail): string {

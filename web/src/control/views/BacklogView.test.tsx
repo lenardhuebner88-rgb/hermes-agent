@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FoBacklogQueueTable, FoHealthStrip, ReasonChips } from "./BacklogView";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
+import type { CommissionState, DispatchFoState, FoBoardStatus } from "../hooks/useControlData";
 
 function item(overrides: Partial<BacklogItem> & { id: string }): BacklogItem {
   return {
@@ -120,5 +121,94 @@ describe("Family Organizer queue-first view pieces", () => {
     expect(html).toContain("Status now");
     expect(html).toContain("Hohes Risiko");
     expect(html).toContain("Kein Owner");
+  });
+
+  // S4 — error-state visibility tests: commission and dispatch failures must be
+  // visible in the rendered UI, never silently swallowed.
+
+  it("commission error state renders a retry affordance and red colour (not silent)", () => {
+    // commissionState[id] = "error" must produce visible error UI on the row.
+    const id = "0010";
+    const errorState: Record<string, CommissionState> = { [id]: "error" };
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item({ id, title: "Commission me", status: "next" })]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+        onCommission={() => undefined}
+        commissionState={errorState}
+      />,
+    );
+    // The error button must contain the retry label text
+    expect(html).toContain("nochmal");
+    // And must NOT show the normal "→ Fleet" / commission label (error state replaces it)
+    // The button should have the red border class
+    expect(html).toContain("red-500");
+  });
+
+  it("commission done state renders success indicator, not an error", () => {
+    const id = "0011";
+    const doneState: Record<string, CommissionState> = { [id]: "done" };
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item({ id, title: "Already commissioned", status: "next" })]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+        onCommission={() => undefined}
+        commissionState={doneState}
+      />,
+    );
+    // Done state uses emerald, not red
+    expect(html).toContain("emerald");
+    expect(html).not.toContain("red-500");
+  });
+
+  it("dispatch error state renders a retry affordance and red colour (not silent)", () => {
+    // A board task in triage/scheduled status + dispatchStateByTaskId = "error"
+    // must make the dispatch error visible.
+    const foId = "0012";
+    const boardTaskId = "t-board-999";
+    const boardStatusById: Record<string, FoBoardStatus> = {
+      [foId]: { taskId: boardTaskId, status: "triage", label: "wartet" },
+    };
+    const dispatchState: Record<string, DispatchFoState> = { [boardTaskId]: "error" };
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item({ id: foId, title: "Dispatch me", status: "next" })]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+        onDispatch={() => undefined}
+        boardStatusById={boardStatusById}
+        dispatchStateByTaskId={dispatchState}
+      />,
+    );
+    // Dispatch error also renders "nochmal" and red
+    expect(html).toContain("nochmal");
+    expect(html).toContain("red-500");
+  });
+
+  it("dispatch done state renders success indicator, not an error", () => {
+    const foId = "0013";
+    const boardTaskId = "t-board-888";
+    const boardStatusById: Record<string, FoBoardStatus> = {
+      [foId]: { taskId: boardTaskId, status: "scheduled", label: "wartet" },
+    };
+    const dispatchState: Record<string, DispatchFoState> = { [boardTaskId]: "done" };
+    const html = renderToStaticMarkup(
+      <FoBacklogQueueTable
+        items={[item({ id: foId, title: "Already dispatched", status: "next" })]}
+        nowSec={1770000000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+        onDispatch={() => undefined}
+        boardStatusById={boardStatusById}
+        dispatchStateByTaskId={dispatchState}
+      />,
+    );
+    expect(html).toContain("emerald");
+    expect(html).not.toContain("red-500");
   });
 });

@@ -585,7 +585,13 @@ export const de = {
     commissionCopied: "Prompt kopiert ✓",
     commissionHint: "Kopiert den Dispatch-Prompt in die Zwischenablage — in eine Remote-Claude-Session einfügen.",
     commissionDrawer: "Commission-Prompt kopieren",
-    noNextTask: "Alle Tasks blockiert oder kein Now/Next offen.",
+    noNextTask: "Kein bereit-Task gefunden — alle Einträge im Grooming oder Ideenspeicher.",
+    // In-place dispatch (Slice 3)
+    dispatchLabel: "Freigeben",
+    dispatchBusy: "gibt frei …",
+    dispatchDone: "freigegeben ✓",
+    dispatchRetry: "nochmal",
+    dispatchTitle: "Task auf das Board dispatchen — startet den Worker-Dispatch",
     // Audit-Knopf: kopiert einen read-first Audit-Prompt für das FO-Projekt
     audit: "Audit beauftragen",
     auditCopied: "Audit-Prompt kopiert ✓",

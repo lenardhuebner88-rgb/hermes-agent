@@ -123,6 +123,9 @@ export const BoardTaskSchema = z.object({
   tenant: z.string().nullable().catch(null),
   root_id: z.string().nullable().catch(null),
   epic_id: z.string().nullable().catch(null),
+  // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
+  // Ältere Tasks ohne dieses Feld liefern null.
+  idempotency_key: z.string().nullable().catch(null),
 });
 
 export const BoardResponseSchema = z.object({

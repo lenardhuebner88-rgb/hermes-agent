@@ -12,11 +12,12 @@ import {
 } from "../../lib/foBacklog";
 import type { FoOwnerLoad, FoQuickView, FoRankedCandidate } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState, DispatchFoState, FoBoardStatus } from "../../hooks/useControlData";
 import { CopyButton } from "./CopyButton";
 import { FoBacklogQueueTable, FoBacklogQueueSkeleton } from "./FoBacklogQueueTable";
 import { ReasonChips } from "./ReasonChips";
 import { ACTIVE_COLUMNS, clockLabel, QUICK_VIEWS, sourceRef, STATUS_TONE, type ViewMode } from "./shared";
+import { partitionReadinessZones } from "./readinessZones";
 
 export function BacklogHeroPanel({
   activeTotal,
@@ -182,7 +183,7 @@ export function QuickViewChips({
           aria-pressed={quickView === view.id}
           onClick={() => onQuickView(view.id)}
           className={cn(
-            "rounded-md border px-2.5 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70",
+            "rounded-md border px-2.5 py-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70",
             quickView === view.id ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-200" : "border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200",
           )}
         >
@@ -194,7 +195,7 @@ export function QuickViewChips({
         aria-pressed={showHelp}
         onClick={onToggleHelp}
         title="Tastenkürzel"
-        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1 text-xs text-zinc-400 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70"
+        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-2.5 text-xs text-zinc-400 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70"
       >
         <Keyboard className="h-3.5 w-3.5" /> Tasten
       </button>
@@ -259,6 +260,125 @@ export function BacklogBoard({
   );
 }
 
+export function ReadinessZones({
+  filteredActive,
+  nowSec,
+  nextTaskId,
+  activeId,
+  detailById,
+  onOpen,
+  onCommission,
+  commissionState,
+  boardStatusById,
+  onDispatch,
+  dispatchStateByTaskId,
+}: {
+  filteredActive: BacklogItem[];
+  nowSec: number;
+  nextTaskId: string | null;
+  activeId: string | null;
+  detailById: Record<string, BacklogDetail | undefined>;
+  onOpen: (id: string) => void;
+  onCommission?: (item: BacklogItem) => void;
+  commissionState?: Record<string, CommissionState>;
+  boardStatusById?: Record<string, FoBoardStatus>;
+  onDispatch?: (taskId: string) => void;
+  dispatchStateByTaskId?: Record<string, DispatchFoState>;
+}) {
+  const { ready, grooming, ideas } = partitionReadinessZones(filteredActive);
+
+  return (
+    <div className="space-y-3">
+      {/* Zone 1 — Bereit: always open */}
+      <section aria-label="Bereit">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-semibold uppercase text-cyan-300">Bereit</span>
+          <span className="hc-mono text-xs hc-dim">{ready.length}</span>
+        </div>
+        {ready.length ? (
+          <FoBacklogQueueTable
+            items={ready}
+            nowSec={nowSec}
+            nextTaskId={nextTaskId}
+            activeId={activeId}
+            detailById={detailById}
+            onOpen={onOpen}
+            onCommission={onCommission}
+            commissionState={commissionState}
+            boardStatusById={boardStatusById}
+            onDispatch={onDispatch}
+            dispatchStateByTaskId={dispatchStateByTaskId}
+          />
+        ) : (
+          <p className="py-3 text-center text-xs hc-dim">Keine bereit-Tasks.</p>
+        )}
+      </section>
+
+      {/* Zone 2 — Schleifen: collapsed by default */}
+      <section aria-label="Schleifen">
+        <Disclosure
+          defaultOpen={false}
+          summary={
+            <div className="flex min-h-[44px] items-center gap-2">
+              <span className="text-xs font-semibold uppercase text-amber-300">Schleifen</span>
+              <span className="hc-mono text-xs hc-dim">{grooming.length}</span>
+            </div>
+          }
+        >
+          {grooming.length ? (
+            <FoBacklogQueueTable
+              items={grooming}
+              nowSec={nowSec}
+              nextTaskId={nextTaskId}
+              activeId={activeId}
+              detailById={detailById}
+              onOpen={onOpen}
+              onCommission={onCommission}
+              commissionState={commissionState}
+              boardStatusById={boardStatusById}
+              onDispatch={onDispatch}
+              dispatchStateByTaskId={dispatchStateByTaskId}
+            />
+          ) : (
+            <p className="py-3 text-center text-xs hc-dim">{de.backlog.empty}</p>
+          )}
+        </Disclosure>
+      </section>
+
+      {/* Zone 3 — Ideenspeicher: collapsed by default */}
+      <section aria-label="Ideenspeicher">
+        <Disclosure
+          defaultOpen={false}
+          summary={
+            <div className="flex min-h-[44px] items-center gap-2">
+              <span className="text-xs font-semibold uppercase text-zinc-400">Ideenspeicher</span>
+              <span className="hc-mono text-xs hc-dim">{ideas.length}</span>
+            </div>
+          }
+        >
+          {ideas.length ? (
+            <FoBacklogQueueTable
+              items={ideas}
+              nowSec={nowSec}
+              nextTaskId={nextTaskId}
+              activeId={activeId}
+              detailById={detailById}
+              onOpen={onOpen}
+              onCommission={onCommission}
+              commissionState={commissionState}
+              boardStatusById={boardStatusById}
+              onDispatch={onDispatch}
+              dispatchStateByTaskId={dispatchStateByTaskId}
+            />
+          ) : (
+            <p className="py-3 text-center text-xs hc-dim">{de.backlog.empty}</p>
+          )}
+        </Disclosure>
+      </section>
+    </div>
+  );
+}
+
 export function QueueSurface({
   loading,
   filteredActive,
@@ -269,6 +389,9 @@ export function QueueSurface({
   onOpen,
   onCommission,
   commissionState,
+  boardStatusById,
+  onDispatch,
+  dispatchStateByTaskId,
 }: {
   loading: boolean;
   filteredActive: BacklogItem[];
@@ -279,10 +402,25 @@ export function QueueSurface({
   onOpen: (id: string) => void;
   onCommission?: (item: BacklogItem) => void;
   commissionState?: Record<string, CommissionState>;
+  boardStatusById?: Record<string, FoBoardStatus>;
+  onDispatch?: (taskId: string) => void;
+  dispatchStateByTaskId?: Record<string, DispatchFoState>;
 }) {
   if (loading) return <FoBacklogQueueSkeleton />;
   return filteredActive.length ? (
-    <FoBacklogQueueTable items={filteredActive} nowSec={nowSec} nextTaskId={nextTaskId} activeId={activeId} detailById={detailById} onOpen={onOpen} onCommission={onCommission} commissionState={commissionState} />
+    <ReadinessZones
+      filteredActive={filteredActive}
+      nowSec={nowSec}
+      nextTaskId={nextTaskId}
+      activeId={activeId}
+      detailById={detailById}
+      onOpen={onOpen}
+      onCommission={onCommission}
+      commissionState={commissionState}
+      boardStatusById={boardStatusById}
+      onDispatch={onDispatch}
+      dispatchStateByTaskId={dispatchStateByTaskId}
+    />
   ) : (
     <p className="py-4 text-center text-sm hc-dim">{de.backlog.empty}</p>
   );
