@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,23 @@ def repo(tmp_path):
     (r / "web" / "index.txt").write_text("web\n")
     _git(r, "add", "-A")
     _git(r, "commit", "-m", "base")
+    return r
+
+
+@pytest.fixture
+def fo_repo(tmp_path, monkeypatch):
+    """A stand-in Family-Organizer checkout (git repo on ``main``) with
+    ``kwt.FO_REPO_PATH`` pointed at it, so the tenant-pinning paths resolve
+    here instead of the real /home/piet checkout."""
+    r = tmp_path / "family-organizer"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "tester")
+    (r / "a.txt").write_text("base\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "base")
+    monkeypatch.setattr(kwt, "FO_REPO_PATH", r)
     return r
 
 
@@ -247,6 +265,66 @@ def test_provision_scratch_unassigned_stays_scratch(kanban_home, repo):
         ws = kwt.provision_for_task(conn, task, resolved)
     assert ws == Path(resolved)
     assert not kwt.is_provisioned_path(ws)
+
+
+def test_fo_tenant_code_task_provisions_in_fo_repo(kanban_home, repo, fo_repo):
+    """An FO-backlog commission (tenant=family-organizer, coder, no explicit
+    workspace) is born pinned to the FO checkout and provisions its worktree
+    there — never the board default_workdir (the Hermes repo). Regression guard
+    for t_8fbe701d (2026-06-14)."""
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="[FO] task", assignee="coder", tenant="family-organizer",
+        )
+        # Born-correct: create_task pinned the FO repo, not the board default.
+        row = conn.execute(
+            "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        assert row["workspace_kind"] == "dir"
+        assert row["workspace_path"] == str(fo_repo)
+        task = kb.claim_task(conn, tid)
+        resolved = kb.resolve_workspace(task)
+        ws = kwt.provision_for_task(conn, task, resolved)
+        assert kwt.is_provisioned_path(ws)
+        assert str(ws).startswith(str(fo_repo))
+        assert str(repo) not in str(ws)
+
+
+def test_scratch_code_redirect_fo_tenant_pins_fo_repo(kanban_home, repo, fo_repo):
+    """Defense-in-depth: a scratch FO code task (e.g. created before the
+    create_task pin, or by another caller) redirects to the FO repo, not the
+    board default_workdir."""
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    task = SimpleNamespace(
+        id="t_fo", assignee="coder", tenant="family-organizer",
+        workspace_kind="scratch",
+    )
+    assert kwt.scratch_code_redirect(task, None) == fo_repo
+
+
+def test_scratch_code_redirect_non_fo_uses_default_workdir(kanban_home, repo, fo_repo):
+    """A non-FO code task still backstops to the board default_workdir
+    (unchanged behavior)."""
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    task = SimpleNamespace(
+        id="t_x", assignee="coder", tenant=None, workspace_kind="scratch",
+    )
+    assert kwt.scratch_code_redirect(task, None) == repo
+
+
+def test_scratch_code_redirect_fo_missing_checkout_stays_scratch(
+    kanban_home, repo, monkeypatch
+):
+    """FO checkout absent → stay scratch (return None); never fall back to the
+    board default_workdir (the Hermes repo) — that fallback is the bug."""
+    monkeypatch.setattr(kwt, "FO_REPO_PATH", Path("/nonexistent/family-organizer"))
+    kb.write_board_metadata(None, default_workdir=str(repo))
+    task = SimpleNamespace(
+        id="t_fo2", assignee="coder", tenant="family-organizer",
+        workspace_kind="scratch",
+    )
+    assert kwt.scratch_code_redirect(task, None) is None
 
 
 def test_provision_recreates_vanished_worktree(kanban_home, repo):

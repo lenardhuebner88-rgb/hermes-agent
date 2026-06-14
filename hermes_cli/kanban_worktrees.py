@@ -175,6 +175,25 @@ def scratch_code_redirect(task, board: Optional[str] = None) -> Optional[Path]:
     try:
         if assignee not in kb._review_gate_config()["code_roles"]:
             return None
+    except Exception:
+        return None
+
+    # Tenant pins the repo: a family-organizer code task MUST land in the FO
+    # checkout, never the board ``default_workdir`` (the Hermes repo). An
+    # FO-backlog "copy to Fleet" commission arrives as scratch + coder with no
+    # explicit workspace; without this it is silently redirected into
+    # hermes-agent and blocks on missing FO files (t_8fbe701d, 2026-06-14 —
+    # same leak the E1 guard closed for the dir/worktree door in
+    # ``kanban_db.create_task``, here closed for the scratch door). If the FO
+    # checkout is missing / not a git repo we return None (stay scratch) rather
+    # than fall back to the Hermes repo — that fallback IS the bug.
+    tenant = (getattr(task, "tenant", None) or "").strip().lower()
+    if tenant == "family-organizer":
+        if FO_REPO_PATH.is_dir() and repo_root_for(FO_REPO_PATH) is not None:
+            return FO_REPO_PATH
+        return None
+
+    try:
         workdir = kb.read_board_metadata(board).get("default_workdir")
     except Exception:
         return None

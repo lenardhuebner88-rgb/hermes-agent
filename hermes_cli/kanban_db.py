@@ -2680,6 +2680,28 @@ def create_task(
 
     now = int(time.time())
 
+    # FO tenant pins the repo for code tasks: an FO-backlog "copy to Fleet"
+    # commission arrives with tenant='family-organizer', a code role (coder),
+    # and no explicit workspace (scratch). Born-correct routing — set the FO
+    # checkout as the workspace so worker isolation carves the worktree from the
+    # FO repo, not the board default_workdir (the Hermes repo). Without this the
+    # scratch task is dispatched and redirected into hermes-agent, then blocks
+    # on missing FO files (t_8fbe701d, 2026-06-14). Backstopped at dispatch by
+    # scratch_code_redirect; only code roles are pinned (review/research FO
+    # tasks legitimately stay scratch). Reading code_roles is fail-open so a
+    # config error never blocks creation.
+    if workspace_path is None and (tenant or "").strip().lower() == "family-organizer":
+        try:
+            _is_code_role = assignee in _review_gate_config()["code_roles"]
+        except Exception:
+            _is_code_role = False
+        if _is_code_role:
+            from hermes_cli.kanban_worktrees import FO_REPO_PATH
+
+            if FO_REPO_PATH.is_dir():
+                workspace_kind = "dir"
+                workspace_path = str(FO_REPO_PATH)
+
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly. Board defaults represent
     # persistent project checkouts, so only persistent workspace kinds may
