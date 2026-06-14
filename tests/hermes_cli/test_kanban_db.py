@@ -4598,6 +4598,49 @@ def test_claim_review_task_transitions_to_running(kanban_home):
     assert claimed.claim_lock is not None
 
 
+def test_claim_review_task_clears_inherited_heartbeat(kanban_home):
+    """review -> running must reset last_heartbeat_at.
+
+    Regression: a stage whose worker does not self-heartbeat (the claude-CLI
+    verifier/reviewer runs) otherwise inherits the previous (coder) stage's
+    last beat. That stale timestamp ages past the dashboard's stuck threshold
+    and shows an actively-running review as "Hängt". A fresh run must start
+    with a NULL heartbeat (liveness via claim_expires, like any other
+    non-self-beating worker)."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="alice")
+        _set_task_status(conn, t, "review")
+        # Previous stage's lingering heartbeat.
+        conn.execute(
+            "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
+            (1_000_000, t),
+        )
+        conn.commit()
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None and claimed.status == "running"
+        hb = conn.execute(
+            "SELECT last_heartbeat_at FROM tasks WHERE id = ?", (t,)
+        ).fetchone()[0]
+    assert hb is None
+
+
+def test_claim_task_clears_inherited_heartbeat(kanban_home):
+    """ready -> running starts the run with a clean heartbeat slate."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="claim me", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
+            (1_000_000, t),
+        )
+        conn.commit()
+        claimed = kb.claim_task(conn, t)
+        assert claimed is not None and claimed.status == "running"
+        hb = conn.execute(
+            "SELECT last_heartbeat_at FROM tasks WHERE id = ?", (t,)
+        ).fetchone()[0]
+    assert hb is None
+
+
 def test_claim_review_task_fails_on_non_review(kanban_home):
     """claim_review_task returns None if task is not in review status."""
     with kb.connect() as conn:

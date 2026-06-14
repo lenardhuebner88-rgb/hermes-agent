@@ -4364,13 +4364,17 @@ def claim_task(
                 """,
                 (now, int(stale["current_run_id"])),
             )
+        # Reset last_heartbeat_at so each run starts with a clean slate and a
+        # re-claimed task can't carry a stale beat from a prior run (see the
+        # fuller rationale in claim_review_task, where this matters most).
         cur = conn.execute(
             """
             UPDATE tasks
                SET status        = 'running',
                    claim_lock    = ?,
                    claim_expires = ?,
-                   started_at    = COALESCE(started_at, ?)
+                   started_at    = COALESCE(started_at, ?),
+                   last_heartbeat_at = NULL
              WHERE id = ?
                AND status = 'ready'
                AND claim_lock IS NULL
@@ -4441,13 +4445,23 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        # Reset last_heartbeat_at so the new run starts with a clean slate.
+        # Otherwise a stage whose worker does not self-heartbeat (the
+        # claude-CLI verifier/reviewer runs) would inherit the *previous*
+        # stage's last beat, which then ages past the dashboard's stuck
+        # threshold (STUCK_HEARTBEAT_S) and shows an actively-running review
+        # as "Hängt". A NULL heartbeat reads as "no heartbeat yet" (liveness
+        # via claim_expires), exactly like every other non-self-beating
+        # worker. detect_stale_running still reclaims a NULL-heartbeat run
+        # once it exceeds the stale window.
         cur = conn.execute(
             """
             UPDATE tasks
                SET status        = 'running',
                    claim_lock    = ?,
                    claim_expires = ?,
-                   started_at    = COALESCE(started_at, ?)
+                   started_at    = COALESCE(started_at, ?),
+                   last_heartbeat_at = NULL
              WHERE id = ?
                AND status = 'review'
                AND claim_lock IS NULL
