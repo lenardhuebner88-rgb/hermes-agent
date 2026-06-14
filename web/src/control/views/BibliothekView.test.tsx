@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CATEGORY_LABEL, groupBySeries } from "./BibliothekView.helpers";
+import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
 import {
   ItemRow,
   SavedSearchShelf,
@@ -35,6 +35,63 @@ describe("groupBySeries (Bibliothek-Regal)", () => {
     expect(shelves.map((s) => s.series)).toEqual(["WM Morgenbrief", "KI Modell-Brief"]);
     expect(shelves[0].items.map((i) => i.id)).toEqual(["wm2", "wm1"]);
     expect(shelves[1].items).toHaveLength(1);
+  });
+});
+
+describe("newestPerCategory (Frontpage-Auswahl)", () => {
+  it("nimmt je Kategorie nur das erste (= neueste) Item, Reihenfolge der Erst-Treffer bleibt", () => {
+    const top = newestPerCategory([
+      item({ id: "n2", category: "news", ts: 300 }),
+      item({ id: "n1", category: "news", ts: 200 }),
+      item({ id: "r2", category: "recherchen", ts: 250 }),
+      item({ id: "r1", category: "recherchen", ts: 150 }),
+    ]);
+    expect(top.map((i) => i.id)).toEqual(["n2", "r2"]);
+  });
+
+  it("liefert leere Liste für leere Eingabe", () => {
+    expect(newestPerCategory([])).toEqual([]);
+  });
+});
+
+describe("countByCategory (Chip-Zähler)", () => {
+  it("zählt Einträge je Kategorie", () => {
+    const counts = countByCategory([
+      item({ category: "news" }),
+      item({ category: "news" }),
+      item({ category: "recherchen" }),
+    ]);
+    expect(counts).toEqual({ news: 2, recherchen: 1 });
+  });
+});
+
+describe("seriesNeighbors (Vor/Zurück in der Serie)", () => {
+  const series = [
+    item({ id: "c", series_id: "s", ts: 300 }),
+    item({ id: "b", series_id: "s", ts: 200 }),
+    item({ id: "a", series_id: "s", ts: 100 }),
+    item({ id: "x", series_id: "other", ts: 999 }),
+  ];
+
+  it("liefert keine Nachbarn ohne aktuelles Item", () => {
+    expect(seriesNeighbors(series, null)).toEqual({ prev: null, next: null });
+  });
+
+  it("findet in der Mitte ältere (prev) und neuere (next) Ausgabe derselben Serie", () => {
+    const n = seriesNeighbors(series, series[1]);
+    expect(n.prev?.id).toBe("a");
+    expect(n.next?.id).toBe("c");
+  });
+
+  it("hat am neuesten Eintrag kein next, am ältesten kein prev", () => {
+    expect(seriesNeighbors(series, series[0]).next).toBeNull();
+    expect(seriesNeighbors(series, series[0]).prev?.id).toBe("b");
+    expect(seriesNeighbors(series, series[2]).prev).toBeNull();
+    expect(seriesNeighbors(series, series[2]).next?.id).toBe("b");
+  });
+
+  it("ignoriert Items anderer Serien (other-Serie hat nur sich selbst)", () => {
+    expect(seriesNeighbors(series, series[3])).toEqual({ prev: null, next: null });
   });
 });
 

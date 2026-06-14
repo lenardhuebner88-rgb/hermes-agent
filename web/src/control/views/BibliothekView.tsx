@@ -7,7 +7,7 @@ import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
-import { CATEGORY_LABEL, groupBySeries } from "./BibliothekView.helpers";
+import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 
 // Bibliothek = zwei klar getrennte Bereiche (Programm 3, Next-Level):
@@ -333,37 +333,10 @@ function LesesaalBody() {
   const items = useMemo(() => data?.items ?? [], [data]);
   const isFrontpage = !category && !q.trim();
 
-  // Frontpage: das Neueste pro Kategorie (Items kommen ts-absteigend).
-  const frontpage = useMemo(() => {
-    const seen = new Set<string>();
-    const top: LibraryItem[] = [];
-    for (const item of items) {
-      if (!seen.has(item.category)) {
-        seen.add(item.category);
-        top.push(item);
-      }
-    }
-    return top;
-  }, [items]);
-
+  const frontpage = useMemo(() => newestPerCategory(items), [items]);
   const shelves = useMemo(() => groupBySeries(items), [items]);
-
-  const neighbors = useMemo(() => {
-    if (!reading) return { prev: null, next: null };
-    const series = items.filter((i) => i.series_id === reading.series_id);
-    const idx = series.findIndex((i) => i.id === reading.id);
-    // Liste ist neueste-zuerst: "ältere" = idx+1, "neuere" = idx-1.
-    return {
-      prev: idx >= 0 && idx + 1 < series.length ? series[idx + 1] : null,
-      next: idx > 0 ? series[idx - 1] : null,
-    };
-  }, [reading, items]);
-
-  const counts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const item of items) c[item.category] = (c[item.category] ?? 0) + 1;
-    return c;
-  }, [items]);
+  const neighbors = useMemo(() => seriesNeighbors(items, reading), [reading, items]);
+  const counts = useMemo(() => countByCategory(items), [items]);
 
   return (
     <div className="space-y-4">
