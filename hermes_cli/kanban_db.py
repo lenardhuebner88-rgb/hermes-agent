@@ -9542,8 +9542,12 @@ def reviewer_role_fit_hold_reason(
 
 _AUTO_RETRY_QUESTION_RE = re.compile(
     r"(\?|\bwhich\b|\bchoose\b|\bdecision\b|\bdecide\b|\boperator\b|"
-    r"\bhuman\b|\bcredential\b|\bapproval\b|\bmissing credentials?\b|"
-    r"\bfrage\b|\bentscheidung\b|\bentscheiden\b|\bfreigabe\b)",
+    r"\bhuman\b|\bcredential\b|\bcredentials?\b|\bsecret\b|\btoken\b|"
+    r"\bapproval\b|\bmissing credentials?\b|\bpush\b|\bdeploy\b|"
+    r"\bforce[- ]?push\b|\bgit reset\b|\brm -rf\b|\bdelete\b|"
+    r"\bdrop\b|\btruncate\b|\balter\b|\bcreate\s+table\b|\bmigration\b|"
+    r"\bfrage\b|\bentscheidung\b|\bentscheiden\b|\bfreigabe\b|"
+    r"\bgeheim\b|\bzugang\b|\bpasswort\b|\bdeployen\b|\blöschen\b)",
     re.IGNORECASE,
 )
 

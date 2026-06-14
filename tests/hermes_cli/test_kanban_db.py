@@ -2488,6 +2488,38 @@ def test_dispatch_auto_retry_leaves_question_blocks_untouched(
         assert event.payload["blocked_kind"] == "operator_question"
 
 
+def test_dispatch_auto_retry_leaves_secret_and_irreversible_blocks_untouched(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    reasons = [
+        "Need secret token before continuing",
+        "Please approve git push to origin/main",
+        "Requires deploy after migration",
+        "Need DB ALTER TABLE decision",
+        "Freigabe zum Löschen fehlt",
+    ]
+    with kb.connect() as conn:
+        task_ids = []
+        for reason in reasons:
+            t = kb.create_task(conn, title=f"blocked {reason}", assignee="alice")
+            kb.claim_task(conn, t)
+            kb.block_task(conn, t, reason=reason)
+            task_ids.append(t)
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        for t in task_ids:
+            task = kb.get_task(conn, t)
+            assert task is not None
+            assert task.status == "blocked"
+            event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+            assert event.payload["blocked_kind"] == "operator_question"
+
+
 
 def test_dispatch_auto_retry_respects_failure_breaker(
     kanban_home, all_assignees_spawnable, monkeypatch
