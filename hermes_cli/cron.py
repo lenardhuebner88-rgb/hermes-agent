@@ -26,13 +26,47 @@ _GATEWAY_LIFECYCLE_PATTERNS = re.compile(
     r"(hermes\s+gateway\s+(restart|stop|start))"
     r"|(launchctl\s+(kickstart|unload|load|stop|restart)\s+.*hermes)"
     r"|(systemctl\s+(restart|stop|start)\s+.*hermes)"
-    r"|(p?kill\s+.*hermes.*gateway)"
+    r"|((p?kill|pgrep)\s+.*hermes)"
 )
 
 
 def _contains_gateway_lifecycle_command(text: str) -> bool:
     """Return True if *text* contains a gateway lifecycle command pattern."""
-    return bool(_GATEWAY_LIFECYCLE_PATTERNS.search(text))
+    # Collapse all whitespace so regex gaps match across newlines; re.MULTILINE
+    # only changes ^/$ behavior and would not fix command-splitting bypasses.
+    normalized = re.sub(r"\s+", " ", text or "")
+    return bool(_GATEWAY_LIFECYCLE_PATTERNS.search(normalized))
+
+
+def _reject_if_gateway_lifecycle(
+    prompt=None,
+    script=None,
+    skills: Optional[Iterable[str]] = None,
+) -> Optional[int]:
+    checked_parts = [str(prompt or "")]
+    if script:
+        try:
+            checked_parts.append(Path(script).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            print(color(
+                f"Blocked: cron script could not be read for lifecycle validation: {script}\n"
+                f"{exc}\n"
+                "This is blocked to prevent unchecked gateway lifecycle jobs (#30719).",
+                Colors.RED,
+            ))
+            return 1
+    checked_parts.extend(str(skill or "") for skill in (skills or []))
+
+    if _contains_gateway_lifecycle_command("\n".join(checked_parts)):
+        print(color(
+            "Blocked: cron job contains a gateway lifecycle command "
+            "(restart/stop/kill).\n"
+            "This is blocked to prevent restart loops (#30719).\n"
+            "Use `hermes gateway restart` from a shell outside the gateway.",
+            Colors.RED,
+        ))
+        return 1
+    return None
 
 
 def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
@@ -185,27 +219,14 @@ def cron_status():
 
 
 def cron_create(args):
-    # Defense: reject cron jobs that contain gateway lifecycle commands.
-    # Prevents agents from scheduling their own restart/stop, which creates
-    # SIGTERM-respawn loops under launchd/systemd KeepAlive (#30719).
-    prompt = getattr(args, "prompt", None) or ""
-    script = getattr(args, "script", None)
-    combined = prompt
-    if script:
-        try:
-            script_text = Path(script).read_text(encoding="utf-8")
-            combined = f"{combined}\n{script_text}"
-        except (OSError, UnicodeDecodeError):
-            pass
-    if _contains_gateway_lifecycle_command(combined):
-        print(color(
-            "Blocked: cron job contains a gateway lifecycle command "
-            "(restart/stop/kill).\n"
-            "This is blocked to prevent restart loops (#30719).\n"
-            "Use `hermes gateway restart` from a shell outside the gateway.",
-            Colors.RED,
-        ))
-        return 1
+    final_skills = _normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None))
+    lifecycle_block = _reject_if_gateway_lifecycle(
+        getattr(args, "prompt", None),
+        getattr(args, "script", None),
+        final_skills,
+    )
+    if lifecycle_block is not None:
+        return lifecycle_block
 
     result = _cron_api(
         action="create",
@@ -215,7 +236,7 @@ def cron_create(args):
         deliver=getattr(args, "deliver", None),
         repeat=getattr(args, "repeat", None),
         skill=getattr(args, "skill", None),
-        skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
+        skills=final_skills,
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
@@ -268,6 +289,14 @@ def cron_edit(args):
         for skill in add_skills:
             if skill not in final_skills:
                 final_skills.append(skill)
+
+    lifecycle_block = _reject_if_gateway_lifecycle(
+        getattr(args, "prompt", None),
+        getattr(args, "script", None),
+        final_skills,
+    )
+    if lifecycle_block is not None:
+        return lifecycle_block
 
     result = _cron_api(
         action="update",

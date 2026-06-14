@@ -13,6 +13,8 @@ import pytest
 
 from hermes_cli.cron import (
     _contains_gateway_lifecycle_command,
+    cron_create,
+    cron_edit,
     cron_command,
 )
 
@@ -51,6 +53,15 @@ class TestGatewayLifecyclePattern:
         "pkill -f hermes.*gateway",
     ])
     def test_kill_commands(self, text):
+        assert _contains_gateway_lifecycle_command(text), f"Should match: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        'pkill -f "hermes"\npkill -9 "gateway"',
+        "kill $(pgrep -f hermes)",
+        "pgrep -f hermes",
+        "pkill -f hermes",
+    ])
+    def test_multiline_and_hermes_kill_commands(self, text):
         assert _contains_gateway_lifecycle_command(text), f"Should match: {text!r}"
 
     @pytest.mark.parametrize("text", [
@@ -187,6 +198,195 @@ class TestCronCreateLifecycleBlock:
         # the error message is about prompt/skill, NOT about "Blocked".
         out = capsys.readouterr().out
         assert "Blocked" not in out
+
+
+class TestCronLifecycleGuardApiBoundary:
+    """Verify cron create/edit block before reaching the cron API."""
+
+    def _edit_args(self, **overrides):
+        values = {
+            "job_id": "job-1",
+            "schedule": None,
+            "prompt": None,
+            "name": None,
+            "deliver": None,
+            "repeat": None,
+            "skill": None,
+            "skills": None,
+            "add_skills": None,
+            "remove_skills": None,
+            "clear_skills": False,
+            "script": None,
+            "workdir": None,
+            "no_agent": None,
+        }
+        values.update(overrides)
+        return Namespace(**values)
+
+    def _create_args(self, **overrides):
+        values = {
+            "schedule": "30m",
+            "prompt": "Check server health",
+            "name": None,
+            "deliver": None,
+            "repeat": None,
+            "skill": None,
+            "skills": None,
+            "script": None,
+            "workdir": None,
+            "no_agent": False,
+        }
+        values.update(overrides)
+        return Namespace(**values)
+
+    @pytest.fixture
+    def edit_job(self, monkeypatch):
+        job = {
+            "id": "job-1",
+            "job_id": "job-1",
+            "name": "Existing Job",
+            "prompt": "Existing prompt",
+            "skills": [],
+            "skill": None,
+        }
+        monkeypatch.setattr("cron.jobs.resolve_job_ref", lambda job_id: job)
+        return job
+
+    @pytest.fixture
+    def cron_api_calls(self, monkeypatch):
+        calls = []
+
+        def fake_cron_api(**kwargs):
+            calls.append(kwargs)
+            action = kwargs["action"]
+            if action == "create":
+                return {
+                    "success": True,
+                    "job_id": "job-1",
+                    "name": "Created Job",
+                    "schedule": kwargs["schedule"],
+                    "next_run_at": "2026-06-14T12:00:00Z",
+                    "job": {
+                        "job_id": "job-1",
+                        "name": "Created Job",
+                        "schedule": kwargs["schedule"],
+                    },
+                }
+            return {
+                "success": True,
+                "job": {
+                    "job_id": kwargs["job_id"],
+                    "name": "Updated Job",
+                    "schedule": kwargs.get("schedule") or "30m",
+                    "skills": kwargs.get("skills") or [],
+                },
+            }
+
+        monkeypatch.setattr("hermes_cli.cron._cron_api", fake_cron_api)
+        return calls
+
+    def test_cron_edit_blocks_gateway_restart_prompt(self, edit_job, cron_api_calls, capsys):
+        rc = cron_edit(self._edit_args(prompt="hermes gateway restart"))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        assert "Blocked" in capsys.readouterr().out
+
+    def test_cron_edit_blocks_multiline_kill_prompt(self, edit_job, cron_api_calls, capsys):
+        rc = cron_edit(self._edit_args(prompt='pkill -f "hermes"\npkill -9 "gateway"'))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        assert "Blocked" in capsys.readouterr().out
+
+    def test_cron_edit_blocks_pgrep_kill_prompt(self, edit_job, cron_api_calls, capsys):
+        rc = cron_edit(self._edit_args(prompt="kill $(pgrep -f hermes)"))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        assert "Blocked" in capsys.readouterr().out
+
+    def test_cron_edit_blocks_lifecycle_command_in_skills(self, edit_job, cron_api_calls, capsys):
+        rc = cron_edit(self._edit_args(skills=["hermes gateway restart"]))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        assert "Blocked" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("overrides", [
+        {"prompt": 'pkill -f "hermes"\npkill -9 "gateway"'},
+        {"prompt": "kill $(pgrep -f hermes)"},
+        {"skills": ["hermes gateway restart"]},
+    ])
+    def test_cron_create_blocks_lifecycle_variants(self, overrides, cron_api_calls, capsys):
+        rc = cron_create(self._create_args(**overrides))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        assert "Blocked" in capsys.readouterr().out
+
+    def test_cron_edit_allows_benign_gateway_restart_report_prompt(
+        self,
+        edit_job,
+        cron_api_calls,
+        capsys,
+    ):
+        prompt = "summarize the API gateway logs and report restart events"
+
+        rc = cron_edit(self._edit_args(prompt=prompt))
+
+        assert rc == 0
+        assert cron_api_calls == [
+            {
+                "action": "update",
+                "job_id": "job-1",
+                "schedule": None,
+                "prompt": prompt,
+                "name": None,
+                "deliver": None,
+                "repeat": None,
+                "skills": None,
+                "script": None,
+                "workdir": None,
+                "no_agent": None,
+            }
+        ]
+        assert "Updated job" in capsys.readouterr().out
+
+    def test_cron_create_allows_benign_gateway_restart_report_prompt(self, cron_api_calls, capsys):
+        prompt = "summarize the API gateway logs and report restart events"
+
+        rc = cron_create(self._create_args(prompt=prompt))
+
+        assert rc == 0
+        assert cron_api_calls[0]["action"] == "create"
+        assert cron_api_calls[0]["prompt"] == prompt
+        assert "Created job" in capsys.readouterr().out
+
+    def test_cron_edit_blocks_unreadable_script_path(
+        self,
+        tmp_path,
+        edit_job,
+        cron_api_calls,
+        capsys,
+    ):
+        missing_script = tmp_path / "missing.sh"
+
+        rc = cron_edit(self._edit_args(prompt="Check server health", script=str(missing_script)))
+
+        assert rc == 1
+        assert cron_api_calls == []
+        out = capsys.readouterr().out
+        assert "Blocked" in out
+        assert "could not be read" in out
+
+    def test_cron_edit_allows_benign_prompt_without_script(self, edit_job, cron_api_calls, capsys):
+        rc = cron_edit(self._edit_args(prompt="Check server health", script=None))
+
+        assert rc == 0
+        assert cron_api_calls[0]["action"] == "update"
+        assert cron_api_calls[0]["script"] is None
+        assert "Updated job" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
