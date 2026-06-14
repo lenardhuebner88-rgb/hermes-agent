@@ -127,6 +127,18 @@ export const zh: Translations = {
       transcriptionUnavailable: '语音转写暂不可用。',
       tryRecordingAgain: '请再录一次。',
       unavailable: '语音不可用'
+    },
+    native: {
+      approvalTitle: '需要批准',
+      approveAction: '批准',
+      rejectAction: '拒绝',
+      inputTitle: '需要输入',
+      inputBody: 'Hermes 正在等待你的回应。',
+      turnDoneTitle: 'Hermes 已完成',
+      turnDoneBody: '回复已就绪。',
+      turnErrorTitle: '本轮失败',
+      backgroundDoneTitle: '后台任务已完成',
+      backgroundFailedTitle: '后台任务失败'
     }
   },
 
@@ -259,7 +271,45 @@ export const zh: Translations = {
       keysSettings: '设置',
       mcp: 'MCP',
       archivedChats: '已归档对话',
-      about: '关于'
+      about: '关于',
+      notifications: '通知'
+    },
+    notifications: {
+      title: '通知',
+      intro: '原生桌面通知，区别于应用内提示。设置按设备保存，每台电脑各自独立。',
+      enableAll: '启用通知',
+      enableAllDesc: '总开关。关闭后将静音下方所有通知。',
+      focusedHint: '完成提醒仅在 Hermes 处于后台时触发。',
+      kinds: {
+        approval: {
+          label: '需要批准',
+          description: '有命令正在等待你批准或拒绝。'
+        },
+        input: {
+          label: '需要输入',
+          description: 'Hermes 提出了问题，或需要密码或密钥。'
+        },
+        turnDone: {
+          label: '回复就绪',
+          description: 'Hermes 在后台时完成了一轮对话。'
+        },
+        turnError: {
+          label: '本轮失败',
+          description: '本轮以错误结束。'
+        },
+        backgroundDone: {
+          label: '后台任务完成',
+          description: '后台终端命令已完成。'
+        }
+      },
+      test: '发送测试通知',
+      testTitle: 'Hermes',
+      testBody: '通知工作正常。',
+      testSent: '测试已发送。如果没有出现，请检查系统通知权限和专注模式／勿扰模式。',
+      testUnsupported: '此系统不支持原生通知。',
+      completionSoundTitle: '完成提示音',
+      completionSoundDesc: '智能体回合结束时播放。可在此选择预设并预览。',
+      completionSoundPreview: '预览'
     },
     sections: {
       model: '模型',
@@ -291,6 +341,8 @@ export const zh: Translations = {
       colorModeDesc: '选择固定模式，或让 Hermes 跟随系统设置。',
       toolViewTitle: '工具调用显示',
       toolViewDesc: '产品模式隐藏原始工具数据；技术模式显示完整输入/输出。',
+      translucencyTitle: '窗口透明',
+      translucencyDesc: '让整个窗口透出桌面。仅支持 macOS 和 Windows。',
       product: '产品',
       productDesc: '易读的工具活动与简洁摘要。',
       technical: '技术',
@@ -706,6 +758,12 @@ export const zh: Translations = {
       collapse: '收起',
       connectAnother: '连接其他提供方',
       otherProviders: '其他提供方',
+      removeConfirm: provider => `移除 ${provider}？`,
+      removeExternal: (provider, command) => `${provider} 由 Hermes 外部管理。请使用 ${command} 移除。`,
+      removeKeyManaged: provider => `${provider} 由 API 密钥配置。请从 API Keys 中移除。`,
+      removedTitle: '账号已移除',
+      removedMessage: provider => `${provider} 已移除。`,
+      failedRemove: provider => `无法移除 ${provider}`,
       noProviderKeys: '没有可用的提供方 API 密钥。',
       loading: '正在加载提供方...'
     },
@@ -833,6 +891,7 @@ export const zh: Translations = {
     back: '返回',
     searchPlaceholder: '搜索会话、视图与操作',
     goTo: '前往',
+    goToSession: '前往会话',
     commandCenter: '命令中心',
     appearance: '外观',
     settings: '设置',
@@ -1089,6 +1148,9 @@ export const zh: Translations = {
     deleting: '删除中…',
     createDesc: '配置档案是相互独立的 Hermes 环境：各自拥有独立的配置、技能和 SOUL.md。',
     nameLabel: '名称',
+    cloneFrom: '克隆来源',
+    cloneFromNone: '无（空白）',
+    cloneFromDesc: '从选中的来源配置档案复制配置、技能和 SOUL.md。',
     cloneFromDefault: '从默认档案克隆',
     cloneFromDefaultDesc: '从你的默认配置档案复制配置、技能和 SOUL.md。',
     invalidName: hint => `名称无效。${hint}`,
@@ -1396,6 +1458,8 @@ export const zh: Translations = {
     queueSendNext: '下一个',
     queueSend: '发送',
     queueDelete: '删除',
+    queueStuckTitle: '排队消息未发送',
+    queueStuckBody: '排队的对话多次发送失败。它仍在队列中，请重试发送。',
     previewUnavailable: '预览不可用',
     previewLabel: label => `预览 ${label}`,
     couldNotPreview: label => `无法预览 ${label}`,
@@ -1831,6 +1895,7 @@ export const zh: Translations = {
   assistant: {
     thread: {
       loadingSession: '正在加载会话',
+      showEarlier: '显示更早的消息',
       loadingResponse: 'Hermes 正在加载回复',
       thinking: '思考中',
       today: time => `今天，${time}`,
@@ -1844,6 +1909,7 @@ export const zh: Translations = {
       stopReading: '停止朗读',
       readAloud: '朗读',
       editMessage: '编辑消息',
+      scrollToBottom: '滚动到底部',
       stop: '停止',
       restorePrevious: '恢复上一个检查点',
       restoreCheckpoint: '恢复检查点',
@@ -1860,9 +1926,11 @@ export const zh: Translations = {
       gatewayDisconnected: 'Hermes 网关未连接',
       sendFailed: '无法发送审批响应',
       run: '运行',
+      command: '命令',
       moreOptions: '更多审批选项',
       allowSession: '允许本会话',
       alwaysAllowMenu: '始终允许…',
+      jumpToApproval: '需要审批',
       reject: '拒绝',
       alwaysTitle: '始终允许此命令？',
       alwaysDescription: pattern =>

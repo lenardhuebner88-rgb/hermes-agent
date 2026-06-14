@@ -71,6 +71,35 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def _image_error_max_dimension(error: Exception) -> Optional[int]:
+    """Extract a provider-reported image dimension ceiling, if present."""
+    parts = []
+    for value in (
+        error,
+        getattr(error, "message", None),
+        getattr(error, "body", None),
+    ):
+        if value:
+            try:
+                parts.append(str(value))
+            except Exception:
+                pass
+    text = " ".join(parts).lower()
+    if "image" not in text or "dimension" not in text or "max allowed size" not in text:
+        return None
+
+    match = re.search(r"max allowed size(?:\s+for [^:]+)?:\s*(\d{3,5})\s*pixels?", text)
+    if not match:
+        return None
+    try:
+        max_dimension = int(match.group(1))
+    except ValueError:
+        return None
+    if 512 <= max_dimension <= 8000:
+        return max_dimension
+    return None
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -595,7 +624,11 @@ def run_conversation(
         # landed after an orphan tool result). Most providers return
         # empty content on malformed sequences, which would otherwise
         # retrigger the empty-retry loop indefinitely.
-        repaired_seq = agent._repair_message_sequence(messages)
+        # repair_message_sequence_with_cursor also recomputes the SessionDB
+        # flush cursor (_last_flushed_db_idx) when repair compacts the list,
+        # so the turn-end flush doesn't skip the assistant/tool chain (#44837).
+        from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
+        repaired_seq = repair_message_sequence_with_cursor(agent, messages)
         if repaired_seq > 0:
             request_logger.info(
                 "Repaired %s message-alternation violations before request (session=%s)",
@@ -703,7 +736,10 @@ def run_conversation(
         # a thinking-only turn. Runs on the per-call copy only — the
         # stored conversation history keeps the reasoning block for the
         # UI transcript and session persistence.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+        api_messages = agent._drop_thinking_only_and_merge_users(
+            api_messages,
+            drop_codex_reasoning_items=agent.api_mode != "codex_responses",
+        )
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
@@ -2063,7 +2099,11 @@ def run_conversation(
                     and not _retry.image_shrink_retry_attempted
                 ):
                     _retry.image_shrink_retry_attempted = True
-                    if agent._try_shrink_image_parts_in_messages(api_messages):
+                    image_max_dimension = _image_error_max_dimension(api_error) or 8000
+                    if agent._try_shrink_image_parts_in_messages(
+                        api_messages,
+                        max_dimension=image_max_dimension,
+                    ):
                         agent._vprint(
                             f"{agent.log_prefix}📐 Image(s) exceeded provider size limit — "
                             f"shrank and retrying...",
@@ -2631,10 +2671,13 @@ def run_conversation(
                     except Exception:
                         pass
                     if _genuine_nous_rate_limit:
-                        # Skip straight to max_retries -- the
-                        # top-of-loop guard will handle fallback or
-                        # bail cleanly.
-                        retry_count = max_retries
+                        # Re-enter the loop exactly once so the
+                        # top-of-loop Nous guard handles fallback or
+                        # bails cleanly. (Setting retry_count to
+                        # max_retries would make the while condition
+                        # false immediately and the guard would never
+                        # run -- no fallback, generic exhaustion error.)
+                        retry_count = max(0, max_retries - 1)
                         continue
                     # Upstream capacity 429: fall through to normal
                     # retry logic.  A different model (or the same

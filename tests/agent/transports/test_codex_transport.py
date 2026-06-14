@@ -104,21 +104,21 @@ class TestCodexBuildKwargs:
         )
         assert kw.get("prompt_cache_key") == "cron_bf56b17edd1a"
 
-    def test_cron_session_id_keeps_trace_headers_unique(self, transport):
-        """Only ``prompt_cache_key`` gets the stable form. The session_id
-        and x-client-request-id headers must keep the full timestamped id
-        so OpenAI's request logs and our own correlation stay per-request
-        unique."""
+    def test_cron_session_id_collapses_to_stable_prompt_cache_key(self, transport):
+        """The cron session_id collapses to the stable cron-stripped
+        ``prompt_cache_key`` so cache hits survive across cron ticks. On the
+        codex backend NO body-level ``extra_headers`` are sent — that backend
+        400s on them (see test_codex_backend_does_not_set_extra_headers); the
+        fork's earlier session_id/x-client-request-id trace headers were
+        dropped in the 2026-06-14 upstream sync for exactly that reason."""
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
             model="gpt-5.5", messages=messages, tools=[],
             session_id="cron_bf56b17edd1a_20260527_082953",
             is_codex_backend=True,
         )
-        headers = kw.get("extra_headers", {})
         assert kw["prompt_cache_key"] == "cron_bf56b17edd1a"
-        assert headers.get("session_id") == "cron_bf56b17edd1a_20260527_082953"
-        assert headers.get("x-client-request-id") == "cron_bf56b17edd1a_20260527_082953"
+        assert "extra_headers" not in kw
 
     def test_cron_jobid_with_digits_not_truncated(self, transport):
         """Job ids are hex (may include digits) — the strip pattern must
@@ -204,6 +204,46 @@ class TestCodexBuildKwargs:
             is_codex_backend=True,
         )
         assert "max_output_tokens" not in kw
+
+    def test_codex_backend_does_not_set_extra_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="conv-codex-1",
+            is_codex_backend=True,
+        )
+
+        assert "extra_headers" not in kw
+
+    def test_codex_backend_strips_caller_extra_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="conv-codex-1",
+            is_codex_backend=True,
+            request_overrides={"extra_headers": {"x-test": "1"}},
+        )
+
+        assert "extra_headers" not in kw
+
+    def test_non_codex_responses_preserves_caller_extra_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            is_codex_backend=False,
+            request_overrides={"extra_headers": {"x-test": "1"}},
+        )
+
+        assert kw["extra_headers"] == {"x-test": "1"}
 
     def test_xai_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
