@@ -327,6 +327,65 @@ def test_scratch_code_redirect_fo_missing_checkout_stays_scratch(
     assert kwt.scratch_code_redirect(task, None) is None
 
 
+def test_fo_integration_gate_self_heals_missing_node_modules(tmp_path, monkeypatch):
+    """When the live FO checkout has no `next` bin, the gate runs `npm ci`
+    FIRST, then builds — instead of failing on exit 127 and reverting approved
+    work. Regression guard for t_8fbe701d (2026-06-14)."""
+    repo = tmp_path / "fo"
+    repo.mkdir()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "ci":
+            nb = repo / "node_modules" / ".bin"
+            nb.mkdir(parents=True, exist_ok=True)
+            (nb / "next").write_text("#!/bin/sh\n")  # simulate install
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    ok, detail = kwt.fo_integration_gate(repo, [])
+    assert ok is True
+    assert [c[1] for c in calls] == ["ci", "run"]  # npm ci THEN npm run build
+    assert "self-healed" in detail
+
+
+def test_fo_integration_gate_skips_npm_ci_when_next_present(tmp_path, monkeypatch):
+    """When `next` is already installed, the gate builds directly — no npm ci
+    overhead in the common case."""
+    repo = tmp_path / "fo"
+    (repo / "node_modules" / ".bin").mkdir(parents=True)
+    (repo / "node_modules" / ".bin" / "next").write_text("#!/bin/sh\n")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    ok, detail = kwt.fo_integration_gate(repo, [])
+    assert ok is True
+    assert [c[1] for c in calls] == ["run"]  # only npm run build
+    assert "self-healed" not in detail
+
+
+def test_fo_integration_gate_npm_ci_failure_fails_clearly(tmp_path, monkeypatch):
+    """If the self-heal npm ci itself fails, the gate fails with a clear
+    message and does NOT fall through to a doomed exit-127 build."""
+    repo = tmp_path / "fo"
+    repo.mkdir()
+
+    def fake_run(argv, **kwargs):
+        if argv[1] == "ci":
+            return SimpleNamespace(returncode=1, stdout="", stderr="lockfile mismatch")
+        raise AssertionError("build must not run after npm ci failed")
+
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    ok, detail = kwt.fo_integration_gate(repo, [])
+    assert ok is False
+    assert "npm ci (self-heal" in detail
+
+
 def test_provision_recreates_vanished_worktree(kanban_home, repo):
     with kb.connect() as conn:
         tid = kb.create_task(

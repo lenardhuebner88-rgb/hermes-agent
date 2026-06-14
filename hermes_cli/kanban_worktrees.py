@@ -710,8 +710,37 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
     """FO post-merge integration gate: ONE `npm run build` (the heavy gate that
     runs once at integration; lint/backlog:check/test are the worker gate, D).
     ``changed_files`` is accepted for signature-compatibility with
-    default_quick_gate but unused — the build is whole-repo."""
+    default_quick_gate but unused — the build is whole-repo.
+
+    Self-heals a missing dependency tree first. The build runs in the LIVE FO
+    checkout (``repo_root``), whose gitignored ``node_modules`` can be emptied
+    out of band — a worker ``npm ci`` through the provisioner's node_modules
+    symlink, a cleanup, or a fresh checkout. When ``next`` is absent, ``next
+    build`` exits 127 and the integrator would REVERT already-approved work
+    (t_8fbe701d, 2026-06-14). So if the ``next`` bin is missing we run ``npm
+    ci`` once to restore deps before building, instead of failing the gate."""
+    repo_root = Path(repo_root)
     npm_bin = shutil.which("npm") or "npm"
+    notes: list[str] = []
+
+    if not (repo_root / "node_modules" / ".bin" / "next").exists():
+        try:
+            ci = subprocess.run(  # noqa: S603 -- fixed argv
+                [npm_bin, "ci"], cwd=str(repo_root),
+                capture_output=True, text=True, timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "npm ci (self-heal, node_modules was missing): TIMEOUT after 900s"
+        except FileNotFoundError:
+            return False, f"npm ci (self-heal): command not found ({npm_bin})"
+        if ci.returncode != 0:
+            tail = (ci.stdout + "\n" + ci.stderr).strip()[-2000:]
+            return False, (
+                "npm ci (self-heal, node_modules was missing): "
+                f"exit {ci.returncode}\n{tail}"
+            )
+        notes.append("npm ci (self-healed missing node_modules)")
+
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv
             [npm_bin, "run", "build"], cwd=str(repo_root),
@@ -724,7 +753,8 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
     if proc.returncode != 0:
         tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
         return False, f"build: exit {proc.returncode}\n{tail}"
-    return True, "npm run build ok"
+    notes.append("npm run build ok")
+    return True, "; ".join(notes)
 
 
 def integrate_chain(
