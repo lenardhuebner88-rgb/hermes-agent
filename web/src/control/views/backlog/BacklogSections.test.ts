@@ -62,22 +62,24 @@ describe("partitionReadinessZones", () => {
     expect(ideas).toHaveLength(0);
   });
 
-  it("an item with readiness=blocked lands in ideas (not ready, not grooming)", () => {
+  // Regression (new behavior): blocked = needs external unblocking = Schleifen,
+  // not Ideenspeicher. The operator can act on it.
+  it("an item with readiness=blocked lands in grooming (Schleifen), not ideas", () => {
     const { ready, grooming, ideas } = partitionReadinessZones([
       item({ id: "0001", status: "blocked" }),
     ]);
-    expect(ideas).toHaveLength(1);
+    expect(grooming).toHaveLength(1);
     expect(ready).toHaveLength(0);
-    expect(grooming).toHaveLength(0);
+    expect(ideas).toHaveLength(0);
   });
 
   it("every item lands in exactly ONE zone (disjoint + complete)", () => {
     const items = [
       item({ id: "0001", readiness: "ready" }),
       item({ id: "0002", readiness: "needs_grooming" }),
-      item({ id: "0003", status: "blocked" }),               // v1 → "blocked" → ideas
+      item({ id: "0003", status: "blocked" }),               // readiness="blocked" → grooming
       item({ id: "0004", status: "readyish" as BacklogItem["status"] }), // drift → grooming
-      item({ id: "0005", readiness: "blocked" }),            // explicit → ideas
+      item({ id: "0005", readiness: "blocked" }),            // explicit → grooming
     ];
     const { ready, grooming, ideas } = partitionReadinessZones(items);
     // Completeness: all items appear somewhere
@@ -95,12 +97,14 @@ describe("partitionReadinessZones", () => {
       item({ id: "r2", owner: "claude", status: "next" }),   // v1 fallback, no issues → ready
       item({ id: "g1", readiness: "needs_grooming" }),
       item({ id: "g2", status: "readyish" as BacklogItem["status"] }), // drift → grooming
-      item({ id: "i1", status: "blocked" }),                 // v1 fallback → "blocked" → ideas
-      item({ id: "i2", readiness: "blocked" }),              // explicit → ideas
+      item({ id: "g3", status: "blocked" }),                 // readiness="blocked" → grooming
+      item({ id: "g4", readiness: "blocked" }),              // explicit → grooming
+      item({ id: "i1", status: "done" }),                    // done → ideas
+      item({ id: "i2", status: "in_progress", owner: "claude", readiness: "ready" }), // in_progress is never Bereit
     ];
     const { ready, grooming, ideas } = partitionReadinessZones(items);
     expect(ready.map((it) => it.id).sort()).toEqual(["r1", "r2"].sort());
-    expect(grooming.map((it) => it.id).sort()).toEqual(["g1", "g2"].sort());
+    expect(grooming.map((it) => it.id).sort()).toEqual(["g1", "g2", "g3", "g4"].sort());
     expect(ideas.map((it) => it.id).sort()).toEqual(["i1", "i2"].sort());
   });
 
@@ -110,29 +114,45 @@ describe("partitionReadinessZones", () => {
     expect(ready[0]).toBe(src);
   });
 
-  // Regression: v1-fallback bug — readinessForFoItem returns "ready" for a clean
-  // `later` item (no quality issues, no server readiness). Without the status guard,
-  // such items would appear in Bereit instead of Ideenspeicher.
-  it("a later item whose v1-readiness would be 'ready' lands in ideas, never in ready", () => {
-    // No readiness field → v1 fallback fires. No quality issues → fallback returns "ready".
-    // Status guard must intercept before readinessForFoItem is used for zone placement.
-    const laterClean = item({ id: "idea1", status: "later", owner: "claude" });
-    const { ready, grooming, ideas } = partitionReadinessZones([laterClean]);
-    expect(ideas).toHaveLength(1);
-    expect(ready).toHaveLength(0);
+  // Regression (new behavior): a `later` item with server readiness==="ready" is a
+  // parked-but-done task that the backend promoted. It now belongs in Bereit, not
+  // Ideenspeicher. Readiness drives the zone, not status.
+  it("a later item with readiness=ready lands in Bereit (not ideas)", () => {
+    const laterReady = item({ id: "park1", status: "later", readiness: "ready" });
+    const { ready, grooming, ideas } = partitionReadinessZones([laterReady]);
+    expect(ready).toHaveLength(1);
     expect(grooming).toHaveLength(0);
-    expect(ideas[0].id).toBe("idea1");
+    expect(ideas).toHaveLength(0);
+    expect(ready[0].id).toBe("park1");
   });
 
-  it("excluded-status items (later, done, in_progress, blocked) all go to ideas", () => {
+  // Regression: a `later` item whose v1-readiness would be "ready" (no quality
+  // issues, no server readiness field) also lands in Bereit now.
+  it("a later item whose v1-readiness is 'ready' (no server field) lands in Bereit", () => {
+    const laterClean = item({ id: "idea1", status: "later", owner: "claude" });
+    const { ready, grooming, ideas } = partitionReadinessZones([laterClean]);
+    expect(ready).toHaveLength(1);
+    expect(grooming).toHaveLength(0);
+    expect(ideas).toHaveLength(0);
+    expect(ready[0].id).toBe("idea1");
+  });
+
+  // Regression: a `later` item with readiness=needs_grooming lands in Schleifen.
+  it("a later item with readiness=needs_grooming lands in grooming (Schleifen)", () => {
+    const laterGroom = item({ id: "park2", status: "later", readiness: "needs_grooming" });
+    const { ready, grooming, ideas } = partitionReadinessZones([laterGroom]);
+    expect(grooming).toHaveLength(1);
+    expect(ready).toHaveLength(0);
+    expect(ideas).toHaveLength(0);
+  });
+
+  it("done and in_progress items always go to ideas regardless of readiness", () => {
     const inputs = [
-      item({ id: "lt", status: "later" }),
       item({ id: "dn", status: "done" }),
-      item({ id: "ip", status: "in_progress" }),
-      item({ id: "bl", status: "blocked" }),
+      item({ id: "ip", status: "in_progress", readiness: "ready" }), // even if ready
     ];
     const { ready, grooming, ideas } = partitionReadinessZones(inputs);
-    expect(ideas).toHaveLength(4);
+    expect(ideas).toHaveLength(2);
     expect(ready).toHaveLength(0);
     expect(grooming).toHaveLength(0);
   });

@@ -516,3 +516,76 @@ def test_read_items_deterministic_for_fixed_now(tmp_path, monkeypatch):
 
     now = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
     assert _read_items_sync(now) == _read_items_sync(now)
+
+
+# --- _item_facts token-expansion (Done-Kriterien / Umsetzungshinweis / warn-demotion) ---
+
+from hermes_cli.family_organizer_view import _item_facts
+
+_NOW = int(dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc).timestamp())
+_EPOCH = int(dt.datetime(2026, 6, 9, tzinfo=dt.timezone.utc).timestamp())
+
+
+def _facts(body: str, *, status: str = "later", title: str = "A well described item title"):
+    text = f"---\nid: 0099\ntitle: {title}\nstatus: {status}\nowner: unassigned\n---\n\n{body}"
+    return _item_facts(
+        text,
+        title=title,
+        status=status,
+        owner="unassigned",
+        stale=False,
+        epoch=_EPOCH,
+        now=_NOW,
+    )
+
+
+def test_item_facts_done_kriterien_counts_as_acceptance():
+    """'## Done-Kriterien' MUSS als acceptance-Sektion erkannt werden."""
+    body = "## Done-Kriterien\n\n- Gate ist gruen.\n- Smoke bestanden.\n"
+    f = _facts(body)
+    assert f["missing_acceptance"] is False
+    # Ohne fehlende Acceptance (und ohne missing_next_action als risk) → ready
+    assert f["readiness"] == "ready"
+
+
+def test_item_facts_akzeptanzkriterien_counts_as_acceptance():
+    """'## Akzeptanzkriterien' (Entwurf) MUSS erkannt werden."""
+    body = "## Akzeptanzkriterien (Entwurf)\n\n- Mindestens ein Test.\n"
+    f = _facts(body)
+    assert f["missing_acceptance"] is False
+    assert f["readiness"] == "ready"
+
+
+def test_item_facts_umsetzungshinweis_counts_as_next_action():
+    """'## Umsetzungshinweis' MUSS als next-action-Sektion erkannt werden."""
+    body = "## Done-Kriterien\n\n- Gate gruen.\n\n## Umsetzungshinweis\n\nZuerst Komponente X refactorn.\n"
+    f = _facts(body)
+    assert f["missing_next_action"] is False
+    codes = {q["code"] for q in f["quality_issues"]}
+    assert "missing_next_action" not in codes
+    assert f["readiness"] == "ready"
+
+
+def test_item_facts_missing_next_action_is_warn_not_risk():
+    """Fehlender nächster Schritt darf readiness NICHT auf needs_grooming setzen."""
+    # Nur acceptance vorhanden, kein next-action-Abschnitt
+    body = "## Done-Kriterien\n\n- Gate ist gruen.\n"
+    f = _facts(body)
+    assert f["missing_next_action"] is True
+    # severity muss warn sein, NICHT risk
+    na_issues = [q for q in f["quality_issues"] if q["code"] == "missing_next_action"]
+    assert len(na_issues) == 1
+    assert na_issues[0]["severity"] == "warn"
+    # Warn allein blockt readiness nicht
+    assert f["readiness"] == "ready"
+
+
+def test_item_facts_missing_acceptance_still_blocks_ready():
+    """Fehlende Acceptance bleibt risk → needs_grooming (0010-Invariante)."""
+    body = "## Kontext\n\nNur Kontext, keine Kriterien.\n"
+    f = _facts(body)
+    assert f["missing_acceptance"] is True
+    ac_issues = [q for q in f["quality_issues"] if q["code"] == "missing_acceptance"]
+    assert len(ac_issues) == 1
+    assert ac_issues[0]["severity"] == "risk"
+    assert f["readiness"] == "needs_grooming"

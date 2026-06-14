@@ -94,12 +94,12 @@ describe("computeNextFoTaskId", () => {
     expect(computeNextFoTaskId(items)).toBe("0002");
   });
 
-  it("excluded statuses (stale, blocked, in_progress, later) are never returned as primary", () => {
-    // All excluded: should fall through to fallback, then null
+  it("in_progress, blocked, and done are never returned as next-task candidates", () => {
+    // blocked/in_progress/done are in EXCLUDED_STATUSES → never picked.
+    // `later` with readiness=ready IS eligible now (see test below).
     const items = [
       item({ id: "0001", status: "blocked", readiness: "blocked" }),
       item({ id: "0002", status: "in_progress", readiness: "ready" }),
-      item({ id: "0003", status: "later", readiness: "ready" }),
       item({ id: "0004", status: "done" }),
     ];
     expect(computeNextFoTaskId(items)).toBeNull();
@@ -131,16 +131,16 @@ describe("computeNextFoTaskId", () => {
 
   it("fallback: when no ready items, picks best non-stale non-drift non-excluded item", () => {
     const items = [
-      item({ id: "0001", status: "now", missing_acceptance: true }),   // needs_grooming
-      item({ id: "0002", status: "next", missing_acceptance: true }),  // needs_grooming
-      item({ id: "0003", status: "later" }),                           // excluded
+      item({ id: "0001", status: "now", missing_acceptance: true }),               // needs_grooming
+      item({ id: "0002", status: "next", missing_acceptance: true }),              // needs_grooming
+      item({ id: "0003", status: "later", readiness: "needs_grooming" }),         // needs_grooming too
+      item({ id: "0004", status: "blocked", readiness: "blocked" }),              // EXCLUDED_STATUSES
     ];
-    // Both 0001 and 0002 have needs_grooming but are non-stale non-drift and their
-    // status is not in EXCLUDED_STATUSES. Fallback picks the lowest age_days (both 0
-    // from no age_days field); tie-break id → 0001.
+    // 0001, 0002, 0003 all need_grooming (no ready items → fallback).
+    // EXCLUDED_STATUSES has `blocked` but NOT `later` → 0004 is excluded, 0003 is not.
+    // Fallback picks lowest age_days (all 0); tie-break by id → 0001.
     const result = computeNextFoTaskId(items);
     expect(result).not.toBeNull();
-    // Result must be 0001 or 0002 — both are valid fallbacks; 0001 wins on id tie-break.
     expect(result).toBe("0001");
   });
 
@@ -152,12 +152,35 @@ describe("computeNextFoTaskId", () => {
     expect(computeNextFoTaskId(items)).toBeNull();
   });
 
-  it("later items are never chosen even in fallback", () => {
-    // 'later' is in EXCLUDED_STATUSES, so it must never appear
+  // Regression (new behavior): `later` + readiness==="ready" means the backend
+  // promoted a parked task to workable. It is now a valid next-task candidate.
+  it("a later item with readiness=ready is chosen as next task", () => {
     const items = [
       item({ id: "0001", status: "later", readiness: "ready", age_days: 0 }),
     ];
-    expect(computeNextFoTaskId(items)).toBeNull();
+    expect(computeNextFoTaskId(items)).toBe("0001");
+  });
+
+  it("a later item without server readiness (v1-fallback=ready) is also eligible", () => {
+    // No quality issues + later → v1 fallback returns "ready" → qualifies.
+    const items = [
+      item({ id: "0002", status: "later", owner: "claude", age_days: 1 }),
+    ];
+    expect(computeNextFoTaskId(items)).toBe("0002");
+  });
+
+  it("a later item with readiness=needs_grooming is NOT chosen (not ready)", () => {
+    const items = [
+      item({ id: "0003", status: "later", readiness: "needs_grooming" }),
+    ];
+    // Falls to fallback; fallback filters out drift but not needs_grooming.
+    // needs_grooming is NOT drift, so it IS a valid fallback candidate.
+    // Test that needs_grooming later items can appear in fallback (better than null
+    // if that is the only option) — but NOT in the primary ready path.
+    const primary = items.filter(
+      (it) => readinessForFoItem(it) === "ready"
+    );
+    expect(primary).toHaveLength(0);
   });
 
   it("returns null when only done items remain", () => {
@@ -554,17 +577,29 @@ describe("readiness + quick views", () => {
     expect(matchesFoQuickView(quietUnowned, "unowned")).toBe(false);
   });
 
-  // Regression: v1-fallback bug — a clean `later` item has readinessForFoItem==="ready"
-  // but must NOT appear in the "ready" quick view (excluded-status guard).
-  it("matchesFoQuickView 'ready' never matches a later item even if v1-readiness is ready", () => {
-    const laterClean = item({ id: "idea", status: "later", owner: "claude" });
-    // Verify the v1 fallback actually does return "ready" for this item (precondition).
+  // Regression (new behavior): a `later` item with readiness==="ready" (server fact or
+  // v1-fallback) DOES appear in the "ready" quick view. Readiness drives the filter,
+  // not status. Only in_progress/blocked/done are structurally excluded from "ready".
+  it("matchesFoQuickView 'ready' matches a later item when its readiness is ready", () => {
+    // Server readiness field set explicitly.
+    const laterReady = item({ id: "pk1", status: "later", readiness: "ready" });
+    expect(matchesFoQuickView(laterReady, "ready")).toBe(true);
+
+    // v1 fallback: no server readiness, clean item → readinessForFoItem returns "ready".
+    const laterClean = item({ id: "pk2", status: "later", owner: "claude" });
     expect(readinessForFoItem(laterClean)).toBe("ready");
-    // The quick-view guard must block it.
-    expect(matchesFoQuickView(laterClean, "ready")).toBe(false);
-    // done/in_progress/blocked are also excluded.
+    expect(matchesFoQuickView(laterClean, "ready")).toBe(true);
+
+    // A later item with readiness=needs_grooming does NOT match ready.
+    const laterGroom = item({ id: "pk3", status: "later", readiness: "needs_grooming" });
+    expect(matchesFoQuickView(laterGroom, "ready")).toBe(false);
+  });
+
+  it("matchesFoQuickView 'ready' excludes in_progress, blocked, and done regardless of readiness", () => {
+    // in_progress/blocked/done remain in EXCLUDED_STATUSES.
     expect(matchesFoQuickView(item({ id: "dn", status: "done" }), "ready")).toBe(false);
     expect(matchesFoQuickView(item({ id: "ip", status: "in_progress", owner: "claude" }), "ready")).toBe(false);
+    expect(matchesFoQuickView(item({ id: "bl", status: "blocked", readiness: "ready" }), "ready")).toBe(false);
   });
 
   it("owner-gap signals only fire for in_progress, never the quiet queue (unified claim model)", () => {

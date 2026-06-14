@@ -356,15 +356,20 @@ function compareReadyItems(a: BacklogItem, b: BacklogItem): number {
   return ageA - ageB || a.id.localeCompare(b.id);
 }
 
-// Statuses that are never workable candidates for the active queue.
-// `later` items are idea-storage — never surfaced as "next task" even if their
-// computed readiness happens to be "ready" under the v1 client fallback.
-// Exported so readinessZones.ts and matchesFoQuickView can apply the same gate
-// without duplicating the set.
-export const EXCLUDED_STATUSES = new Set(["in_progress", "blocked", "done", "later"]);
+// Statuses that are structurally ineligible for the active queue, regardless of readiness.
+// - `in_progress`: already running — don't double-pick.
+// - `done`: finished — out of the queue entirely.
+// - `blocked`: needs external unblocking; `readiness` is "blocked" → Schleifen zone, not a
+//   next-task candidate. Kept here so computeNextFoTaskId and matchesFoQuickView("ready")
+//   both exclude it without re-reading readiness a second time.
+// `later` is NOT excluded: a `later` item may have `readiness==="ready"` (parked-but-done
+// tasks that the backend promotes) — readiness, not status, decides the zone.
+// Exported so readinessZones.ts and matchesFoQuickView can apply the same gate.
+export const EXCLUDED_STATUSES = new Set(["in_progress", "blocked", "done"]);
 
 export function computeNextFoTaskId(items: BacklogItem[]): string | null {
-  // Primary: readiness==='ready', not stale, not blocked/done/in_progress/later.
+  // Primary: readiness==='ready', not stale, not in_progress/blocked/done.
+  // `later` items are eligible if their server readiness is "ready".
   const readyCandidates = items.filter(
     (it) =>
       readinessForFoItem(it) === "ready" &&

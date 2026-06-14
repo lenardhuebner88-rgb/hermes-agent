@@ -260,9 +260,9 @@ def _item_facts(
     the body extracted once here, reused by both the list and detail read paths.
     """
     body = _body_after_frontmatter(text)
-    has_acceptance = _section_present_in_body(body, ("akzeptanz", "acceptance", "criteria"))
+    has_acceptance = _section_present_in_body(body, ("akzeptanz", "acceptance", "criteria", "kriterien"))
     has_next_action = _section_present_in_body(
-        body, ("next action", "next step", "nächster", "naechster", "vorgehen")
+        body, ("next action", "next step", "nächster", "naechster", "vorgehen", "umsetzungshinweis")
     )
     missing_acceptance = not has_acceptance
     missing_next_action = status != "done" and not has_next_action
@@ -295,7 +295,7 @@ def _item_facts(
     if _body_scope_score(body) >= 10:
         issues.append({"code": "large_scope", "severity": "warn"})
     if missing_next_action:
-        issues.append({"code": "missing_next_action", "severity": "risk"})
+        issues.append({"code": "missing_next_action", "severity": "warn"})
 
     if status not in _STATUSES:
         readiness = "drift"
@@ -320,7 +320,7 @@ def _item_facts(
 
 def _detail_sections(text: str) -> dict[str, Any]:
     decision = _extract_section_lines(text, ("decision", "why now", "warum jetzt"))
-    acceptance = _extract_section_lines(text, ("akzeptanz", "acceptance", "criteria"), max_lines=12)
+    acceptance = _extract_section_lines(text, ("akzeptanz", "acceptance", "criteria", "kriterien"), max_lines=12)
     proofs = _extract_section_lines(text, ("current evidence", "last proof", "proof", "beleg", "evidence", "ergebnis"))
     blockers = _extract_section_lines(text, ("blocker", "blockers", "blocked", "blockiert"))
     next_actions = _extract_section_lines(text, ("next action", "next step", "nächster", "naechster", "vorgehen"), max_lines=3)

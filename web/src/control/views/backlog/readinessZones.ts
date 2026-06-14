@@ -1,8 +1,15 @@
 // Pure helper: categorise FO backlog items into the three readiness zones.
 // Lives in its own module so BacklogSections.tsx (component-only) keeps
 // the react-refresh constraint and this function stays independently testable.
-import { readinessForFoItem, EXCLUDED_STATUSES } from "../../lib/foBacklog";
+import { readinessForFoItem } from "../../lib/foBacklog";
 import type { BacklogItem } from "../../lib/schemas";
+
+// Statuses that structurally cannot be "Bereit" regardless of readiness:
+// - in_progress: already running.
+// - done: finished, already out.
+// `later` is NOT excluded: `later`+`readiness==="ready"` = a parked-but-done task
+// that the backend has promoted to workable — it belongs in Bereit.
+const BEREIT_BLOCKED_STATUSES = new Set(["in_progress", "done"]);
 
 export function partitionReadinessZones(items: BacklogItem[]): {
   ready: BacklogItem[];
@@ -13,22 +20,22 @@ export function partitionReadinessZones(items: BacklogItem[]): {
   const grooming: BacklogItem[] = [];
   const ideas: BacklogItem[] = [];
   for (const item of items) {
-    // Items with excluded statuses (later, done, in_progress, blocked) are always
-    // Ideenspeicher/Rohmaterial — regardless of what readinessForFoItem computes.
-    // The v1 client fallback returns "ready" for any clean item (including later),
-    // which would otherwise place raw idea-storage in the Bereit zone.
-    if (EXCLUDED_STATUSES.has(item.status)) {
-      ideas.push(item);
+    const r = readinessForFoItem(item);
+    // Bereit: server (or v1 fallback) says ready, and the status is not structurally
+    // ineligible (in_progress is already running; done is finished).
+    if (r === "ready" && !BEREIT_BLOCKED_STATUSES.has(item.status)) {
+      ready.push(item);
       continue;
     }
-    const r = readinessForFoItem(item);
-    if (r === "ready") {
-      ready.push(item);
-    } else if (r === "needs_grooming" || r === "drift") {
+    // Schleifen: needs attention — grooming gaps, contract drift, or externally blocked.
+    // `blocked` belongs here: it has a concrete blocker the operator can act on, not raw
+    // idea-storage.
+    if (r === "needs_grooming" || r === "drift" || r === "blocked") {
       grooming.push(item);
-    } else {
-      ideas.push(item);
+      continue;
     }
+    // Ideenspeicher: the genuine rest (done, in_progress, raw parked without a clear signal).
+    ideas.push(item);
   }
   return { ready, grooming, ideas };
 }
