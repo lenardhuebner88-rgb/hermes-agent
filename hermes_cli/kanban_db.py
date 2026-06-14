@@ -9915,16 +9915,19 @@ def dispatch_once(
 
     # serialize_by_repo (A+C): a per-resolved-repo_root in-flight lock beside the
     # per-profile cap. Seed from every NON-TERMINAL task that is NOT itself a fresh
-    # ready candidate — i.e. exclude 'done','archived' AND 'ready'. Excluding 'ready'
-    # is what lets the first ready candidate for an idle repo claim (it re-adds itself
-    # on claim, step 3d); INCLUDING 'review' and 'blocked' is the fix for the
-    # 0167-0171 wave (a task parked in review/blocked must keep holding its repo so
-    # N+1 never branches from a stale main). Empty set + flag off => strict no-op.
+    # ready candidate and NOT merely parked for later — i.e. exclude 'done',
+    # 'archived', 'ready', and 'scheduled'. Excluding 'ready' is what lets the
+    # first ready candidate for an idle repo claim (it re-adds itself on claim,
+    # step 3d). Excluding 'scheduled' keeps deliberately parked backlog cards
+    # from blocking unrelated ready work in the same repo. INCLUDING 'review' and
+    # 'blocked' is the fix for the 0167-0171 wave (a task parked in review/blocked
+    # must keep holding its repo so N+1 never branches from a stale main).
+    # Empty set + flag off => strict no-op.
     _repo_locked: set[str] = set()
     if serialize_by_repo:
         for irow in conn.execute(
             "SELECT workspace_kind, workspace_path FROM tasks "
-            "WHERE status NOT IN ('done', 'archived', 'ready')"
+            "WHERE status NOT IN ('done', 'archived', 'ready', 'scheduled')"
         ):
             _rr = _repo_root_for_row(irow["workspace_kind"], irow["workspace_path"])
             if _rr:

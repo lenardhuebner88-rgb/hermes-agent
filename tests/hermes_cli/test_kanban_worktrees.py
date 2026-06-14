@@ -443,6 +443,34 @@ def test_dispatch_once_flag_off_is_unchanged(
     assert not (repo / ".worktrees").exists()
 
 
+def test_scheduled_tasks_do_not_hold_repo_serialization_lock(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """Parked backlog cards must not block a newly-ready task in the same repo."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        parked = kb.create_task(
+            conn, title="parked", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        assert kb.schedule_task(conn, parked, reason="park for later")
+        ready = kb.create_task(
+            conn, title="ready", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn, serialize_by_repo=True)
+
+    assert ready in spawned
+    assert spawned[ready] == str(repo)
+    assert res.skipped_repo_serialized == []
+    assert parked not in spawned
+
+
 def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
     assert kwt.isolation_mode() == "off"
