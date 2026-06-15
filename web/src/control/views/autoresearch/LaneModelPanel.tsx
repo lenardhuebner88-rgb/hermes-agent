@@ -58,7 +58,14 @@ export function LaneModelPanel() {
 
   return (
     <Panel eyebrow={de.autoresearch.laneModelsEyebrow} title={de.autoresearch.laneModelsHeading} actions={loading ? <Spinner /> : null} className="sm:p-5">
-      {error ? <ToneCallout tone="red">{de.autoresearch.laneModelsFailed}: {error}</ToneCallout> : null}
+      {error ? (
+        <ToneCallout tone="red">
+          <div className="flex items-center justify-between gap-3">
+            <span>{de.autoresearch.laneModelsFailed}: {error}</span>
+            <Button outlined className="hc-hit shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
+          </div>
+        </ToneCallout>
+      ) : null}
       {loading && !aux ? <SkeletonCard rows={2} className="mb-3" /> : null}
       <div className="grid gap-3 md:grid-cols-3">
         {LANE_MODEL_SLOTS.map((slot) => {
@@ -120,14 +127,18 @@ export function TestHardeningSlotPicker() {
 function SingleLaneModelPicker({ task, titleLane }: { task: "code_audit" | "test_hardening"; titleLane: string }) {
   const [aux, setAux] = useState<AuxiliaryModelsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const loadAux = async () => {
     setLoading(true);
+    setError(null);
     try {
       setAux(await fetchJSON<AuxiliaryModelsResponse>("/api/model/auxiliary"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -157,6 +168,14 @@ function SingleLaneModelPicker({ task, titleLane }: { task: "code_audit" | "test
         <span className="text-xs hc-soft">Modell</span>
         {loading ? <Spinner /> : <StatusPill tone={!assignment?.provider || assignment.provider === "auto" ? "zinc" : "cyan"} label={task} />}
       </div>
+      {error ? (
+        <ToneCallout tone="red">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs">{de.autoresearch.laneModelsFailed}: {error}</span>
+            <Button outlined className="hc-hit shrink-0" onClick={() => void loadAux()} disabled={loading}>Erneut versuchen</Button>
+          </div>
+        </ToneCallout>
+      ) : null}
       <p className="hc-mono truncate text-xs hc-soft" title={value}>{value}</p>
       <Button outlined className="hc-hit mt-2 w-full" onClick={() => setPickerOpen(true)} disabled={loading || saving} prefix={saving ? <Spinner /> : <Settings2 className="h-4 w-4" />}>
         {de.autoresearch.laneModelChange}
