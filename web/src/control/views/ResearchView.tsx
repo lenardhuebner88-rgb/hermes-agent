@@ -80,7 +80,10 @@ export function ResearchEntry({ card, now }: { card: ResearchCard; now: number }
     };
     void load();
     // Solange offen + nicht fertig: Antwort nachpollen.
-    const id = done ? 0 : window.setInterval(() => void load(), 8000);
+    const id = done ? 0 : window.setInterval(() => {
+      if (document.hidden) return;
+      void load();
+    }, 8000);
     return () => { cancelled = true; if (id) window.clearInterval(id); };
   }, [open, card.id, done]);
 
@@ -155,7 +158,10 @@ export function ResearchView(_props: { density?: Density }) {
   useEffect(() => {
     // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip), s.o.
     const firstLoad = window.setTimeout(() => void loadHistory(), 0);
-    const id = window.setInterval(() => void loadHistory(), 10000);
+    const id = window.setInterval(() => {
+      if (document.hidden) return;
+      void loadHistory();
+    }, 10000);
     return () => {
       window.clearTimeout(firstLoad);
       window.clearInterval(id);
