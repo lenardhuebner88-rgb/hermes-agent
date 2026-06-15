@@ -7729,6 +7729,15 @@ DEFAULT_FAILURE_LIMIT = 2
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
+# Max transient worktree-provisioning re-queues per task before falling back
+# to the normal (counted) spawn-failure / block path. A transient git-lock
+# timeout is infrastructure, not a task defect, so it re-queues the task to
+# ``ready`` WITHOUT consuming the ``consecutive_failures`` budget — but only up
+# to this cap, so chronic contention still surfaces as a block. The effective
+# value is re-read from ``HERMES_SPAWN_RETRY_LIMIT`` at dispatch time (this
+# constant is the documented default / fallback).
+SPAWN_RETRY_LIMIT = int(os.environ.get("HERMES_SPAWN_RETRY_LIMIT", "5"))
+
 # Max bytes to keep in a single worker log file. The dispatcher truncates
 # and rotates on spawn if the file is larger than this at spawn time.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
@@ -8589,6 +8598,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    count_failure: bool = True,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -8618,6 +8628,13 @@ def _record_task_failure(
     when the breaker trips, so callers can include outcome-specific
     context (e.g. pid on crash, elapsed on timeout).
 
+    ``count_failure`` (default True) controls the circuit breaker. When
+    False, the consecutive-failures counter is NOT incremented and the
+    breaker is NEVER tripped — the claim/run are still closed cleanly and
+    the task transitions back to ``ready``. Used by the transient
+    spawn-retry path (``_record_spawn_retry``), where an infrastructure
+    timeout must not consume the task's real failure budget.
+
     Resolution order for the effective threshold:
       1. per-task ``max_retries`` if set (nothing else overrides)
       2. caller-supplied ``failure_limit`` (gateway passes the config
@@ -8634,7 +8651,11 @@ def _record_task_failure(
         ).fetchone()
         if row is None:
             return False
-        failures = int(row["consecutive_failures"]) + 1
+        # Transient path (count_failure=False) leaves the counter untouched;
+        # everything else increments it toward the breaker threshold.
+        failures = int(row["consecutive_failures"])
+        if count_failure:
+            failures += 1
         cur_status = row["status"]
 
         # Per-task override wins over both caller-supplied and default
@@ -8649,7 +8670,7 @@ def _record_task_failure(
             effective_limit = int(failure_limit)
             limit_source = "dispatcher"
 
-        if failures >= effective_limit:
+        if count_failure and failures >= effective_limit:
             # Trip the breaker.
             if release_claim:
                 # Spawn path: still running, also clear claim state.
@@ -8748,6 +8769,39 @@ def _record_spawn_failure(
         failure_limit=failure_limit,
         release_claim=True,
         end_run=True,
+    )
+
+
+def _count_spawn_retries(conn: sqlite3.Connection, task_id: str) -> int:
+    """How many transient spawn re-queues this task has already taken.
+
+    Counted over the ``spawn_retry`` task_event log (no DB-schema change),
+    so it survives process restarts and is the budget the dispatcher checks
+    against ``SPAWN_RETRY_LIMIT``.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'spawn_retry'",
+        (task_id,),
+    ).fetchone()[0]
+
+
+def _record_spawn_retry(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+    """Transient provisioning failure: release the claim, close the open run
+    with a ``spawn_retry`` outcome, and put the task back to ``ready`` —
+    WITHOUT touching ``consecutive_failures``.
+
+    ``_record_task_failure``'s ``end_run`` path emits the single
+    ``spawn_retry`` task_event that ``_count_spawn_retries`` counts against
+    ``SPAWN_RETRY_LIMIT``; the next dispatch tick retries once the git-lock
+    contention clears. Distinct from ``_record_spawn_failure`` (the
+    permanent / budget-exhausted path), which counts toward the breaker.
+    """
+    _record_task_failure(
+        conn, task_id, reason,
+        outcome="spawn_retry",
+        release_claim=True,
+        end_run=True,
+        count_failure=False,
     )
 
 
@@ -10417,12 +10471,29 @@ def dispatch_once(
                     conn, claimed, workspace, board=board,
                 )
         except Exception as exc:
-            auto = _record_spawn_failure(
-                conn, claimed.id, f"worktree provisioning: {exc}",
-                failure_limit=failure_limit,
+            from hermes_cli import kanban_worktrees as _kwt
+            # A transient git-lock timeout is infrastructure, not a task
+            # defect: re-queue to ``ready`` WITHOUT consuming the
+            # consecutive_failures budget, up to SPAWN_RETRY_LIMIT (read from
+            # the env at call time so operators/tests can tune it). Only once
+            # the spawn budget is spent — or for a permanent WorktreeError —
+            # do we fall back to the normal counted spawn-failure/block path.
+            spawn_retry_limit = int(
+                os.environ.get("HERMES_SPAWN_RETRY_LIMIT", SPAWN_RETRY_LIMIT)
             )
-            if auto:
-                result.auto_blocked.append(claimed.id)
+            transient = isinstance(exc, _kwt.WorktreeTimeout)
+            if transient and _count_spawn_retries(conn, claimed.id) < spawn_retry_limit:
+                _record_spawn_retry(
+                    conn, claimed.id,
+                    f"worktree provisioning (transient): {exc}",
+                )
+            else:
+                auto = _record_spawn_failure(
+                    conn, claimed.id, f"worktree provisioning: {exc}",
+                    failure_limit=failure_limit,
+                )
+                if auto:
+                    result.auto_blocked.append(claimed.id)
             continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
