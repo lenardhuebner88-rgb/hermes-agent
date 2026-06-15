@@ -196,10 +196,49 @@ export function useAutoresearchRuns() {
   );
 }
 
+type ProposalActivityTone = "emerald" | "amber" | "violet" | "red";
+type ProposalActivityEntry = { at: number; text: string; tone: ProposalActivityTone };
+
+// C5: persist the proposals activity timeline so it survives a tab reload.
+// sessionStorage is tab-scoped and cleared when the tab closes. Both read and
+// write are guarded — a disabled/full storage or a malformed payload silently
+// falls back to an empty log instead of throwing into the render path.
+const PROPOSAL_ACTIVITY_STORAGE_KEY = "hermes-control:activity-timeline";
+const PROPOSAL_ACTIVITY_CAP = 8;
+
+function readProposalActivity(): ProposalActivityEntry[] {
+  try {
+    const raw = sessionStorage.getItem(PROPOSAL_ACTIVITY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as unknown[])
+      .filter((e): e is ProposalActivityEntry => {
+        if (!e || typeof e !== "object") return false;
+        const rec = e as Record<string, unknown>;
+        return typeof rec.at === "number" && typeof rec.text === "string" && typeof rec.tone === "string";
+      })
+      .slice(0, PROPOSAL_ACTIVITY_CAP);
+  } catch {
+    return [];
+  }
+}
+
+function writeProposalActivity(items: ProposalActivityEntry[]): void {
+  try {
+    sessionStorage.setItem(PROPOSAL_ACTIVITY_STORAGE_KEY, JSON.stringify(items.slice(0, PROPOSAL_ACTIVITY_CAP)));
+  } catch {
+    // storage unavailable or over quota — keep the in-memory timeline only
+  }
+}
+
 export function useProposals() {
-  const [activity, setActivity] = useState<Array<{ at: number; text: string; tone: "emerald" | "amber" | "violet" | "red" }>>([]);
+  const [activity, setActivity] = useState<ProposalActivityEntry[]>(() => readProposalActivity());
   const [busy, setBusy] = useState<string | null>(null);
   const [batchConfirmById, setBatchConfirmById] = useState<BatchConfirmById>({});
+  useEffect(() => {
+    writeProposalActivity(activity);
+  }, [activity]);
   const state = usePolling<ProposalsResponse>(
     "autoresearch/proposals",
     async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/proposals"), "autoresearch/proposals"),
@@ -209,8 +248,8 @@ export function useProposals() {
   const proposals = useMemo(() => state.data?.proposals ?? [], [state.data]);
   const openSkillProposals = useMemo(() => proposals.filter((p) => isActionable(p) && p.mode === "skill"), [proposals]);
 
-  const log = useCallback((text: string, tone: "emerald" | "amber" | "violet" | "red" = "violet") => {
-    setActivity((items) => [{ at: Math.floor(Date.now() / 1000), text, tone }, ...items].slice(0, 8));
+  const log = useCallback((text: string, tone: ProposalActivityTone = "violet") => {
+    setActivity((items) => [{ at: Math.floor(Date.now() / 1000), text, tone }, ...items].slice(0, PROPOSAL_ACTIVITY_CAP));
   }, []);
 
   const mutateProposal = useCallback((id: string, patch: Partial<Proposal>) => {
