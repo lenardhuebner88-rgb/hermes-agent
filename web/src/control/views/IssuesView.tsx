@@ -146,7 +146,10 @@ export function IssuesView(_props: { density?: Density }) {
     // (TriageStrip): synchrones setState im Effect verletzt react-hooks/
     // set-state-in-effect und kaskadiert Renders.
     const firstLoad = window.setTimeout(() => void load(), 0);
-    const id = window.setInterval(() => void load(), 60000);
+    const id = window.setInterval(() => {
+      if (document.hidden) return;
+      void load();
+    }, 60000);
     return () => {
       window.clearTimeout(firstLoad);
       window.clearInterval(id);
