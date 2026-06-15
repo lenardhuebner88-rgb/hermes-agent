@@ -604,7 +604,8 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onSkip={store.skip}
       />
 
-      <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} />
+      {runs.error ? <ToneCallout tone="red">{runs.error}</ToneCallout> : null}
+      <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} loading={runs.loading && !runs.data} />
 
       <section className="hc-card p-4">
         <h2 className="mb-3 text-base font-semibold text-white">{de.autoresearch.activity}</h2>

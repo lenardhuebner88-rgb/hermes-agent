@@ -5,10 +5,18 @@ import { getAutoresearchRunCard, getAutoresearchRunSummary, type AutoresearchRun
 import { de } from "../../i18n/de";
 import type { AutoresearchRun, Proposal } from "../../lib/types";
 import { StatusPill } from "../../components/atoms";
-import { Disclosure, Panel, Stagger, StaggerItem, Text } from "../../components/primitives";
+import { Disclosure, Panel, SkeletonCard, Stagger, StaggerItem, Text } from "../../components/primitives";
 import { reviewStepToneClass } from "./panels.helpers";
 
-export function RunsList({ runs, proposals }: { runs: AutoresearchRun[]; proposals: Proposal[] }) {
+export function RunsList({ runs, proposals, loading = false }: { runs: AutoresearchRun[]; proposals: Proposal[]; loading?: boolean }) {
+  if (loading && runs.length === 0) {
+    return (
+      <section id="autoresearch-history" className="hc-card scroll-mt-6 p-4">
+        <Text as="h2" variant="subtitle" className="text-white">{de.autoresearch.recentRuns}</Text>
+        <SkeletonCard rows={4} className="mt-3" />
+      </section>
+    );
+  }
   const totalTokens = sumRunTokens(runs);
   const recent = summarizeRecentRuns(runs, 7);
   const proposalRoi = summarizeProposalRoi(proposals, recent.tokens);
