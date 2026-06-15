@@ -11,7 +11,7 @@ import type { useAutoresearchStatus } from "../../hooks/useControlData";
 import type { AutoresearchSectionNavItem } from "../../lib/autoresearchNavigation";
 import type { AutoresearchReadinessSummary } from "../../lib/autoresearchReadiness";
 import type { Proposal, ToneName } from "../../lib/types";
-import { StatusPill, ToneCallout } from "../../components/atoms";
+import { StaleBadge, StatusPill, ToneCallout } from "../../components/atoms";
 import { Card, Text } from "../../components/primitives";
 import { CockpitSectionNav, Metric, ReadinessPanel } from "./panels";
 import { reviewStepToneClass } from "./panels.helpers";
@@ -89,6 +89,7 @@ export function AutoresearchHero({
             <StatusPill tone={loop.routeTone} label={`Route ${status.data?.route_status ?? "unbekannt"}`} dot={loop.routeTone === "emerald" ? "ready" : "warn"} />
             <StatusPill tone={recommendation.tone} label={recommendation.eyebrow} />
             <span className="rounded-full border border-white/10 px-2.5 py-1 text-xs hc-soft">{loop.iterationLabel}</span>
+            <StaleBadge isStale={status.isStale} lastUpdated={status.lastUpdated} errorObj={status.errorObj} error={status.error} />
           </div>
           {alert.show ? <HeroAlertStrip alert={alert} onJump={onJump} /> : null}
           <div>

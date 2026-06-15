@@ -323,7 +323,10 @@ function LesesaalBody() {
       void load();
       void loadPreferences();
     }, 0);
-    const id = window.setInterval(() => void load(), 60000);
+    const id = window.setInterval(() => {
+      if (document.hidden) return;
+      void load();
+    }, 60000);
     return () => {
       window.clearTimeout(firstLoad);
       window.clearInterval(id);
