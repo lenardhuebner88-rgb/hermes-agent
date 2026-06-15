@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Clock, FileText, Pause, Play, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useCronObservability, useCronOutput } from "../hooks/useControlData";
@@ -33,6 +33,10 @@ function CronJobCard({ job, controls, output }: {
   output: ReturnType<typeof useCronOutput>;
 }) {
   const [open, setOpen] = useState(false);
+  // Inline-Zwei-Schritt-Bestätigung (LanesView-Muster) statt window.confirm.
+  // `pending` ist Komponenten-State → pro Karte gescoped: das Schärfen von Job A
+  // schärft Job B nicht. Es ist immer höchstens eine Aktion gleichzeitig scharf.
+  const [pending, setPending] = useState<"pause" | "resume" | "trigger" | null>(null);
   const status = jobTone(job);
   const now = nowSec();
   const lastRunEpoch = toEpoch(job.last_run_at);
@@ -48,6 +52,30 @@ function CronJobCard({ job, controls, output }: {
     setOpen(next);
     if (next && !loaded && !outLoading) void output.load(ref);
   };
+
+  // Eine scharfe Aktion → Inline-Bestätigungszeile (Frage + Bestätigen + Abbrechen),
+  // kein Browser-Dialog. Abbrechen setzt nur `pending` zurück und feuert keine API.
+  const confirmRow = (question: string, confirmLabel: string, icon: ReactNode, run: () => void) => (
+    <span className="inline-flex flex-wrap items-center justify-end gap-2">
+      <span className="hc-type-label hc-soft min-w-0 break-words">{question}</span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => { run(); setPending(null); }}
+        className="inline-flex min-h-11 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] bg-white/5 px-2.5 text-xs text-white disabled:opacity-40 sm:min-h-7"
+      >
+        {icon}{busy ? "…" : confirmLabel}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setPending(null)}
+        className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-2.5 text-xs hc-soft sm:min-h-7"
+      >
+        {de.worker.actions.cancel}
+      </button>
+    </span>
+  );
 
   const eyebrow = (
     <span className="inline-flex min-w-0 items-center gap-2">
@@ -67,17 +95,29 @@ function CronJobCard({ job, controls, output }: {
     <FleetPanel eyebrow={eyebrow} meta={meta}>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {job.enabled && job.state !== "paused" && !job.paused_at ? (
-          <Button size="xs" ghost className="min-h-11" disabled={busy} onClick={() => { if (window.confirm(t.confirmPause)) void controls.pause(ref); }}>
-            <Pause className="h-3.5 w-3.5" />{t.actions.pause}
-          </Button>
+          pending === "pause" ? (
+            confirmRow(t.confirmPause, t.actions.pause, <Pause className="h-3.5 w-3.5" />, () => void controls.pause(ref))
+          ) : (
+            <Button size="xs" ghost className="min-h-11" disabled={busy} onClick={() => setPending("pause")}>
+              <Pause className="h-3.5 w-3.5" />{t.actions.pause}
+            </Button>
+          )
         ) : (
-          <Button size="xs" ghost className="min-h-11" disabled={busy} onClick={() => { if (window.confirm(t.confirmResume)) void controls.resume(ref); }}>
-            <Play className="h-3.5 w-3.5" />{t.actions.resume}
+          pending === "resume" ? (
+            confirmRow(t.confirmResume, t.actions.resume, <Play className="h-3.5 w-3.5" />, () => void controls.resume(ref))
+          ) : (
+            <Button size="xs" ghost className="min-h-11" disabled={busy} onClick={() => setPending("resume")}>
+              <Play className="h-3.5 w-3.5" />{t.actions.resume}
+            </Button>
+          )
+        )}
+        {pending === "trigger" ? (
+          confirmRow(t.confirmTrigger, t.actions.trigger, null, () => void controls.trigger(ref))
+        ) : (
+          <Button size="xs" className="min-h-11" disabled={busy} onClick={() => setPending("trigger")}>
+            {t.actions.trigger}
           </Button>
         )}
-        <Button size="xs" className="min-h-11" disabled={busy} onClick={() => { if (window.confirm(t.confirmTrigger)) void controls.trigger(ref); }}>
-          {t.actions.trigger}
-        </Button>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
