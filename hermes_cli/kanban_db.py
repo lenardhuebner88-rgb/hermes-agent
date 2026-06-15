@@ -2543,6 +2543,73 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+_CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
+
+
+def _is_code_assignee(assignee: Optional[str]) -> bool:
+    if not assignee:
+        return False
+    try:
+        return assignee in _review_gate_config()["code_roles"]
+    except Exception:
+        return False
+
+
+def _with_code_task_contract(
+    body: Optional[str],
+    *,
+    assignee: Optional[str],
+    workspace_kind: str,
+    workspace_path: Optional[str],
+    tenant: Optional[str],
+) -> Optional[str]:
+    """Append a small, stable contract to code-role task bodies.
+
+    GPT-class code workers do better when every card carries the same
+    operational rails. Keep this terse and idempotent: the user/orchestrator
+    spec remains first, and existing cards that already include the marker are
+    left untouched.
+    """
+    if not _is_code_assignee(assignee):
+        return body
+    text = (body or "").strip()
+    if _CODE_TASK_CONTRACT_MARKER in text:
+        return body
+    workspace = workspace_path or "Hermes-managed scratch workspace"
+    tenant_label = (tenant or "default").strip() or "default"
+    contract = "".join(
+        [
+            f"{_CODE_TASK_CONTRACT_MARKER}\n",
+            f"- Assignee: {assignee}\n",
+            f"- Tenant: {tenant_label}\n",
+            f"- Workspace: {workspace_kind}:{workspace}\n",
+            (
+                "- Scope: edit only files required for this card; "
+                "do not broaden into unrelated cleanup.\n"
+            ),
+            (
+                "- Forbidden: no git push/deploy/destructive FS/DB schema changes; "
+                "no secret printing.\n"
+            ),
+            (
+                "- Dependency gate: if required deps are missing "
+                "(e.g. next/tsc/node_modules), restore them with the project "
+                "lockfile when safe, otherwise block with exact evidence instead "
+                "of reverting unrelated work.\n"
+            ),
+            (
+                "- Tests: run the smallest relevant lint/build/test gate; "
+                "if skipped, state why.\n"
+            ),
+            (
+                "- Completion metadata: summarize changed paths, commands run, "
+                "residual risk, and next gate/review needs."
+            ),
+        ]
+    )
+    return f"{text}\n\n{contract}" if text else contract
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2701,6 +2768,14 @@ def create_task(
             if FO_REPO_PATH.is_dir():
                 workspace_kind = "dir"
                 workspace_path = str(FO_REPO_PATH)
+
+    body = _with_code_task_contract(
+        body,
+        assignee=assignee,
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
+        tenant=tenant,
+    )
 
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly. Board defaults represent
@@ -10161,6 +10236,28 @@ def dispatch_once(
             # multi-lane setups where the ready queue is steadily full
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
+            # Emit ONE deduped diagnostic event so a MIS-assigned task
+            # (assignee names a subagent/role, not a real profile) is
+            # visible on the board timeline instead of silently rotting in
+            # ``ready`` with no diagnosis. F2 dedup (role_fit_held pattern):
+            # skip when the task's most recent event is already
+            # ``nonspawnable`` — the task is re-evaluated every tick, so
+            # without this it would emit one event per tick forever. This is
+            # diagnostic ONLY: ``has_spawnable_ready`` still treats these as
+            # non-spawnable so the stuck-alarm stays suppressed for genuine
+            # terminal lanes (orion-cc / orion-research).
+            if not dry_run:
+                latest = conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if latest is None or latest["kind"] != "nonspawnable":
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "nonspawnable",
+                            {"assignee": row_assignee},
+                        )
             continue
         # Per-profile concurrency cap (#21582): even if there's global
         # headroom, refuse to spawn for an assignee that's already at
@@ -10396,6 +10493,22 @@ def dispatch_once(
             profile_exists = None  # type: ignore[assignment]
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
+            # Mirror of the ready-path diagnostic above: emit ONE deduped
+            # ``nonspawnable`` event so a review task whose assignee is not a
+            # runnable profile is visible on the timeline instead of silently
+            # rotting in ``review``.
+            if not dry_run:
+                latest = conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if latest is None or latest["kind"] != "nonspawnable":
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "nonspawnable",
+                            {"assignee": row["assignee"]},
+                        )
             continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))

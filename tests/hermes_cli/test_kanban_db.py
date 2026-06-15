@@ -2956,6 +2956,27 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
     assert guarded_evt.payload.get("reason") == "recent_success"
 
 
+def test_dispatch_nonspawnable_emits_one_diagnostic_event(kanban_home, monkeypatch):
+    """A ready task whose assignee is not a runnable profile leaves a single
+    ``nonspawnable`` event so the skip is visible on the board timeline,
+    instead of the task silently rotting in ``ready`` with no diagnosis.
+    Deduped (F2 pattern): a second dispatch tick does not duplicate it."""
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="visual check", assignee="ui-verifier")
+        kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
+        kb.dispatch_once(conn, spawn_fn=lambda task, ws: None)
+        events = kb.list_events(conn, t)
+
+    kinds = [e.kind for e in events]
+    assert kinds.count("nonspawnable") == 1
+    evt = next(e for e in events if e.kind == "nonspawnable")
+    assert isinstance(evt.payload, dict)
+    assert evt.payload.get("assignee") == "ui-verifier"
+
+
 # ---------------------------------------------------------------------------
 # Workspace resolution
 # ---------------------------------------------------------------------------
@@ -4516,6 +4537,58 @@ def test_create_task_with_explicit_workspace_ignores_board_default(kanban_home):
     assert t is not None
     assert t.workspace_path == explicit
     assert t.workspace_path != "/board/default"
+
+
+def test_create_task_code_role_gets_coder_contract(
+    kanban_home, monkeypatch, tmp_path
+):
+    """Code-role cards get compact scope/deps/test/handoff rails."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+    repo = tmp_path / "family-organizer"
+    repo.mkdir()
+    from hermes_cli import kanban_worktrees
+
+    monkeypatch.setattr(kanban_worktrees, "FO_REPO_PATH", repo)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="[FO] ship chips",
+            body="Implement favorite chips.",
+            assignee="coder",
+            tenant="family-organizer",
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.workspace_kind == "dir"
+    assert task.workspace_path == str(repo)
+    assert task.body is not None
+    assert task.body.startswith("Implement favorite chips.")
+    assert "## Hermes Coder Contract v1" in task.body
+    assert f"Workspace: dir:{repo}" in task.body
+    assert "Dependency gate:" in task.body
+    assert "Completion metadata:" in task.body
+
+
+def test_create_task_non_code_role_body_unchanged(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="read docs",
+            body="Summarize the release notes.",
+            assignee="research",
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.body == "Summarize the release notes."
 
 
 # ---------------------------------------------------------------------------

@@ -815,6 +815,32 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    # Reject an assignee that is not a runnable Hermes profile. The
+    # dispatcher's profile_exists gate would otherwise silently skip the
+    # task on every tick (it stays 'ready' with no diagnosis), so catch it
+    # here and give the agent immediate feedback instead of letting it fan
+    # out a card that can never spawn. A common failure is naming a Claude
+    # subagent type (e.g. 'ui-verifier') instead of a profile. Fail open if
+    # profile_exists can't be imported — same degradation as the gate.
+    # Exempt the ``openclaw:<agent>`` cross-system lane: it is intentionally
+    # NOT a local profile and the dispatcher intercepts it BEFORE the
+    # profile_exists gate (see kanban_db.OPENCLAW_ASSIGNEE_PREFIX), so the
+    # check here must let it through.
+    try:
+        from hermes_cli.profiles import profile_exists
+        from hermes_cli.kanban_db import OPENCLAW_ASSIGNEE_PREFIX
+    except Exception:
+        profile_exists = None  # type: ignore[assignment]
+        OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
+    _is_openclaw = str(assignee).lower().startswith(OPENCLAW_ASSIGNEE_PREFIX)
+    if profile_exists is not None and not _is_openclaw and not profile_exists(assignee):
+        return tool_error(
+            f"assignee {assignee!r} is not a runnable Hermes profile — the "
+            "dispatcher only spawns tasks whose assignee matches a profile "
+            "under ~/.hermes/profiles/ (e.g. coder, reviewer, research, "
+            "critic, premium). Subagent/role names are not profiles and would hang "
+            "in 'ready' forever."
+        )
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -840,6 +866,8 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(bool_error)
     idempotency_key = args.get("idempotency_key")
     max_runtime_seconds = args.get("max_runtime_seconds")
+    max_iterations = args.get("max_iterations")
+    max_continuations = args.get("max_continuations")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
     if isinstance(skills, str):
@@ -887,6 +915,12 @@ def _handle_create(args: dict, **kw) -> str:
                 max_runtime_seconds=(
                     int(max_runtime_seconds)
                     if max_runtime_seconds is not None else None
+                ),
+                max_iterations=(
+                    int(max_iterations) if max_iterations is not None else None
+                ),
+                max_continuations=(
+                    int(max_continuations) if max_continuations is not None else None
                 ),
                 skills=skills,
                 goal_mode=goal_mode,
@@ -1437,6 +1471,21 @@ KANBAN_CREATE_SCHEMA = {
                     "Per-task runtime cap. When exceeded, the "
                     "dispatcher SIGTERMs the worker and re-queues the "
                     "task with outcome='timed_out'."
+                ),
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Per-task worker turn/tool budget override. The dispatcher "
+                    "passes it as --max-turns and HERMES_MAX_ITERATIONS so hard "
+                    "coder cards can finish without hitting the profile default."
+                ),
+            },
+            "max_continuations": {
+                "type": "integer",
+                "description": (
+                    "How many automatic continuation attempts are allowed after "
+                    "explicit iteration-budget exhaustion. Defaults to board policy."
                 ),
             },
             "initial_status": {

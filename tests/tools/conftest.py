@@ -13,6 +13,25 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _assignees_spawnable_by_default(monkeypatch):
+    """Pretend every assignee maps to a real Hermes profile.
+
+    The ``kanban_create`` handler rejects assignees that aren't runnable
+    profiles. Tool tests use synthetic assignees ("peer", "factory") that
+    have no profile directory under the per-test ``HERMES_HOME``, so without
+    this patch every create would be rejected. Mirrors
+    ``tests/hermes_cli/conftest.py``'s ``all_assignees_spawnable``. Tests
+    asserting the rejection re-patch ``profile_exists`` themselves (the
+    test-body patch runs after this autouse fixture and wins).
+    """
+    try:
+        from hermes_cli import profiles
+    except Exception:
+        return
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+
+
 def register_all_web_providers():
     """Register all bundled web-search providers into the global registry.
 

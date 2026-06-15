@@ -1009,6 +1009,64 @@ def test_create_rejects_no_assignee(worker_env):
     assert json.loads(kt._handle_create({"title": "t"})).get("error")
 
 
+def test_create_rejects_unknown_profile_assignee(worker_env, monkeypatch):
+    """Reject a create whose assignee is not a runnable Hermes profile.
+
+    Without this guard an agent can fan out a task naming a Claude
+    subagent type (e.g. ``ui-verifier``) instead of a profile; the
+    dispatcher then silently skips it (the ``profile_exists`` gate) and it
+    hangs in ``ready`` forever. The handler must reject it at creation.
+    """
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    d = json.loads(kt._handle_create({
+        "title": "visual UI check",
+        "assignee": "ui-verifier",
+    }))
+    assert d.get("ok") is not True
+    err = d.get("error", "")
+    assert "ui-verifier" in err
+    assert "profile" in err.lower()
+
+
+def test_create_allows_openclaw_assignee(worker_env, monkeypatch):
+    """An ``openclaw:<agent>`` assignee is a legitimate cross-system lane the
+    dispatcher intercepts BEFORE the profile gate, so the create handler must
+    NOT reject it even though it is not a local Hermes profile."""
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    d = json.loads(kt._handle_create({
+        "title": "lens audit",
+        "assignee": "openclaw:lens",
+    }))
+    assert d.get("ok") is True
+
+
+def test_create_persists_iteration_budget_overrides(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    out = kt._handle_create({
+        "title": "hard coder card",
+        "assignee": "peer",
+        "max_iterations": 140,
+        "max_continuations": 2,
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, d["task_id"])
+        assert task.max_iterations == 140
+        assert task.max_continuations == 2
+    finally:
+        conn.close()
+
+
 def test_create_rejects_non_list_parents(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({"title": "t", "assignee": "a", "parents": 42})
