@@ -953,3 +953,57 @@ def test_complete_task_non_provisioned_untouched(kanban_home, tmp_path):
         assert task.status == "done"
         assert _events(conn, tid, "integration_merged") == []
         assert _events(conn, tid, "integration_parked") == []
+
+
+# ---------------------------------------------------------------------------
+# Spawn-resilience: WorktreeTimeout classification + env-tunable timeout + reap
+# (plan 2026-06-15-001, Tasks 1-3)
+# ---------------------------------------------------------------------------
+
+def test_git_raises_worktree_timeout_on_subprocess_timeout(monkeypatch, repo):
+    """Task 1: a git subprocess timeout surfaces as WorktreeTimeout (a
+    WorktreeError subclass), not a raw subprocess.TimeoutExpired."""
+    def fake_run(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=k.get("timeout", 120))
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    with pytest.raises(kwt.WorktreeTimeout):
+        kwt._git(repo, "status")
+    # Subclass contract: existing ``except WorktreeError`` handlers still catch it.
+    assert issubclass(kwt.WorktreeTimeout, kwt.WorktreeError)
+
+
+def test_git_timeout_follows_env_override(monkeypatch, repo):
+    """Task 2: the timeout handed to subprocess.run follows
+    HERMES_WORKTREE_GIT_TIMEOUT read at call time (not import time)."""
+    seen = {}
+    def fake_run(*a, **k):
+        seen["timeout"] = k.get("timeout")
+        raise subprocess.TimeoutExpired(a[0], k.get("timeout"))
+    monkeypatch.setenv("HERMES_WORKTREE_GIT_TIMEOUT", "37")
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    with pytest.raises(kwt.WorktreeTimeout):
+        kwt._git(repo, "status")
+    assert seen["timeout"] == 37
+
+
+def test_ensure_worktree_reaps_partial_on_failure(monkeypatch, repo):
+    """Task 3: a failed ``worktree add`` (timeout) force-removes + prunes the
+    partial/locked worktree before propagating, so no ``initializing`` leak.
+
+    ``ensure_worktree(repo_root, root_id)`` derives wt/branch/base_branch
+    internally (verified against the real :func:`kwt.ensure_worktree`
+    signature), so the test fakes every ``_git`` call: ``symbolic-ref``
+    (current branch), ``rev-parse`` (branch-exists), the failing
+    ``worktree add``, and the reap's ``worktree remove`` / ``worktree
+    prune``."""
+    calls = []
+    def fake_git(r, *args, check=True, timeout=None):
+        calls.append(tuple(args))
+        if args[:2] == ("worktree", "add"):
+            raise kwt.WorktreeTimeout("simulated add timeout")
+        return ""  # symbolic-ref / rev-parse / remove / prune
+    monkeypatch.setattr(kwt, "_git", fake_git)
+    with pytest.raises(kwt.WorktreeTimeout):
+        kwt.ensure_worktree(repo, "t_reap")
+    assert any(c[:4] == ("worktree", "remove", "--force", "--force") for c in calls)
+    assert any(c[:2] == ("worktree", "prune") for c in calls)

@@ -7136,3 +7136,73 @@ def test_runs_failures_dedupes_per_task_and_filters_recovered(kanban_home):
     assert f["task_id"] == t_open
     assert f["reason"] == "pid 2 exited with code 1"  # jüngster Run gewinnt
     assert f["task_status"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Spawn-resilience: transient worktree-provisioning timeouts re-queue instead
+# of blocking; permanent provisioning errors still block (plan 2026-06-15-001,
+# Task 4). ``all_assignees_spawnable`` makes the ``coder-claude`` profile pass
+# the dispatcher's profile-exists guard so dispatch reaches the worktree
+# provisioning hook.
+# ---------------------------------------------------------------------------
+
+def _count_spawn_retry_events(conn, tid, kind):
+    return conn.execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind=?", (tid, kind)
+    ).fetchone()[0]
+
+
+def test_transient_provisioning_timeout_requeues_without_burning_budget(
+    kanban_home, monkeypatch, all_assignees_spawnable
+):
+    from hermes_cli import kanban_worktrees as kwt
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    def boom(*a, **k):
+        raise kwt.WorktreeTimeout("contention")
+    monkeypatch.setattr(kwt, "provision_for_task", boom)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder-claude",
+                             workspace_kind="worktree", max_retries=1)
+        kb.dispatch_once(conn, board="default")
+        row = conn.execute(
+            "SELECT status, consecutive_failures FROM tasks WHERE id=?", (tid,)
+        ).fetchone()
+        assert row["status"] == "ready"            # re-queued, not blocked
+        assert row["consecutive_failures"] == 0    # budget NOT consumed
+        assert _count_spawn_retry_events(conn, tid, "spawn_retry") == 1
+
+
+def test_spawn_retry_budget_exhaustion_blocks(
+    kanban_home, monkeypatch, all_assignees_spawnable
+):
+    from hermes_cli import kanban_worktrees as kwt
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    monkeypatch.setattr(
+        kwt, "provision_for_task",
+        lambda *a, **k: (_ for _ in ()).throw(kwt.WorktreeTimeout("x")),
+    )
+    monkeypatch.setenv("HERMES_SPAWN_RETRY_LIMIT", "2")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder-claude",
+                             workspace_kind="worktree", max_retries=1)
+        for _ in range(3):
+            kb.dispatch_once(conn, board="default")
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row["status"] == "blocked"          # spawn budget spent → normal block
+
+
+def test_permanent_provisioning_error_blocks_immediately(
+    kanban_home, monkeypatch, all_assignees_spawnable
+):
+    from hermes_cli import kanban_worktrees as kwt
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    monkeypatch.setattr(
+        kwt, "provision_for_task",
+        lambda *a, **k: (_ for _ in ()).throw(kwt.WorktreeError("disk full")),
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder-claude",
+                             workspace_kind="worktree", max_retries=1)
+        kb.dispatch_once(conn, board="default")
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row["status"] == "blocked"          # permanent error: unchanged behavior

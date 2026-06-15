@@ -123,6 +123,15 @@ class WorktreeError(RuntimeError):
     """A provisioning/integration git step failed."""
 
 
+class WorktreeTimeout(WorktreeError):
+    """A git invocation exceeded its timeout (transient lock contention).
+
+    Subclass of WorktreeError so existing ``except WorktreeError`` keeps
+    working, but the dispatcher can isinstance-check it to re-queue instead
+    of permanently blocking.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Config / path predicates
 # ---------------------------------------------------------------------------
@@ -242,14 +251,25 @@ def _git(
     repo: Path | str,
     *args: str,
     check: bool = True,
-    timeout: int = GIT_TIMEOUT_SECONDS,
+    timeout: int | None = None,
 ) -> str:
-    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    # Read the timeout at call time so HERMES_WORKTREE_GIT_TIMEOUT (operator
+    # tuning, tests) is honored — a default-arg bound at import time would
+    # freeze it. Callers passing an explicit ``timeout`` (e.g.
+    # MERGE_TIMEOUT_SECONDS) bypass the env, unchanged.
+    if timeout is None:
+        timeout = int(os.environ.get("HERMES_WORKTREE_GIT_TIMEOUT", GIT_TIMEOUT_SECONDS))
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WorktreeTimeout(
+            f"git {' '.join(args[:3])}… timed out after {timeout}s in {repo}"
+        ) from exc
     if check and proc.returncode != 0:
         raise WorktreeError(
             f"git {' '.join(args[:3])}… failed in {repo}: "
@@ -316,6 +336,19 @@ def dirty_files(repo: Path) -> list[str]:
 # Provisioning
 # ---------------------------------------------------------------------------
 
+def _reap_partial(repo_root: Path | str, wt: Path) -> None:
+    """Reap a partial/locked worktree left behind by a failed ``worktree add``.
+
+    A killed/timed-out ``worktree add`` can leave a registered,
+    ``initializing``-locked worktree that plain ``prune`` won't reap. Force-
+    remove it (the double ``--force`` overrides the lock), then prune the
+    bookkeeping. Best-effort: both calls pass ``check=False`` so reaping never
+    masks the original provisioning error the caller is about to re-raise.
+    """
+    _git(repo_root, "worktree", "remove", "--force", "--force", str(wt), check=False)
+    _git(repo_root, "worktree", "prune", check=False)
+
+
 def ensure_worktree(repo_root: Path, root_id: str) -> dict:
     """Create (or reuse) the chain worktree for *root_id*. Idempotent.
 
@@ -351,11 +384,24 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
 
     try:
         _add()
+    except WorktreeTimeout:
+        # Transient git-lock contention: reap the partial/locked worktree
+        # and re-raise so the dispatcher classifies it as transient
+        # (re-queue, not block — see kanban_db.dispatch_once). Caught BEFORE
+        # the generic WorktreeError on purpose: a timeout must NOT fall into
+        # the inline retry below, which would block the dispatcher for
+        # another full timeout on the same contention.
+        _reap_partial(repo_root, wt)
+        raise
     except WorktreeError:
         # A removed-but-still-registered worktree blocks re-adding; prune
         # the bookkeeping once and retry.
         _git(repo_root, "worktree", "prune", check=False)
-        _add()
+        try:
+            _add()
+        except WorktreeError:
+            _reap_partial(repo_root, wt)
+            raise
 
     # node_modules symlinks (untracked, never committed) so frontend gates
     # run inside the worktree without an npm ci.
