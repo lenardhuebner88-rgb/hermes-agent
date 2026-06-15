@@ -17,7 +17,7 @@ import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySumma
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
-import { ToneCallout } from "../components/atoms";
+import { StaleBadge, ToneCallout } from "../components/atoms";
 import { AutoresearchHero } from "./autoresearch/AutoresearchHero";
 import { ProposalQueue } from "./autoresearch/ProposalQueue";
 import { LoopControls } from "./autoresearch/LoopControls";
@@ -605,6 +605,11 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
       />
 
       {runs.error ? <ToneCallout tone="red">{runs.error}</ToneCallout> : null}
+      {runs.isStale || runs.error ? (
+        <div className="flex justify-end">
+          <StaleBadge isStale={runs.isStale} lastUpdated={runs.lastUpdated} errorObj={runs.errorObj} error={runs.error} />
+        </div>
+      ) : null}
       <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} loading={runs.loading && !runs.data} />
 
       <section className="hc-card p-4">
