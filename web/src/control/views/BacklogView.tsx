@@ -4,7 +4,7 @@ import { AnimatePresence } from "motion/react";
 
 import { de } from "../i18n/de";
 import { useBacklog, useBacklogDetail, useCommissionToFleet, useDispatchFoTask, useFoBoardStatus, type CommissionPayload } from "../hooks/useControlData";
-import { ToneCallout } from "../components/atoms";
+import { StaleBadge, ToneCallout } from "../components/atoms";
 import {
   buildFoAuditPrompt,
   buildFoCommissionPrompt,
@@ -284,6 +284,7 @@ export function BacklogView({ density }: { density: Density }) {
       />
 
       {backlog.error ? <ToneCallout tone="red">{de.backlog.error}</ToneCallout> : null}
+      <StaleBadge isStale={backlog.isStale} lastUpdated={backlog.lastUpdated} errorObj={backlog.errorObj} error={backlog.error} now={nowSec} />
       {data?.error ? <ToneCallout tone="amber">{de.backlog.sourceMissing}</ToneCallout> : null}
 
       <FoHealthStrip items={allItems} contractHealth={data?.contract_health} />

@@ -3,7 +3,7 @@ import { Clock, FileText, Pause, Play, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { useCronObservability, useCronOutput } from "../hooks/useControlData";
 import { de } from "../i18n/de";
-import { Led, StatusPill, ToneCallout } from "../components/atoms";
+import { Led, StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { Disclosure, Stat } from "../components/primitives";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { fmtAge, fmtClock, nowSec } from "../lib/derive";
@@ -166,6 +166,7 @@ export function CronView(_props: { density: Density }) {
   const data = controls.data;
   const jobs = data?.jobs ?? [];
   const gatewayRunning = data?.gateway.running ?? false;
+  const now = nowSec();
 
   return (
     <div className="space-y-5">
@@ -174,6 +175,7 @@ export function CronView(_props: { density: Density }) {
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="hc-type-title text-white">{t.title}</h2>
           <span className="hc-mono text-sm hc-dim">{t.subtitle}</span>
+          <StaleBadge isStale={controls.isStale} lastUpdated={controls.lastUpdated} errorObj={controls.errorObj} error={controls.error} now={now} />
         </div>
       </header>
 
