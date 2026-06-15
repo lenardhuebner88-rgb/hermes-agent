@@ -423,6 +423,7 @@ export function useDeepAudit() {
   useEffect(() => {
     if (status?.state !== "running") return;
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
       void reload();
     }, 5000);
     return () => window.clearInterval(timer);
@@ -498,6 +499,7 @@ export function useTestFoundry() {
   useEffect(() => {
     if (pollIntervalMs === null) return;
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
       void reload();
     }, pollIntervalMs);
     return () => window.clearInterval(timer);
