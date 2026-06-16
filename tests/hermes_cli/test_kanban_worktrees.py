@@ -711,6 +711,31 @@ def test_integration_park_class_marks_operator_reasons(reason):
     assert kwt._integration_park_class(reason) == "needs_operator"
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        # As stored by _park_integration (kanban_db.py): the raw integrator
+        # reason gets an "integration parked: " prefix. The retry lane reads
+        # this stored form, so the classifier must strip it before matching.
+        (
+            "integration parked: dirty files in live checkout overlap the "
+            "branch diff: a.txt",
+            "transient",
+        ),
+        (
+            "integration parked: merge conflict/failure (aborted): boom",
+            "needs_orchestrator",
+        ),
+        (
+            "integration parked: cannot inspect live checkout: rev-parse failed",
+            "needs_operator",
+        ),
+    ],
+)
+def test_integration_park_class_strips_stored_prefix(reason, expected):
+    assert kwt._integration_park_class(reason) == expected
+
+
 def test_integrate_merges_no_ff_and_cleans_up(repo):
     info = _provisioned_chain(repo, "t_m1")
     out = kwt.integrate_chain(
