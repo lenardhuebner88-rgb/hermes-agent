@@ -3975,6 +3975,40 @@ def test_flow_gate_timeout_sweep_releases_old_roots(client):
     assert st[child_ids[2]] == "todo"
 
 
+def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
+    root, child_ids = _setup_gated_root()
+    now = int(time.time())
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, profile, status, claim_lock, claim_expires,
+                    last_heartbeat_at, started_at
+                ) VALUES (?, ?, 'running', ?, ?, ?, ?)
+                """,
+                (child_ids[0], "coder", "lock-a", now + 300, now - 10, now - 120),
+            )
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-graph")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["schema"] == "kanban-chain-graph-v1"
+    assert body["root_id"] == root
+    node_ids = {node["id"] for node in body["nodes"]}
+    assert node_ids == {root, *child_ids}
+    edges = {(edge["from"], edge["to"]) for edge in body["edges"]}
+    assert (child_ids[0], child_ids[2]) in edges
+    assert (child_ids[1], child_ids[2]) in edges
+    assert all((child_id, root) in edges for child_id in child_ids)
+    by_id = {node["id"]: node for node in body["nodes"]}
+    assert by_id[root]["level"] > by_id[child_ids[2]]["level"]
+    latest = by_id[child_ids[0]]["latest_run"]
+    assert latest["profile"] == "coder"
+    assert latest["runtime_seconds"] >= 100
+    assert latest["heartbeat_age_seconds"] >= 0
+
+
 def test_flow_release_unknown_task_404(client):
     r = client.post("/api/plugins/kanban/tasks/t_nope/flow-release")
     assert r.status_code == 404

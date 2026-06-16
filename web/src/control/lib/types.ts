@@ -171,6 +171,47 @@ export interface FlowTimeoutSweepResponse {
   released: number;
 }
 
+export interface ChainGraphRun {
+  id: number;
+  profile: string | null;
+  status: RunStatus;
+  outcome: RunOutcome | null;
+  started_at: number | null;
+  ended_at: number | null;
+  last_heartbeat_at: number | null;
+  runtime_seconds: number | null;
+  heartbeat_age_seconds: number | null;
+}
+
+export interface ChainGraphNode {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  assignee: string | null;
+  level: number;
+  parents: string[];
+  children: string[];
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  last_heartbeat_at: number | null;
+  runtime_seconds: number | null;
+  latest_run: ChainGraphRun | null;
+}
+
+export interface ChainGraphEdge {
+  from: string;
+  to: string;
+}
+
+export interface ChainGraphResponse {
+  schema: string;
+  root_id: string;
+  checked_at: number;
+  nodes: ChainGraphNode[];
+  edges: ChainGraphEdge[];
+}
+
 
 export interface KanbanResult {
   run_id: string;

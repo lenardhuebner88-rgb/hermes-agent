@@ -184,6 +184,42 @@ export const FlowTimeoutSweepResponseSchema = z.object({
   released: z.coerce.number().catch(0),
 });
 
+const ChainGraphRunSchema = z.object({
+  id: z.coerce.number().catch(0),
+  profile: z.string().nullable().catch(null),
+  status: z.enum(["running", "done", "blocked", "crashed", "timed_out", "failed", "released"]).catch("running"),
+  outcome: z.enum(["completed", "blocked", "crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed", "iteration_budget_exhausted"]).nullable().catch(null),
+  started_at: z.coerce.number().nullable().catch(null),
+  ended_at: z.coerce.number().nullable().catch(null),
+  last_heartbeat_at: z.coerce.number().nullable().catch(null),
+  runtime_seconds: z.coerce.number().nullable().catch(null),
+  heartbeat_age_seconds: z.coerce.number().nullable().catch(null),
+});
+
+const ChainGraphNodeSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  status: TaskStatusSchema,
+  assignee: z.string().nullable().catch(null),
+  level: z.coerce.number().catch(0),
+  parents: z.array(z.string()).catch([]),
+  children: z.array(z.string()).catch([]),
+  created_at: z.coerce.number().catch(0),
+  started_at: z.coerce.number().nullable().catch(null),
+  completed_at: z.coerce.number().nullable().catch(null),
+  last_heartbeat_at: z.coerce.number().nullable().catch(null),
+  runtime_seconds: z.coerce.number().nullable().catch(null),
+  latest_run: ChainGraphRunSchema.nullable().catch(null),
+});
+
+export const ChainGraphResponseSchema = z.object({
+  schema: z.string().catch("kanban-chain-graph-v1"),
+  root_id: z.string().catch(""),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  nodes: z.array(ChainGraphNodeSchema).catch([]),
+  edges: z.array(z.object({ from: z.string().catch(""), to: z.string().catch("") })).catch([]),
+});
+
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),
   source: z.string().catch("unknown"),

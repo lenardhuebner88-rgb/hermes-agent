@@ -23,6 +23,7 @@ import {
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
+  ChainGraphResponseSchema,
   FlowGateResponseSchema,
   FlowSizingResponseSchema,
   FlowTimeoutSweepResponseSchema,
@@ -41,7 +42,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -1124,6 +1125,53 @@ export function useFlowGate(rootId: string | null, onDone?: () => void | Promise
     }
   }, [onDone, reload]);
   return { data, loading, busy, error, reload, sizing, sweepTimeouts };
+}
+
+export function useChainGraph(rootId: string | null) {
+  const [data, setData] = useState<ChainGraphResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const reload = useCallback(async (): Promise<ChainGraphResponse | null> => {
+    if (!rootId) {
+      if (aliveRef.current) setData(null);
+      return null;
+    }
+    if (aliveRef.current) setLoading(true);
+    try {
+      const parsed = parseOrThrow(
+        ChainGraphResponseSchema,
+        await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/chain-graph`),
+        "chain-graph",
+      );
+      if (aliveRef.current) {
+        setData(parsed);
+        setError("");
+      }
+      return parsed;
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return null;
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, [rootId]);
+  useEffect(() => {
+    const initial = window.setTimeout(() => {
+      void reload();
+    }, 0);
+    if (!rootId) return () => window.clearTimeout(initial);
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void reload();
+    }, 8000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [rootId, reload]);
+  return { data, loading, error, reload };
 }
 
 // In-place dispatch of a parked FO task: PATCH /tasks/{id} with status="ready"

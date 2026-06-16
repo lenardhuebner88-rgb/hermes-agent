@@ -8,7 +8,7 @@ import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types"
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek" | "schmiede";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek" | "schmiede";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -19,6 +19,7 @@ export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow"
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
+  { id: "ketten", label: "Ketten", mobileLabel: "DAG", path: "/control/ketten", icon: GitBranch },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Stats", path: "/control/statistik", icon: ChartSpline },
   { id: "bibliothek", label: "Bibliothek", mobileLabel: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
 ];

@@ -29,6 +29,9 @@ const AgentOpsView = lazy(() =>
 const FlowView = lazy(() =>
   import("./views/FlowView").then((m) => ({ default: m.FlowView })),
 );
+const ChainVizView = lazy(() =>
+  import("./views/ChainVizView").then((m) => ({ default: m.ChainVizView })),
+);
 const StatistikView = lazy(() =>
   import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
 );
@@ -71,6 +74,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/workstreams")) return "workstreams";
   // /control/hermes wurde in Flow absorbiert (Phase 2) — Redirect unten.
   if (pathname.includes("/control/flow")) return "flow";
+  if (pathname.includes("/control/ketten")) return "ketten";
   if (pathname.includes("/control/statistik")) return "statistik";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
@@ -97,6 +101,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   pulse: () => import("./views/PulseView"),
   workstreams: () => import("./views/AgentOpsView"),
   flow: () => import("./views/FlowView"),
+  ketten: () => import("./views/ChainVizView"),
   statistik: () => import("./views/StatistikView"),
   autoresearch: () => import("./views/AutoresearchView"),
   backlog: () => import("./views/BacklogView"),
@@ -120,6 +125,7 @@ const tabPath: Record<ControlTab, string> = {
   pulse: "/control/pulse",
   workstreams: "/control/workstreams",
   flow: "/control/flow",
+  ketten: "/control/ketten",
   statistik: "/control/statistik",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
@@ -181,7 +187,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "pulse" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "flow", h: "flow", k: "ketten", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "pulse" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -222,6 +228,7 @@ export default function ControlPage() {
             <Route path="hermes" element={<Navigate to="/control/flow" replace />} />
             <Route path="statistik" element={<StatistikView />} />
             <Route path="flow" element={<FlowView />} />
+            <Route path="ketten" element={<ChainVizView />} />
             <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
             <Route path="backlog" element={<BacklogView density={density.density} />} />
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />

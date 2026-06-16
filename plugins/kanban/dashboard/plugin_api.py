@@ -5103,6 +5103,122 @@ def _append_flow_gate_event(
         kanban_db._append_event(conn, task_id, kind, payload)
 
 
+def _latest_run_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
+    try:
+        return conn.execute(
+            """
+            SELECT *
+              FROM task_runs
+             WHERE task_id = ?
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
+    if kanban_db.get_task(conn, root_id) is None:
+        raise HTTPException(status_code=404, detail=f"task {root_id} not found")
+
+    nodes: set[str] = {root_id}
+    edges: set[tuple[str, str]] = set()
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+            (current,),
+        ).fetchall()
+        for row in rows:
+            parent = row["parent_id"]
+            edge = (parent, current)
+            edges.add(edge)
+            if parent not in nodes:
+                nodes.add(parent)
+                stack.append(parent)
+
+    children_by_parent: dict[str, list[str]] = {}
+    parents_by_child: dict[str, list[str]] = {}
+    for parent, child in sorted(edges):
+        children_by_parent.setdefault(parent, []).append(child)
+        parents_by_child.setdefault(child, []).append(parent)
+
+    depth_cache: dict[str, int] = {}
+
+    def depth(node: str, seen: Optional[set[str]] = None) -> int:
+        if node in depth_cache:
+            return depth_cache[node]
+        seen = set(seen or set())
+        if node in seen:
+            return 0
+        seen.add(node)
+        parents = parents_by_child.get(node) or []
+        value = 0 if not parents else max(depth(parent, seen) + 1 for parent in parents)
+        depth_cache[node] = value
+        return value
+
+    now = int(time.time())
+    out_nodes: list[dict[str, Any]] = []
+    for node_id in sorted(nodes, key=lambda item: (depth(item), item)):
+        task = kanban_db.get_task(conn, node_id)
+        if task is None:
+            continue
+        run = _latest_run_for_task(conn, node_id)
+        run_payload = None
+        if run is not None:
+            started = run["started_at"]
+            ended = run["ended_at"]
+            heartbeat = run["last_heartbeat_at"]
+            run_payload = {
+                "id": run["id"],
+                "profile": run["profile"],
+                "status": run["status"],
+                "outcome": run["outcome"],
+                "started_at": started,
+                "ended_at": ended,
+                "last_heartbeat_at": heartbeat,
+                "runtime_seconds": (
+                    max(0, int((ended or now) - started))
+                    if started is not None else None
+                ),
+                "heartbeat_age_seconds": (
+                    max(0, now - int(heartbeat))
+                    if heartbeat is not None else None
+                ),
+            }
+        out_nodes.append({
+            "id": task.id,
+            "title": task.title,
+            "status": task.status,
+            "assignee": task.assignee,
+            "level": depth(node_id),
+            "parents": sorted(parents_by_child.get(node_id, [])),
+            "children": sorted(children_by_parent.get(node_id, [])),
+            "created_at": task.created_at,
+            "started_at": task.started_at,
+            "completed_at": task.completed_at,
+            "last_heartbeat_at": task.last_heartbeat_at,
+            "runtime_seconds": (
+                max(0, int(((task.completed_at or now) - task.started_at)))
+                if task.started_at is not None else None
+            ),
+            "latest_run": run_payload,
+        })
+    return {
+        "schema": "kanban-chain-graph-v1",
+        "root_id": root_id,
+        "checked_at": now,
+        "nodes": out_nodes,
+        "edges": [
+            {"from": parent, "to": child}
+            for parent, child in sorted(edges, key=lambda edge: (depth(edge[0]), edge[0], depth(edge[1]), edge[1]))
+        ],
+    }
+
+
 def _merge_flow_children(
     conn: sqlite3.Connection,
     root_id: str,
@@ -5486,6 +5602,21 @@ def flow_release(
             release_level=body.release_level,
             reason="operator-release",
         )
+    finally:
+        conn.close()
+
+
+@router.get("/tasks/{task_id}/chain-graph")
+def get_chain_graph(task_id: str, board: Optional[str] = Query(None)):
+    """Return a left-to-right DAG for a flow/root task.
+
+    Traverses dependency parents from ``task_id`` and includes per-node runtime
+    and latest-run heartbeat data for the /control chain-visualization tab.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return _chain_graph(conn, task_id)
     finally:
         conn.close()
 
