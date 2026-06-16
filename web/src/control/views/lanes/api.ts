@@ -21,9 +21,35 @@ export interface LaneSpawnCheckResult extends LaneSpawnHealth {
   resolved_model: string | null;
 }
 
+export type OpenRouterModelImportStatus =
+  | "admitted"
+  | "already_configured"
+  | "failed"
+  | "invalid";
+
+export interface OpenRouterModelImportRow {
+  id: string;
+  status: OpenRouterModelImportStatus;
+  reason: string;
+}
+
+export interface OpenRouterModelImportResult {
+  results: OpenRouterModelImportRow[];
+  admitted: string[];
+  configured: string[];
+}
+
+export interface LaneFallbackProvider {
+  provider: string;
+  model: string;
+  base_url?: string;
+}
+
 export interface LaneProfileEntry {
   worker_runtime: LaneRuntime | null;
+  provider?: string | null;
   model: string | null;
+  fallback_providers?: LaneFallbackProvider[];
   /** Optional backend evidence: can this profile actually spawn Kanban workers? */
   kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
 }
@@ -42,7 +68,11 @@ export interface LaneCatalogProfile {
   name: string;
   worker_runtime: LaneRuntime;
   default_model: string | null;
+  default_provider?: string | null;
+  fallback_providers?: LaneFallbackProvider[];
   description: string;
+  locked?: boolean;
+  locked_reason?: string | null;
   /** Optional backend evidence: can this profile actually spawn Kanban workers? */
   kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
 }
@@ -53,8 +83,11 @@ export interface LaneModelOption {
   /** Operator-facing name (e.g. "Qwen 3.7 Max"). */
   label: string;
   runtime: LaneRuntime;
+  provider?: string | null;
   /** Dropdown optgroup, e.g. "Claude (Max-Abo)" / "API-Modelle". */
   group: string;
+  locked?: boolean;
+  source?: string;
 }
 
 export interface LanesResponse {
@@ -291,7 +324,7 @@ export function deleteLane(laneId: string): Promise<{ deleted: string }> {
 
 export function smokeCheckLaneConfig(
   profile: string,
-  entry: Pick<LaneProfileEntry, "worker_runtime" | "model">,
+  entry: Pick<LaneProfileEntry, "worker_runtime" | "model" | "provider">,
 ): Promise<LaneSpawnCheckResult> {
   return fetchJSON<LaneSpawnCheckResult>(`${BASE}/spawn-check`, {
     method: "POST",
@@ -299,8 +332,17 @@ export function smokeCheckLaneConfig(
     body: JSON.stringify({
       profile,
       worker_runtime: entry.worker_runtime,
+      provider: entry.provider ?? null,
       model: entry.model ?? null,
     }),
+  });
+}
+
+export function importOpenRouterModels(rawText: string): Promise<OpenRouterModelImportResult> {
+  return fetchJSON<OpenRouterModelImportResult>(`${BASE}/openrouter-models/import`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ raw_text: rawText }),
   });
 }
 
@@ -314,9 +356,9 @@ export function smokeCheckLaneConfig(
 
 /** Fallback catalog when the backend payload carries no `models` yet. */
 export const FALLBACK_MODELS: LaneModelOption[] = [
-  { id: "claude-fable-5", label: "Claude Fable 5 (gesperrt)", runtime: "claude-cli", group: "Claude (Max-Abo)" },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)" },
-  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
+  { id: "claude-fable-5", label: "Claude Fable 5 (gesperrt)", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
 ];
 
 /** Lane entry → dropdown value. Entries without runtime derive it from the
@@ -362,11 +404,51 @@ export function modelLabel(id: string, models: LaneModelOption[]): string {
   return models.find((m) => m.id === id)?.label ?? id;
 }
 
+export function providerLabel(provider: string | null | undefined, models: LaneModelOption[]): string {
+  const id = (provider ?? "").trim();
+  if (!id) return "auto";
+  return models.find((m) => m.provider === id)?.group ?? id;
+}
+
+export function providerOptions(models: LaneModelOption[]): { id: string; label: string }[] {
+  const seen = new Set<string>();
+  const out: { id: string; label: string }[] = [];
+  for (const model of models) {
+    const provider = (model.provider ?? "").trim();
+    if (model.runtime !== "hermes" || !provider || seen.has(provider)) continue;
+    seen.add(provider);
+    out.push({ id: provider, label: model.group || provider });
+  }
+  return out;
+}
+
+export function modelsForProvider(provider: string | null | undefined, models: LaneModelOption[]): LaneModelOption[] {
+  const id = (provider ?? "").trim();
+  if (!id) return [];
+  return models.filter((m) => m.runtime === "hermes" && m.provider === id);
+}
+
+function cloneFallbacks(value: LaneFallbackProvider[] | undefined): LaneFallbackProvider[] {
+  return (value ?? []).map((entry) => ({
+    provider: entry.provider,
+    model: entry.model,
+    ...(entry.base_url ? { base_url: entry.base_url } : {}),
+  }));
+}
+
 export interface EditorRow {
   profile: string;
   description: string;
   /** Label of the profile's config default, for the "Standard (…)" option. */
   defaultLabel: string;
+  defaultProvider: string | null;
+  defaultFallbackProviders: LaneFallbackProvider[];
+  worker_runtime: LaneRuntime;
+  provider: string | null;
+  model: string | null;
+  fallbackProviders: LaneFallbackProvider[];
+  locked: boolean;
+  lockedReason: string | null;
   choice: string;
 }
 
@@ -383,17 +465,35 @@ export function editorRows(
     profile: p.name,
     description: p.description,
     defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
+    defaultProvider: p.default_provider ?? null,
+    defaultFallbackProviders: cloneFallbacks(p.fallback_providers),
+    worker_runtime: p.worker_runtime,
+    provider: lane.profiles[p.name]?.provider ?? null,
+    model: lane.profiles[p.name]?.model ?? null,
+    fallbackProviders: cloneFallbacks(lane.profiles[p.name]?.fallback_providers),
+    locked: p.locked === true || p.worker_runtime === "claude-cli",
+    lockedReason: p.locked_reason ?? (p.worker_runtime === "claude-cli" ? "Claude-CLI / claude -p excluded from this slice" : null),
     choice: choiceFromEntry(lane.profiles[p.name]),
   }));
   const extras = Object.keys(lane.profiles)
     .filter((name) => !known.has(name))
     .sort((a, b) => a.localeCompare(b));
   for (const name of extras) {
+    const entry = lane.profiles[name];
+    const runtime = entry.worker_runtime ?? (entry.model?.startsWith("claude") ? "claude-cli" : "hermes");
     rows.push({
       profile: name,
       description: "",
       defaultLabel: "automatisch",
-      choice: choiceFromEntry(lane.profiles[name]),
+      defaultProvider: null,
+      defaultFallbackProviders: [],
+      worker_runtime: runtime,
+      provider: entry.provider ?? null,
+      model: entry.model ?? null,
+      fallbackProviders: cloneFallbacks(entry.fallback_providers),
+      locked: runtime === "claude-cli",
+      lockedReason: runtime === "claude-cli" ? "Claude-CLI / claude -p excluded from this slice" : null,
+      choice: choiceFromEntry(entry),
     });
   }
   return rows;
@@ -405,8 +505,61 @@ export function profilesFromEditorRows(
 ): Record<string, Partial<LaneProfileEntry>> {
   const out: Record<string, Partial<LaneProfileEntry>> = {};
   for (const row of rows) {
-    const entry = entryFromChoice(row.choice);
-    if (entry !== null) out[row.profile] = entry;
+    const fallbackProviders = cloneFallbacks(row.fallbackProviders);
+    const hasStructuredOverride =
+      row.provider !== null ||
+      row.model !== null ||
+      fallbackProviders.length > 0 ||
+      row.choice !== "";
+    if (!hasStructuredOverride) continue;
+    if (row.locked) {
+      const entry = entryFromChoice(row.choice);
+      if (entry !== null) out[row.profile] = entry;
+      continue;
+    }
+    out[row.profile] = {
+      worker_runtime: "hermes",
+      provider: row.provider,
+      model: row.model,
+      fallback_providers: fallbackProviders,
+    };
   }
   return out;
+}
+
+export function laneEntryWarnings(row: EditorRow): string[] {
+  const warnings: string[] = [];
+  if (row.locked) {
+    if (row.fallbackProviders.length > 0 || row.provider) {
+      warnings.push("Claude-CLI fallback editing is not supported.");
+    }
+    return warnings;
+  }
+  const primaryProvider = row.provider ?? row.defaultProvider;
+  const primaryModel = row.model;
+  if (row.fallbackProviders.some((fallback) => !fallback.provider || !fallback.model)) {
+    warnings.push("Each fallback requires provider and model.");
+  }
+  for (const fallback of row.fallbackProviders) {
+    if (primaryProvider && primaryModel && fallback.provider === primaryProvider && fallback.model === primaryModel) {
+      warnings.push("Primary and fallback are identical.");
+      break;
+    }
+  }
+  if (
+    primaryProvider === "openrouter" &&
+    row.fallbackProviders.length > 0 &&
+    row.fallbackProviders.every((fallback) => fallback.provider === "openrouter")
+  ) {
+    warnings.push("OpenRouter primary has only OpenRouter fallbacks.");
+  }
+  const experimentalPrimary =
+    primaryProvider === "openrouter" ||
+    (primaryModel ?? "").includes("qwen") ||
+    (primaryModel ?? "").includes("kimi") ||
+    (primaryModel ?? "").includes("moonshot");
+  if (experimentalPrimary && row.fallbackProviders.length === 0) {
+    warnings.push("Fallback fehlt.");
+  }
+  return warnings;
 }

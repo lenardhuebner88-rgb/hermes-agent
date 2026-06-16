@@ -2706,45 +2706,186 @@ def close_epic_endpoint(
         conn.close()
 
 
-# --- Lanes (night-sprint F1) — switchable profile→(runtime, model) presets ---
+# --- Lanes (night-sprint F1) — switchable profile→routing presets ---
 
 
-# Curated model options for the Lanes UI dropdown: only models that are
-# actually wired up in THIS install (provider keys / Max subscription) and
-# known to work. label = operator-facing name, id = the technical model id
-# the dispatcher passes through. Grouped by how they run: the Claude models
-# go through the claude-cli runtime (Max-Abo), everything else through the
-# hermes runtime (API providers).
-_LANE_MODEL_CATALOG: list[dict] = [
-    {"id": "claude-fable-5", "label": "Claude Fable 5 (gesperrt)", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
-    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
-    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)"},
-    {"id": "gpt-5.5", "label": "GPT-5.5", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "gpt-5.4", "label": "GPT-5.4", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "qwen/qwen3.7-max", "label": "Qwen 3.7 Max", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "moonshotai/kimi-k2.7", "label": "Kimi K2.7", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "moonshotai/kimi-k2.6", "label": "Kimi K2.6", "runtime": "hermes", "group": "API-Modelle"},
-    {"id": "kimi-for-coding", "label": "Kimi for Coding", "runtime": "hermes", "group": "API-Modelle"},
-]
+_LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = (
+    {"id": "claude-fable-5", "label": "Claude Fable 5 (gesperrt)", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
+    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
+)
+
+
+def _lane_provider_label(provider_id: str, provider_row: dict[str, Any] | None = None) -> str:
+    provider_id = (provider_id or "").strip()
+    if provider_row is not None:
+        for key in ("name", "label", "display_name"):
+            value = provider_row.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if not provider_id:
+        return "API-Modelle"
+    known = {
+        "openai-codex": "OpenAI Codex",
+        "openrouter": "OpenRouter",
+        "kimi-coding": "Kimi Coding",
+        "kimi-coding-cn": "Kimi Coding CN",
+        "google": "Google Gemini",
+        "anthropic": "Anthropic",
+        "nous": "Nous",
+    }
+    return known.get(provider_id, provider_id)
+
+
+def _lane_model_label(model_id: str) -> str:
+    if not model_id:
+        return model_id
+    compact = model_id.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ")
+    return " ".join(part.upper() if part.lower() in {"gpt", "k2"} else part.capitalize() for part in compact.split())
+
+
+def _append_lane_model_option(
+    out: list[dict[str, Any]],
+    seen: set[tuple[str, str | None, str]],
+    *,
+    model: str,
+    runtime: str,
+    group: str,
+    provider: str | None = None,
+    label: str | None = None,
+    locked: bool = False,
+    source: str | None = None,
+) -> None:
+    model = (model or "").strip()
+    if not model:
+        return
+    provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
+    key = (model, provider, runtime)
+    if key in seen:
+        return
+    seen.add(key)
+    row = {
+        "id": model,
+        "label": label or _lane_model_label(model),
+        "runtime": runtime,
+        "group": group,
+        "provider": provider,
+        "locked": locked,
+    }
+    if source:
+        row["source"] = source
+    out.append(row)
+
+
+def _append_openrouter_extra_model_options(
+    out: list[dict[str, Any]],
+    seen: set[tuple[str, str | None, str]],
+) -> None:
+    """Add locally admitted OpenRouter models from config.yaml."""
+    try:
+        from hermes_cli.model_catalog import get_configured_provider_extra_models
+
+        model_ids = get_configured_provider_extra_models("openrouter")
+    except Exception:
+        log.exception("lanes: failed to load configured OpenRouter extra models")
+        return
+    for model_id in model_ids:
+        _append_lane_model_option(
+            out,
+            seen,
+            model=model_id,
+            runtime="hermes",
+            group="OpenRouter",
+            provider="openrouter",
+            label=model_id,
+            source="config",
+        )
 
 
 def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
-    """Curated model list, extended by any profile default model not yet in
-    it (a profile default demonstrably works — it is live config). Fail-soft
-    and pure: bad profile entries are skipped."""
-    out = [dict(m) for m in _LANE_MODEL_CATALOG]
-    seen = {m["id"] for m in out}
+    """Provider-aware model list for Lanes.
+
+    Hermes-runtime rows come from the shared inventory/model-catalog substrate
+    used by the main picker. Claude-CLI rows stay visible but locked because
+    ``claude -p`` routing is deliberately out of scope for this slice.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None, str]] = set()
+
+    for item in _LANE_CLAUDE_CLI_MODELS:
+        _append_lane_model_option(
+            out,
+            seen,
+            model=str(item["id"]),
+            label=str(item["label"]),
+            runtime="claude-cli",
+            group=str(item["group"]),
+            provider=None,
+            locked=True,
+            source="claude-cli",
+        )
+
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
+        payload = build_models_payload(
+            load_picker_context(),
+            include_unconfigured=True,
+            picker_hints=True,
+            capabilities=True,
+            max_models=200,
+        )
+        for provider_row in payload.get("providers") or []:
+            if not isinstance(provider_row, dict):
+                continue
+            provider = str(provider_row.get("slug") or provider_row.get("id") or "").strip()
+            if not provider:
+                continue
+            authenticated = provider_row.get("authenticated")
+            configured = provider_row.get("configured")
+            has_models = bool(provider_row.get("models"))
+            if authenticated is False and configured is False and not has_models:
+                continue
+            group = _lane_provider_label(provider, provider_row)
+            for model in provider_row.get("models") or []:
+                if not isinstance(model, str) or not model.strip():
+                    continue
+                _append_lane_model_option(
+                    out,
+                    seen,
+                    model=model,
+                    runtime="hermes",
+                    group=group,
+                    provider=provider,
+                    label=model,
+                    source="inventory",
+                )
+    except Exception:
+        log.exception("lanes: failed to build dynamic model catalog")
+
+    _append_openrouter_extra_model_options(out, seen)
+
+    # Profile defaults are live config and must stay visible even if the
+    # curated catalog does not know them yet.
     for prof in profiles:
         try:
             model = (prof.get("default_model") or "").strip()
-            if not model or model in seen:
+            if not model:
                 continue
             runtime = "claude-cli" if prof.get("worker_runtime") == "claude-cli" else "hermes"
             group = "Claude (Max-Abo)" if runtime == "claude-cli" else "API-Modelle"
-            out.append({"id": model, "label": model, "runtime": runtime, "group": group})
-            seen.add(model)
+            _append_lane_model_option(
+                out,
+                seen,
+                model=model,
+                runtime=runtime,
+                group=group,
+                provider=prof.get("default_provider") if runtime == "hermes" else None,
+                label=model,
+                locked=runtime == "claude-cli",
+                source="profile-default",
+            )
         except Exception:
             continue
     return out
@@ -2789,17 +2930,35 @@ def _scan_lane_profiles() -> list[dict]:
                     if isinstance(cm, str) and cm.strip():
                         claude_model = cm.strip()
                     model_cfg = cfg.get("model")
+                    provider = None
                     if isinstance(model_cfg, str):
                         model = model_cfg
                     elif isinstance(model_cfg, dict):
                         model = model_cfg.get("default") or model_cfg.get("model")
+                        provider = model_cfg.get("provider")
+                    from hermes_cli.fallback_config import get_fallback_chain
+                    fallback_providers = get_fallback_chain(cfg)
+                else:
+                    provider = None
+                    fallback_providers = []
+            else:
+                provider = None
+                fallback_providers = []
         except Exception:
+            provider = None
+            fallback_providers = []
             pass
         out.append({
             "name": entry.name,
             "worker_runtime": runtime,
             "default_model": claude_model if runtime == "claude-cli" else model,
+            "default_provider": None if runtime == "claude-cli" else (
+                provider.strip() if isinstance(provider, str) and provider.strip() else None
+            ),
+            "fallback_providers": [] if runtime == "claude-cli" else fallback_providers,
             "description": read_profile_meta(entry).get("description", ""),
+            "locked": runtime == "claude-cli",
+            "locked_reason": "Claude-CLI / claude -p excluded from this slice" if runtime == "claude-cli" else None,
         })
     return out
 
@@ -2835,8 +2994,9 @@ def list_lanes_endpoint(
     try:
         lanes = kanban_db.list_lanes(conn)
         profiles = _lane_profile_catalog()
+        models = _lane_model_catalog(profiles)
         profiles = [
-            {**p, "kanban_spawn_health": _profile_spawn_health(p, profiles)}
+            {**p, "kanban_spawn_health": _profile_spawn_health(p, profiles, models)}
             for p in profiles
         ]
         return {
@@ -2844,7 +3004,7 @@ def list_lanes_endpoint(
             "count": len(lanes),
             "active_id": next((l["id"] for l in lanes if l["active"]), None),
             "profiles": profiles,
-            "models": _lane_model_catalog(profiles),
+            "models": models,
         }
     finally:
         conn.close()
@@ -2861,7 +3021,151 @@ class LaneSpawnCheckBody(BaseModel):
     model: Optional[ShortText] = None
 
 
-def _lane_model_runtime(model: Optional[str], profiles: list[dict]) -> Optional[str]:
+class LaneOpenRouterModelImportBody(BaseModel):
+    raw_text: Optional[FreeText] = None
+    model_ids: Optional[list[ShortText]] = None
+
+
+_OPENROUTER_MODEL_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*(?::[A-Za-z0-9._+-]+)?$"
+)
+_OPENROUTER_IMPORT_LIMIT = 25
+
+
+def _normalize_openrouter_import_token(value: object) -> str:
+    token = str(value or "").strip().strip("`'\"[]{}()")
+    if token.lower().startswith("openrouter:"):
+        token = token.split(":", 1)[1].strip()
+    return token
+
+
+def _parse_openrouter_import_tokens(payload: LaneOpenRouterModelImportBody) -> list[str]:
+    raw: list[str] = []
+    if payload.model_ids:
+        raw.extend(str(item) for item in payload.model_ids)
+    if payload.raw_text:
+        raw.extend(re.split(r"[\s,;]+", payload.raw_text))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = _normalize_openrouter_import_token(item)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _openrouter_extra_models_from_config() -> list[str]:
+    try:
+        from hermes_cli.model_catalog import get_configured_provider_extra_models
+
+        return get_configured_provider_extra_models("openrouter")
+    except Exception:
+        log.exception("lanes: failed to read OpenRouter extra_models from config")
+        return []
+
+
+def _write_openrouter_extra_models_to_config(model_ids: list[str]) -> None:
+    from hermes_cli.config import get_config_path
+
+    config_path = get_config_path()
+    try:
+        from utils import atomic_roundtrip_yaml_update
+
+        atomic_roundtrip_yaml_update(
+            config_path,
+            "model_catalog.providers.openrouter.extra_models",
+            model_ids,
+        )
+        return
+    except ModuleNotFoundError as exc:
+        if exc.name != "ruamel":
+            raise
+
+    from hermes_cli.config import read_raw_config
+    from utils import atomic_yaml_write
+
+    cfg = read_raw_config()
+    model_catalog = cfg.setdefault("model_catalog", {})
+    if not isinstance(model_catalog, dict):
+        model_catalog = {}
+        cfg["model_catalog"] = model_catalog
+    providers = model_catalog.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        model_catalog["providers"] = providers
+    openrouter = providers.setdefault("openrouter", {})
+    if not isinstance(openrouter, dict):
+        openrouter = {}
+        providers["openrouter"] = openrouter
+    openrouter["extra_models"] = model_ids
+    atomic_yaml_write(config_path, cfg, sort_keys=False)
+
+
+def _admit_openrouter_extra_models(model_ids: list[str]) -> tuple[list[str], list[str]]:
+    existing = _openrouter_extra_models_from_config()
+    seen = set(existing)
+    merged = list(existing)
+    added: list[str] = []
+    for model_id in model_ids:
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        merged.append(model_id)
+        added.append(model_id)
+    if added:
+        from hermes_cli.model_catalog import reset_cache as reset_model_catalog_cache
+
+        _write_openrouter_extra_models_to_config(merged)
+        reset_model_catalog_cache()
+    return added, merged
+
+
+def _smoke_openrouter_model_id(model_id: str) -> tuple[bool, str]:
+    """Run a minimal OpenRouter completion through Hermes runtime plumbing."""
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from run_agent import AIAgent
+
+        runtime = resolve_runtime_provider(requested="openrouter", target_model=model_id)
+        agent = AIAgent(
+            api_key=runtime.get("api_key"),
+            base_url=runtime.get("base_url"),
+            provider=runtime.get("provider"),
+            api_mode=runtime.get("api_mode"),
+            model=model_id,
+            enabled_toolsets=[],
+            quiet_mode=True,
+            platform="dashboard",
+            credential_pool=runtime.get("credential_pool"),
+            max_iterations=1,
+            max_tokens=8,
+            skip_context_files=True,
+            skip_memory=True,
+            fallback_model=None,
+        )
+        agent.tools = []
+        agent.valid_tool_names = set()
+        response = (agent.chat("Reply with OK.") or "").strip()
+        if not response:
+            return False, "Smoke produced no response"
+        return True, "Smoke ok"
+    except Exception as exc:  # noqa: BLE001 - expose sanitized provider failure
+        try:
+            from hermes_cli.error_sanitize import safe_detail
+
+            return False, safe_detail(exc, "OpenRouter smoke failed", log=log)
+        except Exception:
+            log.exception("OpenRouter smoke failed")
+            return False, "OpenRouter smoke failed"
+
+
+def _lane_model_runtime(
+    model: Optional[str],
+    profiles: list[dict],
+    models: Optional[list[dict]] = None,
+) -> Optional[str]:
     """Return the curated runtime for ``model`` when known.
 
     Unknown models are intentionally fail-soft; profile defaults can be added
@@ -2871,7 +3175,8 @@ def _lane_model_runtime(model: Optional[str], profiles: list[dict]) -> Optional[
     model = (model or "").strip()
     if not model:
         return None
-    for item in _lane_model_catalog(profiles):
+    catalog = models if models is not None else _lane_model_catalog(profiles)
+    for item in catalog:
         if item.get("id") == model:
             runtime = item.get("runtime")
             return runtime if runtime in {"hermes", "claude-cli"} else None
@@ -2880,7 +3185,7 @@ def _lane_model_runtime(model: Optional[str], profiles: list[dict]) -> Optional[
     return None
 
 
-def _profile_spawn_health(profile: dict, profiles: list[dict]) -> dict:
+def _profile_spawn_health(profile: dict, profiles: list[dict], models: list[dict]) -> dict:
     """Spawn-Health eines Katalog-Profils für GET /lanes.
 
     Gleiche Prüf-Seams wie POST /lanes/spawn-check (Model↔Runtime-Widerspruch,
@@ -2889,7 +3194,7 @@ def _profile_spawn_health(profile: dict, profiles: list[dict]) -> dict:
     """
     runtime = profile.get("worker_runtime") or "hermes"
     model = profile.get("default_model")
-    model_runtime = _lane_model_runtime(model, profiles)
+    model_runtime = _lane_model_runtime(model, profiles, models)
     if model_runtime and model_runtime != runtime:
         return {
             "status": "unhealthy",
@@ -2922,6 +3227,7 @@ def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
     claude-cli path must have an executable available.
     """
     profiles = _lane_profile_catalog()
+    models = _lane_model_catalog(profiles)
     profile = next((p for p in profiles if p.get("name") == payload.profile), None)
     dispatcher_path = payload.worker_runtime
     resolved_model = payload.model or (profile or {}).get("default_model") or None
@@ -2934,7 +3240,7 @@ def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
             "resolved_model": resolved_model,
         }
 
-    model_runtime = _lane_model_runtime(resolved_model, profiles)
+    model_runtime = _lane_model_runtime(resolved_model, profiles, models)
     if model_runtime and model_runtime != dispatcher_path:
         return {
             "status": "unhealthy",
@@ -2963,6 +3269,52 @@ def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
         "reason": "Hermes worker profile is available",
         "dispatcher_path": dispatcher_path,
         "resolved_model": resolved_model,
+    }
+
+
+@router.post("/lanes/openrouter-models/import")
+def lane_openrouter_model_import_endpoint(payload: LaneOpenRouterModelImportBody):
+    """Smoke pasted OpenRouter model IDs and admit successful ones to config."""
+    tokens = _parse_openrouter_import_tokens(payload)
+    if len(tokens) > _OPENROUTER_IMPORT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {_OPENROUTER_IMPORT_LIMIT} model IDs can be smoked at once",
+        )
+
+    results: list[dict[str, str]] = []
+    smoke_ok: list[str] = []
+    for token in tokens:
+        if not _OPENROUTER_MODEL_ID_RE.fullmatch(token):
+            results.append({
+                "id": token,
+                "status": "invalid",
+                "reason": "Expected an OpenRouter model id like vendor/model",
+            })
+            continue
+        ok, reason = _smoke_openrouter_model_id(token)
+        if ok:
+            smoke_ok.append(token)
+            results.append({"id": token, "status": "smoke_ok", "reason": reason})
+        else:
+            results.append({"id": token, "status": "failed", "reason": reason})
+
+    added, configured = _admit_openrouter_extra_models(smoke_ok) if smoke_ok else ([], _openrouter_extra_models_from_config())
+    added_set = set(added)
+    for row in results:
+        if row["status"] != "smoke_ok":
+            continue
+        if row["id"] in added_set:
+            row["status"] = "admitted"
+            row["reason"] = "Smoke ok; added to config"
+        else:
+            row["status"] = "already_configured"
+            row["reason"] = "Smoke ok; already present in config"
+
+    return {
+        "results": results,
+        "admitted": added,
+        "configured": configured,
     }
 
 

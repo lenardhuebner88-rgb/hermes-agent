@@ -824,6 +824,47 @@ def get_toolset_for_tool(*args, **kwargs):
 
     return _get_toolset_for_tool(*args, **kwargs)
 
+
+def _parse_fallback_provider_overrides(values: Any) -> Optional[list[dict[str, Any]]]:
+    """Parse repeated ``--fallback-provider`` values for this invocation only."""
+    if values is None:
+        return None
+    raw_values = values if isinstance(values, (list, tuple)) else [values]
+    out: list[dict[str, Any]] = []
+    for raw in raw_values:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        if text.startswith("{"):
+            try:
+                entry = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid --fallback-provider JSON: {exc}") from exc
+            if not isinstance(entry, dict):
+                raise ValueError("--fallback-provider JSON must be an object")
+        else:
+            provider, sep, model = text.partition(":")
+            if not sep:
+                raise ValueError("--fallback-provider must be PROVIDER:MODEL")
+            entry = {"provider": provider, "model": model}
+
+        provider = str(entry.get("provider") or "").strip()
+        model = str(entry.get("model") or "").strip()
+        if not provider or not model:
+            raise ValueError("--fallback-provider requires non-empty provider and model")
+        normalized = dict(entry)
+        normalized["provider"] = provider
+        normalized["model"] = model
+        base_url = normalized.get("base_url")
+        if isinstance(base_url, str) and base_url.strip():
+            normalized["base_url"] = base_url.strip().rstrip("/")
+        else:
+            normalized.pop("base_url", None)
+        out.append(normalized)
+    return out
+
 # Extracted CLI modules (Phase 3)
 from hermes_cli.banner import build_welcome_banner
 from hermes_cli.commands import SlashCommandCompleter, SlashCommandAutoSuggest
@@ -3197,6 +3238,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         model: str = None,
         toolsets: List[str] = None,
         provider: str = None,
+        fallback_provider: Any = None,
         api_key: str = None,
         base_url: str = None,
         max_turns: int = None,
@@ -3214,6 +3256,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             model: Model to use (default: from env or claude-sonnet)
             toolsets: List of toolsets to enable (default: all)
             provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
+            fallback_provider: Per-invocation fallback override entries from --fallback-provider
             api_key: API key (default: from environment)
             base_url: API base URL (default: OpenRouter)
             max_turns: Maximum tool-calling iterations shared with subagents (default: 90)
@@ -3469,7 +3512,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # (Review-Finding #5 — filter previously applied only in gateway/run.py
         # so interactive CLI sessions would still hit Minimax fallback while
         # gateway sessions wouldn't, diverging on identical config).
-        _raw_fallback = get_fallback_chain(CLI_CONFIG)
+        _fallback_override = _parse_fallback_provider_overrides(fallback_provider)
+        _raw_fallback = _fallback_override if _fallback_override is not None else get_fallback_chain(CLI_CONFIG)
         try:
             from gateway.profile_policy import filter_default_gateway_fallbacks
             self._fallback_model = filter_default_gateway_fallbacks(_raw_fallback)
@@ -13565,6 +13609,7 @@ def main(
     skills: str | list[str] | tuple[str, ...] = None,
     model: str = None,
     provider: str = None,
+    fallback_provider: Any = None,
     api_key: str = None,
     base_url: str = None,
     max_turns: int = None,
@@ -13593,6 +13638,7 @@ def main(
         skills: Comma-separated or repeated list of skills to preload for the session
         model: Model to use (default: anthropic/claude-opus-4-20250514)
         provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
+        fallback_provider: Per-invocation fallback override entries from --fallback-provider
         api_key: API key for authentication
         base_url: Base URL for the API
         max_turns: Maximum tool-calling iterations (default: 60)
@@ -13703,6 +13749,7 @@ def main(
         model=model,
         toolsets=toolsets_list,
         provider=provider,
+        fallback_provider=fallback_provider,
         api_key=api_key,
         base_url=base_url,
         max_turns=max_turns,

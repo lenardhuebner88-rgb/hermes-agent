@@ -282,6 +282,59 @@ class TestCuratedAccessors:
         with patch.object(model_catalog, "_fetch_manifest", return_value=None):
             assert model_catalog.get_curated_openrouter_models() is None
 
+    def test_openrouter_includes_configured_extra_models(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        with patch.object(
+            model_catalog,
+            "_load_catalog_config",
+            return_value={
+                "enabled": True,
+                "url": "http://master",
+                "ttl_hours": 24.0,
+                "providers": {
+                    "openrouter": {
+                        "extra_models": [
+                            "openai/gpt-5.4",
+                            "moonshotai/kimi-k2.7",
+                            {"id": "anthropic/claude-sonnet-4.6"},
+                            "moonshotai/kimi-k2.7",
+                        ]
+                    }
+                },
+            },
+        ):
+            with patch.object(
+                model_catalog, "_fetch_manifest", return_value=_valid_manifest()
+            ):
+                result = model_catalog.get_curated_openrouter_models()
+
+        assert result == [
+            ("anthropic/claude-opus-4.7", "recommended"),
+            ("openai/gpt-5.4", ""),
+            ("openrouter/elephant-alpha", "free"),
+            ("moonshotai/kimi-k2.7", "user-added"),
+            ("anthropic/claude-sonnet-4.6", "user-added"),
+        ]
+
+    def test_openrouter_extra_models_work_without_manifest(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        with patch.object(
+            model_catalog,
+            "_load_catalog_config",
+            return_value={
+                "enabled": True,
+                "url": "http://master",
+                "ttl_hours": 24.0,
+                "providers": {"openrouter": {"extra_models": ["moonshotai/kimi-k2.7"]}},
+            },
+        ):
+            with patch.object(model_catalog, "_fetch_manifest", return_value=None):
+                result = model_catalog.get_curated_openrouter_models()
+
+        assert result == [("moonshotai/kimi-k2.7", "user-added")]
+
     def test_nous_returns_none_when_catalog_empty(self, isolated_home):
         from hermes_cli import model_catalog
         with patch.object(model_catalog, "_fetch_manifest", return_value=None):

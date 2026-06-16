@@ -109,6 +109,37 @@ class TestChatVerboseArg:
         assert "verbose" not in captured
 
 
+class TestFallbackProviderArg:
+    def test_fallback_provider_before_chat_propagates(self):
+        from hermes_cli._parser import build_top_level_parser
+
+        parser, _subparsers, _chat_parser = build_top_level_parser()
+        args = parser.parse_args(["--fallback-provider", "openai-codex:gpt-5.5", "chat"])
+
+        assert args.fallback_provider == ["openai-codex:gpt-5.5"]
+
+    def test_fallback_provider_after_chat_sets_attribute(self):
+        from hermes_cli._parser import build_top_level_parser
+
+        parser, _subparsers, _chat_parser = build_top_level_parser()
+        args = parser.parse_args(["chat", "--fallback-provider", "openai-codex:gpt-5.5"])
+
+        assert args.fallback_provider == ["openai-codex:gpt-5.5"]
+
+    def test_fallback_provider_helper_parses_chain_and_json(self):
+        from cli import _parse_fallback_provider_overrides
+
+        chain = _parse_fallback_provider_overrides([
+            "openai-codex:gpt-5.5",
+            '{"provider":"custom","model":"m1","base_url":"https://example.test/v1/"}',
+        ])
+
+        assert chain == [
+            {"provider": "openai-codex", "model": "gpt-5.5"},
+            {"provider": "custom", "model": "m1", "base_url": "https://example.test/v1"},
+        ]
+
+
 class TestYoloEnvVar:
     """Verify --yolo sets HERMES_YOLO_MODE regardless of flag position.
 

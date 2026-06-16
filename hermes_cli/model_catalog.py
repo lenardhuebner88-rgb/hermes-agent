@@ -321,6 +321,37 @@ def _get_provider_block(provider: str) -> dict[str, Any] | None:
     return block if isinstance(block, dict) else None
 
 
+def get_configured_provider_extra_models(provider: str) -> list[str]:
+    """Return user-added model IDs from ``model_catalog.providers.<provider>``.
+
+    The remote catalog is curated and intentionally small. Operators can add
+    smoke-tested models locally via ``extra_models`` without forking the
+    published manifest.
+    """
+    provider = (provider or "").strip()
+    if not provider:
+        return []
+    provider_cfg = _load_catalog_config()["providers"].get(provider)
+    if not isinstance(provider_cfg, dict):
+        return []
+    raw = provider_cfg.get("extra_models")
+    raw_items = raw if isinstance(raw, list) else [raw]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            model_id = item.strip()
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or "").strip()
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        out.append(model_id)
+    return out
+
+
 def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
     """Return OpenRouter's curated ``[(id, description), ...]`` from the manifest.
 
@@ -328,15 +359,24 @@ def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
     back to their hardcoded list.
     """
     block = _get_provider_block("openrouter")
-    if not block:
+    extra_models = get_configured_provider_extra_models("openrouter")
+    if not block and not extra_models:
         return None
     out: list[tuple[str, str]] = []
-    for m in block.get("models", []):
-        mid = str(m.get("id") or "").strip()
-        if not mid:
+    seen: set[str] = set()
+    if block:
+        for m in block.get("models", []):
+            mid = str(m.get("id") or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            desc = str(m.get("description") or "")
+            out.append((mid, desc))
+    for mid in extra_models:
+        if mid in seen:
             continue
-        desc = str(m.get("description") or "")
-        out.append((mid, desc))
+        seen.add(mid)
+        out.append((mid, "user-added"))
     return out or None
 
 

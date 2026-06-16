@@ -64,10 +64,23 @@ class TestLaneCrud:
             lane = kb.create_lane(
                 conn,
                 name="nacht",
-                profiles={"coder": {"worker_runtime": "claude-cli", "model": "claude-fable-5"}},
+                profiles={
+                    "coder": {
+                        "worker_runtime": "hermes",
+                        "provider": "openrouter",
+                        "model": "qwen/qwen3.7-max",
+                        "fallback_providers": [
+                            {"provider": "openai-codex", "model": "gpt-5.5"},
+                        ],
+                    },
+                },
             )
             assert lane["active"] is False
-            assert lane["profiles"]["coder"]["model"] == "claude-fable-5"
+            assert lane["profiles"]["coder"]["provider"] == "openrouter"
+            assert lane["profiles"]["coder"]["model"] == "qwen/qwen3.7-max"
+            assert lane["profiles"]["coder"]["fallback_providers"] == [
+                {"provider": "openai-codex", "model": "gpt-5.5"},
+            ]
 
             lane = kb.update_lane(
                 conn, lane["id"],
@@ -93,6 +106,37 @@ class TestLaneCrud:
                 kb.create_lane(
                     conn, name="bad",
                     profiles={"coder": {"worker_runtime": "warp-drive"}},
+                )
+
+    def test_invalid_fallback_entry_raises(self, kanban_home):
+        with kb.connect() as conn:
+            with pytest.raises(ValueError, match="fallback_providers\\[0\\]\\.provider"):
+                kb.create_lane(
+                    conn,
+                    name="bad-fallback",
+                    profiles={
+                        "coder": {
+                            "worker_runtime": "hermes",
+                            "provider": "openrouter",
+                            "model": "qwen/qwen3.7-max",
+                            "fallback_providers": [{"model": "gpt-5.5"}],
+                        },
+                    },
+                )
+
+    def test_claude_cli_fallback_edit_rejected(self, kanban_home):
+        with kb.connect() as conn:
+            with pytest.raises(ValueError, match="claude-cli"):
+                kb.create_lane(
+                    conn,
+                    name="bad-claude-fallback",
+                    profiles={
+                        "premium": {
+                            "worker_runtime": "claude-cli",
+                            "model": "claude-opus-4-8",
+                            "fallback_providers": [{"provider": "openai-codex", "model": "gpt-5.5"}],
+                        },
+                    },
                 )
 
     def test_active_lane_not_deletable(self, kanban_home):
@@ -242,6 +286,73 @@ class TestLaneSpawnResolution:
         m_idx = cmd.index("-m", cmd.index("chat"))
         assert cmd[m_idx + 1] == "gpt-5.5"
 
+    def test_lane_provider_and_fallback_chain_reach_hermes_spawn(
+        self, kanban_home, tmp_path, monkeypatch,
+    ):
+        cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            lane_profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                    "fallback_providers": [
+                        {"provider": "openai-codex", "model": "gpt-5.5"},
+                    ],
+                },
+            },
+        )
+        chat_idx = cmd.index("chat")
+        assert cmd[cmd.index("-m", chat_idx) + 1] == "qwen/qwen3.7-max"
+        assert cmd[cmd.index("--provider", chat_idx) + 1] == "openrouter"
+        assert cmd[cmd.index("--fallback-provider", chat_idx) + 1] == "openai-codex:gpt-5.5"
+
+    def test_lane_fallback_chain_wins_over_profile_fallback_chain(
+        self, kanban_home, tmp_path, monkeypatch,
+    ):
+        cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            profile_config=(
+                "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n"
+                "fallback_providers:\n"
+                "  - provider: kimi-coding\n    model: kimi-for-coding\n"
+            ),
+            lane_profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                    "fallback_providers": [
+                        {"provider": "openai-codex", "model": "gpt-5.5"},
+                    ],
+                },
+            },
+        )
+        fallback_values = [
+            cmd[i + 1] for i, value in enumerate(cmd) if value == "--fallback-provider"
+        ]
+        assert fallback_values == ["openai-codex:gpt-5.5"]
+
+    def test_no_lane_fallback_preserves_profile_fallback_behavior(
+        self, kanban_home, tmp_path, monkeypatch,
+    ):
+        cmd = self._spawn(
+            kanban_home, tmp_path, monkeypatch,
+            profile_config=(
+                "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n"
+                "fallback_providers:\n"
+                "  - provider: openai-codex\n    model: gpt-5.5\n"
+            ),
+            lane_profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                },
+            },
+        )
+        assert "--fallback-provider" not in cmd
+
     # 6. Profile NOT mapped in the active lane → untouched config fallback.
     def test_unmapped_profile_falls_back_to_config(
         self, kanban_home, tmp_path, monkeypatch,
@@ -363,7 +474,28 @@ class TestActiveLaneEntry:
             )
             kb.activate_lane(conn, lane["id"])
         entry = kb._active_lane_entry_for_profile("coder")
-        assert entry == {"worker_runtime": "claude-cli", "model": "claude-fable-5"}
+        assert entry == {
+            "worker_runtime": "claude-cli",
+            "provider": None,
+            "model": "claude-fable-5",
+            "fallback_providers": [],
+        }
+
+    def test_old_lane_shape_reads_with_new_defaults(self, kanban_home):
+        with kb.connect() as conn:
+            lane = kb.create_lane(
+                conn,
+                name="old-shape",
+                profiles={"coder": {"worker_runtime": "hermes", "model": "gpt-5.5"}},
+            )
+            kb.activate_lane(conn, lane["id"])
+        entry = kb._active_lane_entry_for_profile("coder")
+        assert entry == {
+            "worker_runtime": "hermes",
+            "provider": None,
+            "model": "gpt-5.5",
+            "fallback_providers": [],
+        }
 
     def test_blank_entry_normalizes_to_none(self, kanban_home):
         with kb.connect() as conn:

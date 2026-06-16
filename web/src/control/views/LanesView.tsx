@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Check, Plus, Trash2 } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Check, ClipboardCheck, Lock, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Led, StatusPill, ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
@@ -7,21 +7,27 @@ import type { Density } from "../hooks/useDensity";
 import type { DotKind } from "../lib/tones";
 import {
   activateLane,
-  choiceOverrideLabel,
   createLane,
   deleteLane,
   editorRows,
-  entryFromChoice,
-  laneChoiceWarning,
+  importOpenRouterModels,
+  laneEntryWarnings,
   laneProfileSpawnHealth,
   loadLanes,
+  modelLabel,
+  modelsForProvider,
+  providerLabel,
+  providerOptions,
   profilesFromEditorRows,
   smokeCheckLaneConfig,
   updateLane,
   FALLBACK_MODELS,
   type EditorRow,
+  type LaneFallbackProvider,
   type Lane,
   type LaneModelOption,
+  type OpenRouterModelImportResult,
+  type OpenRouterModelImportStatus,
   type LaneSpawnCheckResult,
   type LaneSpawnHealth,
   type LaneSpawnHealthStatus,
@@ -42,7 +48,6 @@ const t = {
   profilesPanel: "Rollen & Modelle",
   presetsPanel: "Presets",
   standardOption: (model: string) => `Standard (${model})`,
-  claudeAuto: "Claude (Modell automatisch)",
   builtin: "Mitgeliefert",
   active: "Aktiv",
   remove: "Löschen",
@@ -63,6 +68,19 @@ const t = {
   smokeUnavailable: "Worker-Check nicht verfügbar",
   overrideChip: "Override",
   defaultChip: "Standard",
+  profileDefault: "Profil-Default",
+  laneOverride: "Lane-Override",
+  taskOverride: "Task-Override",
+  lockBadge: "Claude-CLI — später",
+  fallbackMissing: "Fallback fehlt",
+  smokePending: "Smoke ausstehend",
+  primaryLabel: "Primary",
+  fallbackLabel: "Fallbacks",
+  addFallback: "Fallback hinzufügen",
+  safeFallback: "Sicheren Fallback hinzufügen",
+  saveLane: "Als Lane speichern",
+  configPreview: "Dauerhaft setzen (Preview)",
+  wouldChange: "würde ändern",
   readinessTitle: (state: string) => `Spawn-Bereitschaft: ${state}`,
   readinessReady: "bereit",
   readinessChecking: "wird geprüft",
@@ -71,6 +89,11 @@ const t = {
   readinessUnknown: "ungeprüft",
   readySummary: (ready: number, total: number) => `${ready}/${total} bereit`,
   overrideSummary: (n: number) => (n === 1 ? "1 Override" : `${n} Overrides`),
+  openRouterImport: "OpenRouter-IDs",
+  openRouterPlaceholder: "anthropic/claude-sonnet-4.6\nmoonshotai/kimi-k2.7",
+  openRouterImportRun: "Smoken & aufnehmen",
+  openRouterImportRunning: "Smoke läuft …",
+  openRouterImported: (n: number) => (n === 1 ? "1 neu" : `${n} neu`),
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -87,58 +110,82 @@ const ROLE_HINTS: Record<string, string> = {
   "fo-brain": "Family-App Planung",
 };
 
-/** Grouped model dropdown. Eine unbekannte Auswahl (z. B. ein von Hand
- *  gesetztes Modell) bleibt als eigene Option sichtbar statt zu verschwinden. */
-function ModelSelect({
-  row,
+const CONTROL_CLASS =
+  "min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:text-sm";
+
+function ProviderSelect({
+  value,
   models,
   disabled,
+  label,
   onChange,
 }: {
-  row: EditorRow;
+  value: string | null;
   models: LaneModelOption[];
   disabled: boolean;
-  onChange: (choice: string) => void;
+  label: string;
+  onChange: (provider: string | null) => void;
 }) {
-  const groups = useMemo(() => {
-    const out: { group: string; options: LaneModelOption[] }[] = [];
-    for (const m of models) {
-      const g = out.find((x) => x.group === m.group);
-      if (g) g.options.push(m);
-      else out.push({ group: m.group, options: [m] });
-    }
-    return out;
-  }, [models]);
-
-  const knownValues = new Set<string>(["", "claude-cli|"]);
-  for (const m of models) knownValues.add(`${m.runtime}|${m.id}`);
-  const unknown = !knownValues.has(row.choice) ? row.choice : null;
-
+  const providers = providerOptions(models);
+  const known = providers.some((p) => p.id === value);
   return (
     <select
-      value={row.choice}
-      aria-label={`Modell für ${row.profile}`}
+      value={value ?? ""}
+      aria-label={label}
       disabled={disabled}
-      onChange={(e) => onChange(e.target.value)}
-      className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:w-64 sm:text-sm"
+      onChange={(e) => onChange(e.target.value || null)}
+      className={CONTROL_CLASS}
     >
-      <option value="">{t.standardOption(row.defaultLabel)}</option>
-      {groups.map(({ group, options }) => (
-        <optgroup key={group} label={group}>
-          {group.startsWith("Claude") ? (
-            <option value="claude-cli|">{t.claudeAuto}</option>
-          ) : null}
-          {options.map((m) => (
-            <option key={m.id} value={`${m.runtime}|${m.id}`}>
-              {m.label}
-            </option>
-          ))}
-        </optgroup>
+      <option value="">{t.profileDefault}</option>
+      {providers.map((provider) => (
+        <option key={provider.id} value={provider.id}>
+          {provider.label}
+        </option>
       ))}
-      {unknown ? (
-        <option value={unknown}>{unknown.slice(unknown.indexOf("|") + 1) || unknown}</option>
-      ) : null}
+      {value && !known ? <option value={value}>{value}</option> : null}
     </select>
+  );
+}
+
+function ModelSelect({
+  provider,
+  value,
+  models,
+  disabled,
+  label,
+  defaultLabel,
+  onChange,
+}: {
+  provider: string | null;
+  value: string | null;
+  models: LaneModelOption[];
+  disabled: boolean;
+  label: string;
+  defaultLabel: string;
+  onChange: (model: string | null) => void;
+}) {
+  const options = modelsForProvider(provider, models);
+  const listId = `lane-model-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+  return (
+    <>
+      <input
+        list={listId}
+        value={value ?? ""}
+        aria-label={label}
+        disabled={disabled || !provider}
+        placeholder={t.standardOption(defaultLabel)}
+        onChange={(e) => onChange(e.target.value || null)}
+        className={CONTROL_CLASS}
+      />
+      <datalist id={listId}>
+        {options.map((model) => (
+          <option key={`${model.provider}:${model.id}`} value={model.id}>
+            {model.label}
+          </option>
+        ))}
+        {value && !options.some((m) => m.id === value) ? <option value={value}>{value}</option> : null}
+      </datalist>
+    </>
   );
 }
 
@@ -147,6 +194,7 @@ interface EditorActions {
   onApply: (lane: Lane, rows: EditorRow[], needsSave: boolean) => void;
   onCreate: (name: string, rows: EditorRow[]) => void;
   onDelete: (lane: Lane) => void;
+  onImportOpenRouterModels: (rawText: string) => Promise<OpenRouterModelImportResult>;
 }
 
 type RowCheckState =
@@ -166,6 +214,20 @@ function rowSmokeLabel(state: RowCheckState): string {
   if (state.status === "healthy") return t.smokeOk;
   if (state.status === "unhealthy" || state.status === "unknown") return t.smokeWarn;
   return t.smokeError;
+}
+
+function importStatusTone(status: OpenRouterModelImportStatus): "emerald" | "amber" | "red" | "zinc" {
+  if (status === "admitted") return "emerald";
+  if (status === "already_configured") return "zinc";
+  if (status === "invalid") return "amber";
+  return "red";
+}
+
+function importStatusLabel(status: OpenRouterModelImportStatus): string {
+  if (status === "admitted") return "aufgenommen";
+  if (status === "already_configured") return "schon drin";
+  if (status === "invalid") return "ungültig";
+  return "fehlgeschlagen";
 }
 
 interface RowReadiness {
@@ -200,13 +262,35 @@ function rowReadiness(
 }
 
 function resolveRowCheckEntry(row: EditorRow, data: LanesResponse) {
-  const explicit = entryFromChoice(row.choice);
-  if (explicit?.worker_runtime) {
-    return { worker_runtime: explicit.worker_runtime, model: explicit.model ?? null };
-  }
+  if (row.locked) return { worker_runtime: row.worker_runtime, provider: null, model: row.model };
+  if (row.provider || row.model) return { worker_runtime: "hermes" as const, provider: row.provider, model: row.model };
   const profile = data.profiles.find((p) => p.name === row.profile);
   if (!profile) return null;
-  return { worker_runtime: profile.worker_runtime, model: profile.default_model ?? null };
+  return { worker_runtime: profile.worker_runtime, provider: profile.default_provider ?? null, model: profile.default_model ?? null };
+}
+
+function hasLaneOverride(row: EditorRow): boolean {
+  return row.choice !== "" || Boolean(row.provider) || Boolean(row.model) || row.fallbackProviders.length > 0;
+}
+
+function configPreview(row: EditorRow): string | null {
+  if (row.locked || !hasLaneOverride(row)) return null;
+  const provider = row.provider ?? row.defaultProvider;
+  const model = row.model;
+  const lines = ["model:"];
+  lines.push(`  provider: ${provider ?? ""}`);
+  lines.push(`  default: ${model ?? ""}`);
+  lines.push("fallback_providers:");
+  if (row.fallbackProviders.length === 0) {
+    lines.push("  []");
+  } else {
+    for (const fallback of row.fallbackProviders) {
+      lines.push(`  - provider: ${fallback.provider}`);
+      lines.push(`    model: ${fallback.model}`);
+      if (fallback.base_url) lines.push(`    base_url: ${fallback.base_url}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Pure presentation editor — exported for tests (rendered with fixtures).
@@ -229,14 +313,17 @@ export function LanesEditor({
   const [dirty, setDirty] = useState(false);
   const [newName, setNewName] = useState("");
   const [rowChecks, setRowChecks] = useState<Record<string, RowCheckState>>({});
+  const [openRouterPaste, setOpenRouterPaste] = useState("");
+  const [openRouterImporting, setOpenRouterImporting] = useState(false);
+  const [openRouterImportResult, setOpenRouterImportResult] = useState<OpenRouterModelImportResult | null>(null);
   // Inline-Zwei-Schritt fürs Löschen (FlowView-Muster) statt window.confirm.
   const [pendingDelete, setPendingDelete] = useState<string | null>(initialPendingDelete);
 
   const rowWarnings = useMemo(
-    () => Object.fromEntries(rows.map((row) => [row.profile, laneChoiceWarning(row.choice, models)])),
-    [rows, models],
+    () => Object.fromEntries(rows.map((row) => [row.profile, laneEntryWarnings(row)])),
+    [rows],
   );
-  const hasWrongWorkerChoice = Object.values(rowWarnings).some(Boolean);
+  const hasWrongWorkerChoice = Object.values(rowWarnings).some((warnings) => warnings.length > 0);
   const applyDisabled = busy || hasWrongWorkerChoice || (!dirty && lane.active);
 
   // Bereitschaft + Override-Zustand pro Zeile — passiv scannbar, ohne dass der
@@ -251,7 +338,9 @@ export function LanesEditor({
       ) as Record<string, RowReadiness>,
     [rows, rowChecks, lane, data.profiles],
   );
-  const overrideCount = rows.filter((row) => row.choice !== "").length;
+  const overrideCount = rows.filter(
+    (row) => row.choice !== "" || row.provider || row.model || row.fallbackProviders.length > 0,
+  ).length;
   const readinessKnown = rows.some((row) => readiness[row.profile]?.known);
   const readyCount = rows.filter((row) => readiness[row.profile]?.ready).length;
   const profilesMeta = [
@@ -263,7 +352,7 @@ export function LanesEditor({
 
   const runRowCheck = useCallback(async (row: EditorRow) => {
     const entry = resolveRowCheckEntry(row, data);
-    const warning = laneChoiceWarning(row.choice, models);
+    const warning = laneEntryWarnings(row)[0];
     if (warning) {
       setRowChecks((prev) => ({
         ...prev,
@@ -301,7 +390,120 @@ export function LanesEditor({
         [row.profile]: { status: "error", reason: e instanceof Error ? e.message : String(e) },
       }));
     }
-  }, [data, models]);
+  }, [data]);
+
+  const updateRow = useCallback((profile: string, patch: Partial<EditorRow>) => {
+    setRows((prev) =>
+      prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)),
+    );
+    setDirty(true);
+    setRowChecks((prev) => {
+      const next = { ...prev };
+      delete next[profile];
+      return next;
+    });
+  }, []);
+
+  const updateFallback = useCallback((
+    profile: string,
+    index: number,
+    patch: Partial<LaneFallbackProvider>,
+  ) => {
+    setRows((prev) =>
+      prev.map((row) => {
+        if (row.profile !== profile) return row;
+        const fallbackProviders = row.fallbackProviders.map((fallback, i) =>
+          i === index ? { ...fallback, ...patch } : fallback,
+        );
+        return { ...row, fallbackProviders };
+      }),
+    );
+    setDirty(true);
+    setRowChecks((prev) => {
+      const next = { ...prev };
+      delete next[profile];
+      return next;
+    });
+  }, []);
+
+  const seedFallback = useCallback((row: EditorRow): LaneFallbackProvider | null => {
+    const existing = row.defaultFallbackProviders[0];
+    if (existing) return { ...existing };
+    const primaryProvider = row.provider ?? row.defaultProvider;
+    const candidateProvider =
+      providerOptions(models).find((provider) => provider.id !== primaryProvider) ??
+      providerOptions(models)[0] ??
+      null;
+    if (!candidateProvider) return null;
+    const model = modelsForProvider(candidateProvider.id, models)[0]?.id;
+    if (!model) return null;
+    return { provider: candidateProvider.id, model };
+  }, [models]);
+
+  const addFallback = useCallback((row: EditorRow) => {
+    const fallback = seedFallback(row);
+    if (!fallback) return;
+    updateRow(row.profile, { fallbackProviders: [...row.fallbackProviders, fallback] });
+  }, [seedFallback, updateRow]);
+
+  const runOpenRouterImport = useCallback(async () => {
+    const raw = openRouterPaste.trim();
+    if (!raw) return;
+    setOpenRouterImporting(true);
+    try {
+      const result = await actions.onImportOpenRouterModels(raw);
+      setOpenRouterImportResult(result);
+      if (result.admitted.length > 0) setOpenRouterPaste("");
+    } catch (e) {
+      setOpenRouterImportResult({
+        admitted: [],
+        configured: [],
+        results: [{
+          id: "openrouter",
+          status: "failed",
+          reason: e instanceof Error ? e.message : String(e),
+        }],
+      });
+    } finally {
+      setOpenRouterImporting(false);
+    }
+  }, [actions, openRouterPaste]);
+
+  const removeFallback = useCallback((profile: string, index: number) => {
+    setRows((prev) =>
+      prev.map((row) =>
+        row.profile === profile
+          ? { ...row, fallbackProviders: row.fallbackProviders.filter((_, i) => i !== index) }
+          : row,
+      ),
+    );
+    setDirty(true);
+    setRowChecks((prev) => {
+      const next = { ...prev };
+      delete next[profile];
+      return next;
+    });
+  }, []);
+
+  const moveFallback = useCallback((profile: string, index: number, delta: -1 | 1) => {
+    setRows((prev) =>
+      prev.map((row) => {
+        if (row.profile !== profile) return row;
+        const nextIndex = index + delta;
+        if (nextIndex < 0 || nextIndex >= row.fallbackProviders.length) return row;
+        const fallbackProviders = [...row.fallbackProviders];
+        const [item] = fallbackProviders.splice(index, 1);
+        fallbackProviders.splice(nextIndex, 0, item);
+        return { ...row, fallbackProviders };
+      }),
+    );
+    setDirty(true);
+    setRowChecks((prev) => {
+      const next = { ...prev };
+      delete next[profile];
+      return next;
+    });
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -335,63 +537,155 @@ export function LanesEditor({
         </div>
       </FleetPanel>
 
-      {/* Rollen-Liste: pro Profil genau EIN Modell-Dropdown. Bereitschaft (Dot)
-          und Override-Zustand (Chip) sind passiv pro Zeile scannbar. */}
+      {/* Rollen-Liste: mobile-first cards with primary route + fallbacks. */}
       <FleetPanel eyebrow={t.profilesPanel} meta={profilesMeta}>
-        <ul className="divide-y divide-[var(--hc-border)]">
-          {rows.map((row, i) => {
+        <div className="mb-3 space-y-2 border-b border-[var(--hc-border)] pb-3">
+          <label className="block min-w-0">
+            <span className="hc-type-label">{t.openRouterImport}</span>
+            <textarea
+              value={openRouterPaste}
+              aria-label={t.openRouterImport}
+              placeholder={t.openRouterPlaceholder}
+              disabled={busy || openRouterImporting}
+              rows={2}
+              onChange={(e) => {
+                setOpenRouterPaste(e.target.value);
+                setOpenRouterImportResult(null);
+              }}
+              className="mt-1 min-h-20 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white placeholder:text-zinc-500 sm:min-h-24 sm:text-sm"
+            />
+          </label>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button
+              size="sm"
+              ghost
+              className="hc-hit justify-center"
+              disabled={busy || openRouterImporting || openRouterPaste.trim() === ""}
+              onClick={() => void runOpenRouterImport()}
+            >
+              <ClipboardCheck className="h-3.5 w-3.5" />
+              {openRouterImporting ? t.openRouterImportRunning : t.openRouterImportRun}
+            </Button>
+            {openRouterImportResult ? (
+              <span className="text-xs hc-dim">{t.openRouterImported(openRouterImportResult.admitted.length)}</span>
+            ) : null}
+          </div>
+          {openRouterImportResult ? (
+            <ul className="flex flex-wrap gap-2">
+              {openRouterImportResult.results.map((row) => (
+                <li key={`${row.id}:${row.status}`} className="min-w-0 max-w-full">
+                  <span title={row.reason} className="inline-flex max-w-full items-center gap-2">
+                    <StatusPill tone={importStatusTone(row.status)} label={importStatusLabel(row.status)} size="sm" />
+                    <span className="min-w-0 break-words text-xs text-zinc-200">{row.id}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        <ul className="space-y-3">
+          {rows.map((row) => {
             const ready = readiness[row.profile];
-            const override = choiceOverrideLabel(row.choice, models);
+            const override = hasLaneOverride(row);
+            const warnings = rowWarnings[row.profile] ?? [];
+            const preview = configPreview(row);
+            const activeProvider = row.provider ?? row.defaultProvider;
+            const activeModelLabel = row.model ? modelLabel(row.model, models) : row.defaultLabel;
             return (
             <li
               key={row.profile}
-              className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+              className="rounded-md border border-[var(--hc-border)] bg-black/15 p-3"
             >
-              <div className="flex min-w-0 items-start gap-2">
-                <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
-                  <Led kind={ready.kind} size={8} />
-                </span>
-                <div className="min-w-0">
-                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <span className="truncate text-sm text-white" title={row.description}>
-                      {row.profile}
+              <div className="flex min-w-0 flex-col gap-3">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
+                      <Led kind={ready.kind} size={8} />
                     </span>
-                    {override !== null ? (
-                      <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
-                        {t.overrideChip} · {override}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
-                        {t.defaultChip}
-                      </span>
-                    )}
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="truncate text-sm font-medium text-white" title={row.description}>
+                          {row.profile}
+                        </span>
+                        {row.locked ? (
+                          <StatusPill tone="zinc" label={t.lockBadge} size="sm" />
+                        ) : override ? (
+                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
+                            {t.laneOverride}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
+                            {t.profileDefault}
+                          </span>
+                        )}
+                        {!rowChecks[row.profile] ? <StatusPill tone="zinc" label={t.smokePending} size="sm" /> : null}
+                      </div>
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
+                        {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
+                        {ready.known && !ready.ready ? (
+                          <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
+                            {t.readinessTitle(ready.label)}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
-                    {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
-                    {ready.known && !ready.ready ? (
-                      <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
-                        {t.readinessTitle(ready.label)}
-                      </span>
-                    ) : null}
+                  {row.locked ? <Lock className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" /> : null}
+                </div>
+
+                <div className="grid gap-2 text-xs hc-soft sm:grid-cols-2">
+                  <div>
+                    <div className="hc-type-label">{t.profileDefault}</div>
+                    <div className="mt-1 break-words text-white">
+                      {row.defaultProvider ? `${providerLabel(row.defaultProvider, models)} / ` : ""}
+                      {row.defaultLabel}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="hc-type-label">{t.laneOverride}</div>
+                    <div className="mt-1 break-words text-white">
+                      {activeProvider ? `${providerLabel(activeProvider, models)} / ` : ""}
+                      {activeModelLabel}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
-                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-                  <ModelSelect
-                    row={row}
-                    models={models}
-                    disabled={busy}
-                    onChange={(choice) => {
-                      setRows(rows.map((r, j) => (j === i ? { ...r, choice } : r)));
-                      setDirty(true);
-                      setRowChecks((prev) => {
-                        const next = { ...prev };
-                        delete next[row.profile];
-                        return next;
-                      });
-                    }}
-                  />
+
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto] sm:items-end">
+                  <label className="min-w-0">
+                    <span className="hc-type-label">{t.primaryLabel}</span>
+                    <ProviderSelect
+                      value={row.provider}
+                      models={models}
+                      disabled={busy || row.locked}
+                      label={`Provider für ${row.profile}`}
+                      onChange={(provider) =>
+                        updateRow(row.profile, {
+                          worker_runtime: "hermes",
+                          provider,
+                          model: provider === row.provider ? row.model : null,
+                          choice: provider ? `hermes|${provider === row.provider ? row.model ?? "" : ""}` : "",
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="min-w-0">
+                    <span className="hc-type-label">Model</span>
+                    <ModelSelect
+                      provider={row.provider ?? row.defaultProvider}
+                      value={row.model}
+                      models={models}
+                      disabled={busy || row.locked}
+                      label={`Modell für ${row.profile}`}
+                      defaultLabel={row.defaultLabel}
+                      onChange={(model) =>
+                        updateRow(row.profile, {
+                          worker_runtime: "hermes",
+                          model,
+                          choice: model ? `hermes|${model}` : row.provider ? "hermes|" : "",
+                        })
+                      }
+                    />
+                  </label>
                   <Button
                     size="sm"
                     ghost
@@ -403,19 +697,113 @@ export function LanesEditor({
                     {rowChecks[row.profile]?.status === "checking" ? t.workerCheckRunning : t.workerCheck}
                   </Button>
                 </div>
-                {rowWarnings[row.profile] ? (
-                  <ToneCallout tone="amber">{rowWarnings[row.profile]}</ToneCallout>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="hc-type-label">{t.fallbackLabel}</span>
+                    {!row.locked ? (
+                      <Button
+                        size="sm"
+                        ghost
+                        className="hc-hit"
+                        disabled={busy}
+                        onClick={() => addFallback(row)}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {row.defaultFallbackProviders.length > 0 ? t.safeFallback : t.addFallback}
+                      </Button>
+                    ) : null}
+                  </div>
+                  {row.fallbackProviders.length === 0 ? (
+                    <div className="text-xs hc-dim">{t.fallbackMissing}</div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {row.fallbackProviders.map((fallback, idx) => (
+                        <li
+                          key={`${row.profile}-fallback-${idx}`}
+                          className="grid gap-2 rounded-md border border-[var(--hc-border)] bg-black/20 p-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto]"
+                        >
+                          <ProviderSelect
+                            value={fallback.provider}
+                            models={models}
+                            disabled={busy || row.locked}
+                            label={`Fallback-Provider ${idx + 1} für ${row.profile}`}
+                            onChange={(provider) =>
+                              updateFallback(row.profile, idx, {
+                                provider: provider ?? "",
+                                model: provider === fallback.provider ? fallback.model : "",
+                              })
+                            }
+                          />
+                          <ModelSelect
+                            provider={fallback.provider}
+                            value={fallback.model}
+                            models={models}
+                            disabled={busy || row.locked}
+                            label={`Fallback-Modell ${idx + 1} für ${row.profile}`}
+                            defaultLabel="automatisch"
+                            onChange={(model) => updateFallback(row.profile, idx, { model: model ?? "" })}
+                          />
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              aria-label={`Fallback ${idx + 1} nach oben`}
+                              disabled={busy || row.locked || idx === 0}
+                              onClick={() => moveFallback(row.profile, idx, -1)}
+                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                            >
+                              <ArrowUp className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Fallback ${idx + 1} nach unten`}
+                              disabled={busy || row.locked || idx === row.fallbackProviders.length - 1}
+                              onClick={() => moveFallback(row.profile, idx, 1)}
+                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                            >
+                              <ArrowDown className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Fallback ${idx + 1} entfernen`}
+                              disabled={busy || row.locked}
+                              onClick={() => removeFallback(row.profile, idx)}
+                              className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {warnings.length > 0 ? (
+                  <div className="space-y-1">
+                    {warnings.map((warning) => (
+                      <ToneCallout key={warning} tone="amber">{warning}</ToneCallout>
+                    ))}
+                  </div>
                 ) : null}
                 {rowChecks[row.profile] ? (
-                  <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 text-xs hc-soft sm:justify-end">
+                  <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 text-xs hc-soft">
                     <StatusPill
                       tone={rowSmokeTone(rowChecks[row.profile].status)}
                       label={rowSmokeLabel(rowChecks[row.profile])}
                       size="sm"
                     />
-                    <span className="min-w-0 max-w-full break-words sm:text-right">
+                    <span className="min-w-0 max-w-full break-words">
                       {rowChecks[row.profile].reason}
                     </span>
+                  </div>
+                ) : null}
+                {preview ? (
+                  <div className="rounded-md border border-[var(--hc-border)] bg-black/25 p-2">
+                    <div className="mb-1 text-xs hc-soft">
+                      Preview · {t.wouldChange}
+                    </div>
+                    <pre className="whitespace-pre-wrap break-words text-xs text-zinc-200">{preview}</pre>
                   </div>
                 ) : null}
               </div>
@@ -423,6 +811,20 @@ export function LanesEditor({
             );
           })}
         </ul>
+        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-[var(--hc-border)] bg-[var(--hc-bg)]/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
+          <Button
+            size="sm"
+            className="hc-hit justify-center"
+            disabled={applyDisabled}
+            onClick={() => actions.onApply(lane, rows, dirty)}
+          >
+            <Check className="h-4 w-4" />
+            {t.saveLane}
+          </Button>
+          <Button size="sm" ghost className="hc-hit justify-center" disabled>
+            {t.configPreview}
+          </Button>
+        </div>
       </FleetPanel>
 
       {/* Presets: anlegen + aufräumen. Auswahl passiert oben. */}
@@ -577,6 +979,19 @@ export function LanesView(_props: { density?: Density }) {
         setSelectedId(res.lane.id);
       }),
     onDelete: (target) => void run(() => deleteLane(target.id)),
+    onImportOpenRouterModels: async (rawText) => {
+      setBusy(true);
+      try {
+        const result = await importOpenRouterModels(rawText);
+        await reload();
+        return result;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        throw e;
+      } finally {
+        setBusy(false);
+      }
+    },
   };
 
   return (

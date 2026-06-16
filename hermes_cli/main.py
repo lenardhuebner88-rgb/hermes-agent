@@ -2293,6 +2293,7 @@ def cmd_chat(args):
     kwargs = {
         "model": args.model,
         "provider": getattr(args, "provider", None),
+        "fallback_provider": getattr(args, "fallback_provider", None),
         "toolsets": args.toolsets,
         "skills": getattr(args, "skills", None),
         "verbose": getattr(args, "verbose", None),

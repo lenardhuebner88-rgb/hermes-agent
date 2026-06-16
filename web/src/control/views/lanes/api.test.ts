@@ -6,10 +6,14 @@ import {
   deleteLane,
   editorRows,
   entryFromChoice,
+  importOpenRouterModels,
+  laneEntryWarnings,
   laneChoiceWarning,
   laneProfileSpawnHealth,
   modelLabel,
+  modelsForProvider,
   profilesFromEditorRows,
+  providerOptions,
   smokeCheckLaneConfig,
   type Lane,
   type LaneCatalogProfile,
@@ -82,14 +86,34 @@ describe("lanes api client", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       profile: "coder",
       worker_runtime: "hermes",
+      provider: null,
       model: "gpt-5.5",
     });
+  });
+
+  it("importOpenRouterModels posts pasted ids to the smoke/admit endpoint", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      admitted: ["xiaomi/mimo-v2.5"],
+      configured: ["xiaomi/mimo-v2.5"],
+      results: [
+        { id: "xiaomi/mimo-v2.5", status: "admitted", reason: "Smoke ok; added to config" },
+      ],
+    }));
+
+    const result = await importOpenRouterModels("xiaomi/mimo-v2.5");
+
+    expect(result.admitted).toEqual(["xiaomi/mimo-v2.5"]);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/plugins/kanban/lanes/openrouter-models/import");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ raw_text: "xiaomi/mimo-v2.5" });
   });
 });
 
 const MODELS: LaneModelOption[] = [
-  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
-  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
+  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
+  { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "OpenRouter", provider: "openrouter" },
 ];
 
 describe("choice encoding", () => {
@@ -116,11 +140,50 @@ describe("choice encoding", () => {
     expect(modelLabel("unbekannt-9", MODELS)).toBe("unbekannt-9");
   });
 
+  it("provider helpers expose provider-first dynamic options", () => {
+    expect(providerOptions(MODELS)).toEqual([
+      { id: "openai-codex", label: "OpenAI Codex" },
+      { id: "openrouter", label: "OpenRouter" },
+    ]);
+    expect(modelsForProvider("openrouter", MODELS).map((m) => m.id)).toEqual(["qwen/qwen3.7-max"]);
+  });
+
   it("warns when a persisted choice pairs a model with the wrong runtime", () => {
     expect(laneChoiceWarning("hermes|claude-fable-5", MODELS)).toContain("claude-cli");
     expect(laneChoiceWarning("claude-cli|gpt-5.5", MODELS)).toContain("hermes");
     expect(laneChoiceWarning("hermes|gpt-5.5", MODELS)).toBeNull();
     expect(laneChoiceWarning("", MODELS)).toBeNull();
+  });
+});
+
+describe("lane fallback warnings", () => {
+  it("warns for identical primary/fallback and missing provider/model", () => {
+    const [row] = editorRows(
+      {
+        id: "lane_1",
+        name: "test",
+        active: true,
+        builtin: false,
+        created_at: 0,
+        updated_at: 0,
+        profiles: {
+          coder: {
+            worker_runtime: "hermes",
+            provider: "openrouter",
+            model: "qwen/qwen3.7-max",
+            fallback_providers: [
+              { provider: "openrouter", model: "qwen/qwen3.7-max" },
+              { provider: "", model: "" },
+            ],
+          },
+        },
+      },
+      [{ name: "coder", worker_runtime: "hermes", default_model: "gpt-5.5", default_provider: "openai-codex", description: "" }],
+      MODELS,
+    );
+
+    expect(laneEntryWarnings(row)).toContain("Primary and fallback are identical.");
+    expect(laneEntryWarnings(row)).toContain("Each fallback requires provider and model.");
   });
 });
 
@@ -130,6 +193,7 @@ describe("readiness & override state", () => {
       name: "coder",
       worker_runtime: "hermes",
       default_model: "gpt-5.5",
+      default_provider: "openai-codex",
       description: "",
       kanban_spawn_health: "healthy",
     },
@@ -205,7 +269,12 @@ describe("editor rows", () => {
     const rows = editorRows(lane, catalog, MODELS);
     expect(profilesFromEditorRows(rows)).toEqual({
       premium: { worker_runtime: "claude-cli", model: "claude-fable-5" },
-      altprofil: { worker_runtime: "hermes", model: "gpt-5.5" },
+      altprofil: {
+        worker_runtime: "hermes",
+        provider: null,
+        model: "gpt-5.5",
+        fallback_providers: [],
+      },
     });
   });
 });

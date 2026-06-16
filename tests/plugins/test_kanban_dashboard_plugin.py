@@ -4312,7 +4312,42 @@ def _write_lane_profiles(home: Path) -> None:
     (coder / "profile.yaml").write_text("description: builds things\n")
     research = home / "profiles" / "research"
     research.mkdir()
-    (research / "config.yaml").write_text("model:\n  default: gpt-5.4\n")
+    (research / "config.yaml").write_text(
+        "model:\n"
+        "  provider: openrouter\n"
+        "  default: gpt-5.4\n"
+        "fallback_providers:\n"
+        "  - provider: openai-codex\n"
+        "    model: gpt-5.5\n"
+    )
+
+
+def _stub_lane_inventory(monkeypatch):
+    import hermes_cli.inventory as inventory
+
+    monkeypatch.setattr(inventory, "load_picker_context", lambda: object())
+    monkeypatch.setattr(
+        inventory,
+        "build_models_payload",
+        lambda *args, **kwargs: {
+            "providers": [
+                {
+                    "slug": "openrouter",
+                    "name": "OpenRouter",
+                    "authenticated": True,
+                    "models": ["qwen/qwen3.7-max", "moonshotai/kimi-k2.7"],
+                },
+                {
+                    "slug": "openai-codex",
+                    "name": "OpenAI Codex",
+                    "authenticated": True,
+                    "models": ["gpt-5.5"],
+                },
+            ],
+            "model": "gpt-5.4",
+            "provider": "openrouter",
+        },
+    )
 
 
 def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
@@ -4322,6 +4357,7 @@ def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
+    _stub_lane_inventory(monkeypatch)
 
     import hermes_cli.profiles as profiles_mod
 
@@ -4339,17 +4375,102 @@ def test_lanes_profile_catalog_avoids_list_profiles(client, monkeypatch):
     assert catalog["coder"]["description"] == "builds things"
     assert catalog["research"]["worker_runtime"] == "hermes"
     assert catalog["research"]["default_model"] == "gpt-5.4"
-    # The curated model catalog still picks up live profile defaults.
+    assert catalog["research"]["default_provider"] == "openrouter"
+    assert catalog["research"]["fallback_providers"] == [
+        {"provider": "openai-codex", "model": "gpt-5.5"},
+    ]
+    # The dynamic model catalog comes from shared inventory and still picks up
+    # profile defaults even when uncatalogued for that provider.
     model_ids = {m["id"] for m in data["models"]}
+    openrouter_rows = [m for m in data["models"] if m.get("provider") == "openrouter"]
+    assert any(m["id"] == "qwen/qwen3.7-max" for m in openrouter_rows)
     assert "gpt-5.4" in model_ids
-    # Newly curated Kimi K2.7 is offered in the Lanes dropdown alongside K2.6.
     assert "moonshotai/kimi-k2.7" in model_ids
+    assert any(m["runtime"] == "claude-cli" and m.get("locked") for m in data["models"])
+
+
+def test_lanes_openrouter_import_smokes_then_persists_config(client, monkeypatch):
+    import yaml
+
+    mod = _plugin_module()
+    calls: list[str] = []
+
+    def fake_smoke(model_id: str) -> tuple[bool, str]:
+        calls.append(model_id)
+        if model_id == "vendor/fail":
+            return False, "provider rejected model"
+        return True, "Smoke ok"
+
+    monkeypatch.setattr(mod, "_smoke_openrouter_model_id", fake_smoke)
+
+    r = client.post(
+        "/api/plugins/kanban/lanes/openrouter-models/import",
+        json={
+            "raw_text": (
+                "xiaomi/mimo-v2.5\n"
+                "bad-token\n"
+                "openrouter:moonshotai/kimi-k2.7\n"
+                "xiaomi/mimo-v2.5\n"
+                "vendor/fail"
+            )
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert calls == ["xiaomi/mimo-v2.5", "moonshotai/kimi-k2.7", "vendor/fail"]
+    assert data["admitted"] == ["xiaomi/mimo-v2.5", "moonshotai/kimi-k2.7"]
+    assert {row["id"]: row["status"] for row in data["results"]} == {
+        "xiaomi/mimo-v2.5": "admitted",
+        "bad-token": "invalid",
+        "moonshotai/kimi-k2.7": "admitted",
+        "vendor/fail": "failed",
+    }
+
+    cfg_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["model_catalog"]["providers"]["openrouter"]["extra_models"] == [
+        "xiaomi/mimo-v2.5",
+        "moonshotai/kimi-k2.7",
+    ]
+
+
+def test_lanes_openrouter_import_reports_already_configured(client, monkeypatch):
+    home = Path(os.environ["HERMES_HOME"])
+    (home / "config.yaml").write_text(
+        "model_catalog:\n"
+        "  providers:\n"
+        "    openrouter:\n"
+        "      extra_models:\n"
+        "        - xiaomi/mimo-v2.5\n",
+        encoding="utf-8",
+    )
+    mod = _plugin_module()
+    monkeypatch.setattr(mod, "_smoke_openrouter_model_id", lambda model_id: (True, "Smoke ok"))
+
+    r = client.post(
+        "/api/plugins/kanban/lanes/openrouter-models/import",
+        json={"raw_text": "xiaomi/mimo-v2.5"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["admitted"] == []
+    assert data["configured"] == ["xiaomi/mimo-v2.5"]
+    assert data["results"] == [
+        {
+            "id": "xiaomi/mimo-v2.5",
+            "status": "already_configured",
+            "reason": "Smoke ok; already present in config",
+        }
+    ]
 
 
 def test_lanes_profile_catalog_cached_between_requests(client, monkeypatch):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
+    _stub_lane_inventory(monkeypatch)
 
     calls = {"n": 0}
     real_scan = mod._scan_lane_profiles
@@ -4371,6 +4492,7 @@ def test_lanes_catalog_includes_kanban_spawn_health(client, monkeypatch):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
+    _stub_lane_inventory(monkeypatch)
     monkeypatch.setattr(mod, "_claude_worker_available", lambda: True)
 
     r = client.get("/api/plugins/kanban/lanes")
@@ -4384,6 +4506,7 @@ def test_lanes_catalog_spawn_health_unhealthy_without_claude_binary(client, monk
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
+    _stub_lane_inventory(monkeypatch)
     monkeypatch.setattr(mod, "_claude_worker_available", lambda: False)
 
     r = client.get("/api/plugins/kanban/lanes")
@@ -4395,10 +4518,11 @@ def test_lanes_catalog_spawn_health_unhealthy_without_claude_binary(client, monk
     assert catalog["research"]["kanban_spawn_health"]["status"] == "healthy"
 
 
-def test_lanes_spawn_check_reports_healthy_hermes_combo(client):
+def test_lanes_spawn_check_reports_healthy_hermes_combo(client, monkeypatch):
     _write_lane_profiles(Path(os.environ["HERMES_HOME"]))
     mod = _plugin_module()
     mod._lane_profile_cache = None
+    _stub_lane_inventory(monkeypatch)
 
     r = client.post(
         "/api/plugins/kanban/lanes/spawn-check",

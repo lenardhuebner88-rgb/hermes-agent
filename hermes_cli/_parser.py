@@ -135,6 +135,18 @@ def build_top_level_parser():
             "under model.provider — use `hermes setup` or edit the file to change it."
         ),
     )
+    _inherited_flag(
+        parser,
+        "--fallback-provider",
+        action="append",
+        default=None,
+        metavar="PROVIDER:MODEL",
+        help=(
+            "Per-invocation fallback provider/model override. Repeat to build "
+            "a chain. Primarily used by dispatcher-spawned workers; persistent "
+            "fallbacks live in config.yaml fallback_providers."
+        ),
+    )
     parser.add_argument(
         "-t",
         "--toolsets",
@@ -283,6 +295,17 @@ def build_top_level_parser():
         # `--provider` flag.
         default=None,
         help="Inference provider (default: auto). Built-in or a user-defined name from `providers:` in config.yaml.",
+    )
+    _inherited_flag(
+        chat_parser,
+        "--fallback-provider",
+        action="append",
+        default=argparse.SUPPRESS,
+        metavar="PROVIDER:MODEL",
+        help=(
+            "Per-invocation fallback provider/model override. Repeat to build "
+            "a chain. Persistent fallbacks live in config.yaml fallback_providers."
+        ),
     )
     chat_parser.add_argument(
         "-v",

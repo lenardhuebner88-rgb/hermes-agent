@@ -11,6 +11,8 @@ const fixture: LanesResponse = {
       name: "coder",
       worker_runtime: "hermes",
       default_model: "gpt-5.5",
+      default_provider: "openai-codex",
+      fallback_providers: [{ provider: "openai-codex", model: "gpt-5.5" }],
       description: "",
       kanban_spawn_health: "healthy",
     },
@@ -23,10 +25,10 @@ const fixture: LanesResponse = {
     },
   ],
   models: [
-    { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)" },
-    { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)" },
-    { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "API-Modelle" },
-    { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "API-Modelle" },
+    { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+    { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
+    { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "OpenRouter", provider: "openrouter" },
   ],
   lanes: [
     {
@@ -37,7 +39,12 @@ const fixture: LanesResponse = {
       created_at: 0,
       updated_at: 0,
       profiles: {
-        coder: { worker_runtime: "hermes", model: "gpt-5.5" },
+        coder: {
+          worker_runtime: "hermes",
+          provider: "openrouter",
+          model: "qwen/qwen3.7-max",
+          fallback_providers: [{ provider: "openai-codex", model: "gpt-5.5" }],
+        },
       },
     },
     {
@@ -59,9 +66,14 @@ const noopActions = {
   onApply: vi.fn(),
   onCreate: vi.fn(),
   onDelete: vi.fn(),
+  onImportOpenRouterModels: vi.fn(async () => ({
+    admitted: ["xiaomi/mimo-v2.5"],
+    configured: ["xiaomi/mimo-v2.5"],
+    results: [{ id: "xiaomi/mimo-v2.5", status: "admitted" as const, reason: "Smoke ok; added to config" }],
+  })),
 };
 
-describe("LanesEditor (einfache Modell-Schaltung)", () => {
+describe("LanesEditor (routing cards)", () => {
   it("zeigt Preset-Dropdown mit aktiv-Markierung und Übernehmen-Button", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[1]} busy={false} actions={noopActions} />,
@@ -73,20 +85,21 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
     expect(html).toContain("Übernehmen");
   });
 
-  it("rendert pro Rolle genau ein Modell-Dropdown mit sprechenden Namen", () => {
+  it("rendert mobile Role-Cards mit Provider zuerst und Modell-Suche", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
     // Rollen aus dem Katalog + nicht-technische Hinweise
     expect(html).toContain("Schreibt Code");
     expect(html).toContain("Schwere Spezialfälle");
-    // Gruppierte, sprechende Modell-Optionen statt Freitext
-    expect(html).toContain("Claude (Max-Abo)");
-    expect(html).toContain("Claude Fable 5");
+    // Provider-first + model datalist
+    expect(html).toContain("OpenRouter");
+    expect(html).toContain("OpenAI Codex");
     expect(html).toContain("Qwen 3.7 Max");
+    expect(html).toContain("OpenRouter-IDs");
+    expect(html).toContain("Smoken &amp; aufnehmen");
     expect(html).toContain("Standard (Claude Fable 5)");
-    // Kein roher Runtime-Select mehr
-    expect(html).not.toContain(">Runtime<");
+    expect(html).toContain("list=\"lane-model-modell-f-r-coder\"");
   });
 
   it("zeigt pro Rolle einen Worker-Check-Button", () => {
@@ -96,19 +109,24 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
     expect(html.match(/Worker-Check/g)).toHaveLength(2);
   });
 
-  it("warnt und blockiert Übernehmen bei offensichtlich falscher Runtime-/Modell-Kombination", () => {
+  it("warnt und blockiert Speichern bei identischem Primary/Fallback", () => {
     const badLane = {
       ...fixture.lanes[1],
       active: false,
       profiles: {
-        coder: { worker_runtime: "hermes" as const, model: "claude-fable-5" },
+        coder: {
+          worker_runtime: "hermes" as const,
+          provider: "openrouter",
+          model: "qwen/qwen3.7-max",
+          fallback_providers: [{ provider: "openrouter", model: "qwen/qwen3.7-max" }],
+        },
       },
     };
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={badLane} busy={false} actions={noopActions} />,
     );
-    expect(html).toContain("Worker-/Modell-Kombination passt nicht");
-    expect(html).toMatch(/disabled[^>]*>.*Übernehmen/s);
+    expect(html).toContain("Primary and fallback are identical.");
+    expect(html).toMatch(/disabled[^>]*>.*Als Lane speichern/s);
   });
 
   it("Übernehmen ist auf der aktiven Lane ohne Änderungen deaktiviert (zeigt Aktiv)", () => {
@@ -133,10 +151,23 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
-    // coder hat einen Lane-Eintrag (hermes|gpt-5.5) → aktiver Override
-    expect(html).toContain("Override · GPT-5.5");
+    // coder hat einen Lane-Eintrag mit Provider/Model/Fallback → aktiver Override
+    expect(html).toContain("Lane-Override");
+    expect(html).toContain("OpenRouter / Qwen 3.7 Max");
     // premium ohne Lane-Eintrag → expliziter Standard-Zustand
-    expect(html).toContain(">Standard<");
+    expect(html).toContain("Profil-Default");
+  });
+
+  it("zeigt Fallback-Kette, Claude-CLI-Lock und Preview-only Config", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Fallbacks");
+    expect(html).toContain("Sicheren Fallback hinzufügen");
+    expect(html).toContain("Claude-CLI — später");
+    expect(html).toContain("Dauerhaft setzen (Preview)");
+    expect(html).toContain("Preview · würde ändern");
+    expect(html).toContain("fallback_providers:");
   });
 
   it("fasst Bereitschaft + Overrides im Panel-Meta zusammen", () => {
@@ -153,6 +184,7 @@ describe("LanesEditor (einfache Modell-Schaltung)", () => {
         name: `worker-${i}`,
         worker_runtime: "hermes" as const,
         default_model: "gpt-5.5",
+        default_provider: "openai-codex",
         description: "",
         kanban_spawn_health:
           i % 3 === 0

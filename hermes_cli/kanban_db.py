@@ -12553,7 +12553,9 @@ def _default_spawn(
     # the pre-lane behavior below is untouched.
     lane_entry = _active_lane_entry_for_profile(profile_arg, board=board)
     lane_runtime = (lane_entry or {}).get("worker_runtime")
+    lane_provider = (lane_entry or {}).get("provider")
     lane_model = (lane_entry or {}).get("model")
+    lane_fallback_providers = (lane_entry or {}).get("fallback_providers") or []
 
     # Early branch for claude-CLI worker profiles: launch the `claude` CLI
     # instead of `hermes -p <profile> chat`. The lane's worker_runtime (when
@@ -12636,6 +12638,20 @@ def _default_spawn(
     hermes_model = task.model_override or lane_model
     if hermes_model:
         cmd.extend(["-m", hermes_model])
+    if lane_provider and not task.model_override:
+        cmd.extend(["--provider", lane_provider])
+    if lane_fallback_providers:
+        for fallback in lane_fallback_providers:
+            if not isinstance(fallback, dict):
+                continue
+            provider = (fallback.get("provider") or "").strip()
+            model = (fallback.get("model") or "").strip()
+            if not provider or not model:
+                continue
+            if fallback.get("base_url"):
+                cmd.extend(["--fallback-provider", json.dumps(fallback, separators=(",", ":"))])
+            else:
+                cmd.extend(["--fallback-provider", f"{provider}:{model}"])
     # Per-task iteration-budget override routed through the top-precedence
     # CLI-arg path: `--max-turns N` maps to HermesCLI(max_turns=N), which
     # wins over the profile's agent.max_turns (cli.py:3053) — unlike the
@@ -14519,16 +14535,22 @@ def task_age(task: Task) -> dict:
 # Lanes (night-sprint F1) — switchable profile→(runtime, model) presets
 # ---------------------------------------------------------------------------
 #
-# A lane is a named preset mapping profile names to a worker runtime
-# ("hermes" | "claude-cli") and an optional model id. Exactly one lane may be
-# active; the dispatcher hot-reads the active lane from the board DB at every
-# spawn (same per-spawn freshness as _is_claude_cli_profile /
-# _claude_profile_model), so switching lanes needs NO gateway restart.
+# A lane is a named preset mapping profile names to a worker runtime plus
+# optional provider/model/fallback routing for Hermes-runtime workers.
+# Exactly one lane may be active; the dispatcher hot-reads the active lane from
+# the board DB at every spawn (same per-spawn freshness as
+# _is_claude_cli_profile / _claude_profile_model), so switching lanes needs NO
+# gateway restart.
 #
 # Spawn-time precedence (documented + tested):
 #   task.model_override            (per-task escalation, highest)
 #   > active lane entry            (this section)
 #   > profile config.yaml default  (worker_runtime / claude_model / model)
+#
+# Fallback chain precedence:
+#   active lane fallback_providers
+#   > profile fallback_providers
+#   > legacy fallback_model
 #
 # A profile absent from the active lane falls through to its config default;
 # no lanes / no active lane = exact pre-lane behavior.
@@ -14567,14 +14589,15 @@ def _new_lane_id() -> str:
 def _normalize_lane_profiles(profiles) -> dict:
     """Validate + normalize a lane ``profiles`` mapping.
 
-    Returns ``{profile: {"worker_runtime": <str|None>, "model": <str|None>}}``.
-    Raises ValueError on structurally invalid input (non-dict, unknown
-    runtime). Empty-string models normalize to None (= profile default).
+    Returns ``{profile: {"worker_runtime": <str|None>, "provider": <str|None>,
+    "model": <str|None>, "fallback_providers": <list>}}``. Old entries with
+    only ``worker_runtime`` + ``model`` remain valid. Empty-string models
+    normalize to None (= profile default).
     """
     if profiles is None:
         return {}
     if not isinstance(profiles, dict):
-        raise ValueError("profiles must be an object of {profile: {worker_runtime, model}}")
+        raise ValueError("profiles must be an object of {profile: lane-entry}")
     out: dict = {}
     for prof, entry in profiles.items():
         if not isinstance(prof, str) or not prof.strip():
@@ -14594,7 +14617,54 @@ def _normalize_lane_profiles(profiles) -> dict:
         if model is not None and not isinstance(model, str):
             raise ValueError(f"model for {prof!r} must be a string")
         model = model.strip() if isinstance(model, str) and model.strip() else None
-        out[prof.strip()] = {"worker_runtime": runtime, "model": model}
+
+        provider = entry.get("provider")
+        if provider is not None and not isinstance(provider, str):
+            raise ValueError(f"provider for {prof!r} must be a string")
+        provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
+
+        fallbacks = _normalize_lane_fallback_providers(
+            entry.get("fallback_providers"), profile=prof.strip(),
+        )
+        if runtime is None and (provider or fallbacks):
+            runtime = "hermes"
+        if runtime == "claude-cli" and provider:
+            raise ValueError(f"provider for claude-cli lane entry {prof!r} is not supported")
+        if runtime == "claude-cli" and fallbacks:
+            raise ValueError(f"fallback_providers for claude-cli lane entry {prof!r} is not supported")
+        out[prof.strip()] = {
+            "worker_runtime": runtime,
+            "provider": provider,
+            "model": model,
+            "fallback_providers": fallbacks,
+        }
+    return out
+
+
+def _normalize_lane_fallback_providers(raw, *, profile: str) -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"fallback_providers for {profile!r} must be a list")
+
+    out: list[dict] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"fallback_providers[{idx}] for {profile!r} must be an object")
+        provider = item.get("provider")
+        model = item.get("model")
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError(f"fallback_providers[{idx}].provider for {profile!r} is required")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"fallback_providers[{idx}].model for {profile!r} is required")
+        normalized = {
+            "provider": provider.strip(),
+            "model": model.strip(),
+        }
+        base_url = item.get("base_url")
+        if isinstance(base_url, str) and base_url.strip():
+            normalized["base_url"] = base_url.strip().rstrip("/")
+        out.append(normalized)
     return out
 
 
@@ -14603,6 +14673,8 @@ def _lane_dict(row: sqlite3.Row) -> dict:
         profiles = json.loads(row["profiles"] or "{}")
         if not isinstance(profiles, dict):
             profiles = {}
+        else:
+            profiles = _normalize_lane_profiles(profiles)
     except (ValueError, TypeError):
         profiles = {}
     return {
@@ -14642,9 +14714,13 @@ def _seed_api_standard_profiles() -> dict:
                 else:
                     model_cfg = cfg.get("model")
                     default = model_cfg.get("default") if isinstance(model_cfg, dict) else None
+                    provider = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
+                    from hermes_cli.fallback_config import get_fallback_chain
                     roster[prof] = {
                         "worker_runtime": "hermes",
+                        "provider": provider.strip() if isinstance(provider, str) and provider.strip() else None,
                         "model": default.strip() if isinstance(default, str) and default.strip() else roster[prof]["model"],
+                        "fallback_providers": get_fallback_chain(cfg),
                     }
             except Exception:
                 continue  # keep the static fallback for this profile
@@ -14816,8 +14892,8 @@ def _active_lane_entry_for_profile(
     Opens its own short-lived connection (the spawn helpers don't receive the
     dispatcher's). Fail-soft like _is_claude_cli_profile: ANY error returns
     None so a broken lanes table can never block dispatching. Returns
-    ``{"worker_runtime": <str|None>, "model": <str|None>}`` or None when the
-    profile is not mapped / no lane is active.
+    normalized lane entry or None when the profile is not mapped / no lane is
+    active.
     """
     try:
         conn = connect(board=board)
@@ -14835,14 +14911,17 @@ def _active_lane_entry_for_profile(
         entry = profiles.get(profile_arg)
         if not isinstance(entry, dict):
             return None
-        runtime = entry.get("worker_runtime")
-        if runtime not in LANE_RUNTIMES:
-            runtime = None
-        model = entry.get("model")
-        model = model.strip() if isinstance(model, str) and model.strip() else None
-        if runtime is None and model is None:
+        normalized = _normalize_lane_profiles({profile_arg: entry}).get(profile_arg)
+        if not isinstance(normalized, dict):
             return None
-        return {"worker_runtime": runtime, "model": model}
+        if (
+            normalized.get("worker_runtime") is None
+            and normalized.get("provider") is None
+            and normalized.get("model") is None
+            and not normalized.get("fallback_providers")
+        ):
+            return None
+        return normalized
     except Exception:
         return None
 
