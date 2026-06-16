@@ -4257,6 +4257,40 @@ def test_workers_active_carries_note_and_eta(client):
     assert worker["eta_p90_seconds"] == 600
 
 
+def test_workers_active_surfaces_claude_cli_dispatcher_heartbeat(client, monkeypatch):
+    """Criterion 3: the dispatcher-side claude-CLI heartbeat surfaces through the
+    EXISTING last_heartbeat_* fields — no new endpoint/field/UI concept needed."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+
+    now = int(time.time())
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="claude worker live")
+        with kb.write_txn(conn):
+            run_id = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "claim_lock, worker_pid) VALUES (?, 'coder-claude', 'running', ?, ?, 5151)",
+                (t, now - 120, kb._claimer_id()),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status = 'running', current_run_id = ?, "
+                "claim_lock = ?, worker_pid = 5151 WHERE id = ?",
+                (run_id, kb._claimer_id(), t),
+            )
+        # Dispatcher refreshes liveness for the detached claude-CLI worker.
+        assert kb.heartbeat_live_claude_cli_workers(conn) == [t]
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/workers/active").json()
+    worker = next(w for w in data["workers"] if w["run_id"] == run_id)
+    assert worker["last_heartbeat_at"] is not None  # no longer "—" on the card
+    assert worker["last_heartbeat_note"].startswith("claude-cli running")
+    assert worker["last_heartbeat_note_at"] is not None
+
+
 def test_task_model_override_roundtrip(client):
     """Phase B: POST /tasks akzeptiert model_override, PATCH setzt/löscht ihn,
     und der Wert steht in der Task-Antwort (Spawn-Resolution liest tasks.model_override)."""
