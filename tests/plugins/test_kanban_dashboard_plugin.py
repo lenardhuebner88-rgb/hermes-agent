@@ -3893,6 +3893,59 @@ def test_decision_queue_surfaces_sticky_blocked(client):
     assert row["suggested_command"] == f"hermes kanban unblock {t}"
 
 
+def test_decision_queue_surfaces_failure_escalation_with_human_payload(client):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="runtime stop needs Piet", assignee="coder")
+        assert kb.claim_task(conn, t) is not None
+        assert not kb._record_task_failure(
+            conn,
+            t,
+            "first spawn failure",
+            outcome="spawn_failed",
+            failure_limit=2,
+            release_claim=True,
+            end_run=True,
+        )
+        assert kb.claim_task(conn, t) is not None
+        assert kb._record_task_failure(
+            conn,
+            t,
+            "second spawn failure",
+            outcome="spawn_failed",
+            failure_limit=2,
+            release_claim=True,
+            end_run=True,
+            event_payload_extra={"run_log": "smoke-run-2"},
+        )
+
+    r = client.get("/api/plugins/kanban/decision-queue")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["count"] == 1
+    row = data["decisions"][0]
+    assert row["kind"] == "operator_escalation"
+    assert row["task_id"] == t
+    assert row["reason"].startswith("retry ladder exhausted")
+    decision = row["operator_escalation"]
+    assert set(decision) == {
+        "task",
+        "why_now",
+        "attempts_already_made",
+        "evidence",
+        "recommended_human_action",
+        "blocked_action_boundary",
+    }
+    assert decision["task"]["id"] == t
+    assert decision["attempts_already_made"] == 2
+    assert decision["evidence"]["context"] == {"run_log": "smoke-run-2"}
+    assert "inspect the task" in decision["recommended_human_action"]
+    assert decision["blocked_action_boundary"] == list(kb.OPERATOR_ONLY_ACTIONS)
+
+    repeat = client.get("/api/plugins/kanban/decision-queue").json()
+    assert repeat["count"] == 1
+    assert [d["task_id"] for d in repeat["decisions"]] == [t]
+
+
 # ---------------------------------------------------------------------------
 # N-E3: GET /epics + /epics/{id}
 # ---------------------------------------------------------------------------
@@ -4099,6 +4152,26 @@ def test_funnel_drafts_lists_done_funnel_roots(client):
     assert [d["id"] for d in data["drafts"]] == [tid]
     assert data["drafts"][0]["created_by"] == "family"
     assert data["drafts"][0]["draft_excerpt"].startswith("# Draft")
+
+
+def test_funnel_draft_surface_is_separate_from_failure_decision_queue(client):
+    conn = kb.connect()
+    try:
+        tid = _make_funnel_draft(
+            conn,
+            created_by="fo-gap-audit",
+            title="protected funnel wait",
+        )
+    finally:
+        conn.close()
+
+    drafts = client.get("/api/plugins/kanban/funnel/drafts").json()["drafts"]
+    decisions = client.get("/api/plugins/kanban/decision-queue").json()["decisions"]
+
+    assert [d["id"] for d in drafts] == [tid]
+    assert drafts[0]["created_by"] == "fo-gap-audit"
+    assert drafts[0]["draft_excerpt"].startswith("# Draft")
+    assert all(d["task_id"] != tid for d in decisions)
 
 
 def test_funnel_draft_approve_creates_build_child_then_409_on_repeat(client):

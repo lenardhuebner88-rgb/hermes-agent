@@ -155,6 +155,12 @@ function RecoveryStrip() {
                 <span className="hc-mono text-[10px] hc-dim">{row.kind}</span>
               </div>
               <p className="mt-1 line-clamp-2 text-xs hc-soft">{row.reason}</p>
+              {row.operator_escalation?.recommended_human_action ? (
+                <p className="mt-1 line-clamp-2 text-xs text-amber-100">{row.operator_escalation.recommended_human_action}</p>
+              ) : null}
+              {row.operator_escalation?.blocked_action_boundary?.length ? (
+                <p className="mt-1 truncate hc-mono text-[10px] hc-dim">Grenze: {row.operator_escalation.blocked_action_boundary.join(", ")}</p>
+              ) : null}
             </li>
           ))}
         </ul>

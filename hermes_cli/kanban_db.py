@@ -13993,18 +13993,29 @@ def decision_queue(
         except Exception:
             return None
 
-    def _add(kind, task_id, title, reason, age_seconds, suggested_command):
+    def _add(
+        kind,
+        task_id,
+        title,
+        reason,
+        age_seconds,
+        suggested_command,
+        operator_escalation: Optional[dict] = None,
+    ):
         if task_id in seen:
             return
         seen.add(task_id)
-        rows.append({
+        row = {
             "kind": kind,
             "task_id": task_id,
             "title": title,
             "reason": reason,
             "age_seconds": age_seconds,
             "suggested_command": suggested_command,
-        })
+        }
+        if operator_escalation is not None:
+            row["operator_escalation"] = operator_escalation
+        rows.append(row)
 
     def _payload_dict(raw_payload) -> dict:
         try:
@@ -14134,6 +14145,7 @@ def decision_queue(
                 "operator_escalation", row["task_id"], row["title"],
                 reason, _age(row["created_at"]),
                 f"hermes kanban show {row['task_id']}",
+                operator_escalation=payload,
             )
     except Exception:
         pass

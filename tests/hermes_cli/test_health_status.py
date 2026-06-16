@@ -298,6 +298,30 @@ def test_kanban_dispatcher_missing_heartbeat_degraded(
     assert result["heartbeat_age_s"] is None
 
 
+def test_kanban_dispatcher_unreadable_heartbeat_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    heartbeat = tmp_path / "state" / "kanban_dispatcher_heartbeat.json"
+    heartbeat.parent.mkdir(parents=True)
+    heartbeat.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.kanban_db",
+        _module(
+            "hermes_cli.kanban_db",
+            kanban_dispatcher_heartbeat_path=lambda: heartbeat,
+        ),
+    )
+
+    result = asyncio.run(hs._probe_kanban_dispatcher_status())
+
+    assert result["status"] == "degraded"
+    assert result["detail"] == "heartbeat unreadable"
+    assert result["heartbeat_age_s"] is None
+    assert result["error"]
+
+
 def test_kanban_dispatcher_stale_heartbeat_degraded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

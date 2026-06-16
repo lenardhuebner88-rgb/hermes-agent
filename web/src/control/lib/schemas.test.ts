@@ -442,7 +442,22 @@ describe("DecisionQueueResponseSchema", () => {
   it("accepts no-silent-stall decision kinds", () => {
     const parsed = parseOrThrow(DecisionQueueResponseSchema, {
       decisions: [
-        { kind: "operator_escalation", task_id: "t1", title: "Escalated", reason: "needs human", age_seconds: "9", suggested_command: null },
+        {
+          kind: "operator_escalation",
+          task_id: "t1",
+          title: "Escalated",
+          reason: "needs human",
+          age_seconds: "9",
+          suggested_command: null,
+          operator_escalation: {
+            task: { id: "t1", title: "Escalated", status: "blocked", assignee: "coder" },
+            why_now: "retry ladder exhausted",
+            attempts_already_made: "2",
+            evidence: { last_error: "boom" },
+            recommended_human_action: "inspect and choose",
+            blocked_action_boundary: ["DB schema/data mutation"],
+          },
+        },
         { kind: "integration_parked", task_id: "t2", title: "Parked", reason: "merge red", age_seconds: 10, suggested_command: "hermes kanban show t2" },
         { kind: "rate_limited_loop", task_id: "t3", title: "Quota", reason: "429", age_seconds: null, suggested_command: null },
       ],
@@ -456,6 +471,8 @@ describe("DecisionQueueResponseSchema", () => {
       "rate_limited_loop",
     ]);
     expect(parsed.decisions[0].age_seconds).toBe(9);
+    expect(parsed.decisions[0].operator_escalation?.attempts_already_made).toBe(2);
+    expect(parsed.decisions[0].operator_escalation?.recommended_human_action).toBe("inspect and choose");
   });
 });
 

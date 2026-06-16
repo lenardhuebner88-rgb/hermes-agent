@@ -186,12 +186,14 @@ def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
                 },
             )
         alerts = evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW + 1)
+        repeat = evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW + 2)
 
     assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
     assert alerts[0]["channel_id"] == "999"
     assert "Human needs to decide" in alerts[0]["text"]
     assert "retry ladder exhausted" in alerts[0]["text"]
     assert "inspect and unblock" in alerts[0]["text"]
+    assert repeat == []
 
 
 # ---------------------------------------------------------------------------

@@ -279,6 +279,22 @@ export const KanbanDecisionKindSchema = z
   ])
   .catch("sticky_blocked");
 
+const OperatorEscalationTaskSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().nullable().catch(null).optional(),
+  status: z.string().nullable().catch(null).optional(),
+  assignee: z.string().nullable().catch(null).optional(),
+});
+
+export const OperatorEscalationPayloadSchema = z.object({
+  task: OperatorEscalationTaskSchema.catch({ id: "" }),
+  why_now: z.string().catch(""),
+  attempts_already_made: z.coerce.number().catch(0),
+  evidence: z.record(z.string(), z.unknown()).catch({}),
+  recommended_human_action: z.string().catch(""),
+  blocked_action_boundary: z.array(z.string()).catch([]),
+}).nullable().catch(null);
+
 export const KanbanDecisionSchema = z.object({
   kind: KanbanDecisionKindSchema,
   task_id: z.string().catch(""),
@@ -286,6 +302,7 @@ export const KanbanDecisionSchema = z.object({
   reason: z.string().catch(""),
   age_seconds: z.coerce.number().nullable().catch(null),
   suggested_command: z.string().nullable().catch(null),
+  operator_escalation: OperatorEscalationPayloadSchema.optional(),
 });
 
 export const DecisionQueueResponseSchema = z.object({
