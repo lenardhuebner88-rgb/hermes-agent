@@ -23,6 +23,9 @@ import {
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
+  FlowGateResponseSchema,
+  FlowSizingResponseSchema,
+  FlowTimeoutSweepResponseSchema,
   PlanSpecsResponseSchema,
   EpicsResponseSchema,
   TaskDetailResponseSchema,
@@ -32,13 +35,13 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -996,13 +999,13 @@ export function useFlowRelease(onDone?: () => void | Promise<void>) {
   const [errorById, setErrorById] = useState<Record<string, string>>({});
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
-  const release = useCallback(async (rootId: string): Promise<{ ok: boolean; released?: number; detail?: string }> => {
+  const release = useCallback(async (rootId: string, options?: FlowReleaseOptions): Promise<{ ok: boolean; released?: number; detail?: string }> => {
     setBusyId(rootId);
     setErrorById((prev) => ({ ...prev, [rootId]: "" }));
     try {
       const res = await fetchJSON<{ released?: number }>(
         `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-release`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options ?? {}) },
       );
       await onDone?.();
       return { ok: true, released: res.released ?? 0 };
@@ -1015,6 +1018,112 @@ export function useFlowRelease(onDone?: () => void | Promise<void>) {
     }
   }, [onDone]);
   return { busyId, errorById, release };
+}
+
+export function useFlowGate(rootId: string | null, onDone?: () => void | Promise<void>) {
+  const [data, setData] = useState<FlowGateResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const reload = useCallback(async (): Promise<FlowGateResponse | null> => {
+    if (!rootId) {
+      if (aliveRef.current) setData(null);
+      return null;
+    }
+    if (aliveRef.current) setLoading(true);
+    try {
+      const parsed = parseOrThrow(
+        FlowGateResponseSchema,
+        await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-gate`),
+        "flow-gate",
+      );
+      if (aliveRef.current) {
+        setData(parsed);
+        setError("");
+      }
+      return parsed;
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return null;
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, [rootId]);
+  useEffect(() => {
+    const initial = window.setTimeout(() => {
+      void reload();
+    }, 0);
+    if (!rootId) return () => window.clearTimeout(initial);
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void reload();
+    }, 10000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [rootId, reload]);
+  const sizing = useCallback(async (
+    action: "merge" | "split",
+    taskIds: string[],
+    payload?: { title?: string; body?: string; assignee?: string | null },
+  ): Promise<FlowSizingResponse | null> => {
+    if (!rootId) return null;
+    setBusy(true);
+    setError("");
+    try {
+      const parsed = parseOrThrow(
+        FlowSizingResponseSchema,
+        await fetchJSON<unknown>(
+          `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-gate/sizing`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, task_ids: taskIds, ...payload }),
+          },
+        ),
+        "flow-gate/sizing",
+      );
+      if (aliveRef.current) setData(parsed.gate);
+      await onDone?.();
+      return parsed;
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return null;
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, [rootId, onDone]);
+  const sweepTimeouts = useCallback(async (timeoutSeconds?: number): Promise<FlowTimeoutSweepResponse | null> => {
+    setBusy(true);
+    setError("");
+    try {
+      const parsed = parseOrThrow(
+        FlowTimeoutSweepResponseSchema,
+        await fetchJSON<unknown>(
+          "/api/plugins/kanban/tasks/flow-gate/timeout-sweep",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(timeoutSeconds ? { timeout_seconds: timeoutSeconds } : {}),
+          },
+        ),
+        "flow-gate/timeout-sweep",
+      );
+      await Promise.all([onDone?.(), reload()]);
+      return parsed;
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return null;
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, [onDone, reload]);
+  return { data, loading, busy, error, reload, sizing, sweepTimeouts };
 }
 
 // In-place dispatch of a parked FO task: PATCH /tasks/{id} with status="ready"

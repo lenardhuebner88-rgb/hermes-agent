@@ -85,6 +85,16 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/onDispatchSingle/);
   });
 
+  it("surfaces the routing gate proposal before releasing held Flow chains", () => {
+    expect(src).toMatch(/useFlowGate/);
+    expect(src).toMatch(/assignee_overrides/);
+    expect(src).toMatch(/release_level/);
+    expect(src).toMatch(/gate\.sizing/);
+    expect(src).toMatch(/sweepTimeouts/);
+    expect(src).toMatch(/Soft-Limit/);
+    expect(src).toMatch(/Risiko/);
+  });
+
   it("uses scoped Worker action failure copy in the Worker strip", () => {
     expect(src).toMatch(/de\.worker\.actionFailed/);
     expect(src).not.toMatch(/Aktion fehlgeschlagen/);

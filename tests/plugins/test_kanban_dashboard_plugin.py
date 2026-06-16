@@ -3872,6 +3872,109 @@ def test_flow_release_unblocks_scheduled_children_dag_correct(client):
     assert r2.status_code == 200 and r2.json()["released"] == 0
 
 
+def test_flow_gate_proposal_surfaces_risk_cost_lanes_and_timeout(client):
+    root, child_ids = _setup_gated_root()
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/flow-gate")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["root_id"] == root
+    assert body["held_count"] == 3
+    assert [c["id"] for c in body["children"]] == child_ids
+    assert all("risk" in c for c in body["children"])
+    assert set(body["release_levels"]) == {"merge", "live"}
+    assert body["timeout_seconds"] == 1800
+    assert body["timeout_at"] is not None
+    assert body["cost_estimate"]["estimated_tokens"] > 0
+    assert body["cost_estimate"]["estimated_cost_usd"] > 0
+    assert body["cost_estimate"]["soft_limit_usd"] == 1.0
+    profiles = {p for lane in body["lanes"] for p in lane["profiles"]}
+    assert "coder" in profiles and "reviewer" in profiles
+
+
+def test_flow_release_applies_lane_override_and_records_release_level(client):
+    root, child_ids = _setup_gated_root()
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={
+            "assignee_overrides": {child_ids[0]: "reviewer"},
+            "release_level": "live",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == 3
+    assert body["release_level"] == "live"
+    assert body["assignee_overrides"] == {child_ids[0]: "reviewer"}
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, child_ids[0]).assignee == "reviewer"
+        release_events = [e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"]
+    assert release_events
+    assert release_events[-1].payload["release_level"] == "live"
+    assert release_events[-1].payload["released_ids"] == child_ids
+
+
+def test_flow_gate_sizing_merge_and_split_before_release(client):
+    root, child_ids = _setup_gated_root()
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "merge", "task_ids": child_ids[:2]},
+    )
+    assert r.status_code == 200, r.text
+    merged = r.json()
+    assert merged["action"] == "merge"
+    assert merged["kept_id"] == child_ids[0]
+    assert merged["archived_id"] == child_ids[1]
+    assert [c["id"] for c in merged["gate"]["children"]] == [child_ids[0], child_ids[2]]
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, child_ids[1]).status == "archived"
+        assert child_ids[1] not in kb.parent_ids(conn, child_ids[2])
+        assert child_ids[0] in kb.parent_ids(conn, child_ids[2])
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "split", "task_ids": [child_ids[0]], "title": "a follow-up split"},
+    )
+    assert r.status_code == 200, r.text
+    split = r.json()
+    assert split["action"] == "split"
+    new_id = split["new_id"]
+    assert new_id
+
+    with kb.connect() as conn:
+        new_task = kb.get_task(conn, new_id)
+        assert new_task.status == "scheduled"
+        assert new_task.title == "a follow-up split"
+        assert new_id in kb.parent_ids(conn, root)
+
+
+def test_flow_gate_timeout_sweep_releases_old_roots(client):
+    root, child_ids = _setup_gated_root()
+    now = int(time.time())
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now - 4000, root))
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-gate/timeout-sweep",
+        json={"timeout_seconds": 1800},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == 3
+    assert body["released_roots"][0]["task_id"] == root
+
+    with kb.connect() as conn:
+        st = {c: kb.get_task(conn, c).status for c in child_ids}
+    assert st[child_ids[0]] == "ready"
+    assert st[child_ids[1]] == "ready"
+    assert st[child_ids[2]] == "todo"
+
+
 def test_flow_release_unknown_task_404(client):
     r = client.post("/api/plugins/kanban/tasks/t_nope/flow-release")
     assert r.status_code == 404

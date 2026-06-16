@@ -105,6 +105,85 @@ const TaskStatusSchema = z
   .enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"])
   .catch("todo");
 
+const FlowGateReleaseLevelSchema = z.enum(["merge", "live"]).catch("merge");
+
+const FlowGateRiskSchema = z.object({
+  tone: z.enum(["low", "medium", "high"]).catch("low"),
+  reasons: z.array(z.string()).catch([]),
+}).catch({ tone: "low", reasons: [] });
+
+const FlowGateChildSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  status: TaskStatusSchema,
+  assignee: z.string().nullable().catch(null),
+  parents: z.array(z.string()).catch([]),
+  risk: FlowGateRiskSchema,
+  created_at: z.coerce.number().catch(0),
+  age_seconds: z.coerce.number().catch(0),
+});
+
+const FlowGateLaneSchema = z.object({
+  id: z.string().nullable().catch(null),
+  name: z.string().catch("Profile"),
+  active: z.boolean().catch(false),
+  profiles: z.array(z.string()).catch([]),
+});
+
+const FlowGateCostItemSchema = z.object({
+  task_id: z.string().catch(""),
+  profile: z.string().catch("default"),
+  estimated_tokens: z.coerce.number().catch(0),
+  estimated_cost_usd: z.coerce.number().catch(0),
+  token_source: z.string().catch("unknown"),
+  cost_source: z.string().catch("unknown"),
+});
+
+const FlowGateCostEstimateSchema = z.object({
+  estimated_tokens: z.coerce.number().catch(0),
+  estimated_cost_usd: z.coerce.number().catch(0),
+  soft_limit_usd: z.coerce.number().catch(1),
+  warning: z.boolean().catch(false),
+  items: z.array(FlowGateCostItemSchema).catch([]),
+});
+
+export const FlowGateResponseSchema = z.object({
+  root_id: z.string().catch(""),
+  root_status: TaskStatusSchema,
+  children: z.array(FlowGateChildSchema).catch([]),
+  held_count: z.coerce.number().catch(0),
+  release_levels: z.array(FlowGateReleaseLevelSchema).catch(["merge", "live"]),
+  timeout_seconds: z.coerce.number().catch(1800),
+  timeout_at: z.coerce.number().nullable().catch(null),
+  auto_dispatch_eligible: z.boolean().catch(false),
+  lanes: z.array(FlowGateLaneSchema).catch([]),
+  cost_estimate: FlowGateCostEstimateSchema,
+});
+export type FlowGateResponse = z.infer<typeof FlowGateResponseSchema>;
+
+export const FlowSizingResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  task_id: z.string().catch(""),
+  action: z.enum(["merge", "split"]).catch("merge"),
+  kept_id: z.string().optional(),
+  archived_id: z.string().optional(),
+  source_id: z.string().optional(),
+  new_id: z.string().optional(),
+  gate: FlowGateResponseSchema,
+});
+
+export const FlowTimeoutSweepResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  timeout_seconds: z.coerce.number().catch(1800),
+  released_roots: z.array(z.object({
+    task_id: z.string().catch(""),
+    released: z.coerce.number().catch(0),
+    released_ids: z.array(z.string()).catch([]),
+    release_level: FlowGateReleaseLevelSchema,
+  })).catch([]),
+  released: z.coerce.number().catch(0),
+});
+
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),
   source: z.string().catch("unknown"),

@@ -4820,6 +4820,468 @@ class FlowCaptureBody(BaseModel):
     author: Optional[ShortText] = None
 
 
+class FlowReleaseBody(BaseModel):
+    assignee_overrides: dict[str, Optional[str]] = Field(default_factory=dict)
+    release_level: Literal["merge", "live"] = "merge"
+
+
+class FlowSizingBody(BaseModel):
+    action: Literal["merge", "split"]
+    task_ids: list[ShortText] = Field(default_factory=list, max_length=8)
+    title: Optional[ShortText] = None
+    body: Optional[FreeText] = None
+    assignee: Optional[ShortText] = None
+
+
+class FlowTimeoutSweepBody(BaseModel):
+    timeout_seconds: Optional[int] = None
+
+
+def _flow_gate_timeout_seconds() -> int:
+    raw = os.environ.get("HERMES_FLOW_GATE_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        with contextlib.suppress(ValueError):
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        k_cfg = ((cfg.get("dashboard") or {}).get("kanban") or {})
+        parsed = int(k_cfg.get("flow_gate_timeout_seconds") or 0)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return 30 * 60
+
+
+def _flow_gate_soft_cost_usd() -> float:
+    raw = os.environ.get("HERMES_FLOW_GATE_SOFT_COST_USD", "").strip()
+    if raw:
+        with contextlib.suppress(ValueError):
+            parsed = float(raw)
+            if parsed > 0:
+                return parsed
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        k_cfg = ((cfg.get("dashboard") or {}).get("kanban") or {})
+        parsed = float(k_cfg.get("flow_gate_soft_cost_usd") or 0)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return 1.0
+
+
+def _flow_gate_child_order(conn: sqlite3.Connection, root_id: str) -> dict[str, int]:
+    try:
+        for event in reversed(kanban_db.list_events(conn, root_id)):
+            if event.kind != "decomposed":
+                continue
+            child_ids = (event.payload or {}).get("child_ids")
+            if isinstance(child_ids, list):
+                return {
+                    str(child_id): idx
+                    for idx, child_id in enumerate(child_ids)
+                    if isinstance(child_id, str)
+                }
+    except Exception:
+        pass
+    return {}
+
+
+def _flow_gate_child_rows(conn: sqlite3.Connection, root_id: str) -> list[sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT t.*
+          FROM task_links l
+          JOIN tasks t ON t.id = l.parent_id
+         WHERE l.child_id = ?
+           AND t.status != 'archived'
+         ORDER BY t.created_at ASC, t.id ASC
+        """,
+        (root_id,),
+    ).fetchall()
+    order = _flow_gate_child_order(conn, root_id)
+    if not order:
+        return rows
+    return sorted(rows, key=lambda row: (order.get(row["id"], len(order)), row["created_at"], row["id"]))
+
+
+def _flow_gate_child_ids(conn: sqlite3.Connection, root_id: str) -> list[str]:
+    return [r["id"] for r in _flow_gate_child_rows(conn, root_id)]
+
+
+def _flow_gate_lanes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    names: set[str] = {"default"}
+    lanes_out: list[dict[str, Any]] = []
+    try:
+        lanes = kanban_db.list_lanes(conn)
+    except Exception:
+        lanes = []
+    for lane in lanes:
+        profiles = [
+            str(p).strip()
+            for p in (lane.get("profiles") or [])
+            if str(p).strip()
+        ]
+        names.update(profiles)
+        lanes_out.append({
+            "id": lane.get("id"),
+            "name": lane.get("name") or lane.get("id") or "lane",
+            "active": bool(lane.get("active")),
+            "profiles": profiles,
+        })
+    for profile in _lane_profile_catalog():
+        name = str(profile.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return [
+        {"id": "profiles", "name": "Profile", "active": False, "profiles": sorted(names)}
+    ] + lanes_out
+
+
+def _flow_gate_profile_cost_stats(conn: sqlite3.Connection, *, last_n: int = 50) -> dict[str, dict[str, Any]]:
+    try:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    profile,
+                    cost_usd,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY profile
+                        ORDER BY started_at DESC, id DESC
+                    ) AS rn
+                  FROM task_runs
+                 WHERE profile IS NOT NULL
+                   AND cost_usd IS NOT NULL
+                   AND ended_at IS NOT NULL
+            )
+            SELECT profile, COUNT(*) AS runs, AVG(cost_usd) AS avg_cost_usd
+              FROM ranked
+             WHERE rn <= ?
+             GROUP BY profile
+            """,
+            (int(last_n),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        out[row["profile"]] = {
+            "runs": int(row["runs"] or 0),
+            "avg_cost_usd": float(row["avg_cost_usd"] or 0.0),
+        }
+    return out
+
+
+def _flow_gate_risk(task: kanban_db.Task, stats: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    reasons: list[str] = []
+    tone = "low"
+    profile_stats = stats.get(task.assignee or "")
+    if not task.assignee:
+        tone = "medium"
+        reasons.append("unassigned")
+    elif not profile_stats:
+        tone = "medium"
+        reasons.append("no recent lane history")
+    else:
+        blocked = float(profile_stats.get("blocked_pct") or 0.0)
+        timeout = float(profile_stats.get("timeout_pct") or 0.0)
+        if timeout >= 25.0 or blocked >= 40.0:
+            tone = "high"
+            reasons.append("recent failure rate high")
+        elif timeout >= 10.0 or blocked >= 15.0:
+            tone = "medium"
+            reasons.append("recent blocks/timeouts")
+    body_len = len(task.body or "")
+    if body_len > 6_000:
+        tone = "high"
+        reasons.append("large task body")
+    elif body_len > 2_500 and tone == "low":
+        tone = "medium"
+        reasons.append("larger than typical")
+    return {"tone": tone, "reasons": reasons}
+
+
+def _flow_gate_estimate(
+    children: list[kanban_db.Task],
+    stats: dict[str, dict[str, Any]],
+    cost_stats: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    total_cost = 0.0
+    total_tokens = 0
+    for task in children:
+        profile = task.assignee or "default"
+        profile_stats = stats.get(profile, {})
+        avg_tokens = profile_stats.get("avg_tokens")
+        if avg_tokens is None:
+            text_len = len(task.title or "") + len(task.body or "")
+            est_tokens = max(800, int(text_len / 4) + 1_000)
+            token_source = "size-fallback"
+        else:
+            est_tokens = max(1, int(avg_tokens))
+            token_source = "recent-profile-average"
+        avg_cost = cost_stats.get(profile, {}).get("avg_cost_usd")
+        if avg_cost is not None:
+            est_cost = float(avg_cost)
+            cost_source = "recent-profile-average"
+        else:
+            est_cost = est_tokens * 0.0000025
+            cost_source = "token-fallback"
+        total_tokens += est_tokens
+        total_cost += est_cost
+        items.append({
+            "task_id": task.id,
+            "profile": profile,
+            "estimated_tokens": est_tokens,
+            "estimated_cost_usd": round(est_cost, 6),
+            "token_source": token_source,
+            "cost_source": cost_source,
+        })
+    soft_limit = _flow_gate_soft_cost_usd()
+    return {
+        "estimated_tokens": total_tokens,
+        "estimated_cost_usd": round(total_cost, 6),
+        "soft_limit_usd": soft_limit,
+        "warning": total_cost > soft_limit,
+        "items": items,
+    }
+
+
+def _flow_gate_payload(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
+    root = kanban_db.get_task(conn, root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail=f"task {root_id} not found")
+    child_tasks = [
+        kanban_db.Task.from_row(row)
+        for row in _flow_gate_child_rows(conn, root_id)
+    ]
+    stats = kanban_db.profile_outcome_stats(conn)
+    cost_stats = _flow_gate_profile_cost_stats(conn)
+    timeout_seconds = _flow_gate_timeout_seconds()
+    children: list[dict[str, Any]] = []
+    held_count = 0
+    for task in child_tasks:
+        if task.status == "scheduled":
+            held_count += 1
+        children.append({
+            "id": task.id,
+            "title": task.title,
+            "status": task.status,
+            "assignee": task.assignee,
+            "parents": kanban_db.parent_ids(conn, task.id),
+            "risk": _flow_gate_risk(task, stats),
+            "created_at": task.created_at,
+            "age_seconds": max(0, int(time.time()) - int(task.created_at)),
+        })
+    return {
+        "root_id": root_id,
+        "root_status": root.status,
+        "children": children,
+        "held_count": held_count,
+        "release_levels": ["merge", "live"],
+        "timeout_seconds": timeout_seconds,
+        "timeout_at": (int(root.created_at) + timeout_seconds) if child_tasks else None,
+        "auto_dispatch_eligible": bool(child_tasks and held_count > 0 and int(time.time()) - int(root.created_at) >= timeout_seconds),
+        "lanes": _flow_gate_lanes(conn),
+        "cost_estimate": _flow_gate_estimate(child_tasks, stats, cost_stats),
+    }
+
+
+def _append_flow_gate_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+    payload: dict[str, Any],
+) -> None:
+    with kanban_db.write_txn(conn):
+        kanban_db._append_event(conn, task_id, kind, payload)
+
+
+def _merge_flow_children(
+    conn: sqlite3.Connection,
+    root_id: str,
+    keep_id: str,
+    merge_id: str,
+) -> dict[str, Any]:
+    if keep_id == merge_id:
+        raise HTTPException(status_code=400, detail="merge requires two distinct child ids")
+    child_ids = set(_flow_gate_child_ids(conn, root_id))
+    if keep_id not in child_ids or merge_id not in child_ids:
+        raise HTTPException(status_code=400, detail="both merge ids must be children of the flow root")
+    keep = kanban_db.get_task(conn, keep_id)
+    merged = kanban_db.get_task(conn, merge_id)
+    if keep is None or merged is None:
+        raise HTTPException(status_code=404, detail="merge child not found")
+    if keep.status != "scheduled" or merged.status != "scheduled":
+        raise HTTPException(status_code=409, detail="only scheduled flow children can be merged")
+    keep_body = keep.body or ""
+    merged_body = merged.body or ""
+    next_body = (
+        keep_body.rstrip()
+        + "\n\n---\nMerged from "
+        + merge_id
+        + "\n\n"
+        + merged_body.lstrip()
+    ).strip()
+    with kanban_db.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET title = ?, body = ? WHERE id = ?",
+            (f"{keep.title} + {merged.title}"[:_SHORT_TEXT_MAX_LENGTH], next_body, keep_id),
+        )
+        for row in conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (merge_id,),
+        ).fetchall():
+            parent_id = row["parent_id"]
+            if parent_id != keep_id:
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                    (parent_id, keep_id),
+                )
+        for row in conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ?",
+            (merge_id,),
+        ).fetchall():
+            child_id = row["child_id"]
+            if child_id != keep_id:
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                    (keep_id, child_id),
+                )
+        conn.execute(
+            "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+            (merge_id, merge_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+            (merge_id,),
+        )
+        kanban_db._append_event(
+            conn,
+            keep_id,
+            "flow_gate_sizing",
+            {"action": "merge", "root_id": root_id, "merged_id": merge_id},
+        )
+        kanban_db._append_event(
+            conn,
+            root_id,
+            "flow_gate_sizing",
+            {"action": "merge", "kept_id": keep_id, "merged_id": merge_id},
+        )
+    kanban_db.recompute_ready(conn)
+    return {"action": "merge", "kept_id": keep_id, "archived_id": merge_id}
+
+
+def _split_flow_child(
+    conn: sqlite3.Connection,
+    root_id: str,
+    task_id: str,
+    *,
+    title: Optional[str],
+    body: Optional[str],
+    assignee: Optional[str],
+) -> dict[str, Any]:
+    child_ids = set(_flow_gate_child_ids(conn, root_id))
+    if task_id not in child_ids:
+        raise HTTPException(status_code=400, detail="split id must be a child of the flow root")
+    original = kanban_db.get_task(conn, task_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+    if original.status != "scheduled":
+        raise HTTPException(status_code=409, detail="only scheduled flow children can be split")
+    parents = [p for p in kanban_db.parent_ids(conn, task_id) if p != root_id]
+    new_id = kanban_db.create_task(
+        conn,
+        title=(title or f"{original.title} / split").strip(),
+        body=body or original.body,
+        assignee=(assignee or original.assignee),
+        created_by="flow-gate",
+        workspace_kind=original.workspace_kind,
+        workspace_path=original.workspace_path,
+        tenant=original.tenant,
+        priority=original.priority,
+        parents=parents,
+        kind="code",
+    )
+    kanban_db.link_tasks(conn, new_id, root_id)
+    kanban_db.schedule_task(conn, new_id, reason=f"Flow-Gate split from {task_id}")
+    _append_flow_gate_event(
+        conn,
+        task_id,
+        "flow_gate_sizing",
+        {"action": "split_source", "root_id": root_id, "new_id": new_id},
+    )
+    _append_flow_gate_event(
+        conn,
+        root_id,
+        "flow_gate_sizing",
+        {"action": "split", "source_id": task_id, "new_id": new_id},
+    )
+    return {"action": "split", "source_id": task_id, "new_id": new_id}
+
+
+def _release_flow_gate(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    assignee_overrides: dict[str, Optional[str]],
+    release_level: Literal["merge", "live"],
+    reason: str,
+) -> dict[str, Any]:
+    if kanban_db.get_task(conn, root_id) is None:
+        raise HTTPException(status_code=404, detail=f"task {root_id} not found")
+    child_ids = _flow_gate_child_ids(conn, root_id)
+    child_set = set(child_ids)
+    overrides: dict[str, Optional[str]] = {}
+    for raw_id, raw_profile in (assignee_overrides or {}).items():
+        child_id = str(raw_id).strip()
+        if child_id not in child_set:
+            raise HTTPException(
+                status_code=400,
+                detail=f"assignee override {child_id!r} is not a child of {root_id}",
+            )
+        profile = str(raw_profile).strip() if raw_profile is not None else ""
+        overrides[child_id] = profile or None
+    for child_id, profile in overrides.items():
+        if not kanban_db.reassign_task(
+            conn,
+            child_id,
+            profile,
+            reason=f"Flow-Gate lane override before {release_level} release",
+        ):
+            raise HTTPException(status_code=409, detail=f"could not reassign {child_id}")
+    released: list[str] = []
+    for child_id in child_ids:
+        child = kanban_db.get_task(conn, child_id)
+        if child is not None and child.status == "scheduled":
+            if kanban_db.unblock_task(conn, child_id):
+                released.append(child_id)
+    _append_flow_gate_event(
+        conn,
+        root_id,
+        "flow_gate_released",
+        {
+            "released_ids": released,
+            "release_level": release_level,
+            "assignee_overrides": overrides,
+            "reason": reason,
+        },
+    )
+    return {
+        "task_id": root_id,
+        "released": len(released),
+        "released_ids": released,
+        "release_level": release_level,
+        "assignee_overrides": overrides,
+    }
+
+
 @router.post("/tasks/flow-capture")
 def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
     """Create a root, PARK it in ``scheduled`` (invisible to the gateway's
@@ -4902,40 +5364,128 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
     }
 
 
+@router.get("/tasks/{task_id}/flow-gate")
+def flow_gate(task_id: str, board: Optional[str] = Query(None)):
+    """Return the proposed gated chain before dispatch.
+
+    This is the operator-facing pre-release contract: held children, available
+    lanes, per-child risk, a soft cost estimate, and timeout eligibility.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return _flow_gate_payload(conn, task_id)
+    finally:
+        conn.close()
+
+
+@router.post("/tasks/{task_id}/flow-gate/sizing")
+def flow_gate_sizing(
+    task_id: str,
+    payload: FlowSizingBody,
+    board: Optional[str] = Query(None),
+):
+    """Merge or split held Flow children before release."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if kanban_db.get_task(conn, task_id) is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        if payload.action == "merge":
+            ids = [x for x in payload.task_ids if x]
+            if len(ids) != 2:
+                raise HTTPException(status_code=400, detail="merge requires exactly two task_ids")
+            result = _merge_flow_children(conn, task_id, ids[0], ids[1])
+        else:
+            ids = [x for x in payload.task_ids if x]
+            if len(ids) != 1:
+                raise HTTPException(status_code=400, detail="split requires exactly one task_id")
+            result = _split_flow_child(
+                conn,
+                task_id,
+                ids[0],
+                title=payload.title,
+                body=payload.body,
+                assignee=payload.assignee,
+            )
+        return {"ok": True, "task_id": task_id, **result, "gate": _flow_gate_payload(conn, task_id)}
+    finally:
+        conn.close()
+
+
+@router.post("/tasks/flow-gate/timeout-sweep")
+def flow_gate_timeout_sweep(
+    payload: FlowTimeoutSweepBody | None = None,
+    board: Optional[str] = Query(None),
+):
+    """Release gated chains whose root has exceeded the configured hold time."""
+    board = _resolve_board(board)
+    timeout_seconds = int(payload.timeout_seconds) if payload and payload.timeout_seconds else _flow_gate_timeout_seconds()
+    if timeout_seconds <= 0:
+        raise HTTPException(status_code=400, detail="timeout_seconds must be > 0")
+    conn = _conn(board=board)
+    try:
+        cutoff = int(time.time()) - timeout_seconds
+        rows = conn.execute(
+            """
+            SELECT DISTINCT root.id
+              FROM task_links l
+              JOIN tasks child ON child.id = l.parent_id
+              JOIN tasks root ON root.id = l.child_id
+             WHERE child.status = 'scheduled'
+               AND root.created_at <= ?
+               AND root.status != 'archived'
+            """,
+            (cutoff,),
+        ).fetchall()
+        released: list[dict[str, Any]] = []
+        for row in rows:
+            result = _release_flow_gate(
+                conn,
+                row["id"],
+                assignee_overrides={},
+                release_level="merge",
+                reason=f"timeout-sweep after {timeout_seconds}s",
+            )
+            if result["released"]:
+                released.append(result)
+        return {
+            "ok": True,
+            "timeout_seconds": timeout_seconds,
+            "released_roots": released,
+            "released": sum(int(r["released"]) for r in released),
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/tasks/{task_id}/flow-release")
-def flow_release(task_id: str, board: Optional[str] = Query(None)):
+def flow_release(
+    task_id: str,
+    payload: FlowReleaseBody | None = None,
+    board: Optional[str] = Query(None),
+):
     """Release (Flow "Go ausführen") a gated plan: unblock every child of this
     root currently held in ``scheduled`` so the dispatcher can pick them up.
 
     DAG-correct via ``unblock_task`` — a parent-free child goes straight to
     ``ready``, a child still waiting on siblings goes to ``todo`` and
     ``recompute_ready`` promotes it when its parents finish. Idempotent: a
-    second call finds no scheduled children and releases none.
+    second call finds no scheduled children and releases none. The optional
+    body lets the gate apply lane overrides and record whether the operator
+    released for merge-only or live execution.
     """
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        # decompose_triage_task links the root as the CHILD of every graph
-        # child, so the root's graph children are the parent_ids of rows whose
-        # child_id is this root.
-        rows = conn.execute(
-            "SELECT parent_id FROM task_links WHERE child_id = ?",
-            (task_id,),
-        ).fetchall()
-        released: list[str] = []
-        for r in rows:
-            cid = r["parent_id"]
-            child = kanban_db.get_task(conn, cid)
-            if child is not None and child.status == "scheduled":
-                if kanban_db.unblock_task(conn, cid):
-                    released.append(cid)
-        return {
-            "task_id": task_id,
-            "released": len(released),
-            "released_ids": released,
-        }
+        body = payload or FlowReleaseBody()
+        return _release_flow_gate(
+            conn,
+            task_id,
+            assignee_overrides=body.assignee_overrides,
+            release_level=body.release_level,
+            reason="operator-release",
+        )
     finally:
         conn.close()
 

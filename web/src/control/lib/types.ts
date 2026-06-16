@@ -93,6 +93,84 @@ export interface PlanSpecPromptResponse {
   prompt: string;
 }
 
+export type FlowGateReleaseLevel = "merge" | "live";
+
+export interface FlowGateRisk {
+  tone: "low" | "medium" | "high";
+  reasons: string[];
+}
+
+export interface FlowGateChild {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  assignee: string | null;
+  parents: string[];
+  risk: FlowGateRisk;
+  created_at: number;
+  age_seconds: number;
+}
+
+export interface FlowGateLane {
+  id: string | null;
+  name: string;
+  active: boolean;
+  profiles: string[];
+}
+
+export interface FlowGateCostItem {
+  task_id: string;
+  profile: string;
+  estimated_tokens: number;
+  estimated_cost_usd: number;
+  token_source: string;
+  cost_source: string;
+}
+
+export interface FlowGateCostEstimate {
+  estimated_tokens: number;
+  estimated_cost_usd: number;
+  soft_limit_usd: number;
+  warning: boolean;
+  items: FlowGateCostItem[];
+}
+
+export interface FlowGateResponse {
+  root_id: string;
+  root_status: TaskStatus;
+  children: FlowGateChild[];
+  held_count: number;
+  release_levels: FlowGateReleaseLevel[];
+  timeout_seconds: number;
+  timeout_at: number | null;
+  auto_dispatch_eligible: boolean;
+  lanes: FlowGateLane[];
+  cost_estimate: FlowGateCostEstimate;
+}
+
+export interface FlowReleaseOptions {
+  assignee_overrides?: Record<string, string | null>;
+  release_level?: FlowGateReleaseLevel;
+}
+
+export interface FlowSizingResponse {
+  ok: boolean;
+  task_id: string;
+  action: "merge" | "split";
+  kept_id?: string;
+  archived_id?: string;
+  source_id?: string;
+  new_id?: string;
+  gate: FlowGateResponse;
+}
+
+export interface FlowTimeoutSweepResponse {
+  ok: boolean;
+  timeout_seconds: number;
+  released_roots: Array<{ task_id: string; released: number; released_ids: string[]; release_level: FlowGateReleaseLevel }>;
+  released: number;
+}
+
 
 export interface KanbanResult {
   run_id: string;

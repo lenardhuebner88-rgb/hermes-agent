@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge, fmtTokens, freshness, workerHealth, workerSortRank } from "../lib/derive";
+import { fmtAge, fmtDur, fmtTokens, freshness, workerHealth, workerSortRank } from "../lib/derive";
 import {
   FLEET_STAGES,
   STAGE_META,
@@ -38,6 +38,7 @@ import {
   useBoard,
   useEpicActions,
   useEpics,
+  useFlowGate,
   useFlowRelease,
   useKanbanDecisionQueue,
   useHermesBlockedCompletions,
@@ -50,7 +51,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
+import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -542,22 +543,76 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
 // (documented method), and a "Kette starten" release when subtasks are gate-held
 // in `scheduled`. This is the visible+operative proof — the same child ids run
 // on through Execute → Verify → Ship.
-function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, releaseError, released }: {
+function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
   rootId: string; detail?: TaskDetailResponse; boardTasks: BoardTask[];
-  onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
+  now: number; onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [releaseLevel, setReleaseLevel] = useState<FlowGateReleaseLevel>("merge");
+  const [assigneeOverrides, setAssigneeOverrides] = useState<Record<string, string>>({});
+  const [selectedSizing, setSelectedSizing] = useState<string[]>([]);
+  const [splitTitle, setSplitTitle] = useState("");
+  const autoSweepRef = useRef<string | null>(null);
+  const gate = useFlowGate(rootId, onGateChanged);
   const events = detail?.events ?? [];
   const decomposed = [...events].reverse().find((e) => e.kind === "decomposed");
   const hasSpec = events.some((e) => e.kind === "flow_plan");
   const rawIds = (decomposed?.payload?.child_ids as unknown);
-  const childIds: string[] = Array.isArray(rawIds) ? rawIds.filter((x): x is string => typeof x === "string") : [];
+  const gateChildren = gate.data?.children ?? [];
+  const childIds: string[] = gateChildren.length
+    ? gateChildren.map((c) => c.id).filter(Boolean)
+    : (Array.isArray(rawIds) ? rawIds.filter((x): x is string => typeof x === "string") : []);
+  useEffect(() => {
+    if (!gate.data?.auto_dispatch_eligible || gate.data.held_count <= 0) return;
+    const key = `${rootId}:${gate.data.timeout_at ?? "now"}`;
+    if (autoSweepRef.current === key) return;
+    autoSweepRef.current = key;
+    void gate.sweepTimeouts(gate.data.timeout_seconds);
+  }, [gate, gate.data?.auto_dispatch_eligible, gate.data?.held_count, gate.data?.timeout_at, gate.data?.timeout_seconds, rootId]);
   if (!childIds.length && !hasSpec) return null;
 
   const byId = new Map(boardTasks.map((t) => [t.id, t]));
+  const gateById = new Map(gateChildren.map((c) => [c.id, c]));
   const children = childIds.map((id) => byId.get(id)).filter((t): t is BoardTask => !!t);
-  const heldCount = children.filter((c) => c.status === "scheduled").length;
+  const heldCount = gate.data?.held_count ?? children.filter((c) => c.status === "scheduled").length;
   const specUrl = `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-plan`;
+  const profiles = Array.from(new Set((gate.data?.lanes ?? []).flatMap((lane) => lane.profiles))).filter(Boolean).sort();
+  const estimate = gate.data?.cost_estimate;
+  const timeoutAt = gate.data?.timeout_at ?? null;
+  const timeoutCopy = timeoutAt == null
+    ? null
+    : (timeoutAt <= now ? "Timeout erreicht" : `Auto in ${fmtDur(timeoutAt - now)}`);
+  const overridePayload: Record<string, string | null> = {};
+  for (const child of gateChildren) {
+    const next = assigneeOverrides[child.id];
+    if (next !== undefined && next !== (child.assignee ?? "")) {
+      overridePayload[child.id] = next || null;
+    }
+  }
+  const toggleSizing = (id: string) => {
+    setSelectedSizing((prev) => prev.includes(id)
+      ? prev.filter((x) => x !== id)
+      : [...prev, id].slice(-2));
+  };
+  const mergeSelected = () => {
+    if (selectedSizing.length !== 2) return;
+    void gate.sizing("merge", selectedSizing).then((res) => {
+      if (res) setSelectedSizing([]);
+    });
+  };
+  const splitSelected = () => {
+    if (selectedSizing.length !== 1 || !splitTitle.trim()) return;
+    void gate.sizing("split", selectedSizing, { title: splitTitle.trim() }).then((res) => {
+      if (res) {
+        setSelectedSizing([]);
+        setSplitTitle("");
+      }
+    });
+  };
+  const releaseOptions: FlowReleaseOptions = {
+    release_level: releaseLevel,
+    assignee_overrides: overridePayload,
+  };
 
   return (
     <div className="mt-4 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
@@ -571,16 +626,85 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
         ) : null}
       </div>
 
+      {gate.data ? (
+        <div className="mt-2.5 rounded-md border border-[var(--hc-border)] bg-black/10 p-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Eyebrow>Freigabe</Eyebrow>
+            {estimate ? (
+              <StatusPill
+                tone={estimate.warning ? "amber" : "emerald"}
+                label={`~$${estimate.estimated_cost_usd.toFixed(3)} · ${fmtTokens(estimate.estimated_tokens)}`}
+              />
+            ) : null}
+            {timeoutCopy ? <span className="hc-type-label hc-dim">{timeoutCopy}</span> : null}
+            <button
+              type="button"
+              disabled={gate.busy}
+              onClick={() => void gate.sweepTimeouts(gate.data?.timeout_seconds)}
+              className="ml-auto inline-flex min-h-9 items-center gap-1 rounded-full border border-[var(--hc-border-strong)] px-2.5 hc-type-label hc-soft disabled:opacity-40"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />Sweep
+            </button>
+          </div>
+          {estimate?.warning ? (
+            <p className="mt-1.5 flex items-start gap-1.5 hc-type-label text-amber-200">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />Soft-Limit ${estimate.soft_limit_usd.toFixed(2)} überschritten.
+            </p>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {(["merge", "live"] as FlowGateReleaseLevel[]).map((level) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => setReleaseLevel(level)}
+                className={cn(
+                  "inline-flex min-h-9 items-center rounded-full border px-3 hc-type-label transition",
+                  releaseLevel === level ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
+                )}
+              >
+                {level === "merge" ? "Merge" : "Live"}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : gate.loading ? (
+        <p className="mt-2 hc-type-label hc-dim">Gate wird geladen…</p>
+      ) : null}
+
       {children.length ? (
         <ul className="mt-2 space-y-1.5">
           {children.map((c) => {
             const statusExplanation = getFlowSubtaskStatusExplanation(c.status, c.status === "blocked" ? c.latest_summary : null);
+            const gateChild = gateById.get(c.id);
+            const risk = gateChild?.risk;
+            const riskTone = risk?.tone === "high" ? "red" : risk?.tone === "medium" ? "amber" : "emerald";
+            const selected = selectedSizing.includes(c.id);
             return (
-              <li key={c.id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2 py-1.5">
+              <li key={c.id} className={cn("flex min-w-0 flex-wrap items-center gap-2 rounded-md border px-2 py-1.5", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)]")}>
+                <button
+                  type="button"
+                  onClick={() => toggleSizing(c.id)}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--hc-border-strong)] hc-type-label hc-soft"
+                  title="Sizing-Auswahl"
+                  aria-pressed={selected}
+                >
+                  {selected ? "x" : "+"}
+                </button>
                 <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{c.id}</span>
                 <span className="min-w-0 flex-1 basis-36 truncate hc-type-label text-white">{c.title}</span>
                 <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
+                  {risk ? <StatusPill tone={riskTone} label={`Risiko ${risk.tone}`} /> : null}
                   <StatusPill tone={statusTone(c.status)} label={taskStatusLabel[c.status] ?? c.status} />
+                  {profiles.length ? (
+                    <select
+                      value={assigneeOverrides[c.id] ?? gateChild?.assignee ?? c.assignee ?? ""}
+                      onChange={(e) => setAssigneeOverrides((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                      className="min-h-8 max-w-40 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-white"
+                    >
+                      <option value="">Unassigned</option>
+                      {profiles.map((profile) => <option key={profile} value={profile}>{profileLabel[profile] ?? profile}</option>)}
+                    </select>
+                  ) : null}
                   <span className={cn("max-w-full hc-type-label hc-dim sm:max-w-[13rem] sm:text-right", c.status === "blocked" && "text-red-200")} title={statusExplanation}>
                     {statusExplanation}
                   </span>
@@ -593,10 +717,34 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
 
       {heldCount > 0 ? (
         <div className="mt-2.5">
+          <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={gate.busy || selectedSizing.length !== 2}
+              onClick={mergeSelected}
+              className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
+            >
+              Merge
+            </button>
+            <input
+              value={splitTitle}
+              onChange={(e) => setSplitTitle(e.target.value)}
+              placeholder="Split-Titel"
+              className="min-h-9 min-w-0 flex-1 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-white placeholder:text-zinc-500"
+            />
+            <button
+              type="button"
+              disabled={gate.busy || selectedSizing.length !== 1 || !splitTitle.trim()}
+              onClick={splitSelected}
+              className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 hc-type-label hc-soft disabled:opacity-40"
+            >
+              Split
+            </button>
+          </div>
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="hc-type-label hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
-              <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : de.flow.plan.releaseConfirmButton}</button>
+              <button type="button" disabled={releaseBusy} onClick={() => { onRelease(rootId, heldCount, releaseOptions); setConfirming(false); }} className="inline-flex min-h-9 items-center rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 text-xs text-emerald-100 disabled:opacity-40">{releaseBusy ? de.flow.plan.releaseBusy : `${de.flow.plan.releaseConfirmButton} · ${releaseLevel}`}</button>
               <button type="button" onClick={() => setConfirming(false)} className="inline-flex min-h-9 items-center rounded-full border border-[var(--hc-border-strong)] px-3 text-xs hc-soft">Abbrechen</button>
             </div>
           ) : (
@@ -610,6 +758,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
       ) : null}
 
       {released ? <p className="mt-1.5 hc-type-label text-emerald-300">{de.flow.plan.released(released)}</p> : null}
+      {gate.error ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{gate.error}</p> : null}
       {releaseError ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
     </div>
   );
@@ -719,9 +868,9 @@ function DeliverableOpenButton({ url, label = "öffnen" }: { url: string; label?
   );
 }
 
-export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released }: {
+export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
   taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; enriched?: Enriched; loading: boolean; error?: string; now: number;
-  boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number) => void; releaseBusy: boolean; releaseError?: string; released?: number;
+  boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
 }) {
   if (!taskId) {
     return (
@@ -753,13 +902,16 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
 
       {taskId ? (
         <FlowPlanPanel
+          key={taskId}
           rootId={taskId}
           detail={detail}
           boardTasks={boardTasks}
+          now={now}
           onRelease={onRelease}
           releaseBusy={releaseBusy}
           releaseError={releaseError}
           released={released}
+          onGateChanged={onGateChanged}
         />
       ) : null}
 
@@ -1396,8 +1548,12 @@ export function FlowView() {
   }, [runTaskAction, setSelectedTask, taskDetail.detailById, fetchDetail, allTasks]);
   // Release a gated plan: unblock the held subtasks, then refresh the board +
   // this root's detail so the held banner clears and the children move on.
-  const onReleasePlan = useCallback((rootId: string, n: number) => {
-    void flowRelease.release(rootId).then((res) => {
+  const onGateChanged = useCallback(async () => {
+    await reloadBoard();
+    if (selectedId) void fetchDetail(selectedId);
+  }, [reloadBoard, selectedId, fetchDetail]);
+  const onReleasePlan = useCallback((rootId: string, n: number, options?: FlowReleaseOptions) => {
+    void flowRelease.release(rootId, options).then((res) => {
       if (res.ok) {
         setReleasedById((prev) => ({ ...prev, [rootId]: res.released ?? n }));
         void fetchDetail(rootId);
@@ -1760,6 +1916,7 @@ export function FlowView() {
               releaseBusy={flowRelease.busyId === selectedId}
               releaseError={selectedId ? flowRelease.errorById[selectedId] : undefined}
               released={selectedId ? releasedById[selectedId] : undefined}
+              onGateChanged={onGateChanged}
             />
           </div>
         </div>
@@ -1781,6 +1938,7 @@ export function FlowView() {
             releaseBusy={flowRelease.busyId === selectedId}
             releaseError={flowRelease.errorById[selectedId]}
             released={releasedById[selectedId]}
+            onGateChanged={onGateChanged}
           />
         </FlowDetailSheet>
       ) : null}
