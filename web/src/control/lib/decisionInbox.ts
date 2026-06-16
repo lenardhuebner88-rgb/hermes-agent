@@ -53,6 +53,9 @@ const SURFACE_ORDER: Record<InboxSurface, number> = { autoresearch: 0, family: 1
 const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneName }> = {
   review_rejected: { weight: 86, tone: "red" },
   budget_held: { weight: 78, tone: "amber" },
+  operator_escalation: { weight: 92, tone: "red" },
+  integration_parked: { weight: 82, tone: "amber" },
+  rate_limited_loop: { weight: 80, tone: "amber" },
   sticky_blocked: { weight: 75, tone: "amber" },
   role_fit_held: { weight: 55, tone: "cyan" },
   decompose_failed: { weight: 52, tone: "cyan" },
@@ -62,6 +65,9 @@ const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneN
 const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
   review_rejected: "Verifier: Änderungen gefordert",
   budget_held: "Budget-Limit erreicht",
+  operator_escalation: "Operator-Eskalation",
+  integration_parked: "Integration geparkt",
+  rate_limited_loop: "Rate-Limit-Schleife",
   sticky_blocked: "Blockiert — Unblock nötig",
   role_fit_held: "Rolle passt nicht",
   decompose_failed: "Decompose fehlgeschlagen",

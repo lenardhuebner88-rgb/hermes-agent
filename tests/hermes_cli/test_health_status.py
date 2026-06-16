@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -48,6 +50,7 @@ def _install_probe_sources(
     autoresearch_status: dict[str, Any] | None = None,
     autoresearch_exc: Exception | None = None,
     kanban_path: Path | None = None,
+    heartbeat_payload: dict[str, Any] | None = None,
 ) -> None:
     def gateway_probe() -> tuple[bool, dict[str, Any] | None]:
         if gateway_exc is not None:
@@ -65,6 +68,15 @@ def _install_probe_sources(
 
     if kanban_path is None:
         kanban_path = _create_sqlite_db(tmp_path / "kanban.db")
+    heartbeat_path = tmp_path / "state" / "kanban_dispatcher_heartbeat.json"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.write_text(
+        json.dumps(
+            heartbeat_payload
+            or {"last_tick_at": int(time.time()), "tick_health": "ok"}
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setitem(
         sys.modules,
@@ -83,7 +95,11 @@ def _install_probe_sources(
     monkeypatch.setitem(
         sys.modules,
         "hermes_cli.kanban_db",
-        _module("hermes_cli.kanban_db", kanban_db_path=lambda: kanban_path),
+        _module(
+            "hermes_cli.kanban_db",
+            kanban_db_path=lambda: kanban_path,
+            kanban_dispatcher_heartbeat_path=lambda: heartbeat_path,
+        ),
     )
 
 
@@ -105,6 +121,7 @@ def test_all_subsystems_healthy(
         "gateway",
         "autoresearch",
         "kanban_db",
+        "kanban_dispatcher",
     }
     assert {s["status"] for s in data["subsystems"].values()} == {"healthy"}
 
@@ -258,3 +275,51 @@ def test_kanban_db_valid_sqlite_healthy(
 
     assert result["status"] == "healthy"
     assert result["error"] is None
+
+
+def test_kanban_dispatcher_missing_heartbeat_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "state" / "missing-heartbeat.json"
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.kanban_db",
+        _module(
+            "hermes_cli.kanban_db",
+            kanban_dispatcher_heartbeat_path=lambda: missing,
+        ),
+    )
+
+    result = asyncio.run(hs._probe_kanban_dispatcher_status())
+
+    assert result["status"] == "degraded"
+    assert result["detail"] == "heartbeat missing"
+    assert result["heartbeat_age_s"] is None
+
+
+def test_kanban_dispatcher_stale_heartbeat_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    heartbeat = tmp_path / "state" / "kanban_dispatcher_heartbeat.json"
+    heartbeat.parent.mkdir(parents=True)
+    heartbeat.write_text(
+        json.dumps({"last_tick_at": int(time.time()) - 999, "tick_health": "ok"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.kanban_db",
+        _module(
+            "hermes_cli.kanban_db",
+            kanban_dispatcher_heartbeat_path=lambda: heartbeat,
+        ),
+    )
+
+    result = asyncio.run(hs._probe_kanban_dispatcher_status())
+
+    assert result["status"] == "degraded"
+    assert result["detail"] == "ok"
+    assert result["error"] == "heartbeat stale"
+    assert result["heartbeat_age_s"] >= 999

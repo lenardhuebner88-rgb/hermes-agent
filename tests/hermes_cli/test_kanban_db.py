@@ -4648,6 +4648,105 @@ def test_code_task_safe_contract_is_auto_enriched_before_pickup(
     assert payload["allowed_paths"] == [str(repo)]
 
 
+@pytest.mark.parametrize("assignee", ["reviewer", "critic", "research"])
+def test_3a_code_task_rejects_verdict_only_roles_at_create(
+    kanban_home, assignee
+):
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="role_misuse"):
+            kb.create_task(
+                conn,
+                title="implement widget",
+                assignee=assignee,
+                kind="code",
+            )
+
+
+def test_3a_existing_code_task_with_verdict_role_blocks_before_claim(
+    kanban_home, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"code_roles": ["coder", "coder-claude", "premium"]},
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="legacy wrong-role code task",
+            assignee="coder",
+            kind="code",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET assignee = ? WHERE id = ?",
+                ("reviewer", tid),
+            )
+
+        assert kb.claim_task(conn, tid) is None
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task is not None
+    assert task.status == "blocked"
+    needs = [e for e in events if e.kind == "needs_contract"][-1]
+    assert (needs.payload or {})["issue"] == "role_misuse"
+    blocked = [e for e in events if e.kind == "blocked"][-1]
+    assert "role_misuse" in (blocked.payload or {})["reason"]
+
+
+@pytest.mark.parametrize(
+    ("assignee", "kind"),
+    [("reviewer", "review"), ("critic", "review"), ("research", "research")],
+)
+def test_3a_verdict_and_research_tasks_still_claim_when_not_code(
+    kanban_home, assignee, kind
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title=f"{assignee} lane task",
+            assignee=assignee,
+            kind=kind,
+        )
+        claimed = kb.claim_task(conn, tid)
+
+    assert claimed is not None
+    assert claimed.assignee == assignee
+
+
+def test_3a_coder_claude_contract_uses_canonical_lane_reason(
+    kanban_home, tmp_path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="reason through chain-critical change",
+            body="Implement the careful fix.",
+            assignee="coder-claude",
+            kind="code",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task is not None
+    assert task.body is not None
+    assert "Reason for lane: reasoning-heavy or chain-critical Claude code lane" in task.body
+    contract = [e for e in events if e.kind == "code_task_contract_inferred"][-1]
+    payload = contract.payload or {}
+    assert payload["assignee_lane"] == "coder-claude"
+    assert "chain-critical Claude code lane" in payload["reason_for_lane"]
+
+
 def test_complete_task_records_self_verification_event(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="verify self", assignee="worker")
@@ -4738,6 +4837,304 @@ def test_protocol_miss_without_deliverable_still_hard_blocks(
     assert "protocol_violation" in kinds
     assert "gave_up" in kinds
     assert kb.DELIVERABLE_POSTED_NOT_COMPLETED not in kinds
+
+
+def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="needs human decision", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        assert not kb._record_task_failure(
+            conn,
+            tid,
+            "first spawn failure",
+            outcome="spawn_failed",
+            failure_limit=2,
+            release_claim=True,
+            end_run=True,
+        )
+        assert [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ] == []
+
+        assert kb.claim_task(conn, tid) is not None
+        assert kb._record_task_failure(
+            conn,
+            tid,
+            "second spawn failure",
+            outcome="spawn_failed",
+            failure_limit=2,
+            release_claim=True,
+            end_run=True,
+            event_payload_extra={"pid": 1234},
+        )
+        events = kb.list_events(conn, tid)
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.status == "blocked"
+    assert len([e for e in events if e.kind == "gave_up"]) == 1
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    assert len(escalations) == 1
+    payload = escalations[0].payload or {}
+    assert set(payload) == {
+        "task",
+        "why_now",
+        "attempts_already_made",
+        "evidence",
+        "recommended_human_action",
+        "blocked_action_boundary",
+    }
+    assert payload["attempts_already_made"] == 2
+    assert payload["task"]["id"] == tid
+    assert payload["evidence"]["trigger_outcome"] == "spawn_failed"
+    assert payload["evidence"]["context"] == {"pid": 1234}
+    assert payload["blocked_action_boundary"] == list(kb.OPERATOR_ONLY_ACTIONS)
+    boundary = " ".join(payload["blocked_action_boundary"]).lower()
+    assert "push" not in boundary
+    assert "deploy" not in boundary
+    assert "restart" not in boundary
+
+
+def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="wake later", assignee="coder")
+        assert kb.schedule_task(conn, tid, reason="timer") is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = 'scheduled'",
+                (now - 7200, tid),
+            )
+
+        first = kb.no_silent_stall_sweep(
+            conn, now=now, min_age_seconds=3600,
+        )
+        second = kb.no_silent_stall_sweep(
+            conn, now=now + 10, min_age_seconds=3600,
+        )
+        task = kb.get_task(conn, tid)
+        markers = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.NO_SILENT_STALL_EVENT
+        ]
+
+    assert first["self_healed"] == [
+        {"task_id": tid, "class": "scheduled_overdue", "action": "unblocked"}
+    ]
+    assert second["self_healed"] == []
+    assert task.status == "ready"
+    assert len(markers) == 1
+    assert markers[0].payload["action"] == "nudged"
+
+
+def test_4a_decompose_failure_parks_once_and_skips_funnel_root(kanban_home):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        normal = kb.create_task(
+            conn, title="normal triage", assignee="coder", triage=True,
+        )
+        funnel = kb.create_task(
+            conn,
+            title="funnel triage",
+            assignee="coder",
+            triage=True,
+            created_by="family",
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(conn, normal)
+            kb.record_decompose_failure(conn, funnel)
+
+        first = kb.no_silent_stall_sweep(conn, now=now)
+        second = kb.no_silent_stall_sweep(conn, now=now + 1)
+        normal_task = kb.get_task(conn, normal)
+        funnel_task = kb.get_task(conn, funnel)
+        normal_escalations = [
+            e for e in kb.list_events(conn, normal)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        funnel_escalations = [
+            e for e in kb.list_events(conn, funnel)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert {"task_id": normal, "class": "triage_decompose_failed"} in first["parked"]
+    assert second["parked"] == []
+    assert normal_task.status == "blocked"
+    assert funnel_task.status == "triage"
+    assert len(normal_escalations) == 1
+    assert funnel_escalations == []
+
+
+def test_4a_rate_limited_loop_parks_once(kanban_home):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="quota loop", assignee="coder")
+        with kb.write_txn(conn):
+            for i in range(3):
+                conn.execute(
+                    "INSERT INTO task_runs "
+                    "(task_id, profile, status, outcome, error, started_at, ended_at) "
+                    "VALUES (?, 'coder', 'rate_limited', 'rate_limited', "
+                    "'429 quota', ?, ?)",
+                    (tid, now - 100 - i, now - 90 - i),
+                )
+        first = kb.no_silent_stall_sweep(
+            conn, now=now, rate_limit_attempt_limit=3,
+        )
+        second = kb.no_silent_stall_sweep(
+            conn, now=now + 1, rate_limit_attempt_limit=3,
+        )
+        task = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert {"task_id": tid, "class": "rate_limited_loop"} in first["parked"]
+    assert second["parked"] == []
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+    assert escalations[0].payload["attempts_already_made"] == 3
+
+
+def test_4a_funnel_root_skipped_but_funnel_build_child_dispatches(
+    kanban_home, all_assignees_spawnable, tmp_path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned = []
+
+    def fake_spawn(task, workspace):
+        spawned.append(task.id)
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="funnel root", assignee="research", created_by="family",
+        )
+        done_root = kb.create_task(
+            conn, title="approved root", assignee="research", created_by="family",
+        )
+        kb.claim_task(conn, done_root)
+        kb.complete_task(conn, done_root, summary="draft done")
+        child = kb.create_task(
+            conn,
+            title="approved build child",
+            assignee="coder",
+            created_by="family",
+            parents=(done_root,),
+            kind="code",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        root_task = kb.get_task(conn, root)
+        child_task = kb.get_task(conn, child)
+
+    assert root_task.status == "ready"
+    assert child_task.status == "running"
+    assert child in spawned
+    assert (root, "funnel_protected") in result.respawn_guarded
+
+
+def test_4a_funnel_build_child_not_blocked_by_root_contract_rule(kanban_home):
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="approved root",
+            assignee="research",
+            created_by="discord-idee",
+        )
+        kb.claim_task(conn, root)
+        kb.complete_task(conn, root, summary="draft approved")
+        child = kb.create_task(
+            conn,
+            title="approved scratch build child",
+            assignee="coder",
+            created_by="discord-idee",
+            parents=(root,),
+            kind="code",
+        )
+        task = kb.get_task(conn, child)
+        events = kb.list_events(conn, child)
+
+    assert task is not None
+    assert task.status == "ready"
+    assert [e for e in events if e.kind == "needs_contract"] == []
+    assert [e for e in events if e.kind == "code_task_contract_inferred"]
+
+
+def test_4a_auto_retry_skips_funnel_root_but_not_funnel_child(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="blocked funnel root",
+            assignee="research",
+            created_by="family",
+        )
+        kb.claim_task(conn, root)
+        kb.block_task(conn, root, reason="transient")
+
+        done_root = kb.create_task(
+            conn,
+            title="done funnel root",
+            assignee="research",
+            created_by="family",
+        )
+        kb.claim_task(conn, done_root)
+        kb.complete_task(conn, done_root, summary="draft done")
+        child = kb.create_task(
+            conn,
+            title="blocked funnel child",
+            assignee="research",
+            created_by="family",
+            parents=(done_root,),
+        )
+        kb.claim_task(conn, child)
+        kb.block_task(conn, child, reason="transient")
+
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        root_task = kb.get_task(conn, root)
+        child_task = kb.get_task(conn, child)
+
+    assert retried == [(child, 1)]
+    assert root_task.status == "blocked"
+    assert child_task.status == "ready"
+
+
+def test_4a_dispatcher_heartbeat_file_written(kanban_home):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="needs operator", assignee="coder")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "task": {"id": tid, "title": "needs operator"},
+                    "why_now": "test",
+                    "attempts_already_made": 1,
+                    "evidence": {},
+                    "recommended_human_action": "inspect",
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+
+    payload = kb.write_kanban_dispatcher_heartbeat(now=now, tick_health="ok")
+    path = kb.kanban_dispatcher_heartbeat_path()
+    written = json.loads(path.read_text(encoding="utf-8"))
+
+    assert path.name == kb.KANBAN_DISPATCHER_HEARTBEAT_FILENAME
+    assert payload["last_tick_at"] == now
+    assert payload["last_green_gate_at"] == now
+    assert written["counts"]["open_escalations"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -6651,6 +7048,7 @@ def test_a2_acceptance_roles_default_empty_is_noop(kanban_home):
     assert cfg["acceptance_roles"] == frozenset()
     # Default code_roles unchanged (union with ∅).
     assert cfg["code_roles"] == frozenset(kb._DEFAULT_REVIEW_CODE_ROLES)
+    assert "coder-claude" in cfg["code_roles"]
 
 
 def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
@@ -6713,6 +7111,102 @@ def test_e1_decision_queue_review_rejection_outranks_sticky(kanban_home):
         assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
         result = kb.decision_queue(conn)
     assert _kinds_for(t, result) == ["review_rejected"]
+
+
+def test_4b_decision_queue_operator_escalation_outranks_sticky(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs operator", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="needs human eyes")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                t,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "task": {"id": t, "title": "needs operator"},
+                    "why_now": "retry ladder exhausted",
+                    "attempts_already_made": 2,
+                    "evidence": {},
+                    "recommended_human_action": "inspect",
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(t, result) == ["operator_escalation"]
+    row = next(d for d in result["decisions"] if d["task_id"] == t)
+    assert row["reason"] == "retry ladder exhausted"
+    assert row["suggested_command"] == f"hermes kanban show {t}"
+
+
+def test_4b_decision_queue_specific_recovery_classes_beat_generic_escalation(
+    kanban_home,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        parked = kb.create_task(conn, title="merge parked", assignee="coder")
+        kb.claim_task(conn, parked)
+        kb.block_task(conn, parked, reason="integration parked: merge gate red")
+
+        limited = kb.create_task(conn, title="quota loop", assignee="coder")
+        with kb.write_txn(conn):
+            for i in range(3):
+                conn.execute(
+                    "INSERT INTO task_runs "
+                    "(task_id, profile, status, outcome, error, started_at, ended_at) "
+                    "VALUES (?, 'coder', 'rate_limited', 'rate_limited', "
+                    "'429 quota', ?, ?)",
+                    (limited, now - 100 - i, now - 90 - i),
+                )
+
+        kb.no_silent_stall_sweep(conn, now=now, rate_limit_attempt_limit=3)
+        result = kb.decision_queue(conn, now=now + 10)
+
+    assert _kinds_for(parked, result) == ["integration_parked"]
+    assert _kinds_for(limited, result) == ["rate_limited_loop"]
+    parked_row = next(d for d in result["decisions"] if d["task_id"] == parked)
+    limited_row = next(d for d in result["decisions"] if d["task_id"] == limited)
+    assert "integration parked:" in parked_row["reason"]
+    assert "rate-limit loop" in limited_row["reason"]
+
+
+def test_4b_decision_queue_skips_funnel_root_but_not_child(kanban_home):
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="funnel root", assignee="research", created_by="family",
+        )
+        done_root = kb.create_task(
+            conn, title="approved root", assignee="research", created_by="family",
+        )
+        kb.claim_task(conn, done_root)
+        kb.complete_task(conn, done_root, summary="draft approved")
+        child = kb.create_task(
+            conn,
+            title="approved build child",
+            assignee="coder",
+            created_by="family",
+            parents=(done_root,),
+        )
+        with kb.write_txn(conn):
+            for task_id in (root, child):
+                kb._append_event(
+                    conn,
+                    task_id,
+                    kb.OPERATOR_ESCALATION_EVENT,
+                    {
+                        "task": {"id": task_id},
+                        "why_now": "operator must decide",
+                        "attempts_already_made": 1,
+                        "evidence": {},
+                        "recommended_human_action": "inspect",
+                        "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                    },
+                )
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(root, result) == []
+    assert _kinds_for(child, result) == ["operator_escalation"]
 
 
 def test_e1_decision_queue_role_fit_held(kanban_home):
@@ -7302,16 +7796,19 @@ def _count_spawn_retry_events(conn, tid, kind):
 
 
 def test_transient_provisioning_timeout_requeues_without_burning_budget(
-    kanban_home, monkeypatch, all_assignees_spawnable
+    kanban_home, monkeypatch, all_assignees_spawnable, tmp_path
 ):
     from hermes_cli import kanban_worktrees as kwt
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
     def boom(*a, **k):
         raise kwt.WorktreeTimeout("contention")
     monkeypatch.setattr(kwt, "provision_for_task", boom)
+    repo = tmp_path / "repo"
+    repo.mkdir()
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
-                             workspace_kind="worktree", max_retries=1)
+                             workspace_kind="worktree", workspace_path=str(repo),
+                             max_retries=1)
         kb.dispatch_once(conn, board="default")
         row = conn.execute(
             "SELECT status, consecutive_failures FROM tasks WHERE id=?", (tid,)
@@ -7322,7 +7819,7 @@ def test_transient_provisioning_timeout_requeues_without_burning_budget(
 
 
 def test_spawn_retry_budget_exhaustion_blocks(
-    kanban_home, monkeypatch, all_assignees_spawnable
+    kanban_home, monkeypatch, all_assignees_spawnable, tmp_path
 ):
     from hermes_cli import kanban_worktrees as kwt
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
@@ -7331,9 +7828,12 @@ def test_spawn_retry_budget_exhaustion_blocks(
         lambda *a, **k: (_ for _ in ()).throw(kwt.WorktreeTimeout("x")),
     )
     monkeypatch.setenv("HERMES_SPAWN_RETRY_LIMIT", "2")
+    repo = tmp_path / "repo"
+    repo.mkdir()
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
-                             workspace_kind="worktree", max_retries=1)
+                             workspace_kind="worktree", workspace_path=str(repo),
+                             max_retries=1)
         for _ in range(3):
             kb.dispatch_once(conn, board="default")
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
@@ -7341,7 +7841,7 @@ def test_spawn_retry_budget_exhaustion_blocks(
 
 
 def test_permanent_provisioning_error_blocks_immediately(
-    kanban_home, monkeypatch, all_assignees_spawnable
+    kanban_home, monkeypatch, all_assignees_spawnable, tmp_path
 ):
     from hermes_cli import kanban_worktrees as kwt
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
@@ -7349,9 +7849,12 @@ def test_permanent_provisioning_error_blocks_immediately(
         kwt, "provision_for_task",
         lambda *a, **k: (_ for _ in ()).throw(kwt.WorktreeError("disk full")),
     )
+    repo = tmp_path / "repo"
+    repo.mkdir()
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder-claude",
-                             workspace_kind="worktree", max_retries=1)
+                             workspace_kind="worktree", workspace_path=str(repo),
+                             max_retries=1)
         kb.dispatch_once(conn, board="default")
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
         assert row["status"] == "blocked"          # permanent error: unchanged behavior

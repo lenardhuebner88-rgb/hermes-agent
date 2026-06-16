@@ -287,6 +287,7 @@ export interface SystemHealthResponse {
     gateway: SubsystemHealth;
     autoresearch: SubsystemHealth;
     kanban_db: SubsystemHealth;
+    kanban_dispatcher: SubsystemHealth;
   };
 }
 

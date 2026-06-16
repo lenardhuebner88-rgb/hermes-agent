@@ -39,9 +39,11 @@ import {
   useEpicActions,
   useEpics,
   useFlowRelease,
+  useKanbanDecisionQueue,
   useHermesBlockedCompletions,
   useHermesRecentResults,
   useHermesReviewVerdicts,
+  useSystemHealth,
   useHermesWorkers,
   useRunInspect,
   useTaskAction,
@@ -102,6 +104,66 @@ export interface Enriched {
 // A single frozen empty-enrichment object: cards with no sidecar data get this
 // stable reference (not a fresh `{}` per render) so React.memo can skip them.
 const EMPTY_ENRICHED: Enriched = Object.freeze({});
+
+function recoveryAgeLabel(seconds: number | null | undefined): string {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
+}
+
+function RecoveryStrip() {
+  const health = useSystemHealth();
+  const decisions = useKanbanDecisionQueue();
+  const dispatcher = health.data?.subsystems.kanban_dispatcher;
+  const recoveryRows = (decisions.data?.decisions ?? []).filter((d) =>
+    d.kind === "operator_escalation" ||
+    d.kind === "integration_parked" ||
+    d.kind === "rate_limited_loop",
+  );
+  const tone = dispatcher?.status === "healthy"
+    ? "emerald"
+    : dispatcher?.status === "degraded"
+      ? "amber"
+      : "red";
+
+  if (!dispatcher && recoveryRows.length === 0 && !health.error && !decisions.error) {
+    return null;
+  }
+
+  return (
+    <FleetPanel
+      eyebrow="Recovery"
+      meta={`Dispatcher · ${recoveryAgeLabel(dispatcher?.heartbeat_age_s)} · ${recoveryRows.length} offen`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill
+          tone={tone}
+          label={dispatcher?.detail || dispatcher?.status || "unbekannt"}
+          dot={dispatcher?.status === "healthy" ? "live" : dispatcher?.status === "degraded" ? "warn" : "error"}
+        />
+        {health.error ? <span className="text-xs text-amber-200">{health.error}</span> : null}
+        {decisions.error ? <span className="text-xs text-amber-200">{decisions.error}</span> : null}
+      </div>
+      {recoveryRows.length ? (
+        <ul className="mt-3 grid gap-2 lg:grid-cols-3">
+          {recoveryRows.slice(0, 3).map((row) => (
+            <li key={`${row.kind}:${row.task_id}`} className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-white">{row.title}</span>
+                <span className="hc-mono text-[10px] hc-dim">{row.kind}</span>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs hc-soft">{row.reason}</p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-sm hc-dim">Keine Recovery-Parks.</p>
+      )}
+    </FleetPanel>
+  );
+}
 
 // Shallow field compare so enrichmentById can keep the PREVIOUS object reference
 // for an entry whose content didn't change across a poll tick — without it every
@@ -1373,6 +1435,8 @@ export function FlowView() {
           ))}
         </ToneCallout>
       ) : null}
+
+      <RecoveryStrip />
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert

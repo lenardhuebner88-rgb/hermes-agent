@@ -11,6 +11,7 @@ const baseHealth: SystemHealthResponse = {
     gateway: { status: "healthy", detail: "ok", error: null, latency_ms: 12 },
     autoresearch: { status: "healthy", detail: "fresh", error: null, heartbeat_age_s: 2 },
     kanban_db: { status: "healthy", detail: "ok", error: null, latency_ms: 4 },
+    kanban_dispatcher: { status: "healthy", detail: "ok", error: null, heartbeat_age_s: 5 },
   },
 };
 

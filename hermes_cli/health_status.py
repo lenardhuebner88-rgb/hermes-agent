@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import time
@@ -15,7 +16,8 @@ from hermes_cli.error_sanitize import scrub_detail
 
 _SCHEMA = "hermes-health-v1"
 _STATUS_RANK = {"healthy": 0, "degraded": 1, "offline": 2}
-_SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db")
+_SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db", "kanban_dispatcher")
+_KANBAN_DISPATCHER_STALE_AFTER_SECONDS = 180
 _log = logging.getLogger(__name__)
 
 
@@ -170,6 +172,66 @@ async def _probe_kanban_db_status() -> dict[str, Any]:
     return await _run_blocking(_probe_kanban_db_sync)
 
 
+def _probe_kanban_dispatcher_sync() -> dict[str, Any]:
+    try:
+        from hermes_cli.kanban_db import kanban_dispatcher_heartbeat_path
+
+        path = kanban_dispatcher_heartbeat_path()
+        if not path.exists():
+            return _status_dict(
+                "degraded",
+                "heartbeat missing",
+                heartbeat_age_s=None,
+                include_heartbeat_age=True,
+                error=scrub_detail(f"not found: {path}"),
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("heartbeat payload is not an object")
+        last_tick = int(payload.get("last_tick_at") or 0)
+        if last_tick <= 0:
+            raise ValueError("heartbeat missing last_tick_at")
+        age = max(0.0, time.time() - last_tick)
+        tick_health = str(payload.get("tick_health") or "unknown")
+    except Exception as exc:
+        _log.exception("kanban_dispatcher health probe failed")
+        return _status_dict(
+            "degraded",
+            "heartbeat unreadable",
+            heartbeat_age_s=None,
+            include_heartbeat_age=True,
+            error=scrub_detail(str(exc)),
+        )
+
+    if age > _KANBAN_DISPATCHER_STALE_AFTER_SECONDS:
+        return _status_dict(
+            "degraded",
+            tick_health,
+            heartbeat_age_s=round(age, 1),
+            include_heartbeat_age=True,
+            error="heartbeat stale",
+        )
+    if tick_health != "ok":
+        return _status_dict(
+            "degraded",
+            tick_health,
+            heartbeat_age_s=round(age, 1),
+            include_heartbeat_age=True,
+            error=None,
+        )
+    return _status_dict(
+        "healthy",
+        tick_health,
+        heartbeat_age_s=round(age, 1),
+        include_heartbeat_age=True,
+        error=None,
+    )
+
+
+async def _probe_kanban_dispatcher_status() -> dict[str, Any]:
+    return await _run_blocking(_probe_kanban_dispatcher_sync)
+
+
 def _offline_from_exception(name: str, exc: BaseException) -> dict[str, Any]:
     _log.warning(
         "%s health probe raised: %s",
@@ -177,7 +239,7 @@ def _offline_from_exception(name: str, exc: BaseException) -> dict[str, Any]:
         exc,
         exc_info=(type(exc), exc, exc.__traceback__),
     )
-    if name == "autoresearch":
+    if name in {"autoresearch", "kanban_dispatcher"}:
         return _status_dict(
             "offline",
             "probe failed",
@@ -204,6 +266,7 @@ async def _get_health_status() -> dict[str, Any]:
         _probe_gateway_status(),
         _probe_autoresearch_status(),
         _probe_kanban_db_status(),
+        _probe_kanban_dispatcher_status(),
         return_exceptions=True,
     )
 

@@ -3752,14 +3752,14 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     async def _to_thread(fn, *args, **kwargs):
         # PR salvage (#32857 commit 7): the dispatcher now reaps zombies at
         # the top of each tick via ``asyncio.to_thread(_kb.reap_worker_zombies)``
-        # BEFORE the per-board tick work. Each tick now issues 3 ``to_thread``
-        # calls (reaper + ``_tick_once`` + ``_ready_nonempty``) instead of 2,
-        # so this counter must reach 6 to allow the same 2 dispatch ticks the
-        # pre-reaper test expected at 4. Connect counts in the assertion below
-        # are unchanged.
+        # BEFORE the per-board tick work. K16 added cost backfill and Sprint2
+        # adds the dispatcher heartbeat, so each full tick now issues 5
+        # ``to_thread`` calls (reaper + ``_tick_once`` + ``_ready_nonempty`` +
+        # cost backfill + heartbeat). This counter must reach 10 to allow the
+        # same 2 dispatch ticks the pre-reaper test expected at 4.
         calls["to_thread"] += 1
         result = fn(*args, **kwargs)
-        if calls["to_thread"] >= 6:
+        if calls["to_thread"] >= 10:
             runner._running = False
         return result
 
@@ -3790,8 +3790,10 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     # probe, bumping this from 3 → 5. K16 added a per-tick, fail-soft cost
     # backfill (`connect_closing` → one more `_kb.connect` per tick); on a
     # corrupt board that connect raises and is swallowed, so it adds exactly
-    # one connect to each of the two ticks: 5 → 7.
-    assert calls["connect"] == 7
+    # one connect to each of the two ticks: 5 → 7. Sprint2's heartbeat writes
+    # one aggregate state file per tick and probes the same board list
+    # fail-soft, adding one swallowed connect per tick: 7 → 9.
+    assert calls["connect"] == 9
 
 
 def test_gateway_dispatcher_retries_corrupt_board_after_quarantine(

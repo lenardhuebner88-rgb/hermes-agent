@@ -1031,6 +1031,22 @@ def test_create_rejects_unknown_profile_assignee(worker_env, monkeypatch):
     assert "profile" in err.lower()
 
 
+def test_create_rejects_code_kind_for_verdict_only_role(worker_env, monkeypatch):
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "reviewer")
+    d = json.loads(kt._handle_create({
+        "title": "implement widget",
+        "assignee": "reviewer",
+        "kind": "code",
+    }))
+    assert d.get("ok") is not True
+    err = d.get("error", "")
+    assert "role_misuse" in err
+    assert "verdict" in err
+
+
 def test_create_allows_openclaw_assignee(worker_env, monkeypatch):
     """An ``openclaw:<agent>`` assignee is a legitimate cross-system lane the
     dispatcher intercepts BEFORE the profile gate, so the create handler must

@@ -22,6 +22,7 @@ the cooldown alerts again. Alerts go to Discord only (Telegram ist ab).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any, Optional
@@ -33,6 +34,7 @@ DEFAULT_ERROR_RATE_WINDOW_MINUTES = 30
 DEFAULT_ERROR_RATE_MIN_RUNS = 5
 _SNIPPET_MAX_CHARS = 280
 _MAX_FAILURES_LISTED = 5
+_OPERATOR_ESCALATION_EVENT = "operator_escalation"
 
 # Terminal failure classification. status covers the run row's own state;
 # outcome covers the dispatcher's verdict (same family the reliability stats
@@ -71,6 +73,9 @@ def load_alerts_config(cfg: Any) -> dict:
             if fallback:
                 channel_id = fallback
                 break
+    escalation_channel_id = str(raw.get("escalation_channel_id") or "").strip()
+    if not escalation_channel_id:
+        escalation_channel_id = channel_id
 
     threshold = raw.get("daily_cost_threshold_usd")
     try:
@@ -81,6 +86,7 @@ def load_alerts_config(cfg: Any) -> dict:
     return {
         "enabled": bool(raw.get("enabled", False)),
         "channel_id": channel_id or None,
+        "escalation_channel_id": escalation_channel_id or None,
         "thread_id": str(raw.get("thread_id") or "").strip() or None,
         "interval_seconds": max(30.0, _num("interval_seconds", DEFAULT_INTERVAL_SECONDS)),
         "cooldown_seconds": max(0.0, _num("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)),
@@ -95,7 +101,11 @@ def new_alert_state() -> dict:
     """Fresh watcher state. ``last_seen_run_id`` is lazily initialized to the
     current MAX(id) on the first tick so a gateway (re)start never replays
     historic failures as fresh alerts."""
-    return {"last_seen_run_id": None, "last_sent": {}}
+    return {
+        "last_seen_run_id": None,
+        "last_seen_operator_escalation_event_id": None,
+        "last_sent": {},
+    }
 
 
 def _cooldown_ok(state: dict, rule: str, now: int, cooldown_seconds: float) -> bool:
@@ -119,6 +129,67 @@ def _is_failure(status: Optional[str], outcome: Optional[str]) -> bool:
         (status or "").strip().lower() in FAIL_STATUSES
         or (outcome or "").strip().lower() in FAIL_OUTCOMES
     )
+
+
+def _payload_dict(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _rule_operator_escalation(
+    conn: sqlite3.Connection,
+    acfg: dict,
+    state: dict,
+    now: int,
+) -> Optional[dict]:
+    del now
+    last_seen = state.get("last_seen_operator_escalation_event_id")
+    if last_seen is None:
+        row = conn.execute(
+            "SELECT MAX(id) AS m FROM task_events WHERE kind = ?",
+            (_OPERATOR_ESCALATION_EVENT,),
+        ).fetchone()
+        state["last_seen_operator_escalation_event_id"] = (
+            int(row["m"]) if row and row["m"] is not None else 0
+        )
+        return None
+
+    rows = conn.execute(
+        "SELECT e.id, e.task_id, e.payload, t.title "
+        "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
+        "WHERE e.id > ? AND e.kind = ? "
+        "ORDER BY e.id ASC",
+        (int(last_seen), _OPERATOR_ESCALATION_EVENT),
+    ).fetchall()
+    if not rows:
+        return None
+    state["last_seen_operator_escalation_event_id"] = max(int(r["id"]) for r in rows)
+
+    lines = [
+        f"🚨 **Kanban operator escalation:** {len(rows)} task(s) need human action"
+    ]
+    for r in rows[:_MAX_FAILURES_LISTED]:
+        payload = _payload_dict(r["payload"])
+        task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+        title = _snippet(task.get("title") or r["title"]) or "(ohne Titel)"
+        task_id = task.get("id") or r["task_id"]
+        why = _snippet(payload.get("why_now")) or "retry ladder exhausted"
+        action = _snippet(payload.get("recommended_human_action"))
+        line = f"• **{title}** (`{task_id}`) — {why}"
+        if action:
+            line += f"; action: {action}"
+        lines.append(line)
+    if len(rows) > _MAX_FAILURES_LISTED:
+        lines.append(f"… und {len(rows) - _MAX_FAILURES_LISTED} weitere")
+    alert = {"rule": _OPERATOR_ESCALATION_EVENT, "text": "\n".join(lines)}
+    if acfg.get("escalation_channel_id"):
+        alert["channel_id"] = acfg["escalation_channel_id"]
+    return alert
 
 
 def _rule_run_failed(conn: sqlite3.Connection, acfg: dict, state: dict, now: int) -> Optional[dict]:
@@ -231,7 +302,12 @@ def evaluate_alerts(
     """
     ts = int(now if now is not None else time.time())
     alerts: list[dict] = []
-    for rule_fn in (_rule_run_failed, _rule_error_rate, _rule_daily_cost):
+    for rule_fn in (
+        _rule_run_failed,
+        _rule_error_rate,
+        _rule_daily_cost,
+        _rule_operator_escalation,
+    ):
         try:
             alert = rule_fn(conn, acfg, state, ts)
         except Exception:

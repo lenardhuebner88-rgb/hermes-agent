@@ -145,6 +145,56 @@ def test_outcome_classification_counts_gave_up(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# Rule (3B): operator escalation events
+# ---------------------------------------------------------------------------
+
+
+def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide", assignee="coder")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "task": {"id": tid, "title": "historic"},
+                    "why_now": "old retry ladder exhausted",
+                    "attempts_already_made": 2,
+                    "evidence": {},
+                    "recommended_human_action": "old action",
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+        state = new_alert_state()
+        assert evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW) == []
+
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "task": {"id": tid, "title": "Human needs to decide"},
+                    "why_now": "retry ladder exhausted",
+                    "attempts_already_made": 3,
+                    "evidence": {"last_error": "boom"},
+                    "recommended_human_action": "inspect and unblock if safe",
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+        alerts = evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW + 1)
+
+    assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
+    assert alerts[0]["channel_id"] == "999"
+    assert "Human needs to decide" in alerts[0]["text"]
+    assert "retry ladder exhausted" in alerts[0]["text"]
+    assert "inspect and unblock" in alerts[0]["text"]
+
+
+# ---------------------------------------------------------------------------
 # Rule (b): error rate over rolling window
 # ---------------------------------------------------------------------------
 
@@ -237,6 +287,19 @@ def test_load_alerts_config_defaults_off_and_falls_back_to_reporting_channel():
     assert cfg["cooldown_seconds"] == 900
     assert cfg["error_rate_threshold"] == pytest.approx(0.30)
     assert cfg["daily_cost_threshold_usd"] is None
+    assert cfg["escalation_channel_id"] == "777"
+
+    cfg2 = load_alerts_config({
+        "kanban": {
+            "alerts": {
+                "enabled": True,
+                "channel_id": "123",
+                "escalation_channel_id": "999",
+            },
+        },
+    })
+    assert cfg2["channel_id"] == "123"
+    assert cfg2["escalation_channel_id"] == "999"
 
 
 # ---------------------------------------------------------------------------
@@ -326,3 +389,50 @@ def test_alerts_watcher_noop_when_disabled(kanban_home, monkeypatch):
 
     asyncio.run(runner._kanban_alerts_watcher())  # returns immediately
     assert adapter.sent == []
+
+
+def test_alerts_watcher_uses_alert_specific_channel(kanban_home, monkeypatch):
+    from gateway import kanban_alerts
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "alerts": {
+                    "enabled": True,
+                    "escalation_channel_id": "999",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        kanban_alerts,
+        "evaluate_alerts",
+        lambda conn, acfg, state: [
+            {
+                "rule": kb.OPERATOR_ESCALATION_EVENT,
+                "text": "human needed",
+                "channel_id": acfg["escalation_channel_id"],
+            }
+        ],
+    )
+
+    adapter = RecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    async def fake_sleep(delay):
+        if delay != 10:
+            runner._running = False
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    asyncio.run(runner._kanban_alerts_watcher())
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["chat_id"] == "999"
+    assert adapter.sent[0]["text"] == "human needed"

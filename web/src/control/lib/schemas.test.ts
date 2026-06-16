@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("BacklogResponseSchema (Family Organizer contract health)", () => {
   it("preserves unknown status/risk values and parses contract-health drift", () => {
@@ -425,6 +425,7 @@ describe("SystemHealthResponseSchema", () => {
         gateway: { status: "healthy", detail: "ok", error: null, latency_ms: "8" },
         autoresearch: { status: "degraded", detail: "late", error: null, heartbeat_age_s: "12" },
         kanban_db: null,
+        kanban_dispatcher: { status: "healthy", detail: "ok", error: null, heartbeat_age_s: "4" },
       },
     }, "health-status");
     expect(parsed.schema).toBe("hermes-health-v1");
@@ -433,6 +434,28 @@ describe("SystemHealthResponseSchema", () => {
     expect(parsed.subsystems.gateway.latency_ms).toBe(8);
     expect(parsed.subsystems.autoresearch.heartbeat_age_s).toBe(12);
     expect(parsed.subsystems.kanban_db.status).toBe("offline");
+    expect(parsed.subsystems.kanban_dispatcher.heartbeat_age_s).toBe(4);
+  });
+});
+
+describe("DecisionQueueResponseSchema", () => {
+  it("accepts no-silent-stall decision kinds", () => {
+    const parsed = parseOrThrow(DecisionQueueResponseSchema, {
+      decisions: [
+        { kind: "operator_escalation", task_id: "t1", title: "Escalated", reason: "needs human", age_seconds: "9", suggested_command: null },
+        { kind: "integration_parked", task_id: "t2", title: "Parked", reason: "merge red", age_seconds: 10, suggested_command: "hermes kanban show t2" },
+        { kind: "rate_limited_loop", task_id: "t3", title: "Quota", reason: "429", age_seconds: null, suggested_command: null },
+      ],
+      count: 3,
+      checked_at: 123,
+    }, "kanban/decision-queue");
+
+    expect(parsed.decisions.map((d) => d.kind)).toEqual([
+      "operator_escalation",
+      "integration_parked",
+      "rate_limited_loop",
+    ]);
+    expect(parsed.decisions[0].age_seconds).toBe(9);
   });
 });
 

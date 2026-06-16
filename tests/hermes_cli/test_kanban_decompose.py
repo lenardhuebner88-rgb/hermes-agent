@@ -553,6 +553,15 @@ def test_decompose_prompt_requires_verifiable_acceptance_criteria():
 def test_decompose_prompt_documents_optional_kind():
     prompt = decomp._SYSTEM_PROMPT
     assert '"kind"' in prompt
+
+
+def test_decompose_prompt_documents_3a_lane_policy():
+    prompt = decomp._SYSTEM_PROMPT
+    assert "Lane routing table" in prompt
+    assert "coder-claude" in prompt
+    assert "reviewer and critic: verdict-only lanes" in prompt
+    assert "research: research lane" in prompt
+    assert 'Do not invent "researcher" as an alias' in prompt
     assert "code|research|review|ops|text" in prompt
     assert "null if unsure" in prompt
 

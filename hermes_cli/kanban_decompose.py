@@ -98,6 +98,18 @@ Rules:
     runs, not routing instructions. Do NOT add extra review or verification
     child tasks solely because a profile has good statistics; code lanes
     already have a structural review gate on the board.
+  - Lane routing table for implementation work:
+      * coder: default code implementation lane for ordinary code tasks.
+      * coder-claude: reasoning-heavy or chain-critical Claude code lane;
+        use only when the roster explicitly contains this exact profile.
+      * premium: operator-signed high-stakes or escalation-reserve code lane.
+      * reviewer and critic: verdict-only lanes; never assign them
+        kind=code or build/implementation tasks.
+      * research: research lane; never assign it kind=code or
+        build/implementation tasks. Do not invent "researcher" as an alias.
+  - For any code/build implementation child, set kind="code" and pick one of
+    the available code lanes above. For review/verdict work, set kind="review".
+    For research-only work, set kind="research".
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
   - Each child task body MUST include at least two acceptance criteria.

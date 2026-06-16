@@ -877,6 +877,7 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"skills must be a list of skill names, got {type(skills).__name__}"
         )
+    kind = args.get("kind")
     goal_mode, goal_bool_error = _parse_bool_arg(args, "goal_mode")
     if goal_bool_error:
         return tool_error(goal_bool_error)
@@ -930,6 +931,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                kind=str(kind).strip().lower() if kind is not None else None,
             )
             new_task = kb.get_task(conn, new_tid)
             return _ok(
@@ -1455,6 +1457,16 @@ KANBAN_CREATE_SCHEMA = {
                     "If true, task lands in 'triage' instead of 'todo' "
                     "— a specifier profile is expected to flesh out "
                     "the body before work starts."
+                ),
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["code", "research", "review", "ops", "text"],
+                "description": (
+                    "Coarse task lane. Use 'code' only for implementation "
+                    "work assigned to code lanes such as coder, coder-claude, "
+                    "or premium; reviewer/critic/research lanes are "
+                    "verdict/research-only."
                 ),
             },
             "idempotency_key": {

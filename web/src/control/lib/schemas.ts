@@ -273,6 +273,9 @@ export const KanbanDecisionKindSchema = z
     "sticky_blocked",
     "decompose_failed",
     "stranded_by_stuck_parent",
+    "operator_escalation",
+    "integration_parked",
+    "rate_limited_loop",
   ])
   .catch("sticky_blocked");
 
@@ -340,10 +343,12 @@ export const SystemHealthResponseSchema = z.object({
     gateway: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     autoresearch: SubsystemHealthSchema.catch(defaultSubsystemHealth),
     kanban_db: SubsystemHealthSchema.catch(defaultSubsystemHealth),
+    kanban_dispatcher: SubsystemHealthSchema.catch(defaultSubsystemHealth),
   }).catch({
     gateway: defaultSubsystemHealth,
     autoresearch: defaultSubsystemHealth,
     kanban_db: defaultSubsystemHealth,
+    kanban_dispatcher: defaultSubsystemHealth,
   }),
 });
 

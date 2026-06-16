@@ -192,6 +192,44 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[1].fixTaskId).toBeUndefined();
   });
 
+  it("ranks operator escalation above generic blocked rows", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "sticky_blocked", task_id: "t2", title: "Blocked one", reason: "needs eyes", age_seconds: 99, suggested_command: null },
+        { kind: "operator_escalation", task_id: "t1", title: "Escalated one", reason: "retry ladder exhausted", age_seconds: 10, suggested_command: "hermes kanban show t1" },
+      ],
+    });
+
+    expect(items[0].title).toBe("Escalated one");
+    expect(items[0].tone).toBe("red");
+    expect(items[0].why).toContain("Operator-Eskalation");
+    expect(items[0].target).toBe("/control/backlog?focus=t1");
+  });
+
+  it("surfaces no-silent-stall recovery classes with amber priority", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "sticky_blocked", task_id: "t3", title: "Blocked one", reason: "needs eyes", age_seconds: 99, suggested_command: null },
+        { kind: "rate_limited_loop", task_id: "t2", title: "Quota loop", reason: "429 quota", age_seconds: 10, suggested_command: "hermes kanban show t2" },
+        { kind: "integration_parked", task_id: "t1", title: "Merge parked", reason: "integration parked: merge gate red", age_seconds: 8, suggested_command: "hermes kanban show t1" },
+      ],
+    });
+
+    expect(items.map((i) => i.title)).toEqual(["Merge parked", "Quota loop", "Blocked one"]);
+    expect(items[0].why).toContain("Integration geparkt");
+    expect(items[1].why).toContain("Rate-Limit-Schleife");
+    expect(items[0].tone).toBe("amber");
+    expect(items[1].tone).toBe("amber");
+  });
+
   it("ignores rows without a task_id and tolerates an absent kanban source", () => {
     const items = buildDecisionInbox({
       proposals: [],

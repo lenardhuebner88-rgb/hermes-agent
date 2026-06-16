@@ -2561,6 +2561,71 @@ SELF_VERIFIED = "SELF_VERIFIED"
 SELF_VERIFY_LIMITED = "SELF_VERIFY_LIMITED"
 INTEGRATOR_VERIFIED = "INTEGRATOR_VERIFIED"
 DELIVERABLE_POSTED_NOT_COMPLETED = "deliverable_posted_not_completed"
+OPERATOR_ESCALATION_EVENT = "operator_escalation"
+OPERATOR_ONLY_ACTIONS = (
+    "DB schema/data mutation",
+    "destructive delete",
+    "secrets/credentials",
+)
+NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
+NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
+NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
+NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
+KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
+_VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
+_CODE_LANE_REASONS = {
+    "coder": "default code implementation lane",
+    "coder-claude": (
+        "reasoning-heavy or chain-critical Claude code lane; requires "
+        "cross-family review"
+    ),
+    "premium": "operator-signed high-stakes or escalation-reserve code lane",
+}
+
+
+def _assignee_key(assignee: Optional[str]) -> str:
+    return str(assignee or "").strip().lower()
+
+
+def _reason_for_lane(assignee: Optional[str]) -> str:
+    return _CODE_LANE_REASONS.get(
+        _assignee_key(assignee),
+        "code-role implementation task",
+    )
+
+
+def _role_misuse_reason(
+    *,
+    assignee: Optional[str],
+    kind: Optional[str],
+) -> Optional[str]:
+    role = _assignee_key(assignee)
+    task_kind = str(kind or "").strip().lower()
+    if task_kind == "code" and role in _VERDICT_ONLY_BUILD_ROLES:
+        allowed = ", ".join(sorted(_CODE_LANE_REASONS))
+        return (
+            f"role_misuse: {role!r} is a verdict/research-only lane and "
+            "cannot own kind='code' implementation work; route build/code "
+            f"tasks to one of: {allowed}"
+        )
+    return None
+
+
+def _role_misuse_payload(
+    *,
+    assignee: Optional[str],
+    kind: Optional[str],
+    source: str,
+) -> dict:
+    return {
+        "version": 1,
+        "source": source,
+        "issue": "role_misuse",
+        "assignee": assignee,
+        "kind": kind,
+        "verdict_only_roles": sorted(_VERDICT_ONLY_BUILD_ROLES),
+        "allowed_code_lanes": sorted(_CODE_LANE_REASONS),
+    }
 
 
 def _is_code_assignee(assignee: Optional[str]) -> bool:
@@ -2594,6 +2659,7 @@ def _with_code_task_contract(
         return body
     workspace = workspace_path or "Hermes-managed scratch workspace"
     tenant_label = (tenant or "default").strip() or "default"
+    reason_for_lane = _reason_for_lane(assignee)
     contract = "".join(
         [
             f"{_CODE_TASK_CONTRACT_MARKER}\n",
@@ -2602,7 +2668,7 @@ def _with_code_task_contract(
             f"- Workspace: {workspace_kind}:{workspace}\n",
             f"- Repo/workspace: {workspace_kind}:{workspace}\n",
             f"- Assignee/lane: {assignee}\n",
-            "- Reason for lane: code-role implementation task.\n",
+            f"- Reason for lane: {reason_for_lane}.\n",
             (
                 "- Allowed paths: use the explicit workspace path and any "
                 "task-specified paths only; block if the target repo/path is "
@@ -2676,9 +2742,9 @@ def _code_task_contract_payload(
     tenant: Optional[str],
     body: Optional[str],
     created_by: Optional[str],
+    protected_funnel_root: bool,
     source: str,
 ) -> tuple[dict, list[str]]:
-    protected_funnel = (created_by or "") in FUNNEL_CREATED_BY
     inferred_paths = _absolute_paths_from_text(body)
     allowed_paths = [workspace_path] if workspace_path else inferred_paths
     workspace = workspace_path or (
@@ -2693,7 +2759,7 @@ def _code_task_contract_payload(
             f"{workspace_kind}:{workspace}" if workspace else f"{workspace_kind}:"
         ),
         "assignee_lane": assignee,
-        "reason_for_lane": "code-role implementation task",
+        "reason_for_lane": _reason_for_lane(assignee),
         "allowed_paths": allowed_paths,
         "anti_scope": [
             "no unrelated cleanup",
@@ -2720,7 +2786,7 @@ def _code_task_contract_payload(
     missing: list[str] = []
     if workspace_kind in {"dir", "worktree"} and not workspace_path:
         missing.append("repo_workspace")
-    if protected_funnel and workspace_kind == "scratch" and not inferred_paths:
+    if protected_funnel_root and workspace_kind == "scratch" and not inferred_paths:
         missing.extend(["repo_workspace", "allowed_paths"])
     for field in _CODE_TASK_CONTRACT_FIELDS:
         value = payload.get(field)
@@ -2751,6 +2817,18 @@ def _code_contract_issue_for_row(
     source: str,
 ) -> tuple[Optional[str], Optional[dict]]:
     task_id = row["id"]
+    role_misuse = _role_misuse_reason(
+        assignee=row["assignee"],
+        kind=row["kind"] if "kind" in row.keys() else None,
+    )
+    if role_misuse is not None:
+        payload = _role_misuse_payload(
+            assignee=row["assignee"],
+            kind=row["kind"] if "kind" in row.keys() else None,
+            source=source,
+        )
+        payload["reason"] = role_misuse
+        return role_misuse, payload
     if not _is_code_task_row(row):
         return None, None
     if _latest_code_contract_event(conn, task_id) is not None:
@@ -2762,6 +2840,7 @@ def _code_contract_issue_for_row(
         tenant=row["tenant"],
         body=row["body"],
         created_by=row["created_by"],
+        protected_funnel_root=_is_funnel_root_task(conn, row),
         source=source,
     )
     if missing:
@@ -2874,6 +2953,9 @@ def create_task(
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
+    role_misuse = _role_misuse_reason(assignee=assignee, kind=kind)
+    if role_misuse is not None:
+        raise ValueError(role_misuse)
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
@@ -5250,7 +5332,7 @@ class WorkerGateError(Exception):
 #     so it is always sent terminal — never re-parked in review.
 #   * Children gate on the parent's verified ``done`` (recompute_ready is left
 #     unchanged): they must not build on unverified work.
-_DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = ("coder", "premium")
+_DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = ("coder", "coder-claude", "premium")
 _DEFAULT_VERIFIER_PROFILE = "verifier"
 
 
@@ -5265,9 +5347,9 @@ def _review_gate_config() -> dict:
     DB, via :func:`get_default_hermes_root`) so every worker, the dispatcher,
     and the CLI agree on one source of truth.
 
-    Conservative defaults: disabled, ``{coder, premium}`` as the code-bearing
-    roles, ``verifier`` as the verifying profile. The live root ``config.yaml``
-    opts in with ``kanban.review_gate.enabled: true``.
+    Conservative defaults: disabled, ``{coder, coder-claude, premium}`` as the
+    code-bearing roles, ``verifier`` as the verifying profile. The live root
+    ``config.yaml`` opts in with ``kanban.review_gate.enabled: true``.
     """
     rg: dict = {}
     try:
@@ -8993,6 +9075,47 @@ def repair_deliverable_posted_not_completed(
     return True
 
 
+def _operator_escalation_payload(
+    *,
+    task_id: str,
+    row: sqlite3.Row,
+    failures: int,
+    effective_limit: int,
+    limit_source: str,
+    error: str,
+    outcome: str,
+    event_payload_extra: Optional[dict],
+) -> dict:
+    evidence = {
+        "trigger_outcome": outcome,
+        "last_error": error[:500],
+        "effective_limit": effective_limit,
+        "limit_source": limit_source,
+    }
+    if event_payload_extra:
+        evidence["context"] = dict(event_payload_extra)
+    return {
+        "task": {
+            "id": task_id,
+            "title": row["title"] if "title" in row.keys() else None,
+            "status": row["status"] if "status" in row.keys() else None,
+            "assignee": row["assignee"] if "assignee" in row.keys() else None,
+        },
+        "why_now": (
+            "retry ladder exhausted: "
+            f"{failures} consecutive failure(s) reached the "
+            f"{effective_limit} attempt limit"
+        ),
+        "attempts_already_made": failures,
+        "evidence": evidence,
+        "recommended_human_action": (
+            "inspect the task, decide whether to unblock/reassign/close, and "
+            "perform any required operator-only action outside the worker loop"
+        ),
+        "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+    }
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -9051,7 +9174,7 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries "
+            "SELECT consecutive_failures, status, max_retries, title, assignee "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
@@ -9121,6 +9244,22 @@ def _record_task_failure(
                 payload.update(event_payload_extra)
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
+            )
+            _append_event(
+                conn,
+                task_id,
+                OPERATOR_ESCALATION_EVENT,
+                _operator_escalation_payload(
+                    task_id=task_id,
+                    row=row,
+                    failures=failures,
+                    effective_limit=effective_limit,
+                    limit_source=limit_source,
+                    error=error,
+                    outcome=outcome,
+                    event_payload_extra=event_payload_extra,
+                ),
+                run_id=run_id,
             )
             blocked = True
         else:
@@ -9286,6 +9425,516 @@ def reset_decompose_failed(conn: sqlite3.Connection, task_id: str) -> None:
             "UPDATE tasks SET decompose_failed = 0 WHERE id = ?",
             (task_id,),
         )
+
+
+def _task_has_parent(conn: sqlite3.Connection, task_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM task_links WHERE child_id = ? LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
+
+
+def _is_funnel_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    created_by = row["created_by"] if "created_by" in row.keys() else None
+    return (
+        (created_by or "") in FUNNEL_CREATED_BY
+        and not _task_has_parent(conn, row["id"])
+    )
+
+
+def _latest_event_at(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+) -> Optional[int]:
+    row = conn.execute(
+        "SELECT created_at FROM task_events "
+        "WHERE task_id = ? AND kind = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id, kind),
+    ).fetchone()
+    if row is None or row["created_at"] is None:
+        return None
+    return int(row["created_at"])
+
+
+def _has_stall_marker(
+    conn: sqlite3.Connection,
+    task_id: str,
+    stall_class: str,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ?",
+        (task_id, NO_SILENT_STALL_EVENT),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("stall_class") == stall_class:
+            return True
+    return False
+
+
+def _append_stall_marker(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    stall_class: str,
+    action: str,
+    reason: str,
+    now: int,
+) -> None:
+    _append_event(
+        conn,
+        task_id,
+        NO_SILENT_STALL_EVENT,
+        {
+            "stall_class": stall_class,
+            "action": action,
+            "reason": reason[:500],
+            "at": int(now),
+        },
+    )
+
+
+def _stall_operator_escalation_payload(
+    *,
+    row: sqlite3.Row,
+    stall_class: str,
+    reason: str,
+    evidence: dict,
+) -> dict:
+    attempts = evidence.get("attempts")
+    try:
+        attempts_already_made = int(attempts)
+    except (TypeError, ValueError):
+        attempts_already_made = 0
+    return {
+        "task": {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+        },
+        "why_now": f"no-silent-stall sweep detected {stall_class}: {reason}",
+        "attempts_already_made": attempts_already_made,
+        "evidence": {"stall_class": stall_class, **evidence},
+        "recommended_human_action": (
+            "inspect the parked task, decide whether to unblock/reassign/close, "
+            "and perform any required operator-only action outside automation"
+        ),
+        "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+    }
+
+
+def _park_stall_once(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    stall_class: str,
+    reason: str,
+    evidence: dict,
+    now: int,
+) -> bool:
+    task_id = row["id"]
+    if _has_stall_marker(conn, task_id, stall_class):
+        return False
+    with write_txn(conn):
+        fresh = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if fresh is None or fresh["status"] in ("done", "archived"):
+            return False
+        if _is_funnel_root_task(conn, fresh):
+            return False
+        if _has_stall_marker(conn, task_id, stall_class):
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status NOT IN ('done', 'archived')",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        if fresh["status"] != "blocked":
+            _append_event(conn, task_id, "blocked", {"reason": reason})
+        _append_event(
+            conn,
+            task_id,
+            OPERATOR_ESCALATION_EVENT,
+            _stall_operator_escalation_payload(
+                row=fresh,
+                stall_class=stall_class,
+                reason=reason,
+                evidence=evidence,
+            ),
+        )
+        _append_stall_marker(
+            conn,
+            task_id,
+            stall_class=stall_class,
+            action="parked",
+            reason=reason,
+            now=now,
+        )
+        return True
+
+
+def _count_task_runs_with_outcome(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: str,
+) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_runs "
+        "WHERE task_id = ? AND outcome = ?",
+        (task_id, outcome),
+    ).fetchone()
+    return int(row["n"] or 0) if row is not None else 0
+
+
+def _has_operator_escalation(conn: sqlite3.Connection, task_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
+        (task_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchone() is not None
+
+
+def no_silent_stall_sweep(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    min_age_seconds: int = NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS,
+    decompose_failure_limit: int = NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT,
+    rate_limit_attempt_limit: int = NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT,
+) -> dict:
+    """Bound known silent-stall classes with one nudge or one park.
+
+    Pure DB sweep: no schema, no worker spawn, and all idempotency rides on
+    ``task_events`` markers. Demand-Funnel root proposals are visibility-only
+    and are skipped; approved build children are not roots and remain eligible.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    min_age_seconds = max(0, int(min_age_seconds))
+    summary = {
+        "checked_at": ts,
+        "self_healed": [],
+        "parked": [],
+        "skipped_funnel": [],
+    }
+
+    def _old_enough(task_id: str, kind: str, fallback_at: Optional[int]) -> bool:
+        at = _latest_event_at(conn, task_id, kind)
+        if at is None:
+            at = fallback_at
+        return at is not None and int(at) + min_age_seconds <= ts
+
+    # 1) scheduled-overdue: safe deterministic nudge through existing unblock.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE status = 'scheduled'"
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        stall_class = "scheduled_overdue"
+        reason = "scheduled task exceeded no-silent-stall age window"
+        if _has_stall_marker(conn, row["id"], stall_class):
+            continue
+        if not _old_enough(row["id"], "scheduled", row["created_at"]):
+            continue
+        if unblock_task(conn, row["id"]):
+            with write_txn(conn):
+                _append_stall_marker(
+                    conn, row["id"], stall_class=stall_class,
+                    action="nudged", reason=reason, now=ts,
+                )
+            summary["self_healed"].append(
+                {"task_id": row["id"], "class": stall_class, "action": "unblocked"}
+            )
+        elif _park_stall_once(
+            conn, row, stall_class=stall_class, reason=reason,
+            evidence={"attempts": 1}, now=ts,
+        ):
+            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    # 2) review-without-verifier: nonspawnable review owner parks visibly.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE status = 'review' AND claim_lock IS NULL"
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        stall_class = "review_without_verifier"
+        if _has_stall_marker(conn, row["id"], stall_class):
+            continue
+        if not _old_enough(row["id"], "submitted_for_review", row["created_at"]):
+            continue
+        assignee = (row["assignee"] or "").strip()
+        spawnable = bool(assignee)
+        if spawnable:
+            try:
+                from hermes_cli.profiles import profile_exists
+                spawnable = bool(profile_exists(assignee))
+            except Exception:
+                spawnable = True
+        if not spawnable:
+            reason = "review task has no runnable verifier/reviewer profile"
+            if _park_stall_once(
+                conn, row, stall_class=stall_class, reason=reason,
+                evidence={"assignee": assignee or None, "attempts": 1}, now=ts,
+            ):
+                summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    # 3) triage-decompose-failed: auto-decompose failed repeatedly.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE decompose_failed >= ? "
+        "AND status NOT IN ('done', 'archived')",
+        (max(1, int(decompose_failure_limit)),),
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        stall_class = "triage_decompose_failed"
+        if _has_stall_marker(conn, row["id"], stall_class):
+            continue
+        reason = (
+            f"auto_decompose failed {int(row['decompose_failed'])} times"
+        )
+        if _park_stall_once(
+            conn, row, stall_class=stall_class, reason=reason,
+            evidence={"attempts": int(row["decompose_failed"])}, now=ts,
+        ):
+            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    # 4) persistent rate-limit loop: rate_limited runs never increment the
+    # breaker, so bound repeated quota loops explicitly.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE status = 'ready'"
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        latest = conn.execute(
+            "SELECT outcome, ended_at FROM task_runs "
+            "WHERE task_id = ? AND ended_at IS NOT NULL "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if latest is None or latest["outcome"] != "rate_limited":
+            continue
+        attempts = _count_task_runs_with_outcome(conn, row["id"], "rate_limited")
+        if attempts < max(1, int(rate_limit_attempt_limit)):
+            continue
+        stall_class = "rate_limited_loop"
+        if _has_stall_marker(conn, row["id"], stall_class):
+            continue
+        reason = f"persistent rate-limit loop after {attempts} rate-limited runs"
+        if _park_stall_once(
+            conn, row, stall_class=stall_class, reason=reason,
+            evidence={"attempts": attempts, "latest_ended_at": latest["ended_at"]},
+            now=ts,
+        ):
+            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    # 5) integration_parked: already blocked, but add the human escalation.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE status = 'blocked'"
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        blocked_event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        reason = _decision_event_reason(
+            blocked_event["payload"] if blocked_event else None
+        ) or ""
+        if not reason.startswith("integration parked:"):
+            continue
+        stall_class = "integration_parked"
+        if _park_stall_once(
+            conn, row, stall_class=stall_class, reason=reason,
+            evidence={"attempts": 1}, now=ts,
+        ):
+            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    # 6) legacy gave_up without a 3B escalation: backfill exactly once.
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE status = 'blocked'"
+    ).fetchall():
+        if _is_funnel_root_task(conn, row):
+            summary["skipped_funnel"].append(row["id"])
+            continue
+        if _has_operator_escalation(conn, row["id"]):
+            continue
+        gave_up = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'gave_up' "
+            "ORDER BY id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if gave_up is None:
+            continue
+        stall_class = "gave_up_no_subscriber"
+        try:
+            payload = json.loads(gave_up["payload"] or "{}")
+        except Exception:
+            payload = {}
+        attempts = payload.get("failures") if isinstance(payload, dict) else None
+        reason = "gave_up task has no operator escalation event"
+        if _park_stall_once(
+            conn, row, stall_class=stall_class, reason=reason,
+            evidence={"attempts": attempts or 0}, now=ts,
+        ):
+            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+
+    return summary
+
+
+def kanban_dispatcher_heartbeat_path() -> Path:
+    from hermes_constants import get_default_hermes_root
+
+    return (
+        get_default_hermes_root()
+        / "state"
+        / KANBAN_DISPATCHER_HEARTBEAT_FILENAME
+    )
+
+
+def _kanban_heartbeat_counts_for_conn(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+) -> dict:
+    day_start = int(
+        _dt.datetime.fromtimestamp(now, _dt.timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    counts = {
+        "self_healed_today": 0,
+        "parked_open": 0,
+        "open_escalations": 0,
+        "stranded": 0,
+    }
+
+    for row in conn.execute(
+        "SELECT payload, created_at FROM task_events "
+        "WHERE kind = ? AND created_at >= ?",
+        (NO_SILENT_STALL_EVENT, day_start),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("action") == "nudged":
+            counts["self_healed_today"] += 1
+
+    for row in conn.execute(
+        "SELECT e.task_id, e.payload, t.status "
+        "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+        "WHERE e.kind = ? AND t.status = 'blocked'",
+        (NO_SILENT_STALL_EVENT,),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("action") == "parked":
+            counts["parked_open"] += 1
+
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT e.task_id) AS n "
+        "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+        "WHERE e.kind = ? AND t.status NOT IN ('done', 'archived')",
+        (OPERATOR_ESCALATION_EVENT,),
+    ).fetchone()
+    counts["open_escalations"] += int(row["n"] or 0) if row else 0
+
+    try:
+        counts["stranded"] += int(decision_queue(conn, now=now).get("count") or 0)
+    except Exception:
+        pass
+    return counts
+
+
+def _merge_count_dicts(items: Iterable[dict]) -> dict:
+    merged = {
+        "self_healed_today": 0,
+        "parked_open": 0,
+        "open_escalations": 0,
+        "stranded": 0,
+    }
+    for item in items:
+        for key in merged:
+            try:
+                merged[key] += int(item.get(key) or 0)
+            except Exception:
+                pass
+    return merged
+
+
+def write_kanban_dispatcher_heartbeat(
+    *,
+    tick_health: str = "ok",
+    now: Optional[int] = None,
+) -> dict:
+    ts = int(time.time()) if now is None else int(now)
+    board_counts: list[dict] = []
+    boards_payload: list[dict] = []
+    try:
+        boards = list_boards(include_archived=False)
+    except Exception:
+        boards = [read_board_metadata(DEFAULT_BOARD)]
+
+    for board in boards:
+        slug = board.get("slug") or DEFAULT_BOARD
+        try:
+            with connect_closing(board=slug) as conn:
+                counts = _kanban_heartbeat_counts_for_conn(conn, now=ts)
+        except Exception:
+            counts = {
+                "self_healed_today": 0,
+                "parked_open": 0,
+                "open_escalations": 0,
+                "stranded": 0,
+            }
+        board_counts.append(counts)
+        boards_payload.append({"slug": slug, "counts": counts})
+
+    path = kanban_dispatcher_heartbeat_path()
+    previous: dict = {}
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                previous = loaded
+    except Exception:
+        previous = {}
+    health = (tick_health or "unknown").strip() or "unknown"
+    last_green = (
+        ts if health == "ok"
+        else previous.get("last_green_gate_at")
+    )
+    payload = {
+        "last_tick_at": ts,
+        "tick_health": health,
+        "last_green_gate_at": last_green,
+        "counts": _merge_count_dicts(board_counts),
+        "boards": boards_payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+    return payload
 
 
 def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -10192,7 +10841,8 @@ def auto_retry_blocked_tasks(
     retried: list[tuple[str, int]] = []
     rows = conn.execute(
         """
-        SELECT id, assignee, consecutive_failures, max_retries, auto_retry_count
+        SELECT id, assignee, consecutive_failures, max_retries,
+               auto_retry_count, created_by
           FROM tasks
          WHERE status = 'blocked'
          ORDER BY priority DESC, created_at ASC
@@ -10200,6 +10850,8 @@ def auto_retry_blocked_tasks(
     ).fetchall()
     for row in rows:
         task_id = row["id"]
+        if _is_funnel_root_task(conn, row):
+            continue
         blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
         if blocked_run is None:
             continue
@@ -10437,7 +11089,7 @@ def dispatch_once(
 
     ready_rows = conn.execute(
         "SELECT id, assignee, workflow_template_id, current_step_key, "
-        "workspace_kind, workspace_path FROM tasks "
+        "workspace_kind, workspace_path, created_by FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -10558,6 +11210,9 @@ def dispatch_once(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
+        if _is_funnel_root_task(conn, row):
+            result.respawn_guarded.append((row["id"], "funnel_protected"))
+            continue
         # serialize_by_repo: resolve this candidate's repo_root once and reuse it
         # at the guard (3d) and every claim-success re-add. Computed here (above the
         # openclaw branch) so it is in scope at ALL claim paths, including openclaw.
@@ -13351,6 +14006,13 @@ def decision_queue(
             "suggested_command": suggested_command,
         })
 
+    def _payload_dict(raw_payload) -> dict:
+        try:
+            payload = json.loads(raw_payload or "{}")
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     # Blocked tasks feed two categories (review_rejected, sticky_blocked). Fetch
     # the set ONCE and batch every per-task lookup the categories need — the
     # latest-run verdict, the latest blocked/unblocked event (sticky check) and
@@ -13365,7 +14027,7 @@ def decision_queue(
     last_blocked: dict[str, tuple] = {}  # task_id -> (payload, created_at)
     try:
         blocked_tasks = conn.execute(
-            "SELECT id, title FROM tasks WHERE status = 'blocked'"
+            "SELECT id, title, created_by FROM tasks WHERE status = 'blocked'"
         ).fetchall()
     except Exception:
         blocked_tasks = []
@@ -13407,6 +14069,74 @@ def decision_queue(
                 last_blocked[br["task_id"]] = (br["payload"], br["created_at"])
         except Exception:
             last_blocked = {}
+
+    # 0) no-silent-stall parks — specific classes beat the generic
+    #    operator_escalation event that 4A also emits for the same task.
+    try:
+        for row in blocked_tasks:
+            if row["id"] in seen or _is_funnel_root_task(conn, row):
+                continue
+            lb = last_blocked.get(row["id"])
+            reason = _decision_event_reason(lb[0] if lb else None) or ""
+            if not reason.startswith("integration parked:"):
+                continue
+            _add(
+                "integration_parked", row["id"], row["title"],
+                reason, _age(lb[1] if lb else None),
+                f"hermes kanban show {row['id']}",
+            )
+    except Exception:
+        pass
+
+    try:
+        for row in conn.execute(
+            "SELECT e.task_id, e.payload, e.created_at, t.id, t.title, "
+            "t.assignee, t.status, t.created_by "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = ? AND t.status NOT IN ('done', 'archived') "
+            "ORDER BY e.id DESC",
+            (NO_SILENT_STALL_EVENT,),
+        ).fetchall():
+            if row["task_id"] in seen or _is_funnel_root_task(conn, row):
+                continue
+            payload = _payload_dict(row["payload"])
+            if (
+                payload.get("stall_class") != "rate_limited_loop"
+                or payload.get("action") != "parked"
+            ):
+                continue
+            _add(
+                "rate_limited_loop", row["task_id"], row["title"],
+                str(payload.get("reason") or "Persistent rate-limit loop"),
+                _age(row["created_at"]),
+                f"hermes kanban show {row['task_id']}",
+            )
+    except Exception:
+        pass
+
+    try:
+        for row in conn.execute(
+            "SELECT e.task_id, e.payload, e.created_at, t.id, t.title, "
+            "t.assignee, t.status, t.created_by "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = ? AND t.status NOT IN ('done', 'archived') "
+            "ORDER BY e.id DESC",
+            (OPERATOR_ESCALATION_EVENT,),
+        ).fetchall():
+            if row["task_id"] in seen or _is_funnel_root_task(conn, row):
+                continue
+            payload = _payload_dict(row["payload"])
+            reason = (
+                str(payload.get("why_now") or "").strip()
+                or "Operator escalation pending"
+            )
+            _add(
+                "operator_escalation", row["task_id"], row["title"],
+                reason, _age(row["created_at"]),
+                f"hermes kanban show {row['task_id']}",
+            )
+    except Exception:
+        pass
 
     # 1) review_rejected — blocked task whose MOST RECENT run was a verifier
     #    REQUEST_CHANGES (B2 verdict). More specific than sticky_blocked.

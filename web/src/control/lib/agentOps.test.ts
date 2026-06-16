@@ -61,6 +61,7 @@ const healthy: SystemHealthResponse = {
     gateway: { status: "healthy", detail: "", error: null },
     autoresearch: { status: "healthy", detail: "", error: null },
     kanban_db: { status: "healthy", detail: "", error: null },
+    kanban_dispatcher: { status: "healthy", detail: "", error: null },
   },
 };
 

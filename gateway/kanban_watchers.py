@@ -1396,10 +1396,11 @@ class GatewayKanbanWatchersMixin:
         if not acfg["enabled"]:
             logger.info("kanban alerts: disabled (kanban.alerts.enabled not set)")
             return
-        if not acfg["channel_id"]:
+        if not (acfg["channel_id"] or acfg.get("escalation_channel_id")):
             logger.warning(
-                "kanban alerts: enabled but no channel (kanban.alerts.channel_id "
-                "or kanban.reporting_channel_id) — disabled",
+                "kanban alerts: enabled but no channel (kanban.alerts.channel_id, "
+                "kanban.alerts.escalation_channel_id, or "
+                "kanban.reporting_channel_id) — disabled",
             )
             return
         logger.info(
@@ -1434,14 +1435,23 @@ class GatewayKanbanWatchersMixin:
                             if acfg["thread_id"] else None
                         )
                         for alert in alerts:
+                            target_channel_id = (
+                                alert.get("channel_id") or acfg["channel_id"]
+                            )
+                            if not target_channel_id:
+                                logger.warning(
+                                    "kanban alerts: no channel for rule %s; dropped",
+                                    alert["rule"],
+                                )
+                                continue
                             try:
                                 await adapter.send(
-                                    acfg["channel_id"], alert["text"],
+                                    target_channel_id, alert["text"],
                                     metadata=metadata,
                                 )
                                 logger.info(
                                     "kanban alerts: sent %s alert to %s",
-                                    alert["rule"], acfg["channel_id"],
+                                    alert["rule"], target_channel_id,
                                 )
                             except Exception as exc:
                                 logger.warning(
@@ -1805,6 +1815,13 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: openclaw poll-back failed on board %s",
                         slug, exc_info=True,
                     )
+                try:
+                    _kb.no_silent_stall_sweep(conn)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: no-silent-stall sweep failed on board %s",
+                        slug, exc_info=True,
+                    )
                 return _dispatch_result
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -2088,6 +2105,16 @@ class GatewayKanbanWatchersMixin:
                         )
                 except Exception as exc:
                     logger.debug("kanban dispatcher: cost backfill skipped (%s)", exc)
+
+                try:
+                    await asyncio.to_thread(
+                        _kb.write_kanban_dispatcher_heartbeat,
+                        tick_health="ok",
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "kanban dispatcher: heartbeat write skipped (%s)", exc,
+                    )
             except asyncio.CancelledError:
                 logger.debug("kanban dispatcher: cancelled")
                 raise
