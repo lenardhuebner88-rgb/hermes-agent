@@ -356,6 +356,8 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
   const verifierGate = reviewGateStatus(enriched);
   const resultArtifact = preferredResultArtifactLink(enriched.resultArtifactLinks);
   const ageSec = task.age?.created_age_seconds ?? null;
+  // mobileOverflowGuard: all phone-width rows below need min-w-0 + wrapping or
+  // long task ids / branch names can push the Flow tab off the right edge.
   return (
     <article
       id={flowTaskDomId(task.id)}
@@ -364,14 +366,14 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
       aria-pressed={selected}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(task.id); } }}
-      className={cn("cursor-pointer rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
+      className={cn("min-w-0 max-w-full cursor-pointer overflow-hidden rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
     >
-      <div className="flex items-center gap-2">
-        <span className="hc-mono hc-type-label hc-dim">{task.id}</span>
-        <span className="ml-auto"><RoleChip role={role} /></span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{task.id}</span>
+        <span className="ml-auto shrink-0"><RoleChip role={role} /></span>
       </div>
       <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{task.title}</p>
-      <p className="mt-1 hc-mono hc-type-label hc-dim">
+      <p className="mt-1 truncate hc-mono hc-type-label hc-dim">
         {ageSec != null ? `⏱ vor ${fmtAge(now - ageSec, now)}` : ""}{task.branch_name ? ` · ${task.branch_name}` : ""}
         {enriched.workerHeartbeat ? ` · ♥ ${fmtAge(enriched.workerHeartbeat, now)}` : ""}
       </p>
@@ -805,7 +807,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
   const doneMembers = chain.members.filter((m) => m.status === "done");
   const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
   return (
-    <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
+    <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card min-w-0 max-w-full overflow-hidden scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
       <div
         role="button"
         tabIndex={0}
@@ -814,8 +816,8 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
         className="cursor-pointer"
       >
-        <div className="flex items-center gap-2">
-          <span className="hc-mono hc-type-label hc-dim">{chain.rootId}</span>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{chain.rootId}</span>
           <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{projectLabel(chain.tenant)}</span>
           {chain.epicId ? (
             <button
@@ -827,7 +829,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
               {de.flow.epicBadge(epicTitle || chain.epicId)}
             </button>
           ) : null}
-          <span className="ml-auto inline-flex items-center gap-1 hc-type-label hc-soft">
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1 hc-type-label hc-soft">
             {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             {expanded ? de.flow.chainCollapse : de.flow.chainExpand}
           </span>
@@ -857,11 +859,11 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
                     type="button"
                     onClick={() => onSelect(m.id)}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition",
+                      "flex w-full min-w-0 flex-wrap items-center gap-2 rounded-md border px-2 py-1.5 text-left transition",
                       selectedId === m.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
                     )}
                   >
-                    <span className="hc-mono hc-type-label hc-dim">{m.id}</span>
+                    <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{m.id}</span>
                     <span className="min-w-0 flex-1 truncate text-[0.78rem] text-zinc-200">{m.title}</span>
                     <span className="hc-type-label text-emerald-300">✓{m.completed_at ? ` vor ${fmtAge(m.completed_at, now)}` : ""}</span>
                   </button>
@@ -964,11 +966,11 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
                 type="button"
                 onClick={() => onSelect(id)}
                 className={cn(
-                  "hc-decision hc-sev-calm flex w-full items-center gap-2 px-3 py-2 text-left",
+                  "hc-decision hc-sev-calm flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left",
                   selectedId === id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
                 )}
               >
-                <span className="hc-mono hc-type-label hc-dim">{id}</span>
+                <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{id}</span>
                 <span className="min-w-0 flex-1 truncate text-[0.8rem] text-zinc-100">{title}</span>
                 {enriched?.resultQualityLabel ? (
                   <span className={cn(

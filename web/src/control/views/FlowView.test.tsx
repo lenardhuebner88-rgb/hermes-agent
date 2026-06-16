@@ -172,6 +172,14 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/hidden sm:inline/);
   });
 
+  it("keeps Flow rows bounded on phones instead of clipping off the right edge", () => {
+    expect(src).toMatch(/mobileOverflowGuard/);
+    expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2/);
+    expect(src).toMatch(/hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim/);
+    expect(src).toMatch(/flex w-full min-w-0 flex-wrap items-center gap-2/);
+    expect(src).toMatch(/min-w-0 max-w-full overflow-hidden/);
+  });
+
   it("collapses worker cards to compact headers in the worker strip", () => {
     expect(src).toMatch(/collapsible/);
   });
