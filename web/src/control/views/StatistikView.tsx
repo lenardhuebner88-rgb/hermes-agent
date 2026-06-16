@@ -19,7 +19,7 @@ import {
   useHermesRunsDaily,
   useHermesRunSummary,
 } from "../hooks/useControlData";
-import type { CostBucket, Epic, ReliabilityProfile, RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
+import type { CostBucket, CostProfileRow, Epic, ReliabilityProfile, RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 import { Hero } from "../components/Hero";
 import { StaleBadge, ToneCallout } from "../components/atoms";
 import { SkeletonCard } from "../components/primitives";
@@ -37,6 +37,40 @@ const fmtCostPair = (b: CostBucket) => {
   const real = fmtUsd(b.cost_usd ?? 0);
   return b.cost_usd_equivalent != null ? `${real} · ≈ ${fmtUsd(b.cost_usd_equivalent)}` : real;
 };
+
+type SubscriptionTokenBucket = {
+  key: "chatgpt" | "claude" | "kimi";
+  label: string;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costEquivalent: number;
+};
+
+const SUBSCRIPTION_BUCKETS: SubscriptionTokenBucket[] = [
+  { key: "chatgpt", label: "ChatGPT/Codex Abo", runs: 0, inputTokens: 0, outputTokens: 0, costEquivalent: 0 },
+  { key: "claude", label: "Claude Max Abo", runs: 0, inputTokens: 0, outputTokens: 0, costEquivalent: 0 },
+  { key: "kimi", label: "Kimi Abo", runs: 0, inputTokens: 0, outputTokens: 0, costEquivalent: 0 },
+];
+
+function subscriptionTokenBuckets(rows: CostProfileRow[]): SubscriptionTokenBucket[] {
+  const buckets = new Map(SUBSCRIPTION_BUCKETS.map((b) => [b.key, { ...b }]));
+  for (const row of rows) {
+    // Bucket strictly on the server-resolved subscription lane (grounded in the
+    // profile's provider/runtime config). API-billed lanes carry null and are
+    // intentionally excluded — they are not subscriptions.
+    if (!row.subscription) continue;
+    const bucket = buckets.get(row.subscription);
+    if (!bucket) continue;
+    bucket.runs += row.runs;
+    bucket.inputTokens += row.input_tokens ?? 0;
+    bucket.outputTokens += row.output_tokens ?? 0;
+    bucket.costEquivalent += row.cost_usd_equivalent ?? 0;
+  }
+  return SUBSCRIPTION_BUCKETS
+    .map((b) => buckets.get(b.key) ?? b)
+    .filter((b) => b.runs > 0 || b.inputTokens > 0 || b.outputTokens > 0);
+}
 
 function points(series: RunsDailyPoint[], pick: (p: RunsDailyPoint) => number | null): SeriesPoint[] {
   return series.map((p) => ({ label: dayLabel(p.date), value: pick(p) ?? 0 }));
@@ -103,6 +137,36 @@ export function CostBreakdownPanel({ data }: { data: RunsCostsResponse | null })
         </ul>
       ) : (
         <p className="mt-3 hc-type-label hc-dim">{de.stats.costNoData}</p>
+      )}
+    </FleetPanel>
+  );
+}
+
+export function AboTokenPanel({ data }: { data: RunsCostsResponse | null }) {
+  if (!data) return <SkeletonCard rows={3} />;
+  const buckets = subscriptionTokenBuckets(data.profiles);
+  return (
+    <FleetPanel eyebrow={de.stats.subscriptionTokens} meta={de.stats.subscriptionTokensHint}>
+      {buckets.length ? (
+        <div className="grid gap-2 sm:grid-cols-3">
+          {buckets.map((b) => {
+            const total = b.inputTokens + b.outputTokens;
+            return (
+              <div key={b.key} className="rounded-xl border border-[var(--hc-border)] bg-white/[.035] p-3">
+                <span className="hc-eyebrow">{b.label}</span>
+                <strong className="mt-2 block hc-mono text-lg text-[var(--hc-text)]">{fmtTokens(total)}</strong>
+                <span className="mt-1 block hc-type-label hc-dim">
+                  {de.stats.subscriptionInputOutput(fmtTokens(b.inputTokens), fmtTokens(b.outputTokens))}
+                </span>
+                <span className="mt-1 block hc-type-label hc-soft">
+                  {de.stats.costRuns(b.runs)}{b.costEquivalent > 0 ? ` · ${de.stats.subscriptionEquivalent(fmtUsd(b.costEquivalent))}` : ""}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="hc-type-label hc-dim">{de.stats.subscriptionNoData}</p>
       )}
     </FleetPanel>
   );
@@ -443,6 +507,7 @@ export function StatistikView() {
                 ) : null}
               </FleetPanel>
               {costs.error ? <ToneCallout tone="red">{costs.error}</ToneCallout> : <CostBreakdownPanel data={costs.data ?? null} />}
+              <AboTokenPanel data={costs.data ?? null} />
             </div>
           </div>
 

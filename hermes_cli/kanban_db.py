@@ -13712,6 +13712,77 @@ def _cost_bucket_add(bucket: dict, *, cost, equiv, tokens_in, tokens_out) -> Non
         bucket["output_tokens"] = (bucket["output_tokens"] or 0) + int(tokens_out)
 
 
+# Paid-subscription lanes for the Statistik "Abo-Tokenverbrauch" panel. The
+# bucket is derived from the profile's ACTUAL runtime/provider config, never
+# its name — a name heuristic mis-attributes renamed/repurposed lanes (e.g.
+# ``reviewer`` runs on the Kimi sub, not Claude; ``verifier``/``admin`` run on
+# the Codex sub). Cached because profile configs change rarely and the
+# dashboard process restarts on deploy.
+_PROFILE_SUBSCRIPTION_CACHE: dict[str, Optional[str]] = {}
+
+
+def _read_profile_provider(home: Optional[str]) -> Optional[str]:
+    """Read ``model.provider`` from a profile-home ``config.yaml``. Fail-soft
+    None on any error so a broken profile config never breaks the cost view."""
+    if not home:
+        return None
+    try:
+        import yaml
+        cfg_path = os.path.join(home, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        model = cfg.get("model") if isinstance(cfg, dict) else None
+        if isinstance(model, dict):
+            prov = model.get("provider")
+            return str(prov).strip() if prov else None
+        return None
+    except Exception:
+        return None
+
+
+def _profile_subscription(profile: Optional[str]) -> Optional[str]:
+    """Map a profile to its paid-subscription lane: ``"claude"`` (Claude Max via
+    the claude-cli runtime), ``"chatgpt"`` (ChatGPT/Codex via the openai-codex
+    provider) or ``"kimi"`` (Kimi sub). Returns None for API-billed lanes
+    (openrouter/qwen, gemini, …) and for blank/synthetic profile names — those
+    are NOT subscriptions and must not be shown as Abo token usage.
+
+    Grounded in config, not the name: claude-cli is checked FIRST because a
+    claude-cli profile (e.g. ``premium``) may carry a codex ``model.provider``
+    line while actually dispatching through the Claude subscription."""
+    if not profile:
+        return None
+    name = profile.strip()
+    if not name or name.startswith("("):
+        return None
+    if name in _PROFILE_SUBSCRIPTION_CACHE:
+        return _PROFILE_SUBSCRIPTION_CACHE[name]
+    sub: Optional[str] = None
+    try:
+        if _is_claude_cli_runtime(name):
+            sub = "claude"
+        else:
+            home: Optional[str] = None
+            try:
+                from hermes_cli.profiles import resolve_profile_env
+                home = resolve_profile_env(name)
+            except Exception:
+                home = None
+            provider = (_read_profile_provider(home) or "").lower()
+            if "codex" in provider or "openai" in provider or "chatgpt" in provider:
+                sub = "chatgpt"
+            elif "kimi" in provider or "moonshot" in provider:
+                sub = "kimi"
+            elif provider == "anthropic":
+                sub = "claude"
+    except Exception:
+        sub = None
+    _PROFILE_SUBSCRIPTION_CACHE[name] = sub
+    return sub
+
+
 def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     """F4 (Statistik): Kosten-Sicht — heute + N-Tage-Fenster gesamt und pro
     Profil. Liest ausschließlich gestempelte ``task_runs``-Spalten plus
@@ -13763,7 +13834,8 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         return (b["cost_usd"] or 0.0) + (b["cost_usd_equivalent"] or 0.0)
 
     profile_rows = [
-        {"profile": name, **bucket} for name, bucket in profiles.items()
+        {"profile": name, "subscription": _profile_subscription(name), **bucket}
+        for name, bucket in profiles.items()
     ]
     profile_rows.sort(
         key=lambda p: (

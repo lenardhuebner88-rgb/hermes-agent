@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
+import { AboTokenPanel, CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
 import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 
 const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
@@ -38,9 +38,9 @@ describe("CostBreakdownPanel (F4)", () => {
     const html = renderToStaticMarkup(
       <CostBreakdownPanel
         data={fixture([
-          { profile: "premium", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.5, input_tokens: 5000, output_tokens: 900 },
-          { profile: "coder", runs: 2, cost_usd: 0.3, cost_usd_equivalent: null, input_tokens: 1400, output_tokens: 280 },
-          { profile: "verifier", runs: 1, cost_usd: null, cost_usd_equivalent: null, input_tokens: null, output_tokens: null },
+          { profile: "premium", subscription: "claude", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.5, input_tokens: 5000, output_tokens: 900 },
+          { profile: "coder", subscription: "chatgpt", runs: 2, cost_usd: 0.3, cost_usd_equivalent: null, input_tokens: 1400, output_tokens: 280 },
+          { profile: "verifier", subscription: "chatgpt", runs: 1, cost_usd: null, cost_usd_equivalent: null, input_tokens: null, output_tokens: null },
         ])}
       />,
     );
@@ -57,6 +57,44 @@ describe("CostBreakdownPanel (F4)", () => {
   it("zeigt Skeleton solange keine Daten da sind", () => {
     const html = renderToStaticMarkup(<CostBreakdownPanel data={null} />);
     expect(html).not.toContain("Kosten heute");
+  });
+});
+
+describe("AboTokenPanel", () => {
+  it("bucketet nach der server-aufgelösten Abo-Lane, nicht nach dem Profilnamen", () => {
+    const html = renderToStaticMarkup(
+      <AboTokenPanel
+        data={fixture([
+          // ChatGPT/Codex: zwei Codex-Profile (coder + verifier) summieren sich.
+          { profile: "coder", subscription: "chatgpt", runs: 2, cost_usd: 0.0, cost_usd_equivalent: 0.8, input_tokens: 1000, output_tokens: 200 },
+          { profile: "verifier", subscription: "chatgpt", runs: 1, cost_usd: 0.0, cost_usd_equivalent: null, input_tokens: 1000, output_tokens: 100 },
+          { profile: "coder-claude", subscription: "claude", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.2, input_tokens: 3000, output_tokens: 400 },
+          // Kimi-Lane heißt "reviewer" — Namensheuristik würde sie fälschlich
+          // Claude zuschlagen; die server-gegroundete Lane bucketet korrekt.
+          { profile: "reviewer", subscription: "kimi", runs: 3, cost_usd: 0.0, cost_usd_equivalent: null, input_tokens: 500, output_tokens: 50 },
+          // API-Lane (kein Abo): muss ausgeschlossen bleiben.
+          { profile: "critic", subscription: null, runs: 5, cost_usd: 0.0, cost_usd_equivalent: 9.0, input_tokens: 99999, output_tokens: 9999 },
+        ])}
+      />,
+    );
+
+    expect(html).toContain("Abo-Tokenverbrauch");
+    expect(html).toContain("ChatGPT/Codex Abo");
+    expect(html).toContain("Claude Max Abo");
+    expect(html).toContain("Kimi Abo");
+    // ChatGPT summiert coder+verifier: In 2000 → "2 k", Out 300.
+    expect(html).toContain("In 2 k · Out 300");
+    expect(html).toContain("In 3 k · Out 400");
+    // Kimi = reviewer-Tokens (In 500 · Out 50 = 550), trotz Profilname ohne "kimi".
+    expect(html).toContain("In 500 · Out 50");
+    expect(html).toContain("550");
+    // API-Lane critic (99999 Tokens) darf nirgends auftauchen.
+    expect(html).not.toContain("99");
+  });
+
+  it("zeigt einen ruhigen Leerzustand ohne gestempelte Tokens", () => {
+    const html = renderToStaticMarkup(<AboTokenPanel data={fixture([])} />);
+    expect(html).toContain("Noch kein Abo-Tokenverbrauch");
   });
 });
 
