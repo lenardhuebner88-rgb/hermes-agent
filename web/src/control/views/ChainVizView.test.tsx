@@ -7,13 +7,29 @@ const controlPage = readFileSync(fileURLToPath(new URL("../ControlPage.tsx", imp
 const hooks = readFileSync(fileURLToPath(new URL("../hooks/useControlData.ts", import.meta.url)), "utf8");
 
 describe("ChainVizView live wiring", () => {
-  it("polls the chain-graph endpoint and renders a horizontal DAG", () => {
+  it("polls the chain-graph endpoint and delegates SVG DAG rendering to KettenGraph", () => {
     expect(src).toMatch(/useChainGraph/);
     expect(hooks).toMatch(/chain-graph/);
-    expect(src).toMatch(/gridTemplateColumns/);
-    expect(src).toMatch(/outgoingByNode/);
-    expect(src).toMatch(/heartbeat_age_seconds/);
-    expect(src).toMatch(/runtime_seconds/);
+    // Renders a bezier SVG DAG via KettenGraph (not a flat grid with outgoingByNode chips).
+    expect(src).toMatch(/KettenGraph/);
+    // Passes nodes + edges from the chain-graph hook down to KettenGraph.
+    expect(src).toMatch(/graph\.data\.nodes/);
+    expect(src).toMatch(/graph\.data\.edges/);
+  });
+
+  it("falls back to first active chain when no ?root= param is set", () => {
+    expect(src).toMatch(/activeChains\[0\]\.rootId/);
+    expect(src).toMatch(/useSearchParams/);
+  });
+
+  it("uses richer latest_run fields for runtime and heartbeat (via ChainNodeCard)", () => {
+    const cardSrc = readFileSync(
+      fileURLToPath(new URL("./ketten/ChainNodeCard.tsx", import.meta.url)),
+      "utf8",
+    );
+    expect(cardSrc).toMatch(/latest_run/);
+    expect(cardSrc).toMatch(/runtime_seconds/);
+    expect(cardSrc).toMatch(/last_heartbeat_at/);
   });
 
   it("is routed as the /control/ketten tab", () => {
