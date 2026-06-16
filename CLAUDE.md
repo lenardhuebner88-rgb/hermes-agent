@@ -19,6 +19,9 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
 ## Dashboard (Haupt-Bauziel)
 - `/control`-SPA (FastAPI + React/TS), Port **9119** (loopback), via Tailscale Serve
   `:9443` erreichbar.
+- Binding PlanSpecs (`taskgraph_hints`, `freigabe`, `live_test_depth`) sind in
+  `/home/piet/vault/00-Canon/planspec-taskgraph.md` definiert; Dashboard-Hub und
+  `hermes plan ingest <planspec.md>` müssen dieses Schema nutzen.
 - Neustart: `systemctl --user restart hermes-dashboard.service` (über systemd betreiben,
   nicht von Hand).
 - Deploy: `scripts/deploy_dashboard.sh` — Standing Grant bei *wirklich* grünen Gates

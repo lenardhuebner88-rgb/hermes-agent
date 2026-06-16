@@ -23,6 +23,7 @@ import {
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
   BoardResponseSchema,
+  PlanSpecsResponseSchema,
   EpicsResponseSchema,
   TaskDetailResponseSchema,
   RunInspectSchema,
@@ -31,7 +32,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -593,6 +594,14 @@ export const boardLoader = async () =>
 // fresh without churning the DB; usePolling pauses it when the tab is hidden.
 export function useBoard() {
   return usePolling<BoardResponse>("kanban/board", boardLoader, 8000);
+}
+
+export function usePlanSpecs() {
+  return usePolling<PlanSpecsResponse>(
+    "kanban/planspecs",
+    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/planspecs"), "kanban/planspecs"),
+    15000,
+  );
 }
 
 // Derive which FO backlog items are already visible on the board (status IN

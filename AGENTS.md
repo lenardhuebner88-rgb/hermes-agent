@@ -26,6 +26,8 @@ stays visible and no two agents shred the same files:
 
 Canonical rule: `00-Canon/conventions-gates.md` → *Collaboration & Provenance*.
 Who/what overview: `_agents/_activity.md` (or `_agents/_shared/scripts/activity-overview.py`).
+Binding PlanSpecs (`taskgraph_hints`, `freigabe`, `live_test_depth`) are defined in
+`/home/piet/vault/00-Canon/planspec-taskgraph.md`; CLI/API/dashboard ingest must use that schema.
 
 ## What Hermes Is
 

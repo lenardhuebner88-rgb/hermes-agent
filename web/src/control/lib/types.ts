@@ -59,6 +59,40 @@ export interface WorkersResponse {
   checked_at: number;
 }
 
+export interface PlanSpecRecord {
+  path: string;
+  agent: string;
+  filename: string;
+  topic: string;
+  status: string;
+  freigabe: string;
+  live_test_depth: string | null;
+  binding: boolean;
+  subtask_count: number;
+  valid: boolean;
+  errors: string[];
+}
+
+export interface PlanSpecsResponse {
+  planspecs: PlanSpecRecord[];
+  count: number;
+}
+
+export interface PlanSpecIngestResponse {
+  ok: boolean;
+  path: string;
+  root_task_id: string;
+  child_ids: string[];
+  freigabe: string;
+  live_test_depth: string;
+  subtask_count: number;
+}
+
+export interface PlanSpecPromptResponse {
+  path: string;
+  prompt: string;
+}
+
 
 export interface KanbanResult {
   run_id: string;

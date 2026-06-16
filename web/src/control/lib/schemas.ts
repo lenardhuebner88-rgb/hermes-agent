@@ -81,6 +81,26 @@ export const WorkersResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+export const PlanSpecRecordSchema = z.object({
+  path: z.string().catch(""),
+  agent: z.string().catch(""),
+  filename: z.string().catch(""),
+  topic: z.string().catch(""),
+  status: z.string().catch(""),
+  freigabe: z.string().catch(""),
+  live_test_depth: z.string().nullable().catch(null),
+  binding: z.boolean().catch(false),
+  subtask_count: z.coerce.number().catch(0),
+  valid: z.boolean().catch(false),
+  errors: z.array(z.string()).catch([]),
+});
+
+export const PlanSpecsResponseSchema = z.object({
+  planspecs: z.array(PlanSpecRecordSchema).catch([]),
+  count: z.coerce.number().catch(0),
+});
+export type PlanSpecsResponse = z.infer<typeof PlanSpecsResponseSchema>;
+
 const TaskStatusSchema = z
   .enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"])
   .catch("todo");

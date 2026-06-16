@@ -18,20 +18,71 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 DEFAULT_TEMPLATES_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/templates")
 DEFAULT_COMPILED_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/compiled")
 _REQUIRED_MARKDOWN_SECTIONS = ("## Goal", "## Acceptance Criteria", "## Anti-Scope", "## Evidence Required")
 
 
+class BindingSubtask(BaseModel):
+    """Binding taskgraph child from PlanSpec frontmatter.
+
+    ``deps`` are symbolic ids that are resolved to sibling parent indices right
+    before inserting into the kanban graph.
+    """
+
+    id: str
+    title: str
+    lane: str
+    deps: list[str] = Field(default_factory=list)
+    body: str = ""
+
+    @field_validator("id", "title", "lane")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value.strip()
+
+    @field_validator("deps")
+    @classmethod
+    def _clean_deps(cls, value: list[str]) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("must be a list")
+        return [str(item).strip() for item in value if str(item).strip()]
+
+
 class TaskgraphHints(BaseModel):
-    """Optional, non-binding hints for a later taskgraph draft compiler."""
+    """Optional hints for taskgraph draft or binding PlanSpec ingestion."""
 
     candidate_tasks: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     recommended_roles: list[str] = Field(default_factory=list)
     non_binding: bool = True
+    binding: bool = False
+    subtasks: list[BindingSubtask] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_binding_graph(self) -> "TaskgraphHints":
+        if self.subtasks and not self.binding:
+            raise ValueError("taskgraph_hints.subtasks requires taskgraph_hints.binding: true")
+        if self.binding and not self.subtasks:
+            raise ValueError("taskgraph_hints.binding=true requires at least one subtask")
+        ids = [task.id for task in self.subtasks]
+        duplicates = sorted({item for item in ids if ids.count(item) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate taskgraph_hints.subtasks id(s): {', '.join(duplicates)}")
+        known = set(ids)
+        for task in self.subtasks:
+            unknown = [dep for dep in task.deps if dep not in known]
+            if unknown:
+                raise ValueError(
+                    f"taskgraph_hints.subtasks[{task.id}].deps unknown id(s): {', '.join(unknown)}"
+                )
+            if task.id in task.deps:
+                raise ValueError(f"taskgraph_hints.subtasks[{task.id}] cannot depend on itself")
+        return self
 
 
 class AcceptanceCriterion(BaseModel):
@@ -227,10 +278,58 @@ def _role_hint(roles: list[str], index: int) -> str | None:
     return roles[0]
 
 
+def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate binding frontmatter hints into kanban ``children``.
+
+    The output shape is accepted by :func:`kanban_db.decompose_triage_task`.
+    It is deterministic and LLM-free: dependency ids become parent indices in
+    the same order the PlanSpec lists subtasks.
+    """
+    model = hints if isinstance(hints, TaskgraphHints) else TaskgraphHints.model_validate(hints)
+    if not model.binding:
+        raise CompileBlocked(["taskgraph_hints.binding must be true for ingest"])
+    index_by_id = {task.id: index for index, task in enumerate(model.subtasks)}
+    children: list[dict[str, Any]] = []
+    for task in model.subtasks:
+        deps = [index_by_id[dep] for dep in task.deps]
+        body_parts = []
+        if task.body.strip():
+            body_parts.append(task.body.strip())
+        body_parts.append(f"PlanSpec subtask: {task.id}")
+        body_parts.append(f"Lane: {task.lane}")
+        if task.deps:
+            body_parts.append("Depends on: " + ", ".join(task.deps))
+        children.append(
+            {
+                "title": task.title,
+                "body": "\n\n".join(body_parts),
+                "assignee": task.lane,
+                "kind": "code",
+                "parents": deps,
+                "planspec_id": task.id,
+                "planspec_lane": task.lane,
+                "planspec_deps": list(task.deps),
+            }
+        )
+    return children
+
+
 def build_taskgraph_draft(contract: PlanContract) -> dict[str, Any]:
     """Build a non-binding taskgraph draft from optional taskgraph hints."""
 
     hints = contract.taskgraph_hints
+    if hints.binding:
+        children = taskgraph_hints_to_children(hints)
+        return {
+            "schema_version": "taskgraph.binding.v1",
+            "non_binding": False,
+            "binding": True,
+            "source": "contract.taskgraph_hints",
+            "contract_goal": contract.goal,
+            "children": children,
+            "subtasks": [task.model_dump(mode="json") for task in hints.subtasks],
+        }
+
     tasks = []
     for index, title in enumerate(hints.candidate_tasks):
         task: dict[str, Any] = {

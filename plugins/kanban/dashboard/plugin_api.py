@@ -4762,6 +4762,48 @@ def decompose_task_endpoint(
 
 
 # ---------------------------------------------------------------------------
+# PlanSpec hub — Vault PlanSpecs -> deterministic held Kanban chains
+# ---------------------------------------------------------------------------
+
+class PlanSpecPathBody(BaseModel):
+    path: ShortText
+    author: Optional[ShortText] = "dashboard"
+
+
+@router.get("/planspecs")
+def list_planspecs():
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    records = planspecs.list_planspecs()
+    return {"planspecs": records, "count": len(records)}
+
+
+@router.post("/planspecs/ingest")
+def ingest_planspec(payload: PlanSpecPathBody, board: Optional[str] = Query(None)):
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    board = _resolve_board(board)
+    try:
+        return planspecs.ingest_planspec(
+            payload.path,
+            board=board,
+            author=payload.author or "dashboard",
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+
+
+@router.post("/planspecs/sprint-prompt")
+def sprint_prompt_for_planspec(payload: PlanSpecPathBody):
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    try:
+        return planspecs.sprint_prompt_for_planspec(payload.path)
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+
+
+# ---------------------------------------------------------------------------
 # Flow capture Phase B — backend-driven planning (documented/lean) + gate + spec
 # ---------------------------------------------------------------------------
 

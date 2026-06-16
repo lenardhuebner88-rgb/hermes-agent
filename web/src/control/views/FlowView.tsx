@@ -10,7 +10,7 @@
  * exist for a stage.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Copy, FileText, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -43,13 +43,14 @@ import {
   useHermesBlockedCompletions,
   useHermesRecentResults,
   useHermesReviewVerdicts,
+  usePlanSpecs,
   useSystemHealth,
   useHermesWorkers,
   useRunInspect,
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
+import type { BoardTask, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -167,6 +168,126 @@ function RecoveryStrip() {
       ) : (
         <p className="mt-3 text-sm hc-dim">Keine Recovery-Parks.</p>
       )}
+    </FleetPanel>
+  );
+}
+
+function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
+  const plans = usePlanSpecs();
+  const [busyPath, setBusyPath] = useState<string | null>(null);
+  const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
+  const [promptByPath, setPromptByPath] = useState<Record<string, string>>({});
+  const items = (plans.data?.planspecs ?? []).slice(0, 8);
+  const validCount = items.filter((item) => item.valid).length;
+
+  const setRowError = useCallback((path: string, message: string | null) => {
+    setErrorByPath((current) => {
+      const next = { ...current };
+      if (message) next[path] = message;
+      else delete next[path];
+      return next;
+    });
+  }, []);
+
+  const ingest = useCallback(async (item: PlanSpecRecord) => {
+    setBusyPath(`${item.path}:ingest`);
+    setRowError(item.path, null);
+    try {
+      const result = await fetchJSON<PlanSpecIngestResponse>("/api/plugins/kanban/planspecs/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: item.path, author: "dashboard" }),
+      });
+      await plans.reload();
+      onIngested(result.root_task_id);
+    } catch (e) {
+      setRowError(item.path, e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyPath(null);
+    }
+  }, [onIngested, plans, setRowError]);
+
+  const buildPrompt = useCallback(async (item: PlanSpecRecord) => {
+    setBusyPath(`${item.path}:prompt`);
+    setRowError(item.path, null);
+    try {
+      const result = await fetchJSON<PlanSpecPromptResponse>("/api/plugins/kanban/planspecs/sprint-prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: item.path, author: "dashboard" }),
+      });
+      setPromptByPath((current) => ({ ...current, [item.path]: result.prompt }));
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(result.prompt).catch(() => undefined);
+      }
+    } catch (e) {
+      setRowError(item.path, e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyPath(null);
+    }
+  }, [setRowError]);
+
+  if (!plans.loading && !plans.error && items.length === 0) return null;
+
+  return (
+    <FleetPanel eyebrow="Planspec-Hub" meta={`${validCount}/${items.length} bindend · Vault`}>
+      {plans.error ? <ToneCallout tone="amber">{plans.error}</ToneCallout> : null}
+      {plans.loading && plans.data == null ? <SkeletonCard rows={3} /> : null}
+      <div className="grid gap-2">
+        {items.map((item) => {
+          const ingestBusy = busyPath === `${item.path}:ingest`;
+          const promptBusy = busyPath === `${item.path}:prompt`;
+          const rowError = errorByPath[item.path];
+          const prompt = promptByPath[item.path];
+          return (
+            <div key={item.path} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+              <div className="flex min-w-0 flex-wrap items-start gap-2">
+                <FileText className="mt-0.5 h-4 w-4 shrink-0 text-[var(--hc-accent-text)]" />
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-2 text-sm font-semibold text-white">{item.topic}</p>
+                  <p className="mt-1 truncate hc-mono hc-type-label hc-dim">{item.path}</p>
+                </div>
+                <StatusPill tone={item.valid ? "emerald" : "amber"} label={item.valid ? "binding" : "blocked"} dot={item.valid ? "live" : "warn"} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
+                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
+                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
+                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
+              </div>
+              {item.errors.length ? <p className="mt-2 text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
+              {rowError ? <p className="mt-2 text-[0.75rem] text-red-300">{rowError}</p> : null}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!item.valid || ingestBusy || promptBusy}
+                  onClick={() => void ingest(item)}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40"
+                >
+                  {ingestBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
+                  Kanban
+                </button>
+                <button
+                  type="button"
+                  disabled={!item.valid || ingestBusy || promptBusy}
+                  onClick={() => void buildPrompt(item)}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40"
+                >
+                  {promptBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
+                  Sprint-Prompt
+                </button>
+              </div>
+              {prompt ? (
+                <textarea
+                  readOnly
+                  value={prompt}
+                  className="mt-3 min-h-28 w-full resize-y rounded-md border border-[var(--hc-border)] bg-black/20 p-2 hc-mono text-[0.72rem] text-zinc-100 outline-none"
+                />
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
     </FleetPanel>
   );
 }
@@ -1445,6 +1566,7 @@ export function FlowView() {
       ) : null}
 
       <RecoveryStrip />
+      <PlanSpecHub onIngested={onCaptured} />
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert

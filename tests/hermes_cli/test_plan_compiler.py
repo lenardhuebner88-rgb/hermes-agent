@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
-from hermes_cli.plan_compiler import compile_plan, main
+from pydantic import ValidationError
+
+from hermes_cli.plan_compiler import TaskgraphHints, compile_plan, main, taskgraph_hints_to_children
 
 
 VALID_PLAN = """---
@@ -278,6 +281,114 @@ def test_invalid_plan_blocks_without_valid_output(tmp_path: Path, capsys):
     assert "BLOCKED" in captured.err
     assert "anti_scope" in captured.err
     assert not (compiled_root / "bad-plan" / "contract.yaml").exists()
+
+
+def test_binding_taskgraph_hints_compile_to_children(tmp_path: Path):
+    plan = tmp_path / "binding-plan.md"
+    plan.write_text(
+        """---
+contract_version: 1
+goal: Ship binding taskgraph
+anti_scope:
+  - no runtime config changes
+acceptance_criteria:
+  - children are emitted
+evidence_required:
+  - pytest passes
+risk_class: MEDIUM
+next_decision: ingest can consume children
+allowed_actions:
+  - edit local files
+forbidden_actions:
+  - restart services
+requires_approval:
+  - deploy
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: First
+      lane: coder
+      deps: []
+    - id: S2
+      title: Second
+      lane: verifier
+      deps: [S1]
+---
+## Goal
+Ship it.
+
+## Acceptance Criteria
+- Children emitted.
+
+## Anti-Scope
+- None.
+
+## Evidence Required
+- Tests.
+""",
+        encoding="utf-8",
+    )
+
+    artifacts = compile_plan(
+        plan,
+        compiled_root=tmp_path / "compiled",
+        templates_root=tmp_path / "templates",
+    )
+
+    draft = yaml.safe_load(artifacts["taskgraph_draft"].read_text(encoding="utf-8"))
+    assert draft["schema_version"] == "taskgraph.binding.v1"
+    assert draft["binding"] is True
+    assert draft["children"][1]["parents"] == [0]
+    assert draft["children"][1]["assignee"] == "verifier"
+
+
+def test_binding_taskgraph_hints_reject_unknown_dep():
+    with pytest.raises(ValidationError) as exc:
+        TaskgraphHints.model_validate(
+            {
+                "binding": True,
+                "subtasks": [
+                    {"id": "S1", "title": "First", "lane": "coder", "deps": ["missing"]},
+                ],
+            }
+        )
+    assert "unknown id" in str(exc.value)
+
+
+def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+                {"id": "S2", "title": "Verify", "lane": "verifier", "deps": ["S1"]},
+            ],
+        }
+    )
+
+    assert children == [
+        {
+            "title": "Build",
+            "body": "PlanSpec subtask: S1\n\nLane: coder",
+            "assignee": "coder",
+            "kind": "code",
+            "parents": [],
+            "planspec_id": "S1",
+            "planspec_lane": "coder",
+            "planspec_deps": [],
+        },
+        {
+            "title": "Verify",
+            "body": "PlanSpec subtask: S2\n\nLane: verifier\n\nDepends on: S1",
+            "assignee": "verifier",
+            "kind": "code",
+            "parents": [0],
+            "planspec_id": "S2",
+            "planspec_lane": "verifier",
+            "planspec_deps": ["S1"],
+        },
+    ]
 
 
 def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):
