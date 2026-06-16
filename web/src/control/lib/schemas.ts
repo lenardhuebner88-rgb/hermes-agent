@@ -875,6 +875,11 @@ const CostBucketSchema = z.object({
 });
 const CostProfileRowSchema = CostBucketSchema.extend({
   profile: z.string().catch("unbekannt"),
+  // Paid-subscription lane the profile dispatches through, resolved server-side
+  // from the profile's runtime/provider config (NOT its name): "chatgpt"
+  // (ChatGPT/Codex), "claude" (Claude Max), "kimi", or null for API-billed
+  // lanes (openrouter, gemini, …). Drives the Abo-Tokenverbrauch panel.
+  subscription: z.enum(["chatgpt", "claude", "kimi"]).nullable().catch(null),
 });
 export const RunsCostsResponseSchema = z.object({
   days: z.coerce.number().catch(7),

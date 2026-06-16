@@ -853,6 +853,40 @@ def test_runs_costs_today_window_and_profiles(client):
     # Fenster-Schnitt: days=1 sieht den gestrigen Run nicht mehr.
     narrow = client.get("/api/plugins/kanban/runs/costs?days=1").json()
     assert narrow["window"]["cost_usd"] == 0.25
+    # Jede Profilzeile trägt das (server-aufgelöste) Abo-Lane-Feld mit.
+    assert all("subscription" in p for p in data["profiles"])
+
+
+def test_profile_subscription_grounded_in_provider(monkeypatch):
+    """Abo-Lane für den Statistik-Panel wird aus Runtime/Provider aufgelöst,
+    NICHT aus dem Profilnamen — so kann eine umbenannte/umgewidmete Lane (Kimi
+    läuft auf ``reviewer``, Codex auf ``verifier``) nicht falsch zugeordnet
+    werden."""
+    kb._PROFILE_SUBSCRIPTION_CACHE.clear()
+    # claude-cli-Runtime (hier via Env-Allowlist) → Claude Max, unabhängig vom
+    # model.provider (premium fährt ein Codex-Modell durch die claude-cli-Lane).
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "premium")
+    assert kb._profile_subscription("premium") == "claude"
+
+    monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+    monkeypatch.setattr(kb, "_is_claude_cli_runtime", lambda p: False)
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda p: "/x")
+    cases = {
+        "reviewer": ("kimi-coding", "kimi"),
+        "coder": ("openai-codex", "chatgpt"),
+        "verifier": ("openai-codex", "chatgpt"),
+        "coder-claude": ("anthropic", "claude"),
+        "critic": ("openrouter", None),      # API-Lane, kein Abo
+        "research": ("gemini", None),        # API-Lane, kein Abo
+    }
+    for name, (prov, expect) in cases.items():
+        kb._PROFILE_SUBSCRIPTION_CACHE.clear()
+        monkeypatch.setattr(kb, "_read_profile_provider", lambda home, _p=prov: _p)
+        assert kb._profile_subscription(name) == expect, name
+
+    # Leere/synthetische Profilnamen sind kein Abo.
+    for junk in ["", "   ", "(ohne profil)", None]:
+        assert kb._profile_subscription(junk) is None
 
 
 # ---------------------------------------------------------------------------

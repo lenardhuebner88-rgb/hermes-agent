@@ -76,7 +76,7 @@ export const de = {
     costRuns: (n: number) => `${n} Runs`,
     costNoData: "Noch keine Kosten-Stamps im Fenster.",
     subscriptionTokens: "Abo-Tokenverbrauch",
-    subscriptionTokensHint: "7 Tage rollierend · ChatGPT/Codex, Claude Max und Kimi aus gestempelten Run-Tokens",
+    subscriptionTokensHint: "7 Tage rollierend · von Worker-Runs verbrauchte Tokens je Abo-Lane (ChatGPT/Codex · Claude Max · Kimi) — kein Abo-Kontingentstand",
     subscriptionInputOutput: (input: string, output: string) => `In ${input} · Out ${output}`,
     subscriptionEquivalent: (cost: string) => `≈ ${cost} API-Wert`,
     subscriptionNoData: "Noch kein Abo-Tokenverbrauch im Fenster.",

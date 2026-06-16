@@ -53,20 +53,14 @@ const SUBSCRIPTION_BUCKETS: SubscriptionTokenBucket[] = [
   { key: "kimi", label: "Kimi Abo", runs: 0, inputTokens: 0, outputTokens: 0, costEquivalent: 0 },
 ];
 
-function subscriptionKey(profile: string): SubscriptionTokenBucket["key"] | null {
-  const p = profile.toLowerCase();
-  if (p.includes("kimi") || p.includes("moonshot")) return "kimi";
-  if (p.includes("claude") || p === "premium" || p === "reviewer") return "claude";
-  if (p.includes("codex") || p.includes("chatgpt") || p.includes("openai") || p === "coder") return "chatgpt";
-  return null;
-}
-
 function subscriptionTokenBuckets(rows: CostProfileRow[]): SubscriptionTokenBucket[] {
   const buckets = new Map(SUBSCRIPTION_BUCKETS.map((b) => [b.key, { ...b }]));
   for (const row of rows) {
-    const key = subscriptionKey(row.profile);
-    if (!key) continue;
-    const bucket = buckets.get(key);
+    // Bucket strictly on the server-resolved subscription lane (grounded in the
+    // profile's provider/runtime config). API-billed lanes carry null and are
+    // intentionally excluded — they are not subscriptions.
+    if (!row.subscription) continue;
+    const bucket = buckets.get(row.subscription);
     if (!bucket) continue;
     bucket.runs += row.runs;
     bucket.inputTokens += row.input_tokens ?? 0;
