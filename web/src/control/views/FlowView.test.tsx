@@ -200,6 +200,22 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2 rounded-md border/);
   });
 
+  it("keeps the PlanSpec hub open-scoped and readable on phones", () => {
+    expect(src).toMatch(/Planspec-Hub/);
+    expect(src).toMatch(/offen · Vault/);
+    expect(src).toMatch(/aria-expanded=\{plansOpen\}/);
+    expect(src).toMatch(/Offene PlanSpecs/);
+    expect(src).toMatch(/plansOpen \? <div className="mt-3 grid gap-2">/);
+    expect(src).toMatch(/break-words text-sm font-semibold leading-snug text-white/);
+    expect(src).toMatch(/mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal/);
+    expect(src).toMatch(/min-h-11 items-center gap-1.5 rounded-full/);
+  });
+
+  it("keeps the PlanSpec hub at the bottom of the Flow tab", () => {
+    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeGreaterThan(src.indexOf("<DeliveredList"));
+    expect(src.indexOf("<PlanSpecHub onIngested={onCaptured} />")).toBeLessThan(src.indexOf("{detailSheetOpen && selectedId ?"));
+  });
+
   it("collapses worker cards to compact headers in the worker strip", () => {
     expect(src).toMatch(/collapsible/);
   });

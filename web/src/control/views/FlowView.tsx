@@ -175,6 +175,7 @@ function RecoveryStrip() {
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
   const plans = usePlanSpecs();
+  const [plansOpen, setPlansOpen] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
   const [promptByPath, setPromptByPath] = useState<Record<string, string>>({});
@@ -231,39 +232,49 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   if (!plans.loading && !plans.error && items.length === 0) return null;
 
   return (
-    <FleetPanel eyebrow="Planspec-Hub" meta={`${validCount}/${items.length} bindend · Vault`}>
+    <FleetPanel eyebrow="Planspec-Hub" meta={`${validCount}/${items.length} offen · Vault`}>
+      <button
+        type="button"
+        aria-expanded={plansOpen}
+        onClick={() => setPlansOpen((value) => !value)}
+        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 py-2 text-left transition hover:border-[var(--hc-border-strong)]"
+      >
+        {plansOpen ? <ChevronDown className="h-4 w-4 shrink-0 hc-soft" /> : <ChevronRight className="h-4 w-4 shrink-0 hc-soft" />}
+        <span className="min-w-0 flex-1 break-words text-sm font-semibold text-white">Offene PlanSpecs</span>
+        <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
+      </button>
       {plans.error ? <ToneCallout tone="amber">{plans.error}</ToneCallout> : null}
-      {plans.loading && plans.data == null ? <SkeletonCard rows={3} /> : null}
-      <div className="grid gap-2">
+      {plansOpen && plans.loading && plans.data == null ? <SkeletonCard rows={3} /> : null}
+      {plansOpen ? <div className="mt-3 grid gap-2">
         {items.map((item) => {
           const ingestBusy = busyPath === `${item.path}:ingest`;
           const promptBusy = busyPath === `${item.path}:prompt`;
           const rowError = errorByPath[item.path];
           const prompt = promptByPath[item.path];
           return (
-            <div key={item.path} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+            <div key={item.path} className="min-w-0 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
               <div className="flex min-w-0 flex-wrap items-start gap-2">
                 <FileText className="mt-0.5 h-4 w-4 shrink-0 text-[var(--hc-accent-text)]" />
                 <div className="min-w-0 flex-1">
-                  <p className="line-clamp-2 text-sm font-semibold text-white">{item.topic}</p>
-                  <p className="mt-1 truncate hc-mono hc-type-label hc-dim">{item.path}</p>
+                  <p className="break-words text-sm font-semibold leading-snug text-white">{item.topic}</p>
+                  <p className="mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal">{item.path}</p>
                 </div>
-                <StatusPill tone={item.valid ? "emerald" : "amber"} label={item.valid ? "binding" : "blocked"} dot={item.valid ? "live" : "warn"} />
+                <StatusPill tone={item.valid ? "emerald" : "amber"} label={item.valid ? "offen" : "blocked"} dot={item.valid ? "live" : "warn"} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
-                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
-                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
-                <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
+                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
+                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
+                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
+                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
               </div>
-              {item.errors.length ? <p className="mt-2 text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
-              {rowError ? <p className="mt-2 text-[0.75rem] text-red-300">{rowError}</p> : null}
+              {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
+              {rowError ? <p className="mt-2 break-words text-[0.75rem] text-red-300">{rowError}</p> : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy}
                   onClick={() => void ingest(item)}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
                 >
                   {ingestBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
                   Kanban
@@ -272,7 +283,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy}
                   onClick={() => void buildPrompt(item)}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9"
                 >
                   {promptBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
                   Sprint-Prompt
@@ -288,7 +299,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
             </div>
           );
         })}
-      </div>
+      </div> : null}
     </FleetPanel>
   );
 }
@@ -1722,7 +1733,6 @@ export function FlowView() {
       ) : null}
 
       <RecoveryStrip />
-      <PlanSpecHub onIngested={onCaptured} />
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
@@ -1921,6 +1931,8 @@ export function FlowView() {
           </div>
         </div>
       )}
+
+      <PlanSpecHub onIngested={onCaptured} />
 
       {detailSheetOpen && selectedId ? (
         <FlowDetailSheet taskId={selectedId} onClose={() => setDetailSheetOpen(false)}>

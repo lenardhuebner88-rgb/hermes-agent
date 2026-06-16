@@ -21,7 +21,7 @@ def kanban_home(tmp_path, monkeypatch):
 
 def _write_planspec(root: Path, name: str = "2026-06-16-B1.md") -> Path:
     path = root / "Hermes" / "plans" / name
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         """---
 status: freigegeben-komplett
@@ -75,7 +75,42 @@ def test_list_planspecs_reports_binding_status(tmp_path: Path):
     assert len(records) == 1
     assert records[0]["path"] == str(path.resolve(strict=False))
     assert records[0]["valid"] is True
+    assert records[0]["open"] is True
+    assert records[0]["closed_reason"] is None
     assert records[0]["subtask_count"] == 2
+
+
+def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    open_path = _write_planspec(plans_root, "2026-06-16-open.md")
+    closed_path = _write_planspec(plans_root, "2026-06-16-done.md")
+    text = closed_path.read_text(encoding="utf-8")
+    closed_path.write_text(text.replace("status: freigegeben-komplett", "status: implemented"), encoding="utf-8")
+    invalid = plans_root / "Hermes" / "plans" / "draft.md"
+    invalid.write_text("# not binding\n", encoding="utf-8")
+
+    records = planspecs.list_planspecs(plans_root=plans_root)
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
+
+    assert [item["path"] for item in records] == [str(open_path.resolve(strict=False))]
+    by_name = {item["filename"]: item for item in all_records}
+    assert by_name["2026-06-16-open.md"]["open"] is True
+    assert by_name["2026-06-16-done.md"]["open"] is False
+    assert by_name["2026-06-16-done.md"]["closed_reason"] == "closed status: implemented"
+    assert by_name["draft.md"]["open"] is False
+    assert by_name["draft.md"]["closed_reason"] == "invalid PlanSpec"
+
+
+def test_parse_binding_planspec_blocks_closed_status(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("status: freigegeben-komplett", "status: implemented"), encoding="utf-8")
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    assert "closed status: implemented" in str(exc.value)
 
 
 def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path):

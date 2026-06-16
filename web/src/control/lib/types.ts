@@ -70,6 +70,8 @@ export interface PlanSpecRecord {
   binding: boolean;
   subtask_count: number;
   valid: boolean;
+  open: boolean;
+  closed_reason: string | null;
   errors: string[];
 }
 

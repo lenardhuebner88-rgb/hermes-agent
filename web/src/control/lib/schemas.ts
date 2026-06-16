@@ -92,6 +92,8 @@ export const PlanSpecRecordSchema = z.object({
   binding: z.boolean().catch(false),
   subtask_count: z.coerce.number().catch(0),
   valid: z.boolean().catch(false),
+  open: z.boolean().catch(false),
+  closed_reason: z.string().nullable().catch(null),
   errors: z.array(z.string()).catch([]),
 });
 
