@@ -575,6 +575,92 @@ def test_note_dirty_worktree_comments_only_when_dirty(kanban_home, repo):
 
 
 # ---------------------------------------------------------------------------
+# Package 1A — default quick gate web quality checks
+# ---------------------------------------------------------------------------
+
+def _install_fake_web_bins(repo):
+    bin_dir = repo / "web" / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("tsc", "vitest"):
+        tool = bin_dir / name
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+
+
+def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypatch):
+    _install_fake_web_bins(repo)
+    calls = []
+
+    def fake_which(name):
+        return {
+            "npm": "/usr/bin/npm",
+            "npx": "/usr/bin/npx",
+        }.get(name)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", fake_which)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["web/src/control/App.tsx"])
+
+    assert ok is True
+    assert "lint:control ok" in detail
+    assert "tsc ok" in detail
+    assert "vitest[control] ok" in detail
+    assert ["/usr/bin/npm", "run", "lint:control"] in calls
+    assert ["/usr/bin/npx", "vitest", "run", "src/control"] in calls
+    assert any(cmd[-1] == "--noEmit" and "tsc" in cmd[0] for cmd in calls)
+    assert ["/usr/bin/npm", "run", "build"] not in calls
+
+
+def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["hermes_cli/kanban_db.py"])
+
+    assert ok is True
+    assert "pytest skipped" in detail
+    flattened = [" ".join(cmd) for cmd in calls]
+    assert not any("npm run lint:control" in cmd for cmd in flattened)
+    assert not any("vitest run src/control" in cmd for cmd in flattened)
+    assert not any("tsc --noEmit" in cmd for cmd in flattened)
+
+
+def test_default_quick_gate_frontend_failure_fails_closed(repo, monkeypatch):
+    _install_fake_web_bins(repo)
+
+    def fake_which(name):
+        return {
+            "npm": "/usr/bin/npm",
+            "npx": "/usr/bin/npx",
+        }.get(name)
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["/usr/bin/npm", "run", "lint:control"]:
+            return SimpleNamespace(returncode=1, stdout="lint failed", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", fake_which)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["web/src/control/App.tsx"])
+
+    assert ok is False
+    assert "lint:control: exit 1" in detail
+    assert "lint failed" in detail
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 — serialized integrator
 # ---------------------------------------------------------------------------
 
@@ -730,6 +816,18 @@ def test_dirty_chain_worktree_parks(repo):
     assert "uncommitted" in out["reason"]
 
 
+def test_deliverable_md_alone_does_not_block_clean_close(repo):
+    info = kwt.ensure_worktree(repo, "t_deliverable")
+    (info["path"] / ".deliverable.md").write_text("# handoff\n")
+
+    assert kwt.dirty_files(info["path"]) == []
+    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
+                              gate_runner=_ok_gate)
+
+    assert out["action"] == "clean"
+    assert not info["path"].exists()
+
+
 def test_cache_byproducts_do_not_count_as_dirty(repo):
     """Gate runs write __pycache__/.pytest_cache into the worktree; in repos
     without a .gitignore those must NOT park the chain (live E2E finding
@@ -800,16 +898,92 @@ def test_complete_task_integrates_then_done(kanban_home, repo, monkeypatch):
         assert kb.complete_task(conn, tid, result="done")
         task = kb.get_task(conn, tid)
         merged_events = _events(conn, tid, "integration_merged")
+        integrator_verified = _events(conn, tid, "INTEGRATOR_VERIFIED")
+        release_events = _events(conn, tid, "release_gate_created")
         comments = conn.execute(
             "SELECT author, body FROM task_comments WHERE task_id = ?", (tid,)
         ).fetchall()
     assert task.status == "done"
     assert len(merged_events) == 1
     assert merged_events[0]["target"] == "main"
+    assert len(integrator_verified) == 1
+    assert release_events == []
     assert (repo / "feature.py").read_text() == "VALUE = 2\n"
     assert not ws.exists()
     receipt = [c for c in comments if c["author"] == "integrator"]
     assert receipt and merged_events[0]["merge_commit"][:12] in receipt[0]["body"]
+
+
+def test_web_integration_creates_parked_release_gate_child(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(
+            ws,
+            "web/src/control/App.tsx",
+            "export const value = 1\n",
+            msg=f"kanban({tid}): web work",
+        )
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        merged_events = _events(conn, tid, "integration_merged")
+        release_events = _events(conn, tid, "release_gate_created")
+        child_id = release_events[0]["child_id"]
+        child = kb.get_task(conn, child_id)
+        parked_events = _events(conn, child_id, "release_gate_parked")
+        run_count = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (child_id,),
+        ).fetchone()[0]
+
+    assert task.status == "done"
+    assert merged_events[0]["state"] == kwt.MERGED_GREEN
+    assert len(release_events) == 1
+    assert child is not None
+    assert child.status == "blocked"
+    assert child.title == (
+        "[Release-Gate] Dashboard build + runtime activation check for "
+        f"{tid}"
+    )
+    assert parked_events[0]["state"] == kwt.GREEN_CODE_NOT_RUNTIME_ACTIVATED
+    assert run_count == 0
+    for command in (
+        "cd /home/piet/.hermes/hermes-agent/web",
+        "npm run build",
+        "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
+        "curl -fsS http://127.0.0.1:9119/control >/dev/null",
+    ):
+        assert command in (child.body or "")
+
+
+def test_complete_task_closes_already_integrated_branch_visibly(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(ws, "feature.py", "VALUE = 22\n", msg=f"kanban({tid}): work")
+
+    _git(repo, "merge", "--no-ff", "--no-edit", "-m", "manual merge", f"kanban/{tid}")
+
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        clean_events = _events(conn, tid, "integration_clean")
+        comments = conn.execute(
+            "SELECT author, body FROM task_comments WHERE task_id = ?", (tid,)
+        ).fetchall()
+
+    assert task.status == "done"
+    assert len(clean_events) == 1
+    assert clean_events[0]["already_integrated"] is True
+    assert "already reachable" in clean_events[0]["reason"]
+    assert any(
+        c["author"] == "integrator" and "already reachable" in c["body"]
+        for c in comments
+    )
+    assert not ws.exists()
 
 
 def test_complete_task_rebase_conflict_returns_to_coder(kanban_home, repo, monkeypatch):
@@ -881,6 +1055,67 @@ def test_complete_task_defers_until_chain_finished(kanban_home, repo, monkeypatc
         assert len(_events(conn, child, "integration_merged")) == 1
     assert (repo / "feature.py").read_text() == "VALUE = 3\n"
     assert not ws.exists()
+
+
+def test_child_completion_surfaces_pending_root_finalizer(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="root finalizer", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        child = kb.create_task(
+            conn, title="approved child", assignee="coder", parents=[root],
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        rtask = kb.claim_task(conn, root)
+        ws = kwt.provision_for_task(conn, rtask, str(repo))
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running', workspace_path = ? "
+                "WHERE id = ?",
+                (str(ws), child),
+            )
+        _commit_in(ws, "feature.py", "VALUE = 30\n", msg="kanban(child): work")
+
+        assert kb.complete_task(conn, child, result="child done")
+        pending = _events(conn, root, "children_approved_pending_root_integration")
+        child_task = kb.get_task(conn, child)
+        root_task = kb.get_task(conn, root)
+
+    assert child_task.status == "done"
+    assert root_task.status == "running"
+    assert len(pending) == 1
+    assert pending[0]["completed_task_id"] == child
+    assert pending[0]["branch"] == f"kanban/{root}"
+    assert ws.exists()
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+
+
+def test_missing_branch_evidence_parks_root_with_exact_reason(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+
+    _git(repo, "worktree", "remove", "--force", str(ws))
+    _git(repo, "branch", "-D", f"kanban/{tid}")
+
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        parked = _events(conn, tid, "integration_parked")
+        blocked = _events(conn, tid, "blocked")
+
+    assert task.status == "blocked"
+    assert parked
+    assert parked[-1]["reason"] == (
+        f"missing branch evidence for root finalizer: kanban/{tid}"
+    )
+    assert "missing branch evidence" in blocked[-1]["reason"]
 
 
 def test_stale_complete_does_not_integrate(kanban_home, repo, monkeypatch):

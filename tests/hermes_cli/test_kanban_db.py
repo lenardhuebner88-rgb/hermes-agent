@@ -4591,6 +4591,155 @@ def test_create_task_non_code_role_body_unchanged(kanban_home, monkeypatch):
     assert task.body == "Summarize the release notes."
 
 
+def test_code_task_missing_contract_blocks_before_claim(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="ambiguous repo",
+            assignee="coder",
+            workspace_kind="dir",
+        )
+        assert kb.claim_task(conn, tid) is None
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task.status == "blocked"
+    kinds = [e.kind for e in events]
+    assert "needs_contract" in kinds
+    assert "needs_contract_blocked" in kinds
+    blocked = [e for e in events if e.kind == "blocked"][-1]
+    assert "repo_workspace" in (blocked.payload or {}).get("reason", "")
+
+
+def test_code_task_safe_contract_is_auto_enriched_before_pickup(
+    kanban_home, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="explicit repo",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "DELETE FROM task_events WHERE task_id = ? AND kind = ?",
+                (tid, "code_task_contract_inferred"),
+            )
+        task = kb.claim_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task is not None
+    contract_events = [e for e in events if e.kind == "code_task_contract_inferred"]
+    assert contract_events
+    payload = contract_events[-1].payload
+    assert payload["repo_workspace"] == f"dir:{repo}"
+    assert payload["allowed_paths"] == [str(repo)]
+
+
+def test_complete_task_records_self_verification_event(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="verify self", assignee="worker")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="done",
+            summary="ran focused gate",
+            metadata={"self_verification": kb.SELF_VERIFIED},
+        )
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert kb.SELF_VERIFIED in kinds
+
+
+def test_deliverable_posted_not_completed_is_recoverable_and_repairable(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="render quarterly report", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.add_comment(
+            conn,
+            tid,
+            "coder",
+            (
+                "# Deliverable: render quarterly report\n\n"
+                "The quarterly report is complete and mapped to the requested "
+                "objective. Evidence includes the final section list, validation "
+                "notes, and remaining risk. " + "x" * 120
+            ),
+        )
+        pid = 424242
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+
+        crashed = kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+        assert tid not in crashed
+        assert task.status == "blocked"
+        kinds = [e.kind for e in events]
+        assert kb.DELIVERABLE_POSTED_NOT_COMPLETED in kinds
+        assert "gave_up" not in kinds
+
+        assert kb.repair_deliverable_posted_not_completed(
+            conn, tid, actor="integrator",
+        )
+        repaired = kb.get_task(conn, tid)
+        repair_events = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == "deliverable_protocol_repaired"
+        ]
+        verdicts = conn.execute(
+            "SELECT verdict FROM task_runs WHERE task_id = ?", (tid,),
+        ).fetchall()
+
+    assert repaired.status == "done"
+    assert repair_events
+    assert repair_events[-1].payload["actor"] == "integrator"
+    assert all(row["verdict"] is None for row in verdicts)
+
+
+def test_protocol_miss_without_deliverable_still_hard_blocks(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="silent protocol miss", assignee="worker")
+        kb.claim_task(conn, tid)
+        pid = 424243
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+
+        crashed = kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert tid in crashed
+    assert task.status == "blocked"
+    assert "protocol_violation" in kinds
+    assert "gave_up" in kinds
+    assert kb.DELIVERABLE_POSTED_NOT_COMPLETED not in kinds
+
+
 # ---------------------------------------------------------------------------
 # dispatch_once — max_in_progress
 # ---------------------------------------------------------------------------

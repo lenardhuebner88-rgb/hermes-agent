@@ -2544,6 +2544,23 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
 
 
 _CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
+_CODE_TASK_CONTRACT_EVENT = "code_task_contract_inferred"
+_NEEDS_CONTRACT_EVENT = "needs_contract"
+_NEEDS_CONTRACT_BLOCKED_EVENT = "needs_contract_blocked"
+_CODE_TASK_CONTRACT_FIELDS = (
+    "repo_workspace",
+    "assignee_lane",
+    "reason_for_lane",
+    "allowed_paths",
+    "anti_scope",
+    "risk",
+    "expected_gates",
+    "escalation_triggers",
+)
+SELF_VERIFIED = "SELF_VERIFIED"
+SELF_VERIFY_LIMITED = "SELF_VERIFY_LIMITED"
+INTEGRATOR_VERIFIED = "INTEGRATOR_VERIFIED"
+DELIVERABLE_POSTED_NOT_COMPLETED = "deliverable_posted_not_completed"
 
 
 def _is_code_assignee(assignee: Optional[str]) -> bool:
@@ -2583,6 +2600,29 @@ def _with_code_task_contract(
             f"- Assignee: {assignee}\n",
             f"- Tenant: {tenant_label}\n",
             f"- Workspace: {workspace_kind}:{workspace}\n",
+            f"- Repo/workspace: {workspace_kind}:{workspace}\n",
+            f"- Assignee/lane: {assignee}\n",
+            "- Reason for lane: code-role implementation task.\n",
+            (
+                "- Allowed paths: use the explicit workspace path and any "
+                "task-specified paths only; block if the target repo/path is "
+                "ambiguous.\n"
+            ),
+            (
+                "- Anti-scope: no unrelated cleanup, broad rewrites, push, "
+                "deploy, runtime restart, or schema migration.\n"
+            ),
+            "- Risk: medium unless the task body states a narrower verified risk.\n",
+            (
+                "- Expected gates: smallest relevant lint/type/test gate; "
+                "use SELF_VERIFY_LIMITED if a safe worktree-targeted gate is "
+                "not possible.\n"
+            ),
+            (
+                "- Escalation triggers: missing workspace, unclear allowed paths, "
+                "failing required gate, open coordination overlap, or required "
+                "secret/runtime/deploy action.\n"
+            ),
             (
                 "- Scope: edit only files required for this card; "
                 "do not broaden into unrelated cleanup.\n"
@@ -2608,6 +2648,174 @@ def _with_code_task_contract(
         ]
     )
     return f"{text}\n\n{contract}" if text else contract
+
+
+def _absolute_paths_from_text(text: Optional[str]) -> list[str]:
+    if not text:
+        return []
+    seen: set[str] = set()
+    paths: list[str] = []
+    for match in re.finditer(r"(?<![\w.-])/(?:[^\s`'\"<>|;$]+)", text):
+        raw = match.group(0).rstrip(".,);:]")
+        if raw and raw not in seen:
+            seen.add(raw)
+            paths.append(raw)
+    return paths[:12]
+
+
+def _is_code_task_row(row: sqlite3.Row) -> bool:
+    kind = row["kind"] if "kind" in row.keys() else None
+    return _is_code_assignee(row["assignee"]) or str(kind or "").lower() == "code"
+
+
+def _code_task_contract_payload(
+    *,
+    assignee: Optional[str],
+    workspace_kind: str,
+    workspace_path: Optional[str],
+    tenant: Optional[str],
+    body: Optional[str],
+    created_by: Optional[str],
+    source: str,
+) -> tuple[dict, list[str]]:
+    protected_funnel = (created_by or "") in FUNNEL_CREATED_BY
+    inferred_paths = _absolute_paths_from_text(body)
+    allowed_paths = [workspace_path] if workspace_path else inferred_paths
+    workspace = workspace_path or (
+        "Hermes-managed scratch workspace"
+        if workspace_kind == "scratch"
+        else None
+    )
+    payload = {
+        "version": 1,
+        "source": source,
+        "repo_workspace": (
+            f"{workspace_kind}:{workspace}" if workspace else f"{workspace_kind}:"
+        ),
+        "assignee_lane": assignee,
+        "reason_for_lane": "code-role implementation task",
+        "allowed_paths": allowed_paths,
+        "anti_scope": [
+            "no unrelated cleanup",
+            "no git push",
+            "no deploy or runtime restart",
+            "no DB schema migration",
+        ],
+        "risk": "medium" if workspace_kind in {"dir", "worktree"} else "low",
+        "expected_gates": [
+            "run the smallest relevant lint/type/test gate",
+            "record SELF_VERIFIED when safe worktree-targeted gates pass",
+            "record SELF_VERIFY_LIMITED when safe self-verification is not possible",
+        ],
+        "escalation_triggers": [
+            "missing or ambiguous workspace",
+            "unclear allowed paths",
+            "failing required gate",
+            "coordination overlap",
+            "secret/runtime/deploy action required",
+        ],
+        "tenant": tenant,
+        "created_by": created_by,
+    }
+    missing: list[str] = []
+    if workspace_kind in {"dir", "worktree"} and not workspace_path:
+        missing.append("repo_workspace")
+    if protected_funnel and workspace_kind == "scratch" and not inferred_paths:
+        missing.extend(["repo_workspace", "allowed_paths"])
+    for field in _CODE_TASK_CONTRACT_FIELDS:
+        value = payload.get(field)
+        if value is None or value == "":
+            missing.append(field)
+    return payload, sorted(set(missing))
+
+
+def _latest_code_contract_event(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, _CODE_TASK_CONTRACT_EVENT),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _code_contract_issue_for_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    source: str,
+) -> tuple[Optional[str], Optional[dict]]:
+    task_id = row["id"]
+    if not _is_code_task_row(row):
+        return None, None
+    if _latest_code_contract_event(conn, task_id) is not None:
+        return None, None
+    payload, missing = _code_task_contract_payload(
+        assignee=row["assignee"],
+        workspace_kind=row["workspace_kind"] or "scratch",
+        workspace_path=row["workspace_path"],
+        tenant=row["tenant"],
+        body=row["body"],
+        created_by=row["created_by"],
+        source=source,
+    )
+    if missing:
+        payload["missing"] = missing
+        reason = "needs_contract: missing " + ", ".join(missing)
+        return reason, payload
+    return None, payload
+
+
+def _ensure_code_task_contract_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    source: str,
+) -> Optional[str]:
+    row = conn.execute(
+        "SELECT id, body, assignee, workspace_kind, workspace_path, tenant, "
+        "created_by, kind FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    reason, payload = _code_contract_issue_for_row(conn, row, source=source)
+    if payload is None:
+        return None
+    if reason is None:
+        _append_event(conn, task_id, _CODE_TASK_CONTRACT_EVENT, payload)
+        return None
+    conn.execute(
+        "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+        "claim_expires = NULL, worker_pid = NULL "
+        "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+        (task_id,),
+    )
+    _append_event(conn, task_id, _NEEDS_CONTRACT_EVENT, payload)
+    _append_event(conn, task_id, _NEEDS_CONTRACT_BLOCKED_EVENT, payload)
+    _append_event(conn, task_id, "blocked", {"reason": reason})
+    return reason
+
+
+def ensure_code_task_contract_before_pickup(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    source: str = "pickup",
+) -> Optional[str]:
+    """Ensure a code task has a visible contract before any worker pickup.
+
+    Returns a blocking reason when the task was parked for missing contract
+    data, otherwise ``None``. Contract state is written only to the existing
+    task event stream; no schema surface is added.
+    """
+    with write_txn(conn):
+        return _ensure_code_task_contract_in_txn(conn, task_id, source=source)
 
 
 def create_task(
@@ -2927,6 +3135,24 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+                row = conn.execute(
+                    "SELECT id, body, assignee, workspace_kind, workspace_path, "
+                    "tenant, created_by, kind FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                if row is not None and _is_code_task_row(row):
+                    reason, payload = _code_contract_issue_for_row(
+                        conn, row, source="create_task",
+                    )
+                    if payload is not None:
+                        if reason is None:
+                            _append_event(
+                                conn, task_id, _CODE_TASK_CONTRACT_EVENT, payload,
+                            )
+                        else:
+                            _append_event(
+                                conn, task_id, _NEEDS_CONTRACT_EVENT, payload,
+                            )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -4392,6 +4618,11 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        contract_reason = _ensure_code_task_contract_in_txn(
+            conn, task_id, source="claim_task",
+        )
+        if contract_reason is not None:
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. Archived parents intentionally remain
         # unsatisfied: archiving a parent parks/cancels that branch, it does
@@ -6207,6 +6438,24 @@ def complete_task(
             md_commit = metadata.get("commit")
             if isinstance(md_commit, str) and md_commit.strip():
                 completed_payload["commit"] = md_commit.strip()[:64]
+            self_state = metadata.get("self_verification") or metadata.get(
+                "self_verification_state"
+            )
+            if self_state is True:
+                self_state = SELF_VERIFIED
+            if isinstance(self_state, str):
+                self_state = self_state.strip().upper()
+            if self_state in {SELF_VERIFIED, SELF_VERIFY_LIMITED}:
+                _append_event(
+                    conn,
+                    task_id,
+                    self_state,
+                    {
+                        "summary": ev_summary or None,
+                        "source": "completion_metadata",
+                    },
+                    run_id=run_id,
+                )
         _append_event(
             conn, task_id, "completed",
             completed_payload,
@@ -7948,6 +8197,54 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     return ("unknown", None)
 
 
+def _title_terms(title: Optional[str]) -> set[str]:
+    words = re.findall(r"[a-z0-9][a-z0-9_-]{3,}", (title or "").lower())
+    return {w for w in words if w not in {"task", "work", "todo", "implement"}}
+
+
+def _deliverable_evidence_for_protocol_miss(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT title, assignee FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    terms = _title_terms(row["title"])
+    assignee = (row["assignee"] or "").strip().lower()
+    rows = conn.execute(
+        "SELECT id, author, body, created_at FROM task_comments "
+        "WHERE task_id = ? ORDER BY id DESC LIMIT 10",
+        (task_id,),
+    ).fetchall()
+    for comment in rows:
+        body = (comment["body"] or "").strip()
+        if len(body) < 80:
+            continue
+        author = (comment["author"] or "").strip().lower()
+        if assignee and author not in {assignee, "worker", "assistant"}:
+            continue
+        lowered = body.lower()
+        has_deliverable_signal = (
+            "deliverable" in lowered
+            or "result" in lowered
+            or "ergebnis" in lowered
+            or body.startswith("#")
+        )
+        if not has_deliverable_signal:
+            continue
+        if terms and not any(term in lowered for term in terms):
+            continue
+        return {
+            "comment_id": int(comment["id"]),
+            "author": comment["author"],
+            "created_at": int(comment["created_at"]),
+            "preview": body[:400],
+        }
+    return None
+
+
 def reap_worker_zombies() -> "list[int]":
     """Reap all zombie children of this process without blocking.
 
@@ -8454,22 +8751,41 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
             rate_limited_exit = False
+            recoverable_protocol_miss = False
             if kind == "clean_exit":
-                # Worker subprocess returned 0 but its task is still
-                # ``running`` in the DB — it exited without calling
-                # ``kanban_complete`` / ``kanban_block``. Retrying won't
-                # help.
-                protocol_violation = True
-                error_text = (
-                    "worker exited cleanly (rc=0) without calling "
-                    "kanban_complete or kanban_block — protocol violation"
+                evidence = _deliverable_evidence_for_protocol_miss(
+                    conn, row["id"],
                 )
-                event_kind = "protocol_violation"
-                event_payload = {
-                    "pid": pid,
-                    "claimer": row["claim_lock"],
-                    "exit_code": code,
-                }
+                if evidence is not None:
+                    protocol_violation = False
+                    recoverable_protocol_miss = True
+                    error_text = (
+                        "deliverable posted but worker exited cleanly (rc=0) "
+                        "without calling kanban_complete — repair required"
+                    )
+                    event_kind = DELIVERABLE_POSTED_NOT_COMPLETED
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "exit_code": code,
+                        "evidence": evidence,
+                    }
+                else:
+                    # Worker subprocess returned 0 but its task is still
+                    # ``running`` in the DB — it exited without calling
+                    # ``kanban_complete`` / ``kanban_block``. Retrying won't
+                    # help.
+                    protocol_violation = True
+                    error_text = (
+                        "worker exited cleanly (rc=0) without calling "
+                        "kanban_complete or kanban_block — protocol violation"
+                    )
+                    event_kind = "protocol_violation"
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "exit_code": code,
+                    }
             elif kind == "rate_limited":
                 # Worker bailed because the provider rate-limited / exhausted
                 # quota (EX_TEMPFAIL sentinel). This is NOT a task failure —
@@ -8514,7 +8830,11 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # Rate-limited requeues are a clean release, not a crash —
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
-                _run_outcome = "rate_limited" if rate_limited_exit else "crashed"
+                _run_outcome = (
+                    "rate_limited" if rate_limited_exit
+                    else DELIVERABLE_POSTED_NOT_COMPLETED
+                    if recoverable_protocol_miss else "crashed"
+                )
                 run_id = _end_run(
                     conn, row["id"],
                     outcome=_run_outcome, status=_run_outcome,
@@ -8537,6 +8857,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
+                elif recoverable_protocol_miss:
+                    conn.execute(
+                        "UPDATE tasks SET status = 'blocked', "
+                        "last_failure_error = ? WHERE id = ?",
+                        (error_text[:500], row["id"]),
+                    )
                 else:
                     crashed.append(row["id"])
                     crash_details.append(
@@ -8586,6 +8912,85 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
     return crashed
+
+
+def repair_deliverable_posted_not_completed(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    actor: str = "operator",
+) -> bool:
+    """Terminalize a recoverable deliverable/protocol miss without approval.
+
+    This closes only the missing ``kanban_complete`` protocol step when a
+    prior ``deliverable_posted_not_completed`` event carries clear evidence.
+    It does not write a review verdict.
+    """
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, DELIVERABLE_POSTED_NOT_COMPLETED),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return False
+    try:
+        evidence_payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(evidence_payload, dict):
+        return False
+    evidence = evidence_payload.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+
+    now = int(time.time())
+    actor = (actor or "operator").strip() or "operator"
+    summary = (
+        "Protocol repair: deliverable was posted but worker missed "
+        "kanban_complete."
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'done',
+                   result       = COALESCE(result, ?),
+                   completed_at = COALESCE(completed_at, ?),
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL,
+                   current_run_id = NULL
+             WHERE id = ?
+               AND status = 'blocked'
+            """,
+            (summary, now, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _synthesize_ended_run(
+            conn,
+            task_id,
+            outcome="completed",
+            summary=summary,
+            metadata={
+                "repair": DELIVERABLE_POSTED_NOT_COMPLETED,
+                "actor": actor,
+                "evidence": evidence,
+            },
+        )
+        _append_event(
+            conn,
+            task_id,
+            "deliverable_protocol_repaired",
+            {
+                "actor": actor,
+                "terminalized": True,
+                "evidence": evidence,
+            },
+            run_id=run_id,
+        )
+    recompute_ready(conn)
+    return True
 
 
 def _record_task_failure(
@@ -8935,6 +9340,18 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     ).fetchone()
     if row is None:
         return None
+
+    contract_row = conn.execute(
+        "SELECT id, body, assignee, workspace_kind, workspace_path, tenant, "
+        "created_by, kind FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if contract_row is not None:
+        contract_reason, _payload = _code_contract_issue_for_row(
+            conn, contract_row, source="respawn_guard",
+        )
+        if contract_reason is not None:
+            return contract_reason
 
     now = int(time.time())
 
@@ -10375,6 +10792,16 @@ def dispatch_once(
                             conn, row["id"], "budget_held",
                             {"reason": budget_reason},
                         )
+            continue
+        contract_reason = (
+            check_respawn_guard(conn, row["id"])
+            if dry_run
+            else ensure_code_task_contract_before_pickup(
+                conn, row["id"], source="dispatch",
+            )
+        )
+        if contract_reason is not None:
+            result.respawn_guarded.append((row["id"], contract_reason))
             continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic

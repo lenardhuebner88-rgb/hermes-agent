@@ -172,16 +172,20 @@ def test_list_drafts_skips_blocked_comments_for_excerpt(conn):
     assert draft["draft_excerpt"].startswith("echter draft")
 
 
-def test_approve_draft_creates_linked_ready_child(conn):
+def test_approve_draft_creates_linked_parked_child_without_contract(conn):
     tid = _make_done_draft(conn, created_by="discord-idee")
     new_id = funnel.approve_draft(conn, tid)
 
     child = kb.get_task(conn, new_id)
-    assert child.status == "ready"
+    assert child.status == "blocked"
     assert child.created_by == "discord-idee"  # Bilanz zählt die Kette einmal
     assert child.assignee == "coder-claude"    # Fallback, Wunsch hatte keinen
+    assert child.kind == "code"
     assert child.title.startswith("Umsetzen:")
     assert "Spec-Draft" in (child.body or "")
+    events = kb.list_events(conn, new_id)
+    kinds = [e.kind for e in events]
+    assert "needs_contract_blocked" in kinds
     link = conn.execute(
         "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
         (tid, new_id),
@@ -407,7 +411,7 @@ def test_approve_passes_spend_draft_with_disclosure(conn):
                                 title="Benchmark mit Kosten-Abschnitt")
     new_id = funnel.approve_draft(conn, tid)
     assert new_id is not None
-    assert kb.get_task(conn, new_id).status == "ready"
+    assert kb.get_task(conn, new_id).status == "blocked"
 
 
 def test_approve_passes_normal_draft_without_signal(conn):

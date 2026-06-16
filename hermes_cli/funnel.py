@@ -340,7 +340,7 @@ def approve_draft(
     excerpt = _draft_excerpt(conn, task_id) or (
         "(kein Draft-Kommentar gefunden — Referenzen im Ursprungs-Task prüfen)"
     )
-    return kb.create_task(
+    new_id = kb.create_task(
         conn,
         title=title,
         body=APPROVE_BODY_TEMPLATE.format(
@@ -350,7 +350,12 @@ def approve_draft(
         created_by=task.created_by,
         assignee=task.assignee or assignee_fallback,
         parents=(task_id,),
+        kind="code",
     )
+    kb.ensure_code_task_contract_before_pickup(
+        conn, new_id, source="funnel.approve_draft",
+    )
+    return new_id
 
 
 def dismiss_draft(conn: sqlite3.Connection, task_id: str) -> None:

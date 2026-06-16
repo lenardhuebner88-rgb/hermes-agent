@@ -54,6 +54,7 @@ _IGNORED_DIRTY_PREFIXES = (
     f"{WORKTREES_DIRNAME}/",
 )
 _IGNORED_DIRTY_PATHS = (
+    ".deliverable.md",
     "node_modules",
     "web/node_modules",
 )
@@ -83,6 +84,14 @@ def _is_ignorable_dirty_path(path: str) -> bool:
 _NODE_MODULES_LINKS = ("node_modules", "web/node_modules")
 
 FO_REPO_PATH = Path("/home/piet/projects/family-organizer")
+MERGED_GREEN = "MERGED_GREEN"
+GREEN_CODE_NOT_RUNTIME_ACTIVATED = "GREEN_CODE_NOT_RUNTIME_ACTIVATED"
+_RELEASE_GATE_COMMANDS = (
+    "cd /home/piet/.hermes/hermes-agent/web",
+    "npm run build",
+    "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
+    "curl -fsS http://127.0.0.1:9119/control >/dev/null",
+)
 
 
 def _is_fo_repo(repo_root: Path) -> bool:
@@ -306,6 +315,14 @@ def _branch_exists(repo: Path, branch: str) -> bool:
         return False
 
 
+def _branch_is_ancestor(repo: Path, branch: str, target: str) -> bool:
+    try:
+        _git(repo, "merge-base", "--is-ancestor", branch, target)
+        return True
+    except WorktreeError:
+        return False
+
+
 def dirty_files(repo: Path) -> list[str]:
     """Porcelain status paths (incl. files inside untracked dirs), with the
     worktree namespace and the planted node_modules symlinks filtered out.
@@ -471,6 +488,160 @@ def frozen_merge_target(conn: sqlite3.Connection, root_id: str) -> Optional[str]
         return str(target) if target else None
     except (sqlite3.Error, ValueError, TypeError):
         return None
+
+
+def _release_gate_subject(task_id: str, root_id: str) -> str:
+    return task_id if task_id == root_id else f"{task_id}/{root_id}"
+
+
+def _release_gate_title(task_id: str, root_id: str) -> str:
+    return (
+        "[Release-Gate] Dashboard build + runtime activation check for "
+        f"{_release_gate_subject(task_id, root_id)}"
+    )
+
+
+def _release_gate_body(task_id: str, root_id: str, outcome: dict) -> str:
+    commands = "\n".join(_RELEASE_GATE_COMMANDS)
+    return (
+        f"Source integration: {task_id}\n"
+        f"Chain root: {root_id}\n"
+        f"Code state: {MERGED_GREEN}\n"
+        f"Release state: {GREEN_CODE_NOT_RUNTIME_ACTIVATED}\n"
+        f"Merge commit: {outcome.get('merge_commit', '')}\n\n"
+        "Parked by default. Do not execute until a release-gate GO explicitly "
+        "includes dashboard build/runtime activation.\n\n"
+        "Documented activation commands:\n"
+        f"{commands}\n"
+    )
+
+
+def _release_gate_child_exists(
+    conn: sqlite3.Connection, parent_id: str, title: str,
+) -> Optional[str]:
+    row = conn.execute(
+        "SELECT t.id FROM tasks t "
+        "JOIN task_links l ON l.child_id = t.id "
+        "WHERE l.parent_id = ? AND t.title = ? AND t.status != 'archived' "
+        "ORDER BY t.created_at DESC LIMIT 1",
+        (parent_id, title),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _create_parked_release_gate_child(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    outcome: dict,
+) -> Optional[str]:
+    title = _release_gate_title(task_id, root_id)
+    existing = _release_gate_child_exists(conn, task_id, title)
+    if existing:
+        return existing
+
+    from hermes_cli import kanban_db as kb
+
+    child_id = kb.create_task(
+        conn,
+        title=title,
+        body=_release_gate_body(task_id, root_id, outcome),
+        assignee="verifier",
+        created_by="integrator",
+        parents=(task_id,),
+        initial_status="blocked",
+    )
+    payload = {
+        "state": GREEN_CODE_NOT_RUNTIME_ACTIVATED,
+        "source_task": task_id,
+        "root_id": root_id,
+        "merge_commit": outcome.get("merge_commit"),
+        "reason": "awaiting release-gate GO",
+        "commands": list(_RELEASE_GATE_COMMANDS),
+    }
+    with kb.write_txn(conn):
+        kb._append_event(conn, child_id, "release_gate_parked", payload)
+        kb._append_event(conn, child_id, "blocked", payload)
+        kb._append_event(
+            conn,
+            task_id,
+            "release_gate_created",
+            {"child_id": child_id, **payload},
+        )
+    return child_id
+
+
+def _terminal_status(status: str) -> bool:
+    return status in {"done", "archived", "failed", "cancelled"}
+
+
+def _pending_root_finalizer_id(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    root_id: str,
+    wt: Path,
+    members: set[str],
+) -> Optional[str]:
+    ids = set(members)
+    ids.add(root_id)
+    placeholders = ",".join("?" for _ in ids)
+    like = (
+        str(wt).replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        + "%"
+    )
+    if placeholders:
+        rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders}) "
+            "OR workspace_path LIKE ? ESCAPE '\\'",
+            (*ids, like),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, status FROM tasks WHERE workspace_path LIKE ? ESCAPE '\\'",
+            (like,),
+        ).fetchall()
+    open_ids = [
+        r["id"] for r in rows
+        if r["id"] != task_id and not _terminal_status(r["status"])
+    ]
+    if len(open_ids) != 1:
+        return None
+    pending_id = open_ids[0]
+    if pending_id == task_id:
+        return None
+    return pending_id
+
+
+def _record_pending_root_finalizer(
+    conn: sqlite3.Connection,
+    *,
+    pending_root_id: str,
+    completed_task_id: str,
+    root_id: str,
+    branch: str,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    latest = conn.execute(
+        "SELECT kind FROM task_events WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (pending_root_id,),
+    ).fetchone()
+    if latest is not None and latest["kind"] == "children_approved_pending_root_integration":
+        return
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            pending_root_id,
+            "children_approved_pending_root_integration",
+            {
+                "completed_task_id": completed_task_id,
+                "chain_root": root_id,
+                "branch": branch,
+                "reason": "all children approved; root finalizer pending",
+            },
+        )
 
 
 def provision_for_task(
@@ -698,7 +869,10 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
 
 def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
     """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
-    modules; tsc --noEmit only when the diff touches ``web/``."""
+    modules; when the diff touches ``web/``, run lint:control, tsc
+    --noEmit, and the control Vitest suite. ``npm run build`` intentionally
+    stays out of this automatic merge path because it mutates generated
+    dashboard assets and belongs to the parked post-merge release gate."""
     notes: list[str] = []
 
     def _run(label: str, cmd: list[str], cwd: Path, timeout: int) -> Optional[str]:
@@ -741,11 +915,27 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         notes.append("pytest skipped (no affected test modules)")
 
     if any(f.startswith("web/") for f in changed_files):
-        tsc = repo_root / "web" / "node_modules" / ".bin" / "tsc"
+        web_root = repo_root / "web"
+        tsc = web_root / "node_modules" / ".bin" / "tsc"
+        vitest = web_root / "node_modules" / ".bin" / "vitest"
+        npm_bin = shutil.which("npm") or "npm"
+        npx_bin = shutil.which("npx") or "npx"
+
+        err = _run("lint:control", [npm_bin, "run", "lint:control"], web_root, 600)
+        if err:
+            return False, err
         if not tsc.is_file():
             # Fail closed: a web diff we cannot type-check is not "green".
             return False, "tsc: web/ in diff but web/node_modules/.bin/tsc missing"
-        err = _run("tsc", [str(tsc), "--noEmit"], repo_root / "web", 600)
+        err = _run("tsc", [str(tsc), "--noEmit"], web_root, 600)
+        if err:
+            return False, err
+        if not vitest.is_file():
+            return False, (
+                "vitest[control]: web/ in diff but "
+                "web/node_modules/.bin/vitest missing"
+            )
+        err = _run("vitest[control]", [npx_bin, "vitest", "run", "src/control"], web_root, 900)
         if err:
             return False, err
 
@@ -876,7 +1066,16 @@ def integrate_chain(
                     return parked(
                         "worktree has uncommitted changes but no commits to merge"
                     )
+                already_integrated = _branch_is_ancestor(repo_root, branch, cur)
                 remove_worktree(repo_root, wt_path, branch)
+                if already_integrated:
+                    return {
+                        "action": "clean",
+                        "branch": branch,
+                        "target": cur,
+                        "already_integrated": True,
+                        "reason": f"chain branch already reachable from {cur}",
+                    }
                 return {"action": "clean", "branch": branch,
                         "reason": "no commits on chain branch"}
 
@@ -968,11 +1167,13 @@ def integrate_chain(
             remove_worktree(repo_root, wt_path, branch)
             return {
                 "action": "merged",
+                "state": MERGED_GREEN,
                 "merge_commit": merge_commit,
                 "branch": branch,
                 "target": cur,
                 "gate": detail,
                 "files": len(diff_files),
+                "changed_files": diff_files,
             }
         finally:
             _release_file_lock(lock)
@@ -1034,11 +1235,40 @@ def maybe_integrate_on_complete(
             (like, task_id),
         ).fetchone()
     if open_sibling:
+        pending_root_id = _pending_root_finalizer_id(
+            conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
+        )
+        if pending_root_id is not None:
+            try:
+                _record_pending_root_finalizer(
+                    conn,
+                    pending_root_id=pending_root_id,
+                    completed_task_id=task_id,
+                    root_id=root_id,
+                    branch=chain_branch(root_id),
+                )
+            except Exception:
+                _log.debug("pending-root-finalizer event failed", exc_info=True)
         return {"action": "deferred", "reason": "chain has open siblings"}
 
     target = frozen_merge_target(conn, root_id)
+    branch = chain_branch(root_id)
+    if not _branch_exists(repo_root, branch):
+        outcome = {
+            "action": "parked",
+            "reason": f"missing branch evidence for root finalizer: {branch}",
+            "branch": branch,
+            "target": target,
+        }
+        try:
+            with kb.write_txn(conn):
+                kb._append_event(conn, task_id, "integration_parked", outcome)
+        except Exception:
+            _log.warning("could not record missing-branch event for %s", task_id,
+                         exc_info=True)
+        return outcome
     outcome = integrate_chain(
-        repo_root, wt, chain_branch(root_id), target, gate_runner=gate_runner,
+        repo_root, wt, branch, target, gate_runner=gate_runner,
     )
 
     try:
@@ -1049,6 +1279,17 @@ def maybe_integrate_on_complete(
                 "rebase_conflict": "integration_rebase_conflict",
             }.get(outcome["action"], "integration_parked")
             kb._append_event(conn, task_id, kind, outcome)
+            if outcome["action"] == "merged":
+                kb._append_event(
+                    conn,
+                    task_id,
+                    "INTEGRATOR_VERIFIED",
+                    {
+                        "merge_commit": outcome.get("merge_commit"),
+                        "gate": outcome.get("gate"),
+                        "state": outcome.get("state"),
+                    },
+                )
     except Exception:
         _log.warning("could not record integration event for %s", task_id,
                      exc_info=True)
@@ -1063,4 +1304,22 @@ def maybe_integrate_on_complete(
             )
         except Exception:
             _log.debug("integration receipt comment failed", exc_info=True)
+        if any(f.startswith("web/") for f in outcome.get("changed_files", [])):
+            try:
+                _create_parked_release_gate_child(conn, task_id, root_id, outcome)
+            except Exception:
+                _log.warning(
+                    "could not create parked release-gate child for %s",
+                    task_id, exc_info=True,
+                )
+    elif outcome["action"] == "clean" and outcome.get("already_integrated"):
+        try:
+            kb.add_comment(
+                conn, task_id, "integrator",
+                f"✅ Integration clean: `{outcome['branch']}` is already "
+                f"reachable from `{outcome.get('target', target)}`. "
+                "Worktree and branch removed. Not pushed.",
+            )
+        except Exception:
+            _log.debug("already-integrated receipt comment failed", exc_info=True)
     return outcome
