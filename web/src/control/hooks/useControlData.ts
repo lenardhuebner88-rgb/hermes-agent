@@ -603,7 +603,7 @@ export function useBoard() {
 export function usePlanSpecs() {
   return usePolling<PlanSpecsResponse>(
     "kanban/planspecs",
-    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/planspecs"), "kanban/planspecs"),
+    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/planspecs?scope=open"), "kanban/planspecs"),
     15000,
   );
 }

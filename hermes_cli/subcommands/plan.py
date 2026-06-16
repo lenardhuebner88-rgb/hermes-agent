@@ -30,6 +30,7 @@ def build_plan_parser(subparsers) -> None:
 
     list_parser = sub.add_parser("list", aliases=["ls"], help="List Vault PlanSpecs visible to Hermes")
     list_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    list_parser.add_argument("--all", action="store_true", help="Include closed, invalid, and diagnostic PlanSpecs")
 
 
 def plan_command(args: argparse.Namespace) -> int:
@@ -41,13 +42,14 @@ def plan_command(args: argparse.Namespace) -> int:
         return 0
     try:
         if action in ("list", "ls"):
-            records = planspecs.list_planspecs()
+            records = planspecs.list_planspecs(scope="all" if getattr(args, "all", False) else "open")
             if getattr(args, "json", False):
                 print(json.dumps({"planspecs": records}, ensure_ascii=False))
             else:
                 for item in records:
                     marker = "OK" if item["valid"] else "BLOCKED"
-                    print(f"{marker} {item['path']} · {item['freigabe'] or '-'} · {item['subtask_count']} subtasks")
+                    suffix = f" · {item['closed_reason']}" if item.get("closed_reason") else ""
+                    print(f"{marker} {item['path']} · {item['freigabe'] or '-'} · {item['subtask_count']} subtasks{suffix}")
             return 0
         if action == "ingest":
             result = planspecs.ingest_planspec(args.path, board=args.board, author=args.author)

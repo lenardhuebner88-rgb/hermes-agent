@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, Literal
 
 import yaml
 
@@ -13,6 +14,20 @@ from hermes_cli.plan_compiler import CompileBlocked, TaskgraphHints, _extract_fr
 
 DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
+PlanSpecScope = Literal["open", "all"]
+
+_CLOSED_STATUS_PREFIXES = (
+    "archived",
+    "closed",
+    "complete",
+    "completed",
+    "done",
+    "implemented",
+    "merged",
+    "obsolete",
+    "shipped",
+    "superseded",
+)
 
 
 class PlanSpecBlocked(RuntimeError):
@@ -46,6 +61,19 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _status_slug(status: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", status.lower()).strip("-")
+
+
+def _closed_reason(status: str, *, valid: bool) -> str | None:
+    if not valid:
+        return "not a binding PlanSpec"
+    slug = _status_slug(status)
+    if any(slug == prefix or slug.startswith(f"{prefix}-") for prefix in _CLOSED_STATUS_PREFIXES):
+        return f"closed status: {status}"
+    return None
 
 
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
@@ -90,6 +118,10 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     freigabe = str(frontmatter.get("freigabe") or "").strip()
     if not freigabe:
         findings.append("freigabe is required")
+    status = str(frontmatter.get("status") or "").strip()
+    closed = _closed_reason(status, valid=True)
+    if closed:
+        findings.append(closed)
 
     if findings:
         raise PlanSpecBlocked(findings)
@@ -109,7 +141,7 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
         path=resolved,
         frontmatter=frontmatter,
         topic=topic,
-        status=str(frontmatter.get("status") or "").strip(),
+        status=status,
         freigabe=freigabe,
         live_test_depth=live_test_depth,
         hints=hints,
@@ -117,7 +149,9 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     )
 
 
-def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT) -> list[dict[str, Any]]:
+def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScope = "open") -> list[dict[str, Any]]:
+    if scope not in ("open", "all"):
+        raise ValueError("scope must be 'open' or 'all'")
     root = plans_root.expanduser().resolve(strict=False)
     paths = sorted(root.glob("*/plans/*.md"), key=lambda p: str(p).lower())
     records: list[dict[str, Any]] = []
@@ -144,18 +178,23 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT) -> list[dict[str, A
                 or _first_heading(body)
                 or path.stem
             )
+            status = str(frontmatter.get("status") or "").strip()
+            valid = not errors and bool(hints and hints.binding)
+            closed = _closed_reason(status, valid=valid)
             records.append(
                 {
                     "path": str(path.resolve(strict=False)),
                     "agent": path.parent.parent.name,
                     "filename": path.name,
                     "topic": topic,
-                    "status": str(frontmatter.get("status") or "").strip(),
+                    "status": status,
                     "freigabe": str(frontmatter.get("freigabe") or "").strip(),
                     "live_test_depth": live_test_depth or None,
                     "binding": bool(hints.binding) if hints else False,
                     "subtask_count": len(hints.subtasks) if hints else 0,
-                    "valid": not errors and bool(hints and hints.binding),
+                    "valid": valid,
+                    "open": closed is None,
+                    "closed_reason": closed,
                     "errors": errors,
                 }
             )
@@ -172,10 +211,14 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT) -> list[dict[str, A
                     "binding": False,
                     "subtask_count": 0,
                     "valid": False,
+                    "open": False,
+                    "closed_reason": "invalid PlanSpec",
                     "errors": [str(exc)],
                 }
             )
-    records.sort(key=lambda item: (item["valid"] is False, item["path"]), reverse=False)
+    if scope == "open":
+        records = [item for item in records if item["open"]]
+    records.sort(key=lambda item: (item["open"] is False, item["valid"] is False, item["path"]), reverse=False)
     return records
 
 
