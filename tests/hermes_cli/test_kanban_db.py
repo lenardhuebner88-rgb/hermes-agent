@@ -7858,3 +7858,200 @@ def test_permanent_provisioning_error_blocks_immediately(
         kb.dispatch_once(conn, board="default")
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
         assert row["status"] == "blocked"          # permanent error: unchanged behavior
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher-side heartbeat for claude-CLI workers
+# (heartbeat_live_claude_cli_workers)
+# ---------------------------------------------------------------------------
+
+def _make_running_worker(
+    conn, *, profile, pid, claim_lock=None, last_heartbeat_at=None,
+    started_at=None, title="claude-cli-live",
+):
+    """Set up a ``running`` task + matching ``task_runs`` row directly.
+
+    Mirrors the raw-SQL setup used by the dashboard worker tests so we can
+    pin ``profile`` / ``worker_pid`` / ``claim_lock`` / ``last_heartbeat_at``
+    without going through the code-task contract gate in ``claim_task``.
+    Returns ``(task_id, run_id)``.
+    """
+    now = int(time.time())
+    t = kb.create_task(conn, title=title)
+    lock = claim_lock if claim_lock is not None else kb._claimer_id()
+    start = started_at if started_at is not None else now
+    with kb.write_txn(conn):
+        run_id = conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, "
+            "claim_lock, worker_pid) VALUES (?, ?, 'running', ?, ?, ?)",
+            (t, profile, start, lock, pid),
+        ).lastrowid
+        conn.execute(
+            "UPDATE tasks SET status = 'running', current_run_id = ?, "
+            "claim_lock = ?, worker_pid = ?, started_at = ?, "
+            "last_heartbeat_at = ? WHERE id = ?",
+            (run_id, lock, pid, start, last_heartbeat_at, t),
+        )
+    return t, run_id
+
+
+def test_claude_cli_heartbeat_refreshes_and_emits_honest_note(
+    kanban_home, monkeypatch,
+):
+    """A live claude-CLI run with no prior heartbeat gets last_heartbeat_at
+    refreshed, a heartbeat event appended, and an honest note (criteria 1/2/4)."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+
+    with kb.connect() as conn:
+        t, run_id = _make_running_worker(conn, profile="coder-claude", pid=4242)
+        # Worker log present → note carries the honest log detail.
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"{t}.log").write_text("claude working...\n" * 100)
+
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+
+        task = kb.get_task(conn, t)
+        assert task.last_heartbeat_at is not None
+        run_hb = conn.execute(
+            "SELECT last_heartbeat_at FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()["last_heartbeat_at"]
+        assert run_hb is not None
+
+        ev = conn.execute(
+            "SELECT json_extract(payload, '$.note') AS note FROM task_events "
+            "WHERE task_id = ? AND kind = 'heartbeat' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert ev is not None
+        note = ev["note"]
+        assert note.startswith("claude-cli running")
+        assert "log" in note  # honest log detail, no fake percentage
+        assert "%" not in note
+
+
+def test_claude_cli_heartbeat_skips_hermes_runtime_worker(kanban_home, monkeypatch):
+    """Hermes-runtime workers self-heartbeat; the dispatcher must NOT touch
+    their heartbeat or it would mask a genuine stall (criterion 5)."""
+    import hermes_cli.kanban_db as _kb
+    # "worker" is deliberately NOT in HERMES_CLAUDE_CLI_PROFILES.
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+
+    with kb.connect() as conn:
+        t, _ = _make_running_worker(conn, profile="worker", pid=4243)
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+        assert kb.get_task(conn, t).last_heartbeat_at is None
+        n_events = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'heartbeat'",
+            (t,),
+        ).fetchone()[0]
+        assert n_events == 0
+
+
+def test_claude_cli_heartbeat_skips_dead_pid(kanban_home, monkeypatch):
+    """A dead PID is detect_crashed_workers' job — the heartbeat step leaves
+    it alone so a crashed worker is not falsely kept alive."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+
+    with kb.connect() as conn:
+        t, _ = _make_running_worker(conn, profile="coder-claude", pid=4244)
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+        assert kb.get_task(conn, t).last_heartbeat_at is None
+
+
+def test_claude_cli_heartbeat_skips_other_host_claim(kanban_home, monkeypatch):
+    """Only host-local claims are candidates — a claim owned by another host
+    is checked by that host's dispatcher, not ours."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+
+    with kb.connect() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4245,
+            claim_lock="someotherhost:9999",
+        )
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+        assert kb.get_task(conn, t).last_heartbeat_at is None
+
+
+def test_claude_cli_heartbeat_rate_limited(kanban_home, monkeypatch):
+    """A fresh heartbeat is not re-emitted (no timeline spam); a stale one is
+    refreshed."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+
+    with kb.connect() as conn:
+        # Fresh heartbeat (10s ago) → skipped.
+        t_fresh, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4246,
+            last_heartbeat_at=now - 10, title="fresh",
+        )
+        # Stale heartbeat (well beyond the min gap) → refreshed.
+        t_stale, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4247,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            title="stale",
+        )
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert t_stale in beat
+        assert t_fresh not in beat
+        # Fresh run keeps its original beat untouched.
+        assert kb.get_task(conn, t_fresh).last_heartbeat_at == now - 10
+        # Stale run advanced to ~now.
+        assert kb.get_task(conn, t_stale).last_heartbeat_at >= now
+
+
+def test_claude_cli_heartbeat_note_failsoft_without_log(kanban_home, monkeypatch):
+    """No worker log → the note degrades to the honest base, never raises."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    with kb.connect() as conn:
+        t, _ = _make_running_worker(conn, profile="coder-claude", pid=4248)
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        ev = conn.execute(
+            "SELECT json_extract(payload, '$.note') AS note FROM task_events "
+            "WHERE task_id = ? AND kind = 'heartbeat' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert ev["note"] == "claude-cli running"
+
+
+def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
+    kanban_home, monkeypatch, all_assignees_spawnable,
+):
+    """End-to-end: dispatch_once refreshes a live claude-CLI heartbeat BEFORE
+    the stale reclaimer runs, so a healthy long run (no self-heartbeat) is not
+    false-positive reclaimed, and the run shows up in result.heartbeated."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    five_hours_ago = int(time.time()) - (5 * 3600)
+
+    with kb.connect() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4249,
+            started_at=five_hours_ago, last_heartbeat_at=None,
+        )
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *a, **k: None,
+            stale_timeout_seconds=14400,  # 4h — would reclaim a NULL-hb run
+            board="default",
+        )
+        assert t in result.heartbeated
+        assert t not in result.stale
+        assert kb.get_task(conn, t).status == "running"

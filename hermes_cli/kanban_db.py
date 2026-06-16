@@ -123,6 +123,18 @@ DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
 # effect of normal API traffic.
 DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
 
+# Dispatcher-side heartbeat cadence for claude-CLI workers. Unlike Hermes-
+# runtime workers (which bridge chunk-level liveness into ``last_heartbeat_at``
+# via ``_touch_activity`` #31752), a ``claude -p`` worker is a detached
+# subprocess the dispatcher only ever sees as a PID + a growing log file. So
+# ``heartbeat_live_claude_cli_workers`` refreshes the heartbeat from the
+# dispatcher tick while that PID is alive. Only re-emit (touch + event) when
+# the existing heartbeat is older than this gap, so the timeline gets a steady
+# pulse rather than one event per tick. Far below ``_STALE_HEARTBEAT_GAP_SECONDS``
+# (1h) and the SPA's ``STUCK_HEARTBEAT_S`` (10m), so a live claude worker never
+# reads as stale/stuck.
+_CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS = 120
+
 
 def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
     """Return the effective claim TTL, honoring the kanban env override.
@@ -4048,6 +4060,38 @@ def _is_claude_cli_runtime(profile: Optional[str]) -> bool:
         except Exception:
             hermes_home = None
         return _is_claude_cli_profile(profile, hermes_home)
+    except Exception:
+        return False
+
+
+def _run_is_claude_cli(profile: Optional[str], *, board: Optional[str] = None) -> bool:
+    """True when a run's ``profile`` was dispatched via the ``claude`` CLI.
+
+    Mirrors the spawn-time branch in ``_default_spawn`` so the dispatcher-side
+    heartbeat (``heartbeat_live_claude_cli_workers``) classifies a live run
+    exactly the way it was launched:
+
+        active lane ``worker_runtime`` == "claude-cli"  → claude CLI
+        active lane pins a different runtime (e.g. hermes) → NOT claude CLI
+        no lane override → fall back to the profile config seam
+            (``_is_claude_cli_runtime`` → env allowlist + ``worker_runtime``)
+
+    Re-evaluating the lane (rather than only the profile config) is what keeps
+    a Hermes-runtime worker untouched even when its profile *config* says
+    claude-cli but an active lane forced it to hermes — that worker self-
+    heartbeats and must not also be dispatcher-heartbeat'd. Fail-soft False so
+    a broken lanes/profile config can never mis-mark a hermes worker.
+    """
+    if not profile:
+        return False
+    try:
+        lane_entry = _active_lane_entry_for_profile(profile, board=board)
+        lane_runtime = (lane_entry or {}).get("worker_runtime")
+        if lane_runtime == "claude-cli":
+            return True
+        if lane_runtime is None:
+            return _is_claude_cli_runtime(profile)
+        return False
     except Exception:
         return False
 
@@ -8198,6 +8242,12 @@ class DispatchResult:
     auto_retried_blocked: list[tuple[str, int]] = field(default_factory=list)
     """Opt-in blocked-run auto-retries performed this tick as
     ``(task_id, attempt)`` pairs."""
+    heartbeated: list[str] = field(default_factory=list)
+    """Live claude-CLI runs whose heartbeat the dispatcher refreshed this tick
+    (``heartbeat_live_claude_cli_workers``). claude-CLI workers can't bridge
+    their own liveness into ``last_heartbeat_at`` the way Hermes-runtime
+    workers do, so the dispatcher pulses it from the parent side while the PID
+    is alive. Empty when no claude-CLI worker is running."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -8519,6 +8569,114 @@ def heartbeat_worker(
             run_id=run_id,
         )
     return True
+
+
+def _claude_cli_heartbeat_note(
+    task_id: str, *, board: Optional[str] = None,
+) -> str:
+    """Honest one-line liveness note for a live claude-CLI worker.
+
+    The dispatcher cannot see inside a ``claude -p`` session, so the only
+    ground truth is the per-task worker log: how much output it has produced
+    and how recently it last wrote. Reported verbatim — no fake percentage.
+    Always returns at least ``"claude-cli running"``; the log detail is
+    additive and fully fail-soft (missing/unreadable log → base note).
+    """
+    base = "claude-cli running"
+    try:
+        log_path = worker_logs_dir(board=board) / f"{task_id}.log"
+        st = log_path.stat()
+        size = int(st.st_size)
+        if size >= 1024:
+            size_str = f"{size / 1024:.0f}KB"
+        else:
+            size_str = f"{size}B"
+        age = max(0, int(time.time()) - int(st.st_mtime))
+        return f"{base} · log {size_str} · last output {age}s"
+    except Exception:
+        return base
+
+
+def heartbeat_live_claude_cli_workers(
+    conn: sqlite3.Connection, *, board: Optional[str] = None,
+) -> list[str]:
+    """Dispatcher-side heartbeat for live claude-CLI workers.
+
+    A ``claude -p`` worker (``_spawn_claude_worker``) is a detached subprocess
+    with stdout/stderr in its per-task log only — it never re-enters the
+    Hermes runtime, so the ``_touch_activity`` → ``heartbeat_current_worker_
+    from_env`` bridge (#31752) that keeps Hermes-runtime workers' heartbeats
+    fresh does not apply. Without this, a claude-CLI run's ``last_heartbeat_at``
+    stays NULL for its whole life: the dashboard worker card shows no liveness
+    ("—"), no "doing now" note, and ``detect_stale_running`` can false-positive
+    reclaim a perfectly healthy long run.
+
+    This closes that gap from the parent/dispatcher side while the child PID is
+    alive, reusing the SAME heartbeat fields/events the dashboard already
+    consumes (``heartbeat_claim`` to hold the claim + ``heartbeat_worker`` to
+    touch ``last_heartbeat_at`` and append a ``heartbeat`` event with an honest
+    note). No parallel protocol, no schema change.
+
+    Scope guards (so Hermes-runtime workers are byte-for-byte unchanged):
+      * only ``status='running'`` tasks with a non-NULL ``worker_pid``;
+      * only host-local claims (PID liveness + log path are host-local, same
+        reasoning as ``detect_stale_running`` / ``enforce_max_runtime``);
+      * only runs whose ``profile`` classifies as claude-CLI via
+        ``_run_is_claude_cli`` (Hermes-runtime runs are skipped — they self-
+        heartbeat, and a second writer would mask a genuine stall);
+      * only when the PID is actually alive;
+      * rate-limited: re-emit only when the existing heartbeat is older than
+        ``_CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS`` (NULL → always), so the run
+        timeline gets a steady pulse instead of one event per tick.
+
+    Returns the task ids heartbeat'd this tick. Fully fail-soft: a single bad
+    row never aborts the batch and any error returns the ids collected so far,
+    so the dispatcher tick is never destabilised by liveness bookkeeping.
+    """
+    now = int(time.time())
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    beat: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.worker_pid, t.last_heartbeat_at, t.claim_lock, "
+            "       t.current_run_id, r.profile "
+            "FROM tasks t "
+            "LEFT JOIN task_runs r ON r.id = t.current_run_id "
+            "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return beat
+
+    for row in rows:
+        try:
+            lock = row["claim_lock"] or ""
+            if not lock.startswith(host_prefix):
+                continue  # another host owns it; it checks its own PIDs
+            if not _run_is_claude_cli(row["profile"], board=board):
+                continue  # Hermes-runtime worker — leave its heartbeat alone
+            if not _pid_alive(row["worker_pid"]):
+                continue  # dead PID is detect_crashed_workers' job, not ours
+
+            last_hb = row["last_heartbeat_at"]
+            if last_hb is not None and (now - int(last_hb)) < _CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS:
+                continue  # heartbeat still fresh — don't spam the timeline
+
+            tid = row["id"]
+            run_id = row["current_run_id"]
+            # Hold the claim too, mirroring the Hermes bridge (heartbeat_claim
+            # + heartbeat_worker). release_stale_claims already extends a
+            # live-PID claim, but doing it here keeps claude-CLI liveness
+            # self-sufficient regardless of step ordering.
+            try:
+                heartbeat_claim(conn, tid, claimer=lock)
+            except Exception:
+                pass
+            note = _claude_cli_heartbeat_note(tid, board=board)
+            if heartbeat_worker(conn, tid, note=note, expected_run_id=run_id):
+                beat.append(tid)
+        except Exception:
+            continue
+    return beat
 
 
 def enforce_max_runtime(
@@ -11042,6 +11200,12 @@ def dispatch_once(
     reap_worker_zombies()
 
     result = DispatchResult()
+    # Refresh liveness for detached claude-CLI workers BEFORE the reclaimers
+    # run: a live ``claude -p`` child never self-heartbeats, so this keeps its
+    # ``last_heartbeat_at`` fresh and stops detect_stale_running from
+    # false-positive reclaiming a healthy long run. Hermes-runtime workers are
+    # skipped (they self-heartbeat). Fail-soft; never blocks dispatch.
+    result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
     result.reclaimed = release_stale_claims(conn)
     result.stale = detect_stale_running(
         conn, stale_timeout_seconds=stale_timeout_seconds,
