@@ -673,6 +673,69 @@ def _provisioned_chain(repo, root_id, relpath="feature.py",
     return info
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "live checkout has an operation in progress (MERGE_HEAD)",
+        "checked-out branch 'other-branch' != frozen merge target 'main'",
+        "worktree has uncommitted changes but no commits to merge",
+        "chain worktree has uncommitted changes: uncommitted.py",
+        "dirty files in live checkout overlap the branch diff: a.txt",
+        "chain worktree missing before rebase",
+    ],
+)
+def test_integration_park_class_marks_transient_reasons(reason):
+    assert kwt._integration_park_class(reason) == "transient"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "merge conflict/failure (aborted): conflict details",
+        "post-merge gate failed: ruff failed",
+    ],
+)
+def test_integration_park_class_marks_orchestrator_reasons(reason):
+    assert kwt._integration_park_class(reason) == "needs_orchestrator"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "cannot inspect live checkout: rev-parse failed",
+        "some unexpected integrator failure",
+        "",
+    ],
+)
+def test_integration_park_class_marks_operator_reasons(reason):
+    assert kwt._integration_park_class(reason) == "needs_operator"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        # As stored by _park_integration (kanban_db.py): the raw integrator
+        # reason gets an "integration parked: " prefix. The retry lane reads
+        # this stored form, so the classifier must strip it before matching.
+        (
+            "integration parked: dirty files in live checkout overlap the "
+            "branch diff: a.txt",
+            "transient",
+        ),
+        (
+            "integration parked: merge conflict/failure (aborted): boom",
+            "needs_orchestrator",
+        ),
+        (
+            "integration parked: cannot inspect live checkout: rev-parse failed",
+            "needs_operator",
+        ),
+    ],
+)
+def test_integration_park_class_strips_stored_prefix(reason, expected):
+    assert kwt._integration_park_class(reason) == expected
+
+
 def test_integrate_merges_no_ff_and_cleans_up(repo):
     info = _provisioned_chain(repo, "t_m1")
     out = kwt.integrate_chain(
