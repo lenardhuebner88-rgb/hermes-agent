@@ -4803,6 +4803,19 @@ def sprint_prompt_for_planspec(payload: PlanSpecPathBody):
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
+@router.post("/planspecs/not-needed")
+def mark_planspec_not_needed(payload: PlanSpecPathBody):
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    try:
+        return planspecs.mark_planspec_not_needed(
+            payload.path,
+            author=payload.author or "dashboard",
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+
+
 # ---------------------------------------------------------------------------
 # Flow capture Phase B — backend-driven planning (documented/lean) + gate + spec
 # ---------------------------------------------------------------------------

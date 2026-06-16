@@ -49,6 +49,22 @@ taskgraph_hints:
     return path
 
 
+def _write_display_plangate(root: Path, name: str = "2026-06-16-abo-limits.md") -> Path:
+    path = root / "Claude-Code" / "plans" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """---
+title: PlanSpec — Dashboard-Tile "Abo-Limits"
+status: signiert 2026-06-16 (bereit für Build)
+gate: planGate
+---
+# PlanSpec — Dashboard-Tile "Abo-Limits"
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_parse_binding_planspec_to_children(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
@@ -83,6 +99,7 @@ def test_list_planspecs_reports_binding_status(tmp_path: Path):
 def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     open_path = _write_planspec(plans_root, "2026-06-16-open.md")
+    display_path = _write_display_plangate(plans_root)
     closed_path = _write_planspec(plans_root, "2026-06-16-done.md")
     text = closed_path.read_text(encoding="utf-8")
     closed_path.write_text(text.replace("status: freigegeben-komplett", "status: implemented"), encoding="utf-8")
@@ -92,9 +109,19 @@ def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
     records = planspecs.list_planspecs(plans_root=plans_root)
     all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
 
-    assert [item["path"] for item in records] == [str(open_path.resolve(strict=False))]
+    assert [item["path"] for item in records] == [
+        str(open_path.resolve(strict=False)),
+        str(display_path.resolve(strict=False)),
+    ]
     by_name = {item["filename"]: item for item in all_records}
     assert by_name["2026-06-16-open.md"]["open"] is True
+    assert by_name["2026-06-16-abo-limits.md"]["open"] is True
+    assert by_name["2026-06-16-abo-limits.md"]["valid"] is False
+    assert by_name["2026-06-16-abo-limits.md"]["binding"] is False
+    assert by_name["2026-06-16-abo-limits.md"]["closed_reason"] is None
+    assert by_name["2026-06-16-abo-limits.md"]["errors"] == [
+        "display-only: taskgraph_hints.binding is missing; Kanban ingest disabled"
+    ]
     assert by_name["2026-06-16-done.md"]["open"] is False
     assert by_name["2026-06-16-done.md"]["closed_reason"] == "closed status: implemented"
     assert by_name["draft.md"]["open"] is False
@@ -111,6 +138,26 @@ def test_parse_binding_planspec_blocks_closed_status(tmp_path: Path):
         planspecs.parse_binding_planspec(path, plans_root=plans_root)
 
     assert "closed status: implemented" in str(exc.value)
+
+
+def test_mark_planspec_not_needed_closes_display_only_plan(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_display_plangate(plans_root)
+
+    result = planspecs.mark_planspec_not_needed(path, plans_root=plans_root, author="tester")
+    records = planspecs.list_planspecs(plans_root=plans_root)
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
+    updated = path.read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert result["status"] == "obsolete"
+    assert records == []
+    row = all_records[0]
+    assert row["open"] is False
+    assert row["closed_reason"] == "closed status: obsolete"
+    assert "status: obsolete" in updated
+    assert "closed_by: tester" in updated
+    assert "closed_reason: not needed anymore" in updated
 
 
 def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path):

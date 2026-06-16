@@ -206,6 +206,8 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/aria-expanded=\{plansOpen\}/);
     expect(src).toMatch(/Offene PlanSpecs/);
     expect(src).toMatch(/plansOpen \? <div className="mt-3 grid gap-2">/);
+    expect(src).toMatch(/\/api\/plugins\/kanban\/planspecs\/not-needed/);
+    expect(src).toMatch(/Wird nicht benötigt/);
     expect(src).toMatch(/break-words text-sm font-semibold leading-snug text-white/);
     expect(src).toMatch(/mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal/);
     expect(src).toMatch(/min-h-11 items-center gap-1.5 rounded-full/);

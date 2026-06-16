@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -67,13 +68,19 @@ def _status_slug(status: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", status.lower()).strip("-")
 
 
-def _closed_reason(status: str, *, valid: bool) -> str | None:
-    if not valid:
-        return "not a binding PlanSpec"
+def _closed_reason(status: str) -> str | None:
     slug = _status_slug(status)
     if any(slug == prefix or slug.startswith(f"{prefix}-") for prefix in _CLOSED_STATUS_PREFIXES):
         return f"closed status: {status}"
     return None
+
+
+def _is_display_only_open_plan(frontmatter: dict[str, Any], status: str) -> bool:
+    gate = str(frontmatter.get("gate") or "").strip().lower()
+    if gate != "plangate":
+        return False
+    slug = _status_slug(status)
+    return slug.startswith("signiert") or slug.startswith("signed")
 
 
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
@@ -119,7 +126,7 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     if not freigabe:
         findings.append("freigabe is required")
     status = str(frontmatter.get("status") or "").strip()
-    closed = _closed_reason(status, valid=True)
+    closed = _closed_reason(status)
     if closed:
         findings.append(closed)
 
@@ -179,8 +186,14 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScop
                 or path.stem
             )
             status = str(frontmatter.get("status") or "").strip()
-            valid = not errors and bool(hints and hints.binding)
-            closed = _closed_reason(status, valid=valid)
+            binding = bool(hints and hints.binding)
+            valid = not errors and binding
+            closed = _closed_reason(status)
+            display_only_open = not errors and not binding and _is_display_only_open_plan(frontmatter, status)
+            open_record = closed is None and (valid or display_only_open)
+            record_errors = list(errors)
+            if display_only_open:
+                record_errors.append("display-only: taskgraph_hints.binding is missing; Kanban ingest disabled")
             records.append(
                 {
                     "path": str(path.resolve(strict=False)),
@@ -190,12 +203,12 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScop
                     "status": status,
                     "freigabe": str(frontmatter.get("freigabe") or "").strip(),
                     "live_test_depth": live_test_depth or None,
-                    "binding": bool(hints.binding) if hints else False,
+                    "binding": binding,
                     "subtask_count": len(hints.subtasks) if hints else 0,
                     "valid": valid,
-                    "open": closed is None,
-                    "closed_reason": closed,
-                    "errors": errors,
+                    "open": open_record,
+                    "closed_reason": closed if closed else (None if open_record else "not a binding PlanSpec"),
+                    "errors": record_errors,
                 }
             )
         except Exception as exc:
@@ -220,6 +233,47 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScop
         records = [item for item in records if item["open"]]
     records.sort(key=lambda item: (item["open"] is False, item["valid"] is False, item["path"]), reverse=False)
     return records
+
+
+def mark_planspec_not_needed(
+    path: str | Path,
+    *,
+    plans_root: Path = DEFAULT_PLANS_ROOT,
+    author: str = "dashboard",
+) -> dict[str, Any]:
+    resolved = resolve_planspec_path(path, plans_root=plans_root)
+    try:
+        frontmatter, body = _extract_frontmatter(resolved.read_text(encoding="utf-8"))
+    except CompileBlocked as exc:
+        raise PlanSpecBlocked(exc.findings) from exc
+    except UnicodeDecodeError as exc:
+        raise PlanSpecBlocked([f"planspec is not valid utf-8: {exc}"]) from exc
+
+    current_status = str(frontmatter.get("status") or "").strip()
+    if _closed_reason(current_status):
+        return {
+            "ok": True,
+            "path": str(resolved),
+            "status": current_status,
+            "closed_reason": _closed_reason(current_status),
+        }
+
+    frontmatter["status"] = "obsolete"
+    frontmatter["closed_at"] = datetime.now(timezone.utc).date().isoformat()
+    frontmatter["closed_by"] = author.strip() or "dashboard"
+    frontmatter["closed_reason"] = "not needed anymore"
+
+    raw_frontmatter = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
+    next_text = f"---\n{raw_frontmatter}\n---\n\n{body.lstrip()}"
+    tmp_path = resolved.with_name(f".{resolved.name}.tmp")
+    tmp_path.write_text(next_text, encoding="utf-8")
+    tmp_path.replace(resolved)
+    return {
+        "ok": True,
+        "path": str(resolved),
+        "status": "obsolete",
+        "closed_reason": "not needed anymore",
+    }
 
 
 def build_root_body(spec: BindingPlanSpec) -> str:

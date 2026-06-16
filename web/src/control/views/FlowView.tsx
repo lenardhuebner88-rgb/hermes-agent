@@ -51,7 +51,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
+import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -229,6 +229,28 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
     }
   }, [setRowError]);
 
+  const markNotNeeded = useCallback(async (item: PlanSpecRecord) => {
+    setBusyPath(`${item.path}:close`);
+    setRowError(item.path, null);
+    try {
+      await fetchJSON<PlanSpecCloseResponse>("/api/plugins/kanban/planspecs/not-needed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: item.path, author: "dashboard" }),
+      });
+      setPromptByPath((current) => {
+        const next = { ...current };
+        delete next[item.path];
+        return next;
+      });
+      await plans.reload();
+    } catch (e) {
+      setRowError(item.path, e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyPath(null);
+    }
+  }, [plans, setRowError]);
+
   if (!plans.loading && !plans.error && items.length === 0) return null;
 
   return (
@@ -249,6 +271,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
         {items.map((item) => {
           const ingestBusy = busyPath === `${item.path}:ingest`;
           const promptBusy = busyPath === `${item.path}:prompt`;
+          const closeBusy = busyPath === `${item.path}:close`;
           const rowError = errorByPath[item.path];
           const prompt = promptByPath[item.path];
           return (
@@ -272,7 +295,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  disabled={!item.valid || ingestBusy || promptBusy}
+                  disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void ingest(item)}
                   className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
                 >
@@ -281,12 +304,21 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 </button>
                 <button
                   type="button"
-                  disabled={!item.valid || ingestBusy || promptBusy}
+                  disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void buildPrompt(item)}
                   className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9"
                 >
                   {promptBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
                   Sprint-Prompt
+                </button>
+                <button
+                  type="button"
+                  disabled={ingestBusy || promptBusy || closeBusy}
+                  onClick={() => void markNotNeeded(item)}
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-red-300/30 px-3 text-sm text-red-200 transition hover:bg-red-500/10 disabled:opacity-40 sm:min-h-9"
+                >
+                  {closeBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                  Wird nicht benötigt
                 </button>
               </div>
               {prompt ? (

@@ -95,6 +95,13 @@ export interface PlanSpecPromptResponse {
   prompt: string;
 }
 
+export interface PlanSpecCloseResponse {
+  ok: boolean;
+  path: string;
+  status: string;
+  closed_reason: string;
+}
+
 export type FlowGateReleaseLevel = "merge" | "live";
 
 export interface FlowGateRisk {
