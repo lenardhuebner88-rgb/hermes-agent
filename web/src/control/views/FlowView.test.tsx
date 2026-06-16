@@ -172,6 +172,24 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/hidden sm:inline/);
   });
 
+  it("keeps Flow rows bounded on phones instead of clipping off the right edge", () => {
+    expect(src).toMatch(/mobileOverflowGuard/);
+    expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2/);
+    expect(src).toMatch(/hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim/);
+    expect(src).toMatch(/flex w-full min-w-0 flex-wrap items-center gap-2/);
+    expect(src).toMatch(/min-w-0 max-w-full overflow-hidden/);
+  });
+
+  it("bounds the receipt rail, chain-insight and plan rows so long ids/branches cannot clip on phones", () => {
+    // FlowReceiptRail: run-meta mono line truncates, header row shrinks the status pill.
+    expect(src).toMatch(/mt-1 truncate hc-mono hc-type-label hc-dim/);
+    expect(src).toMatch(/ml-auto inline-flex shrink-0 items-center gap-1 hc-type-label/);
+    // FlowChainInsight: concatenated task lines wrap instead of pushing the right edge.
+    expect(src).toMatch(/mt-1 break-words text-\[0\.75rem\] hc-soft/);
+    // FlowPlanPanel: subtask id span follows the mono-id truncate pattern.
+    expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2 rounded-md border/);
+  });
+
   it("collapses worker cards to compact headers in the worker strip", () => {
     expect(src).toMatch(/collapsible/);
   });

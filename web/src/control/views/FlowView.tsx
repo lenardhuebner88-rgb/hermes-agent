@@ -356,6 +356,8 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
   const verifierGate = reviewGateStatus(enriched);
   const resultArtifact = preferredResultArtifactLink(enriched.resultArtifactLinks);
   const ageSec = task.age?.created_age_seconds ?? null;
+  // mobileOverflowGuard: all phone-width rows below need min-w-0 + wrapping or
+  // long task ids / branch names can push the Flow tab off the right edge.
   return (
     <article
       id={flowTaskDomId(task.id)}
@@ -364,14 +366,14 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
       aria-pressed={selected}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(task.id); } }}
-      className={cn("cursor-pointer rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
+      className={cn("min-w-0 max-w-full cursor-pointer overflow-hidden rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
     >
-      <div className="flex items-center gap-2">
-        <span className="hc-mono hc-type-label hc-dim">{task.id}</span>
-        <span className="ml-auto"><RoleChip role={role} /></span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{task.id}</span>
+        <span className="ml-auto shrink-0"><RoleChip role={role} /></span>
       </div>
       <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{task.title}</p>
-      <p className="mt-1 hc-mono hc-type-label hc-dim">
+      <p className="mt-1 truncate hc-mono hc-type-label hc-dim">
         {ageSec != null ? `⏱ vor ${fmtAge(now - ageSec, now)}` : ""}{task.branch_name ? ` · ${task.branch_name}` : ""}
         {enriched.workerHeartbeat ? ` · ♥ ${fmtAge(enriched.workerHeartbeat, now)}` : ""}
       </p>
@@ -453,8 +455,8 @@ function FlowPlanPanel({ rootId, detail, boardTasks, onRelease, releaseBusy, rel
           {children.map((c) => {
             const statusExplanation = getFlowSubtaskStatusExplanation(c.status, c.status === "blocked" ? c.latest_summary : null);
             return (
-              <li key={c.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2 py-1.5">
-                <span className="hc-mono hc-type-label hc-dim">{c.id}</span>
+              <li key={c.id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-[var(--hc-border)] px-2 py-1.5">
+                <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{c.id}</span>
                 <span className="min-w-0 flex-1 basis-36 truncate hc-type-label text-white">{c.title}</span>
                 <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
                   <StatusPill tone={statusTone(c.status)} label={taskStatusLabel[c.status] ?? c.status} />
@@ -535,30 +537,30 @@ function FlowChainInsight({ task, detail, boardTasks, snapshotLabel }: { task?: 
       <div className="mt-2 grid gap-2">
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow text-sky-100">Gehalten</p>
-          <p className="mt-1 text-[0.75rem] hc-soft">{heldTasks.length ? heldTasks.map(taskLine).join(" · ") : "Keine gehaltenen direkten Nachbarn im Snapshot."}</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">{heldTasks.length ? heldTasks.map(taskLine).join(" · ") : "Keine gehaltenen direkten Nachbarn im Snapshot."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow text-emerald-100">Ready-Nachbar im Snapshot</p>
-          <p className="mt-1 text-[0.75rem] hc-soft">{readyTasks.length ? readyTasks.map(taskLine).join(" · ") : "Kein ready-Nachbar im Snapshot; keine Scheduler-Zusage."}</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">{readyTasks.length ? readyTasks.map(taskLine).join(" · ") : "Kein ready-Nachbar im Snapshot; keine Scheduler-Zusage."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow text-cyan-100">Läuft bereits</p>
-          <p className="mt-1 text-[0.75rem] hc-soft">{runningTasks.length ? runningTasks.map(taskLine).join(" · ") : "Kein direkter Nachbar läuft im Snapshot."}</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">{runningTasks.length ? runningTasks.map(taskLine).join(" · ") : "Kein direkter Nachbar läuft im Snapshot."}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow text-amber-100">Mögliche Vorgänger</p>
-          <p className="mt-1 text-[0.75rem] hc-soft">{predecessorHintLine}</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">{predecessorHintLine}</p>
         </div>
         <div className="rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
           <p className="hc-eyebrow text-amber-100">Mögliche Nachfolger mit Wartestatus</p>
-          <p className="mt-1 text-[0.75rem] hc-soft">{waitingDependents.length ? waitingDependents.map(taskLine).join(" · ") : "Keine möglichen Nachfolger mit Wartestatus im Snapshot."}</p>
+          <p className="mt-1 break-words text-[0.75rem] hc-soft">{waitingDependents.length ? waitingDependents.map(taskLine).join(" · ") : "Keine möglichen Nachfolger mit Wartestatus im Snapshot."}</p>
         </div>
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {parentTasks.map((p) => <StatusPill key={`p-${p.id}`} tone={statusTone(p.status)} label={`Möglicher Vorgänger ${taskStatusLabel[p.status] ?? p.status}`} />)}
         {childTasks.map((c) => <StatusPill key={`c-${c.id}`} tone={statusTone(c.status)} label={`Möglicher Nachfolger ${taskStatusLabel[c.status] ?? c.status}`} />)}
       </div>
-      {unknownIds.length ? <p className="mt-2 hc-type-label hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
+      {unknownIds.length ? <p className="mt-2 break-words hc-type-label hc-dim">Nicht im Board-Snapshot: {unknownIds.join(", ")}</p> : null}
       {parentIds.length ? <p className="mt-2 hc-type-label hc-dim">Snapshot-Hinweis: rohe Detail-Links zeigen Nähe, aber keinen sicheren Blockierungsgrund.</p> : null}
       {hasAmbiguousTodo ? <p className="mt-2 hc-type-label text-amber-200">Hinweis: todo ist uneindeutig; es kann Dependency-Warten, manuelles Backlog oder Dispatcher-Queue sein.</p> : null}
     </div>
@@ -654,14 +656,14 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
               const role = roleChip(run.profile, run.run_role);
               const ok = run.outcome === "completed";
               return (
-                <div key={run.id} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2.5">
-                  <div className="flex items-center gap-2">
+                <div key={run.id} className="min-w-0 max-w-full overflow-hidden rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2.5">
+                  <div className="flex min-w-0 items-center gap-2">
                     <RoleChip role={role} />
-                    <span className={cn("ml-auto inline-flex items-center gap-1 hc-type-label", ok ? "text-[var(--hc-emerald)]" : run.error ? "text-[var(--hc-red)]" : "hc-dim")}>
+                    <span className={cn("ml-auto inline-flex shrink-0 items-center gap-1 hc-type-label", ok ? "text-[var(--hc-emerald)]" : run.error ? "text-[var(--hc-red)]" : "hc-dim")}>
                       <span className={cn("h-1.5 w-1.5 rounded-full", ok ? "bg-[var(--hc-emerald)]" : run.error ? "bg-[var(--hc-red)]" : "bg-[var(--hc-text-dim)]")} />{run.outcome ?? run.status}
                     </span>
                   </div>
-                  <p className="mt-1 hc-mono hc-type-label hc-dim">Run {run.id} · {run.run_role_label ?? profileLabel[run.profile ?? ""] ?? run.profile ?? "—"}{run.ended_at ? ` · vor ${fmtAge(run.ended_at, now)}` : run.started_at ? ` · seit ${fmtAge(run.started_at, now)}` : ""}</p>
+                  <p className="mt-1 truncate hc-mono hc-type-label hc-dim">Run {run.id} · {run.run_role_label ?? profileLabel[run.profile ?? ""] ?? run.profile ?? "—"}{run.ended_at ? ` · vor ${fmtAge(run.ended_at, now)}` : run.started_at ? ` · seit ${fmtAge(run.started_at, now)}` : ""}</p>
                   {run.summary ? <p className="mt-1 line-clamp-3 text-[0.78rem] text-zinc-100">{run.summary}</p> : null}
                   {run.error ? <p className="mt-1 line-clamp-2 hc-type-label text-red-300">{run.error}</p> : null}
                 </div>
@@ -805,7 +807,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
   const doneMembers = chain.members.filter((m) => m.status === "done");
   const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
   return (
-    <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
+    <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card min-w-0 max-w-full overflow-hidden scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
       <div
         role="button"
         tabIndex={0}
@@ -814,8 +816,8 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
         className="cursor-pointer"
       >
-        <div className="flex items-center gap-2">
-          <span className="hc-mono hc-type-label hc-dim">{chain.rootId}</span>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{chain.rootId}</span>
           <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{projectLabel(chain.tenant)}</span>
           {chain.epicId ? (
             <button
@@ -827,7 +829,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
               {de.flow.epicBadge(epicTitle || chain.epicId)}
             </button>
           ) : null}
-          <span className="ml-auto inline-flex items-center gap-1 hc-type-label hc-soft">
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1 hc-type-label hc-soft">
             {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             {expanded ? de.flow.chainCollapse : de.flow.chainExpand}
           </span>
@@ -857,11 +859,11 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
                     type="button"
                     onClick={() => onSelect(m.id)}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition",
+                      "flex w-full min-w-0 flex-wrap items-center gap-2 rounded-md border px-2 py-1.5 text-left transition",
                       selectedId === m.id ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
                     )}
                   >
-                    <span className="hc-mono hc-type-label hc-dim">{m.id}</span>
+                    <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{m.id}</span>
                     <span className="min-w-0 flex-1 truncate text-[0.78rem] text-zinc-200">{m.title}</span>
                     <span className="hc-type-label text-emerald-300">✓{m.completed_at ? ` vor ${fmtAge(m.completed_at, now)}` : ""}</span>
                   </button>
@@ -964,11 +966,11 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
                 type="button"
                 onClick={() => onSelect(id)}
                 className={cn(
-                  "hc-decision hc-sev-calm flex w-full items-center gap-2 px-3 py-2 text-left",
+                  "hc-decision hc-sev-calm flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left",
                   selectedId === id && "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]",
                 )}
               >
-                <span className="hc-mono hc-type-label hc-dim">{id}</span>
+                <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{id}</span>
                 <span className="min-w-0 flex-1 truncate text-[0.8rem] text-zinc-100">{title}</span>
                 {enriched?.resultQualityLabel ? (
                   <span className={cn(
