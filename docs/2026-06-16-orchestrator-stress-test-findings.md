@@ -28,10 +28,15 @@ auto-integrator → main → deploy*.
 ## Findings (priority-ordered)
 
 ### F1 — Integrator frontend gate is partial (HIGH)
-**Symptom.** The post-merge integration gate for the dashboard (non-FO repo) runs
-`ruff + affected-pytest + tsc --noEmit (web/ only)`. It does **NOT** run `eslint`
+**Status 2026-06-16 follow-up.** Closed for automatic quick-gate coverage: web diffs
+now run `lint:control`, `tsc -b --noEmit`, and the control Vitest suite before merge.
+`npm run build` remains the separate post-merge release/deploy gate because it mutates
+generated dashboard assets.
+
+**Original symptom.** The post-merge integration gate for the dashboard (non-FO repo) ran
+`ruff + affected-pytest + tsc --noEmit (web/ only)`. It did **NOT** run `eslint`
 (`lint:control`), **NOT** `vitest`, **NOT** `npm run build`. A lint violation, a failing or
-uncovered vitest test, or a build-only break can therefore auto-merge to `main`.
+uncovered vitest test, or a build-only break could therefore auto-merge to `main`.
 **Evidence.** `hermes_cli/kanban_worktrees.py:699-752` (`default_quick_gate`); the live merge
 gate strings for `t_5182a2ae`/`t_ed9d3591`/`t_40ca037b` were all
 `"ruff ok; pytest skipped (no affected test modules); tsc ok"`. My manual per-wave gate

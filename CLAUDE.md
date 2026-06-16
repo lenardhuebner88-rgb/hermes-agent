@@ -24,9 +24,11 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
 - Deploy: `scripts/deploy_dashboard.sh` — Standing Grant bei *wirklich* grünen Gates
   (mit `CONFIRMED=1`), sonst nicht. Wahrheit = API-Payload, nicht Screenshot (die SPA
   injiziert ihr Token via `window.__HERMES_SESSION_TOKEN__`; bare Loopback-curl = 401).
+- Auth-Smoke nach gated Deploy: `HERMES_DASHBOARD_URL=https://… HERMES_DASHBOARD_USERNAME=… HERMES_DASHBOARD_PASSWORD=… scripts/smoke_health_status_auth.py --no-prompt`
+  prüft Login-Cookie → `/api/health-status`; Script loggt keine Passwörter, Tokens oder Cookies.
 
 ## Gates (vor Deploy/Push)
-- Frontend: `cd web && npm run lint:control && npx tsc --noEmit && npx vitest run && npm run build`
+- Frontend: `cd web && npm run lint:control && npx tsc -b --noEmit && npx vitest run && npm run build`
   (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
   Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
 - Python: `scripts/run_tests.sh` (mit pytest-timeout) + `ruff`

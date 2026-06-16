@@ -11,7 +11,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc -p . --noEmit"
+    "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
     "@nous-research/ui": "0.18.2",

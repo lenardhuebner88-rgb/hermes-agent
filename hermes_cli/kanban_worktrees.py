@@ -869,8 +869,8 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
 
 def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
     """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
-    modules; when the diff touches ``web/``, run lint:control, tsc
-    --noEmit, and the control Vitest suite. ``npm run build`` intentionally
+    modules; when the diff touches ``web/``, run lint:control,
+    ``tsc -b --noEmit``, and the control Vitest suite. ``npm run build`` intentionally
     stays out of this automatic merge path because it mutates generated
     dashboard assets and belongs to the parked post-merge release gate."""
     notes: list[str] = []
@@ -927,7 +927,7 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         if not tsc.is_file():
             # Fail closed: a web diff we cannot type-check is not "green".
             return False, "tsc: web/ in diff but web/node_modules/.bin/tsc missing"
-        err = _run("tsc", [str(tsc), "--noEmit"], web_root, 600)
+        err = _run("tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600)
         if err:
             return False, err
         if not vitest.is_file():

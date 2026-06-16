@@ -15,6 +15,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import hermes_cli.health_status as hs
+from hermes_cli.dashboard_auth import (
+    DashboardAuthProvider,
+    InvalidCredentialsError,
+    RefreshExpiredError,
+    Session,
+)
 from hermes_cli.health_status import register_health_status_routes
 
 
@@ -101,6 +107,55 @@ def _install_probe_sources(
             kanban_dispatcher_heartbeat_path=lambda: heartbeat_path,
         ),
     )
+
+
+class _HealthSmokePasswordProvider(DashboardAuthProvider):
+    name = "health-smoke"
+    display_name = "Health Smoke"
+    supports_password = True
+
+    def start_login(self, *, redirect_uri: str) -> Any:
+        raise NotImplementedError
+
+    def complete_login(self, **_kwargs: Any) -> Session:
+        raise NotImplementedError
+
+    def complete_password_login(self, *, username: str, password: str) -> Session:
+        if username != "admin" or password != "hunter2":
+            raise InvalidCredentialsError("bad credentials")
+        return self._session(self._access_token())
+
+    def verify_session(self, *, access_token: str) -> Session | None:
+        if not access_token.startswith("health-smoke:"):
+            return None
+        try:
+            expires_at = int(access_token.rsplit(":", 1)[1])
+        except ValueError:
+            return None
+        if expires_at <= int(time.time()):
+            return None
+        return self._session(access_token, expires_at=expires_at)
+
+    def refresh_session(self, *, refresh_token: str) -> Session:
+        raise RefreshExpiredError("not used by this smoke test")
+
+    def revoke_session(self, *, refresh_token: str) -> None:
+        return None
+
+    def _access_token(self) -> str:
+        return f"health-smoke:{int(time.time()) + 3600}"
+
+    def _session(self, access_token: str, *, expires_at: int | None = None) -> Session:
+        return Session(
+            user_id="health-smoke-admin",
+            email="",
+            display_name="health-smoke-admin",
+            org_id="",
+            provider=self.name,
+            expires_at=expires_at or int(time.time()) + 3600,
+            access_token=access_token,
+            refresh_token="health-smoke-refresh",
+        )
 
 
 def test_all_subsystems_healthy(
@@ -347,3 +402,81 @@ def test_kanban_dispatcher_stale_heartbeat_degraded(
     assert result["detail"] == "ok"
     assert result["error"] == "heartbeat stale"
     assert result["heartbeat_age_s"] >= 999
+
+
+@pytest.mark.xdist_group("dashboard_auth_app_state")
+def test_health_status_requires_authenticated_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli import web_server
+    from hermes_cli.dashboard_auth import clear_providers, register_provider
+    from hermes_cli.dashboard_auth.routes import _reset_password_rate_limit
+
+    async def gateway_status() -> dict[str, Any]:
+        return {"status": "healthy", "detail": "gateway running", "error": None}
+
+    async def autoresearch_status() -> dict[str, Any]:
+        return {
+            "status": "healthy",
+            "detail": "idle",
+            "heartbeat_age_s": None,
+            "error": None,
+        }
+
+    async def kanban_db_status() -> dict[str, Any]:
+        return {"status": "healthy", "detail": "database healthy", "error": None}
+
+    async def kanban_dispatcher_status() -> dict[str, Any]:
+        return {
+            "status": "healthy",
+            "detail": "ok",
+            "heartbeat_age_s": 1.0,
+            "error": None,
+        }
+
+    monkeypatch.setattr(hs, "_probe_gateway_status", gateway_status)
+    monkeypatch.setattr(hs, "_probe_autoresearch_status", autoresearch_status)
+    monkeypatch.setattr(hs, "_probe_kanban_db_status", kanban_db_status)
+    monkeypatch.setattr(
+        hs, "_probe_kanban_dispatcher_status", kanban_dispatcher_status
+    )
+
+    prev_host = getattr(web_server.app.state, "bound_host", None)
+    prev_port = getattr(web_server.app.state, "bound_port", None)
+    prev_required = getattr(web_server.app.state, "auth_required", None)
+    clear_providers()
+    register_provider(_HealthSmokePasswordProvider())
+    _reset_password_rate_limit()
+    web_server.app.state.bound_host = "fly-app.fly.dev"
+    web_server.app.state.bound_port = 443
+    web_server.app.state.auth_required = True
+
+    try:
+        client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+
+        unauthenticated = client.get("/api/health-status")
+        assert unauthenticated.status_code == 401
+
+        login = client.post(
+            "/auth/password-login",
+            json={
+                "provider": "health-smoke",
+                "username": "admin",
+                "password": "hunter2",
+                "next": "/api/health-status",
+            },
+        )
+        assert login.status_code == 200
+        assert login.json()["ok"] is True
+
+        response = client.get("/api/health-status")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["overall"] == "healthy"
+        assert data["subsystems"]["kanban_dispatcher"]["heartbeat_age_s"] == 1.0
+    finally:
+        clear_providers()
+        _reset_password_rate_limit()
+        web_server.app.state.bound_host = prev_host
+        web_server.app.state.bound_port = prev_port
+        web_server.app.state.auth_required = prev_required

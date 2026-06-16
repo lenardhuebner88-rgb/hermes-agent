@@ -608,11 +608,11 @@ def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypat
 
     assert ok is True
     assert "lint:control ok" in detail
-    assert "tsc ok" in detail
+    assert "tsc -b ok" in detail
     assert "vitest[control] ok" in detail
     assert ["/usr/bin/npm", "run", "lint:control"] in calls
     assert ["/usr/bin/npx", "vitest", "run", "src/control"] in calls
-    assert any(cmd[-1] == "--noEmit" and "tsc" in cmd[0] for cmd in calls)
+    assert any(cmd[-2:] == ["-b", "--noEmit"] and "tsc" in cmd[0] for cmd in calls)
     assert ["/usr/bin/npm", "run", "build"] not in calls
 
 
@@ -633,6 +633,7 @@ def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch)
     flattened = [" ".join(cmd) for cmd in calls]
     assert not any("npm run lint:control" in cmd for cmd in flattened)
     assert not any("vitest run src/control" in cmd for cmd in flattened)
+    assert not any("tsc -b --noEmit" in cmd for cmd in flattened)
     assert not any("tsc --noEmit" in cmd for cmd in flattened)
 
 
