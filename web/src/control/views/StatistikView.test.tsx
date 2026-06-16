@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
+import { AboTokenPanel, CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
 import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
 
 const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
@@ -57,6 +57,33 @@ describe("CostBreakdownPanel (F4)", () => {
   it("zeigt Skeleton solange keine Daten da sind", () => {
     const html = renderToStaticMarkup(<CostBreakdownPanel data={null} />);
     expect(html).not.toContain("Kosten heute");
+  });
+});
+
+describe("AboTokenPanel", () => {
+  it("gruppiert Tokenverbrauch fuer ChatGPT/Codex, Claude und Kimi-Abos", () => {
+    const html = renderToStaticMarkup(
+      <AboTokenPanel
+        data={fixture([
+          { profile: "coder", runs: 2, cost_usd: 0.0, cost_usd_equivalent: 0.8, input_tokens: 1000, output_tokens: 200 },
+          { profile: "coder-claude", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.2, input_tokens: 3000, output_tokens: 400 },
+          { profile: "kimi", runs: 3, cost_usd: 0.0, cost_usd_equivalent: null, input_tokens: 500, output_tokens: 50 },
+        ])}
+      />,
+    );
+
+    expect(html).toContain("Abo-Tokenverbrauch");
+    expect(html).toContain("ChatGPT/Codex Abo");
+    expect(html).toContain("Claude Max Abo");
+    expect(html).toContain("Kimi Abo");
+    expect(html).toContain("In 1 k · Out 200");
+    expect(html).toContain("In 3 k · Out 400");
+    expect(html).toContain("550");
+  });
+
+  it("zeigt einen ruhigen Leerzustand ohne gestempelte Tokens", () => {
+    const html = renderToStaticMarkup(<AboTokenPanel data={fixture([])} />);
+    expect(html).toContain("Noch kein Abo-Tokenverbrauch");
   });
 });
 
