@@ -141,6 +141,38 @@ class WorktreeTimeout(WorktreeError):
     """
 
 
+def _integration_park_class(reason: str) -> str:
+    """Classify why the serialized integrator parked a chain.
+
+    ``transient`` reasons can self-clear and are safe for the future
+    integration-retry lane. ``needs_orchestrator`` reasons require a focused
+    fixer. Unknown reasons stay operator-owned as the conservative fallback.
+    """
+    text = (reason or "").strip()
+    if text.startswith("integration parked:"):
+        text = text.removeprefix("integration parked:").strip()
+
+    transient_prefixes = (
+        "live checkout has an operation in progress (",
+        "checked-out branch ",
+        "worktree has uncommitted changes but no commits to merge",
+        "chain worktree has uncommitted changes:",
+        "dirty files in live checkout overlap the branch diff:",
+        "chain worktree missing before rebase",
+    )
+    if text.startswith(transient_prefixes):
+        return "transient"
+
+    needs_orchestrator_prefixes = (
+        "merge conflict/failure (aborted):",
+        "post-merge gate failed:",
+    )
+    if text.startswith(needs_orchestrator_prefixes):
+        return "needs_orchestrator"
+
+    return "needs_operator"
+
+
 # ---------------------------------------------------------------------------
 # Config / path predicates
 # ---------------------------------------------------------------------------
