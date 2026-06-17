@@ -4053,6 +4053,7 @@ def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
     now = int(time.time())
     with kb.connect() as conn:
         with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (child_ids[2],))
             conn.execute(
                 """
                 INSERT INTO task_runs (
@@ -4076,6 +4077,10 @@ def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
     assert all((child_id, root) in edges for child_id in child_ids)
     by_id = {node["id"]: node for node in body["nodes"]}
     assert by_id[root]["level"] > by_id[child_ids[2]]["level"]
+    assert by_id[child_ids[0]]["progress"] == {"done": 1, "total": 2}
+    assert by_id[child_ids[1]]["progress"] == {"done": 1, "total": 2}
+    assert by_id[child_ids[2]]["progress"] == {"done": 0, "total": 1}
+    assert by_id[root]["progress"] is None
     latest = by_id[child_ids[0]]["latest_run"]
     assert latest["profile"] == "coder"
     assert latest["runtime_seconds"] >= 100

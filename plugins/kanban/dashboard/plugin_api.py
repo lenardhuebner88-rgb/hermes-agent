@@ -5156,6 +5156,23 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
         children_by_parent.setdefault(parent, []).append(child)
         parents_by_child.setdefault(child, []).append(parent)
 
+    # Progress rollup mirrors the board-card contract: for every node that has
+    # outgoing task_links, report how many direct children are done / total.
+    # The frontend treats ``None`` as "no children or legacy backend".
+    progress: dict[str, dict[str, int]] = {}
+    if nodes:
+        placeholders = ",".join("?" for _ in nodes)
+        for row in conn.execute(
+            "SELECT l.parent_id AS pid, t.status AS cstatus "
+            "FROM task_links l JOIN tasks t ON t.id = l.child_id "
+            f"WHERE l.parent_id IN ({placeholders})",
+            tuple(nodes),
+        ).fetchall():
+            p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
+            p["total"] += 1
+            if row["cstatus"] == "done":
+                p["done"] += 1
+
     depth_cache: dict[str, int] = {}
 
     def depth(node: str, seen: Optional[set[str]] = None) -> int:
@@ -5215,6 +5232,7 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
                 max(0, int(((task.completed_at or now) - task.started_at)))
                 if task.started_at is not None else None
             ),
+            "progress": progress.get(task.id),
             "latest_run": run_payload,
         })
     return {
