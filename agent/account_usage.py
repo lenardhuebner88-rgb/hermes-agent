@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -617,6 +617,71 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     )
 
 
+def _positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _format_token_total(total: int) -> str:
+    return f"{int(total):,}"
+
+
+def _format_run_count(count: int) -> str:
+    return f"{count:,} run" + ("" if count == 1 else "s")
+
+
+def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
+    from hermes_cli import config as hermes_config
+    from hermes_cli import kanban_db
+
+    cfg = hermes_config.load_config() or {}
+    kanban_cfg = cfg.get("kanban") if isinstance(cfg, dict) else None
+    if not isinstance(kanban_cfg, dict):
+        kanban_cfg = {}
+
+    now = _utc_now()
+    windows: list[AccountUsageWindow] = []
+    details: list[str] = []
+    periods = (
+        ("5h", int((now - timedelta(hours=5)).timestamp()), _positive_int(kanban_cfg.get("cap_tokens_5h"))),
+        ("7d", int((now - timedelta(days=7)).timestamp()), _positive_int(kanban_cfg.get("cap_tokens_7d"))),
+    )
+
+    with kanban_db.connect_closing() as conn:
+        for label, since_epoch, cap in periods:
+            totals = kanban_db.subscription_token_totals(
+                conn,
+                subscription="kimi",
+                since_epoch=since_epoch,
+            )
+            total_tokens = int(totals.get("total_tokens") or 0)
+            runs = int(totals.get("runs") or 0)
+            pretty_total = _format_token_total(total_tokens)
+            details.append(f"Kimi {label} tokens: {pretty_total} across {_format_run_count(runs)}")
+            if cap:
+                windows.append(
+                    AccountUsageWindow(
+                        label=f"Kimi {label}",
+                        used_percent=(total_tokens / cap) * 100.0,
+                        detail=f"{pretty_total} / {_format_token_total(cap)} tokens",
+                    )
+                )
+
+    return AccountUsageSnapshot(
+        provider="kimi",
+        source="kanban_subscription_tokens",
+        fetched_at=now,
+        title="Kimi subscription tokens",
+        windows=tuple(windows),
+        details=tuple(details),
+    )
+
+
 def fetch_account_usage(
     provider: Optional[str],
     *,
@@ -633,6 +698,8 @@ def fetch_account_usage(
             return _fetch_anthropic_account_usage()
         if normalized == "openrouter":
             return _fetch_openrouter_account_usage(base_url, api_key)
+        if normalized in {"kimi", "moonshot"}:
+            return _fetch_kimi_account_usage()
     except Exception:
         return None
     return None
