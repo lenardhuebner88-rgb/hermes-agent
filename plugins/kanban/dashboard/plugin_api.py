@@ -3401,6 +3401,108 @@ def activate_lane_endpoint(
         conn.close()
 
 
+class LanePersistProfileEntry(BaseModel):
+    worker_runtime: Literal["hermes", "claude-cli"]
+    provider: Optional[ShortText] = None
+    model: ShortText
+
+
+class LanePersistBody(BaseModel):
+    profiles: dict[str, LanePersistProfileEntry]
+
+
+@router.post("/lanes/persist")
+def persist_lane_models_endpoint(
+    payload: LanePersistBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Write the selected model per profile to the profile's config.yaml and
+    mirror the primary choice into the active lane, preserving existing
+    fallbacks. Returns a per-profile report plus a fresh lane payload."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from utils import atomic_roundtrip_yaml_update
+
+        catalog_profiles = _lane_profile_catalog()
+        known_profiles = {p["name"] for p in catalog_profiles}
+        models = _lane_model_catalog(catalog_profiles)
+        known_models = {m["id"] for m in models}
+
+        unknown_profiles = [name for name in payload.profiles if name not in known_profiles]
+        if unknown_profiles:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "unknown profiles", "profiles": unknown_profiles},
+            )
+
+        bad_models: list[dict[str, str]] = []
+        for name, entry in payload.profiles.items():
+            if entry.model not in known_models:
+                bad_models.append({"profile": name, "model": entry.model})
+        if bad_models:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "unknown models", "models": bad_models},
+            )
+
+        lanes = kanban_db.list_lanes(conn)
+        active_id = next((l["id"] for l in lanes if l["active"]), None)
+        if active_id is None:
+            raise HTTPException(status_code=409, detail="no active lane")
+
+        written: list[str] = []
+        failed: list[dict[str, str]] = []
+        lane_profiles: dict[str, dict[str, Any]] = {}
+
+        for name, entry in payload.profiles.items():
+            try:
+                canon = profiles_mod.normalize_profile_name(name)
+                profile_dir = profiles_mod.get_profile_dir(canon)
+                config_path = profile_dir / "config.yaml"
+                if entry.worker_runtime == "claude-cli":
+                    atomic_roundtrip_yaml_update(config_path, "claude_model", entry.model)
+                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "claude-cli")
+                else:
+                    atomic_roundtrip_yaml_update(config_path, "model.default", entry.model)
+                    atomic_roundtrip_yaml_update(
+                        config_path, "model.provider", entry.provider or ""
+                    )
+                    atomic_roundtrip_yaml_update(config_path, "worker_runtime", "hermes")
+                written.append(name)
+            except Exception as exc:
+                log.exception("lanes/persist: failed to write config for %s", name)
+                failed.append({"profile": name, "error": str(exc)})
+                continue
+
+            active_entry = next(
+                (l for l in lanes if l["id"] == active_id), {}
+            ).get("profiles", {})
+            existing = active_entry.get(name) or {}
+            lane_profiles[name] = {
+                "worker_runtime": entry.worker_runtime,
+                "provider": entry.provider if entry.worker_runtime != "claude-cli" else None,
+                "model": entry.model,
+                "fallback_providers": existing.get("fallback_providers") or [],
+            }
+
+        if lane_profiles:
+            active_lane = next(l for l in lanes if l["id"] == active_id)
+            merged_profiles = dict(active_lane.get("profiles") or {})
+            merged_profiles.update(lane_profiles)
+            kanban_db.update_lane(conn, active_id, profiles=merged_profiles)
+
+        return {
+            "written": written,
+            "failed": failed,
+            "lanes": kanban_db.list_lanes(conn),
+            "active_id": active_id,
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/runs/summary")
 def get_runs_summary(
     since_hours: int = Query(24, ge=1, le=720),

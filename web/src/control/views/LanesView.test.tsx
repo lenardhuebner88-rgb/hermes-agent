@@ -64,6 +64,7 @@ const fixture: LanesResponse = {
 const noopActions = {
   onSelect: vi.fn(),
   onApply: vi.fn(),
+  onPersist: vi.fn(async () => {}),
   onCreate: vi.fn(),
   onDelete: vi.fn(),
   onImportOpenRouterModels: vi.fn(async () => ({
@@ -109,7 +110,7 @@ describe("LanesEditor (routing cards)", () => {
     expect(html.match(/Worker-Check/g)).toHaveLength(2);
   });
 
-  it("warnt und blockiert Speichern bei identischem Primary/Fallback", () => {
+  it("warnt bei identischem Primary/Fallback, sperrt den Speicher-Knopf aber nicht mehr", () => {
     const badLane = {
       ...fixture.lanes[1],
       active: false,
@@ -126,7 +127,62 @@ describe("LanesEditor (routing cards)", () => {
       <LanesEditor data={fixture} lane={badLane} busy={false} actions={noopActions} />,
     );
     expect(html).toContain("Primary and fallback are identical.");
-    expect(html).toMatch(/disabled[^>]*>.*Als Lane speichern/s);
+    expect(html).toMatch(/\b\d+ Hinweis(?:e)?\b/);
+    expect(html).toContain("Dauerhaft speichern");
+  });
+
+  it("lässt den Speicher-Knopf trotz Fallback-fehlt-Warnung aktiv (critic/qwen-Default)", () => {
+    const warningLane = {
+      ...fixture.lanes[1],
+      active: false,
+      profiles: {
+        coder: {
+          worker_runtime: "hermes" as const,
+          provider: "openrouter",
+          model: "qwen/qwen3.7-max",
+          fallback_providers: [],
+        },
+      },
+    };
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={warningLane} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Fallback fehlt.");
+    expect(html).toMatch(/\b\d+ Hinweis(?:e)?\b/);
+    expect(html).toContain("Dauerhaft speichern");
+  });
+
+  it("zeigt in der Standardansicht ein gruppiertes Dropdown pro Rolle", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Modelle pro Rolle");
+    expect(html).toContain("Standard (Claude Fable 5)");
+    expect(html).toContain("Standard (GPT-5.5)");
+    expect(html).toContain("<optgroup");
+    expect(html).toContain("Claude (Max-Abo)");
+    expect(html).toContain("OpenAI Codex");
+  });
+
+  it("bietet einen Erweitert-Collapse für Provider/Fallbacks/Presets", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Erweitert");
+    expect(html).toContain("Rollen &amp; Modelle");
+    expect(html).toContain("Fallbacks");
+    expect(html).toContain("OpenRouter-IDs");
+  });
+
+  it("zeigt im Standard-Modus den primären 'Dauerhaft speichern'-Knopf", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[1]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Dauerhaft speichern");
+    // The primary save button is in the simple-view panel and must be enabled.
+    const simplePanel = (html.split("Modelle pro Rolle")[1] ?? "").split("Erweitert")[0] ?? "";
+    expect(simplePanel).toContain("Dauerhaft speichern");
+    expect(simplePanel).not.toContain('disabled=""');
   });
 
   it("Übernehmen ist auf der aktiven Lane ohne Änderungen deaktiviert (zeigt Aktiv)", () => {
@@ -198,9 +254,10 @@ describe("LanesEditor (routing cards)", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={crowded} lane={crowded.lanes[0]} busy={false} actions={noopActions} />,
     );
-    expect((html.match(/hc-led-live/g) ?? []).length).toBe(4);
-    expect((html.match(/hc-led-warn/g) ?? []).length).toBe(4);
-    expect((html.match(/hc-led-idle/g) ?? []).length).toBe(4);
+    // LEDs render in both the simple view and the advanced collapse.
+    expect((html.match(/hc-led-live/g) ?? []).length).toBe(8);
+    expect((html.match(/hc-led-warn/g) ?? []).length).toBe(8);
+    expect((html.match(/hc-led-idle/g) ?? []).length).toBe(8);
     expect(html).toContain("4/12 bereit · 0 Overrides");
   });
 

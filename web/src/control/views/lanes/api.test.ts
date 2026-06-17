@@ -12,6 +12,7 @@ import {
   laneProfileSpawnHealth,
   modelLabel,
   modelsForProvider,
+  persistLaneModels,
   profilesFromEditorRows,
   providerOptions,
   smokeCheckLaneConfig,
@@ -107,6 +108,29 @@ describe("lanes api client", () => {
     expect(url).toContain("/api/plugins/kanban/lanes/openrouter-models/import");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({ raw_text: "xiaomi/mimo-v2.5" });
+  });
+
+  it("persistLaneModels posts profiles to the persist endpoint", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      written: ["coder"],
+      failed: [],
+      lanes: [],
+      active_id: "lane_1",
+    }));
+
+    const result = await persistLaneModels({
+      coder: { worker_runtime: "hermes", provider: "openai-codex", model: "gpt-5.5" },
+    });
+
+    expect(result.written).toEqual(["coder"]);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/plugins/kanban/lanes/persist");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      profiles: {
+        coder: { worker_runtime: "hermes", provider: "openai-codex", model: "gpt-5.5" },
+      },
+    });
   });
 });
 

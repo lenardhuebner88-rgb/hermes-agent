@@ -99,6 +99,19 @@ export interface LanesResponse {
   models?: LaneModelOption[];
 }
 
+export interface LanePersistProfileEntry {
+  worker_runtime: LaneRuntime;
+  provider?: string | null;
+  model: string;
+}
+
+export interface LanePersistResult {
+  written: string[];
+  failed: { profile: string; error: string }[];
+  lanes: Lane[];
+  active_id: string;
+}
+
 const BASE = "/api/plugins/kanban/lanes";
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -346,6 +359,16 @@ export function importOpenRouterModels(rawText: string): Promise<OpenRouterModel
   });
 }
 
+export function persistLaneModels(
+  profiles: Record<string, LanePersistProfileEntry>,
+): Promise<LanePersistResult> {
+  return fetchJSON<LanePersistResult>(`${BASE}/persist`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ profiles }),
+  });
+}
+
 // --- choice helpers (pure; unit-tested) -------------------------------------
 //
 // The simple editor shows ONE dropdown per profile. Its value encodes
@@ -499,13 +522,17 @@ export function editorRows(
   return rows;
 }
 
-/** Editor rows → API payload. Default rows ("") are dropped entirely. */
+/** Editor rows → API payload. Default rows ("") are dropped entirely.
+ *  Incomplete fallback lines are silently dropped so advisory warnings never
+ *  block saving the primary choice. */
 export function profilesFromEditorRows(
   rows: EditorRow[],
 ): Record<string, Partial<LaneProfileEntry>> {
   const out: Record<string, Partial<LaneProfileEntry>> = {};
   for (const row of rows) {
-    const fallbackProviders = cloneFallbacks(row.fallbackProviders);
+    const fallbackProviders = cloneFallbacks(row.fallbackProviders).filter(
+      (fallback) => fallback.provider && fallback.model,
+    );
     const hasStructuredOverride =
       row.provider !== null ||
       row.model !== null ||

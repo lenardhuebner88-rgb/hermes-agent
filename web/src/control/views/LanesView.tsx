@@ -9,12 +9,15 @@ import {
   activateLane,
   createLane,
   deleteLane,
+  choiceFromEntry,
   editorRows,
+  entryFromChoice,
   importOpenRouterModels,
   laneEntryWarnings,
+  modelLabel,
+  persistLaneModels,
   laneProfileSpawnHealth,
   loadLanes,
-  modelLabel,
   modelsForProvider,
   providerLabel,
   providerOptions,
@@ -94,6 +97,16 @@ const t = {
   openRouterImportRun: "Smoken & aufnehmen",
   openRouterImportRunning: "Smoke läuft …",
   openRouterImported: (n: number) => (n === 1 ? "1 neu" : `${n} neu`),
+  warningsHint: (n: number) => (n === 1 ? "1 Hinweis" : `${n} Hinweise`),
+  warningsExpand: "Hinweise anzeigen",
+  warningsCollapse: "Hinweise ausblenden",
+  modelsTitle: "Modelle pro Rolle",
+  standard: "Standard",
+  advanced: "Erweitert",
+  permanent: "Dauerhaft",
+  permanentModel: (model: string) => `Dauerhaft: ${model}`,
+  savePermanently: "Dauerhaft speichern",
+  divergenceHint: (model: string) => `läuft aktuell auf ${model}`,
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -112,6 +125,53 @@ const ROLE_HINTS: Record<string, string> = {
 
 const CONTROL_CLASS =
   "min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-base text-white sm:min-h-9 sm:text-sm";
+
+function groupedModelOptions(models: LaneModelOption[]) {
+  const groups = new Map<string, LaneModelOption[]>();
+  for (const model of models) {
+    const key = model.group || model.provider || "API-Modelle";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(model);
+  }
+  return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+}
+
+function SimpleModelSelect({
+  value,
+  defaultLabel,
+  models,
+  disabled,
+  label,
+  onChange,
+}: {
+  value: string;
+  defaultLabel: string;
+  models: LaneModelOption[];
+  disabled: boolean;
+  label: string;
+  onChange: (choice: string) => void;
+}) {
+  return (
+    <select
+      value={value}
+      aria-label={label}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+      className={CONTROL_CLASS}
+    >
+      <option value="">{t.standardOption(defaultLabel)}</option>
+      {groupedModelOptions(models).map(([group, items]) => (
+        <optgroup key={group} label={group}>
+          {items.map((model) => (
+            <option key={model.id} value={choiceFromEntry({ worker_runtime: model.runtime, model: model.id })}>
+              {model.label}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
 
 function ProviderSelect({
   value,
@@ -192,6 +252,7 @@ function ModelSelect({
 interface EditorActions {
   onSelect: (laneId: string) => void;
   onApply: (lane: Lane, rows: EditorRow[], needsSave: boolean) => void;
+  onPersist: (rows: EditorRow[]) => Promise<void>;
   onCreate: (name: string, rows: EditorRow[]) => void;
   onDelete: (lane: Lane) => void;
   onImportOpenRouterModels: (rawText: string) => Promise<OpenRouterModelImportResult>;
@@ -323,8 +384,13 @@ export function LanesEditor({
     () => Object.fromEntries(rows.map((row) => [row.profile, laneEntryWarnings(row)])),
     [rows],
   );
-  const hasWrongWorkerChoice = Object.values(rowWarnings).some((warnings) => warnings.length > 0);
-  const applyDisabled = busy || hasWrongWorkerChoice || (!dirty && lane.active);
+  const warningEntries = useMemo(
+    () => rows.flatMap((row) => rowWarnings[row.profile].map((text) => ({ profile: row.profile, text }))),
+    [rows, rowWarnings],
+  );
+  const hasWarnings = warningEntries.length > 0;
+  const [warningsExpanded, setWarningsExpanded] = useState(false);
+  const applyDisabled = busy || (!dirty && lane.active);
 
   // Bereitschaft + Override-Zustand pro Zeile — passiv scannbar, ohne dass der
   // Operator erst jede Zeile einzeln per Worker-Check anstoßen muss.
@@ -525,20 +591,163 @@ export function LanesEditor({
               </option>
             ))}
           </select>
+          <div className="flex flex-col gap-2 sm:ml-auto sm:flex-row sm:items-center">
+            <Button
+              size="sm"
+              className="hc-hit"
+              disabled={applyDisabled}
+              onClick={() => actions.onApply(lane, rows, dirty)}
+            >
+              <Check className="h-4 w-4" />
+              {!dirty && lane.active ? t.applied : t.apply}
+            </Button>
+            {hasWarnings ? (
+              <button
+                type="button"
+                onClick={() => setWarningsExpanded((v) => !v)}
+                className="text-xs hc-dim hover:text-white"
+                aria-expanded={warningsExpanded}
+                aria-label={warningsExpanded ? t.warningsCollapse : t.warningsExpand}
+              >
+                {t.warningsHint(warningEntries.length)} {warningsExpanded ? "▾" : "▸"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {hasWarnings && warningsExpanded ? (
+          <div className="mt-3 space-y-1 border-t border-[var(--hc-border)] pt-3">
+            {warningEntries.map(({ profile, text }) => (
+              <ToneCallout key={`${profile}:${text}`} tone="amber">
+                <span className="font-medium">{profile}:</span> {text}
+              </ToneCallout>
+            ))}
+          </div>
+        ) : null}
+      </FleetPanel>
+
+      {/* Standardansicht: ein Dropdown pro Rolle. */}
+      <FleetPanel eyebrow={t.modelsTitle} meta={profilesMeta}>
+        <ul className="space-y-3">
+          {rows.map((row) => {
+            const ready = readiness[row.profile];
+            const override = hasLaneOverride(row);
+            const currentChoice = row.choice;
+            return (
+              <li
+                key={row.profile}
+                className="rounded-md border border-[var(--hc-border)] bg-black/15 p-3"
+              >
+                <div className="flex min-w-0 flex-col gap-2">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <span className="mt-1.5 inline-flex shrink-0" title={t.readinessTitle(ready.label)}>
+                      <Led kind={ready.kind} size={8} />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="truncate text-sm font-medium text-white" title={row.description}>
+                          {row.profile}
+                        </span>
+                        {override ? (
+                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-sky-200">
+                            {t.laneOverride}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] leading-4 hc-dim">
+                            {t.profileDefault}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
+                        {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
+                        {ready.known && !ready.ready ? (
+                          <span className={ready.kind === "ready" ? "hc-soft" : "text-amber-300/90"}>
+                            {t.readinessTitle(ready.label)}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                  <SimpleModelSelect
+                    value={currentChoice}
+                    defaultLabel={row.defaultLabel}
+                    models={models}
+                    disabled={busy}
+                    label={`Modell für ${row.profile}`}
+                    onChange={(choice) => {
+                      const entry = entryFromChoice(choice);
+                      if (entry === null) {
+                        updateRow(row.profile, {
+                          choice: "",
+                          worker_runtime: row.worker_runtime,
+                          provider: null,
+                          model: null,
+                        });
+                      } else {
+                        const model = entry.model ?? "";
+                        const catalogEntry = models.find((m) => m.id === model);
+                        updateRow(row.profile, {
+                          choice,
+                          worker_runtime: entry.worker_runtime ?? "hermes",
+                          provider: catalogEntry?.provider ?? null,
+                          model: model || null,
+                        });
+                      }
+                    }}
+                  />
+                  <div className="text-xs hc-dim">
+                    {t.permanentModel(row.defaultLabel)}
+                    {(() => {
+                      const profile = data.profiles.find((p) => p.name === row.profile);
+                      const profileModel = profile?.default_model;
+                      const activeLane = data.lanes.find((l) => l.active) ?? lane;
+                      const activeEntry = activeLane.profiles[row.profile];
+                      const activeModel = activeEntry?.model ?? profileModel;
+                      if (!activeModel || !profileModel || activeModel === profileModel) return null;
+                      return (
+                        <span className="ml-2 text-amber-300/90">
+                          ⚠ {t.divergenceHint(modelLabel(activeModel, models))}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+        <div className="sticky bottom-0 mt-3 flex flex-col gap-2 border-t border-[var(--hc-border)] bg-[var(--hc-bg)]/95 pt-3 sm:flex-row sm:items-center sm:justify-end">
           <Button
             size="sm"
-            className="hc-hit sm:ml-auto"
+            className="hc-hit w-full justify-center sm:w-auto"
             disabled={applyDisabled}
-            onClick={() => actions.onApply(lane, rows, dirty)}
+            onClick={() => actions.onPersist(rows)}
           >
             <Check className="h-4 w-4" />
-            {!dirty && lane.active ? t.applied : t.apply}
+            {t.savePermanently}
           </Button>
+          {hasWarnings ? (
+            <button
+              type="button"
+              onClick={() => setWarningsExpanded((v) => !v)}
+              className="inline-flex min-h-11 items-center text-xs hc-dim hover:text-white sm:min-h-0"
+              aria-expanded={warningsExpanded}
+              aria-label={warningsExpanded ? t.warningsCollapse : t.warningsExpand}
+            >
+              {t.warningsHint(warningEntries.length)} {warningsExpanded ? "▾" : "▸"}
+            </button>
+          ) : null}
         </div>
       </FleetPanel>
 
-      {/* Rollen-Liste: mobile-first cards with primary route + fallbacks. */}
-      <FleetPanel eyebrow={t.profilesPanel} meta={profilesMeta}>
+      {/* Erweitert: Provider, Fallbacks, Presets, OpenRouter-Import */}
+      <details className="group">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between rounded-md border border-[var(--hc-border)] bg-black/15 p-3 text-sm hc-soft sm:min-h-9">
+          <span>{t.advanced}</span>
+          <span className="group-open:hidden">▸</span>
+          <span className="hidden group-open:inline">▾</span>
+        </summary>
+        <div className="mt-3">
+          <FleetPanel eyebrow={t.profilesPanel} meta={profilesMeta}>
         <div className="mb-3 space-y-2 border-b border-[var(--hc-border)] pb-3">
           <label className="block min-w-0">
             <span className="hc-type-label">{t.openRouterImport}</span>
@@ -825,7 +1034,9 @@ export function LanesEditor({
             {t.configPreview}
           </Button>
         </div>
-      </FleetPanel>
+          </FleetPanel>
+        </div>
+      </details>
 
       {/* Presets: anlegen + aufräumen. Auswahl passiert oben. */}
       <FleetPanel eyebrow={t.presetsPanel}>
@@ -972,6 +1183,27 @@ export function LanesView(_props: { density?: Density }) {
           await updateLane(target.id, { profiles: profilesFromEditorRows(rows) });
         }
         if (!target.active) await activateLane(target.id);
+      }),
+    onPersist: (rows) =>
+      run(async () => {
+        const profiles: Record<string, import("./lanes/api").LanePersistProfileEntry> = {};
+        for (const row of rows) {
+          if (!row.choice && !row.provider && !row.model) continue;
+          profiles[row.profile] = {
+            worker_runtime: row.worker_runtime ?? "hermes",
+            provider: row.provider,
+            model: row.model ?? "",
+          };
+        }
+        if (Object.keys(profiles).length === 0) return;
+        const result = await persistLaneModels(profiles);
+        if (result.failed.length > 0) {
+          throw new Error(
+            `Dauerhaft speichern fehlgeschlagen für: ${result.failed
+              .map((f) => `${f.profile} (${f.error})`)
+              .join(", ")}`,
+          );
+        }
       }),
     onCreate: (name, rows) =>
       void run(async () => {
