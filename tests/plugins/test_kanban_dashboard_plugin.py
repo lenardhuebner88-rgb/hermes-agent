@@ -4854,3 +4854,97 @@ def test_lanes_spawn_check_reports_unknown_profile(client):
     assert data["status"] == "unhealthy"
     assert data["dispatcher_path"] == "hermes"
     assert "Profile 'ghost' is not in the lane catalog" in data["reason"]
+
+
+# ---------------------------------------------------------------------------
+# GET /planspecs/detail
+# ---------------------------------------------------------------------------
+
+_REAL_PLANSPEC = (
+    "/home/piet/vault/03-Agents/Claude-Code/plans/"
+    "2026-06-17-kanban-chain-haertung-planspec.md"
+)
+
+
+@pytest.mark.skipif(
+    not Path(_REAL_PLANSPEC).exists(),
+    reason="real planspec file not present on this machine",
+)
+def test_planspecs_detail_happy_path(client):
+    """Happy path: real planspec → 200 with all required fields populated."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": _REAL_PLANSPEC},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    # Top-level fields present
+    assert "goal" in data
+    assert "freigabe" in data
+    assert "live_test_depth" in data
+    assert "anti_scope" in data
+    assert "subtasks" in data
+
+    # acceptance_criteria non-empty (this planspec has structured ACs)
+    assert isinstance(data["acceptance_criteria"], list)
+    assert len(data["acceptance_criteria"]) > 0, "expected at least one AC"
+
+    # anti_scope non-empty
+    assert isinstance(data["anti_scope"], list)
+    assert len(data["anti_scope"]) > 0, "expected at least one anti_scope entry"
+
+    # freigabe and live_test_depth populated
+    assert data["freigabe"], "freigabe must be non-empty"
+    assert data["live_test_depth"], "live_test_depth must be non-empty"
+
+    # subtasks list with correct keys
+    assert isinstance(data["subtasks"], list)
+    assert len(data["subtasks"]) > 0, "expected at least one subtask"
+    for st in data["subtasks"]:
+        assert "id" in st, f"subtask missing id: {st}"
+        assert "title" in st, f"subtask missing title: {st}"
+        assert "lane" in st, f"subtask missing lane: {st}"
+        assert "deps" in st, f"subtask missing deps: {st}"
+        assert isinstance(st["deps"], list)
+
+
+def test_planspecs_detail_traversal_relative(client):
+    """Path traversal via relative ``../../..`` → 400, no file content leak."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "../../../../etc/passwd"},
+    )
+    assert r.status_code in (400, 404), r.text
+    body = r.text
+    # Must not echo /etc/passwd contents (e.g. "root:" marker)
+    assert "root:" not in body, f"file content leaked in response: {body[:200]}"
+
+
+def test_planspecs_detail_traversal_absolute(client):
+    """Absolute path outside vault root → 400, no file content leak."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/etc/passwd"},
+    )
+    assert r.status_code in (400, 404), r.text
+    body = r.text
+    assert "root:" not in body, f"file content leaked in response: {body[:200]}"
+
+
+def test_planspecs_detail_missing_file_under_root(client):
+    """Valid path under vault root but file does not exist → 404."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"},
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_planspecs_detail_non_md_suffix(client):
+    """Path with non-.md suffix → 400."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/something.txt"},
+    )
+    assert r.status_code == 400, r.text
