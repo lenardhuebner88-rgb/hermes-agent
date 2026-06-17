@@ -221,6 +221,65 @@ def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path)
         assert set(kb.parent_ids(conn, root.id)) == {child1.id, child2.id}
 
 
+def test_list_planspecs_derives_queued_kanban_state(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+
+    assert len(records) == 1
+    row = records[0]
+    assert row["open"] is True
+    assert row["kanban_state"] == "queued"
+    assert row["kanban_root_task_id"] == result["root_task_id"]
+    assert row["kanban_root_status"] == "todo"
+    assert row["kanban_child_total"] == 2
+    assert row["kanban_child_done"] == 0
+
+
+def test_list_planspecs_hides_completed_kanban_state_from_open_scope(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    with kb.connect_closing() as conn:
+        child_ids = result["child_ids"]
+        with kb.write_txn(conn):
+            conn.executemany("UPDATE tasks SET status = 'done' WHERE id = ?", [(task_id,) for task_id in child_ids])
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (result["root_task_id"],))
+
+    assert planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True) == []
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all", include_kanban_status=True)
+
+    assert len(all_records) == 1
+    row = all_records[0]
+    assert row["open"] is False
+    assert row["closed_reason"] == "kanban state: completed"
+    assert row["kanban_state"] == "completed"
+    assert row["kanban_child_done"] == 2
+
+
+def test_list_planspecs_derives_blocked_and_running_kanban_state(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (result["child_ids"][0],))
+    running = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)[0]
+    assert running["kanban_state"] == "running"
+    assert running["kanban_child_running"] == 1
+
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (result["child_ids"][1],))
+    blocked = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)[0]
+    assert blocked["kanban_state"] == "blocked"
+    assert blocked["kanban_child_blocked"] == 1
+
+
 def test_ingest_planspec_is_idempotent_on_reingest(kanban_home, tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)

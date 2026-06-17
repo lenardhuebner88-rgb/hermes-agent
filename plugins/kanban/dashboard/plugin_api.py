@@ -4776,10 +4776,19 @@ def list_planspecs(
     valid: Optional[bool] = Query(None),
     limit: Optional[int] = Query(None, ge=0, le=500),
     q: Optional[str] = Query(None, max_length=256),
+    board: Optional[str] = Query(None),
 ):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
-    records = planspecs.list_planspecs(scope=scope, valid=valid, limit=limit, search=q)
+    board = _resolve_board(board)
+    records = planspecs.list_planspecs(
+        scope=scope,
+        valid=valid,
+        limit=limit,
+        search=q,
+        include_kanban_status=True,
+        board=board,
+    )
     return {"planspecs": records, "count": len(records)}
 
 

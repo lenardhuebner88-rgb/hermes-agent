@@ -94,6 +94,14 @@ export const PlanSpecRecordSchema = z.object({
   valid: z.boolean().catch(false),
   open: z.boolean().catch(false),
   closed_reason: z.string().nullable().catch(null),
+  kanban_root_task_id: z.string().nullable().catch(null),
+  kanban_root_status: z.string().nullable().catch(null),
+  kanban_state: z.enum(["not_ingested", "queued", "running", "blocked", "completed", "done", "unknown"]).catch("not_ingested"),
+  kanban_child_total: z.coerce.number().catch(0),
+  kanban_child_done: z.coerce.number().catch(0),
+  kanban_child_blocked: z.coerce.number().catch(0),
+  kanban_child_running: z.coerce.number().catch(0),
+  kanban_ingested_at: z.coerce.number().nullable().catch(null),
   errors: z.array(z.string()).catch([]),
 });
 

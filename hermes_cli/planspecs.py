@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -157,6 +158,73 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     )
 
 
+def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str, Any] | None:
+    """Return the latest Kanban execution state for a PlanSpec source path.
+
+    Variant A is deliberately read-only: the Vault frontmatter is not touched.
+    Ingest already records a durable root event with
+    ``payload.source == 'planspec_ingest'`` and ``payload.path == <path>``;
+    the dashboard can derive whether that root is queued, running, blocked, or
+    completed from the live Kanban tree.
+    """
+    resolved = str(path.resolve(strict=False))
+    conn = kanban_db.connect(board=board)
+    try:
+        rows = conn.execute(
+            "SELECT task_id, payload, created_at FROM task_events "
+            "WHERE kind = 'specified' AND payload LIKE ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 50",
+            ("%planspec_ingest%",),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if payload.get("source") != "planspec_ingest":
+                continue
+            if str(payload.get("path") or "") != resolved:
+                continue
+            root_id = str(row["task_id"])
+            root = kanban_db.get_task(conn, root_id)
+            if root is None:
+                continue
+            child_ids = kanban_db.parent_ids(conn, root_id)
+            child_statuses: list[str] = []
+            for child_id in child_ids:
+                child = kanban_db.get_task(conn, child_id)
+                if child is not None:
+                    child_statuses.append(child.status)
+            statuses = [root.status, *child_statuses]
+            if root.status == "done":
+                state = "completed"
+            elif "blocked" in statuses:
+                state = "blocked"
+            elif any(status in {"running", "review"} for status in statuses):
+                state = "running"
+            elif any(status in {"triage", "todo", "scheduled", "ready"} for status in statuses):
+                state = "queued"
+            else:
+                state = root.status or "unknown"
+            total = len(child_statuses)
+            done = sum(1 for status in child_statuses if status == "done")
+            blocked = sum(1 for status in child_statuses if status == "blocked")
+            running = sum(1 for status in child_statuses if status in {"running", "review"})
+            return {
+                "root_task_id": root_id,
+                "root_status": root.status,
+                "state": state,
+                "child_total": total,
+                "child_done": done,
+                "child_blocked": blocked,
+                "child_running": running,
+                "ingested_at": int(row["created_at"]),
+            }
+        return None
+    finally:
+        conn.close()
+
+
 def list_planspecs(
     *,
     plans_root: Path = DEFAULT_PLANS_ROOT,
@@ -164,6 +232,8 @@ def list_planspecs(
     valid: bool | None = None,
     limit: int | None = None,
     search: str | None = None,
+    include_kanban_status: bool = False,
+    board: str | None = None,
 ) -> list[dict[str, Any]]:
     if scope not in ("open", "all"):
         raise ValueError("scope must be 'open' or 'all'")
@@ -199,10 +269,28 @@ def list_planspecs(
             valid = not errors and binding
             closed = _closed_reason(status)
             display_only_open = not errors and not binding and _is_display_only_open_plan(frontmatter, status)
-            open_record = closed is None and (valid or display_only_open)
+            kanban_state = None
+            kanban_state_error = None
+            if include_kanban_status:
+                try:
+                    kanban_state = _planspec_kanban_state(path, board=board)
+                except Exception as exc:  # pragma: no cover - defensive UI fallback
+                    kanban_state_error = str(exc)
+            kanban_terminal_state = (kanban_state or {}).get("state") or "not_ingested"
+            open_record = closed is None and (valid or display_only_open) and kanban_terminal_state != "completed"
+            if closed:
+                closed_reason = closed
+            elif kanban_terminal_state == "completed":
+                closed_reason = "kanban state: completed"
+            elif open_record:
+                closed_reason = None
+            else:
+                closed_reason = "not a binding PlanSpec"
             record_errors = list(errors)
             if display_only_open:
                 record_errors.append("display-only: taskgraph_hints.binding is missing; Kanban ingest disabled")
+            if kanban_state_error:
+                record_errors.append(f"kanban status unavailable: {kanban_state_error}")
             records.append(
                 {
                     "path": str(path.resolve(strict=False)),
@@ -216,7 +304,15 @@ def list_planspecs(
                     "subtask_count": len(hints.subtasks) if hints else 0,
                     "valid": valid,
                     "open": open_record,
-                    "closed_reason": closed if closed else (None if open_record else "not a binding PlanSpec"),
+                    "closed_reason": closed_reason,
+                    "kanban_root_task_id": (kanban_state or {}).get("root_task_id"),
+                    "kanban_root_status": (kanban_state or {}).get("root_status"),
+                    "kanban_state": kanban_terminal_state,
+                    "kanban_child_total": (kanban_state or {}).get("child_total", 0),
+                    "kanban_child_done": (kanban_state or {}).get("child_done", 0),
+                    "kanban_child_blocked": (kanban_state or {}).get("child_blocked", 0),
+                    "kanban_child_running": (kanban_state or {}).get("child_running", 0),
+                    "kanban_ingested_at": (kanban_state or {}).get("ingested_at"),
                     "errors": record_errors,
                 }
             )

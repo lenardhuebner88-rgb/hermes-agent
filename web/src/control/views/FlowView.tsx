@@ -51,7 +51,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
+import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -171,6 +171,30 @@ function RecoveryStrip() {
       )}
     </FleetPanel>
   );
+}
+
+function planSpecKanbanTone(state: PlanSpecRecord["kanban_state"]): ToneName {
+  if (state === "completed" || state === "done") return "emerald";
+  if (state === "blocked") return "red";
+  if (state === "running") return "amber";
+  if (state === "queued") return "violet";
+  return "zinc";
+}
+
+function planSpecKanbanLabel(item: PlanSpecRecord): string {
+  if (item.kanban_state === "completed" || item.kanban_state === "done") return "erledigt";
+  if (item.kanban_state === "blocked") return "blocked";
+  if (item.kanban_state === "running") return "läuft";
+  if (item.kanban_state === "queued") return "geplant";
+  return item.valid ? "offen" : "blocked";
+}
+
+function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
+  if (!item.kanban_root_task_id || item.kanban_child_total <= 0) return null;
+  const bits = [`${item.kanban_child_done}/${item.kanban_child_total} done`];
+  if (item.kanban_child_running > 0) bits.push(`${item.kanban_child_running} läuft`);
+  if (item.kanban_child_blocked > 0) bits.push(`${item.kanban_child_blocked} blocked`);
+  return bits.join(" · ");
 }
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
@@ -299,6 +323,9 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const closeBusy = busyPath === `${item.path}:close`;
           const rowError = errorByPath[item.path];
           const prompt = promptByPath[item.path];
+          const kanbanLabel = planSpecKanbanLabel(item);
+          const kanbanProgress = planSpecKanbanProgress(item);
+          const kanbanTone = planSpecKanbanTone(item.kanban_state);
           return (
             <div key={item.path} className="min-w-0 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
               <div className="flex min-w-0 flex-wrap items-start gap-2">
@@ -307,12 +334,14 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   <p className="break-words text-sm font-semibold leading-snug text-white">{item.topic}</p>
                   <p className="mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal">{item.path}</p>
                 </div>
-                <StatusPill tone={item.valid ? "emerald" : "amber"} label={item.valid ? "offen" : "blocked"} dot={item.valid ? "live" : "warn"} />
+                <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "warn" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
+                {item.kanban_root_task_id ? <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">Root {item.kanban_root_task_id}</span> : null}
+                {kanbanProgress ? <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{kanbanProgress}</span> : null}
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}

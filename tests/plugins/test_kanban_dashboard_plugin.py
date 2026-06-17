@@ -91,7 +91,14 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
 
     assert response.status_code == 200
     assert response.json()["count"] == 1
-    assert calls == [{"scope": "open", "valid": True, "limit": 8, "search": None}]
+    assert calls == [{
+        "scope": "open",
+        "valid": True,
+        "limit": 8,
+        "search": None,
+        "include_kanban_status": True,
+        "board": None,
+    }]
 
 
 # ---------------------------------------------------------------------------
