@@ -3876,6 +3876,7 @@ def test_flow_release_unblocks_scheduled_children_dag_correct(client):
     r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
     assert r.status_code == 200, r.text
     body = r.json()
+    assert body["ok"] is True
     assert body["released"] == 3, body
     assert set(body["released_ids"]) == set(child_ids)
 

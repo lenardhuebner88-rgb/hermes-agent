@@ -173,6 +173,15 @@ export interface FlowSizingResponse {
   gate: FlowGateResponse;
 }
 
+export interface FlowReleaseResponse {
+  ok: boolean;
+  task_id: string;
+  released: number;
+  released_ids: string[];
+  release_level: FlowGateReleaseLevel;
+  assignee_overrides: Record<string, string | null>;
+}
+
 export interface FlowTimeoutSweepResponse {
   ok: boolean;
   timeout_seconds: number;

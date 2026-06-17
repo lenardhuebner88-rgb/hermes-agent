@@ -25,6 +25,7 @@ import {
   BoardResponseSchema,
   ChainGraphResponseSchema,
   FlowGateResponseSchema,
+  FlowReleaseResponseSchema,
   FlowSizingResponseSchema,
   FlowTimeoutSweepResponseSchema,
   PlanSpecsResponseSchema,
@@ -42,7 +43,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -1020,9 +1021,13 @@ export function useFlowRelease(onDone?: () => void | Promise<void>) {
     setBusyId(rootId);
     setErrorById((prev) => ({ ...prev, [rootId]: "" }));
     try {
-      const res = await fetchJSON<{ released?: number }>(
-        `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-release`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options ?? {}) },
+      const res: FlowReleaseResponse = parseOrThrow(
+        FlowReleaseResponseSchema,
+        await fetchJSON<unknown>(
+          `/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-release`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options ?? {}) },
+        ),
+        "flow-release",
       );
       await onDone?.();
       return { ok: true, released: res.released ?? 0 };

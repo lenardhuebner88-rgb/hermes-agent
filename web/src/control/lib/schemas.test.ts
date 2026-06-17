@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+
+describe("FlowReleaseResponseSchema", () => {
+  it("preserves the release contract ok flag and count", () => {
+    const parsed = parseOrThrow(FlowReleaseResponseSchema, {
+      ok: true,
+      task_id: "t_root",
+      released: 2,
+      released_ids: ["t_a", "t_b"],
+      release_level: "merge",
+      assignee_overrides: { t_a: "reviewer" },
+    }, "flow-release");
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.released).toBe(2);
+    expect(parsed.released_ids).toEqual(["t_a", "t_b"]);
+  });
+});
 
 describe("BacklogResponseSchema (Family Organizer contract health)", () => {
   it("preserves unknown status/risk values and parses contract-health drift", () => {

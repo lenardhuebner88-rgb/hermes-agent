@@ -5408,6 +5408,7 @@ def _release_flow_gate(
         },
     )
     return {
+        "ok": True,
         "task_id": root_id,
         "released": len(released),
         "released_ids": released,
