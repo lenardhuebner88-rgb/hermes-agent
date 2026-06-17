@@ -2078,6 +2078,101 @@ async def get_portal_status():
     }
 
 
+_ACCOUNT_USAGE_PROVIDERS: Tuple[str, ...] = ("anthropic", "openai-codex", "kimi")
+_ACCOUNT_USAGE_CACHE_TTL_SECONDS = 60
+_ACCOUNT_USAGE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_ACCOUNT_USAGE_CACHE_LOCK = threading.Lock()
+
+
+def _isoformat_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _account_usage_unavailable(provider: str, reason: str = "usage_unavailable") -> Dict[str, Any]:
+    return {
+        "provider": provider,
+        "available": False,
+        "source": None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "title": "Account limits",
+        "plan": None,
+        "windows": [],
+        "details": [],
+        "unavailable_reason": reason,
+    }
+
+
+def _account_usage_payload(snapshot: Any, provider: str) -> Dict[str, Any]:
+    if snapshot is None:
+        return _account_usage_unavailable(provider)
+    windows = []
+    for window in getattr(snapshot, "windows", ()) or ():
+        windows.append(
+            {
+                "label": str(getattr(window, "label", "") or ""),
+                "used_percent": getattr(window, "used_percent", None),
+                "reset_at": _isoformat_or_none(getattr(window, "reset_at", None)),
+                "detail": getattr(window, "detail", None),
+            }
+        )
+    return {
+        "provider": str(getattr(snapshot, "provider", None) or provider),
+        "available": bool(getattr(snapshot, "available", False)),
+        "source": getattr(snapshot, "source", None),
+        "fetched_at": _isoformat_or_none(getattr(snapshot, "fetched_at", None)),
+        "title": getattr(snapshot, "title", None) or "Account limits",
+        "plan": getattr(snapshot, "plan", None),
+        "windows": windows,
+        "details": [str(detail) for detail in (getattr(snapshot, "details", ()) or ())],
+        "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
+    }
+
+
+async def _cached_account_usage_payload(provider: str) -> Dict[str, Any]:
+    now = time.monotonic()
+    with _ACCOUNT_USAGE_CACHE_LOCK:
+        cached = _ACCOUNT_USAGE_CACHE.get(provider)
+        if cached is not None:
+            expires_at, payload = cached
+            if expires_at > now:
+                return {**payload, "cached": True}
+
+    try:
+        import agent.account_usage as account_usage
+
+        snapshot = await asyncio.to_thread(account_usage.fetch_account_usage, provider)
+        payload = _account_usage_payload(snapshot, provider)
+    except Exception:
+        # The dashboard contract is fail-soft: do not 500 and do not copy
+        # exception text into the response, since upstream errors can include
+        # bearer-token shaped values.
+        _log.debug("account usage fetch failed for provider %s", provider)
+        payload = _account_usage_unavailable(provider)
+
+    with _ACCOUNT_USAGE_CACHE_LOCK:
+        _ACCOUNT_USAGE_CACHE[provider] = (
+            time.monotonic() + _ACCOUNT_USAGE_CACHE_TTL_SECONDS,
+            payload,
+        )
+    return {**payload, "cached": False}
+
+
+@app.get("/api/account-usage")
+async def get_account_usage():
+    providers = [
+        await _cached_account_usage_payload(provider)
+        for provider in _ACCOUNT_USAGE_PROVIDERS
+    ]
+    return {
+        "providers": providers,
+        "cache_ttl_seconds": _ACCOUNT_USAGE_CACHE_TTL_SECONDS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics: prompt-size, support dump, debug upload, config migrate.
 # All produce text output, so they spawn background actions tailed via
