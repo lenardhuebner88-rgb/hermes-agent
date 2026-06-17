@@ -82,6 +82,33 @@ def test_parse_binding_planspec_to_children(tmp_path: Path):
     assert spec.children[1]["assignee"] == "coder-claude"
 
 
+def test_parse_binding_planspec_maps_reviewer_lane_to_review_kind(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            """    - id: B1-S2
+      title: "Ingest deterministically"
+      lane: coder-claude
+      deps: [B1-S1]
+""",
+            """    - id: B1-S2
+      title: "Final verdict"
+      lane: reviewer
+      deps: [B1-S1]
+""",
+        ),
+        encoding="utf-8",
+    )
+
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    assert spec.children[0]["kind"] == "code"
+    assert spec.children[1]["assignee"] == "reviewer"
+    assert spec.children[1]["kind"] == "review"
+
+
 def test_list_planspecs_reports_binding_status(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)

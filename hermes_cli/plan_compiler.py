@@ -278,6 +278,15 @@ def _role_hint(roles: list[str], index: int) -> str | None:
     return roles[0]
 
 
+def _kind_for_planspec_lane(lane: str) -> str:
+    normalized = (lane or "").strip().lower()
+    if normalized in {"reviewer", "critic"}:
+        return "review"
+    if normalized == "research":
+        return "research"
+    return "code"
+
+
 def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[dict[str, Any]]:
     """Translate binding frontmatter hints into kanban ``children``.
 
@@ -304,7 +313,7 @@ def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[
                 "title": task.title,
                 "body": "\n\n".join(body_parts),
                 "assignee": task.lane,
-                "kind": "code",
+                "kind": _kind_for_planspec_lane(task.lane),
                 "parents": deps,
                 "planspec_id": task.id,
                 "planspec_lane": task.lane,
