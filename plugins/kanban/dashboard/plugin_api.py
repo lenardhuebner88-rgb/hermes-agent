@@ -4398,23 +4398,6 @@ def get_stats(board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.get("/assignees")
-def get_assignees(board: Optional[str] = Query(None)):
-    """Known profiles + per-profile task counts.
-
-    Returns the union of ``~/.hermes/profiles/*`` on disk and every
-    distinct assignee currently used on the board. The dashboard uses
-    this to populate its assignee dropdown so a freshly-created profile
-    appears in the picker before it's been given any task.
-    """
-    board = _resolve_board(board)
-    conn = _conn(board=board)
-    try:
-        return {"assignees": kanban_db.known_assignees(conn)}
-    finally:
-        conn.close()
-
-
 # ---------------------------------------------------------------------------
 # Worker log (read-only; file written by _default_spawn)
 # ---------------------------------------------------------------------------

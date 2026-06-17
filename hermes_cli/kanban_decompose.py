@@ -269,14 +269,6 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     return val
 
 
-def _profile_author() -> str:
-    """Mirror of ``hermes_cli.kanban._profile_author``."""
-    return (
-        os.environ.get("HERMES_PROFILE")
-        or os.environ.get("USER")
-        or "decomposer"
-    )
-
 
 def _load_config() -> dict:
     try:
@@ -1165,7 +1157,7 @@ def decompose_task(
     _apply_epic_choice(task, parsed, open_epic_ids)
 
     fanout = bool(parsed.get("fanout"))
-    audit_author = author or _profile_author()
+    audit_author = author or kb._profile_author()
 
     if not fanout:
         # Fall back to single-task spec promotion (same effect as specify).
@@ -1570,7 +1562,7 @@ def plan_and_document(
     narrative = narrative.strip() if isinstance(narrative, str) and narrative.strip() else ""
     rationale = parsed.get("rationale")
     rationale = rationale.strip() if isinstance(rationale, str) and rationale.strip() else ""
-    audit_author = author or _profile_author()
+    audit_author = author or kb._profile_author()
     fanout = bool(parsed.get("fanout"))
 
     if fanout:

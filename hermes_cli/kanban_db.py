@@ -1362,6 +1362,7 @@ CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_task_id        ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 -- idx_runs_started: the budget preflight SUMs tokens/cost over a started_at>=?
@@ -2322,6 +2323,7 @@ _REBUILD_SPECS = {
         " payload TEXT, created_at INTEGER NOT NULL)",
         (
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
+            "CREATE INDEX idx_events_task_id ON task_events(task_id, id)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
         ),
     ),
@@ -2540,6 +2542,19 @@ def _claimer_id() -> str:
     except Exception:
         host = "unknown"
     return f"{host}:{os.getpid()}"
+
+
+def _profile_author() -> str:
+    """Best-effort author name for the active profile (mirrors kanban.py)."""
+    for env in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
+        v = os.environ.get(env)
+        if v:
+            return v
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name() or "user"
+    except Exception:
+        return "user"
 
 
 # ---------------------------------------------------------------------------
@@ -12551,6 +12566,9 @@ def _spawn_claude_worker(
             "`claude` executable not found on PATH. "
             "Install the Claude CLI or set HERMES_CLAUDE_BIN before running the kanban dispatcher."
         )
+    except BaseException:
+        log_f.close()
+        raise
     # NOTE: we intentionally do NOT close log_f here — same as the hermes path
     # (the child keeps writing after this function returns).
     return proc.pid
@@ -12841,6 +12859,9 @@ def _default_spawn(
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
+    except BaseException:
+        log_f.close()
+        raise
     # NOTE: we intentionally do NOT close log_f here — we want Popen's
     # child process to keep writing after this function returns.  The
     # handle is kept alive by the child's inheritance.  The parent's

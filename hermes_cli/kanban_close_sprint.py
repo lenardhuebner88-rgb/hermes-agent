@@ -58,13 +58,6 @@ class CloseSprintOutcome:
     kid_receipts: Optional[list[KidReceipt]] = None
 
 
-def _profile_author() -> str:
-    return (
-        os.environ.get("HERMES_PROFILE")
-        or os.environ.get("USER")
-        or "close-sprint"
-    )
-
 
 def _kid_receipt(conn, kid_id: str) -> KidReceipt:
     task = kb.get_task(conn, kid_id)
@@ -222,7 +215,7 @@ def build_closure_comment(
 
     lines: list[str] = []
     lines.append(
-        f"{_CLOSURE_HEADER} by {_profile_author()}. "
+        f"{_CLOSURE_HEADER} by {kb._profile_author()}. "
         f"All {sum(1 for k in kids if k.status == 'done')} of {len(kids)} kids done. "
         "Deliverables:"
     )
@@ -332,7 +325,7 @@ def close_sprint(
             conn, parent_id, auto_summary=auto_summary,
         )
 
-    audit_author = author or _profile_author()
+    audit_author = author or kb._profile_author()
     try:
         comment_id = kb.add_comment(conn, parent_id, audit_author, body)
     except ValueError as exc:

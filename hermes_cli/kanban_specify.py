@@ -140,15 +140,6 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     return val
 
 
-def _profile_author() -> str:
-    """Mirror of ``hermes_cli.kanban._profile_author``. Kept local to
-    avoid a circular import when kanban.py imports this module."""
-    return (
-        os.environ.get("HERMES_PROFILE")
-        or os.environ.get("USER")
-        or "specifier"
-    )
-
 
 def specify_task(
     task_id: str,
@@ -258,7 +249,7 @@ def specify_task(
             task_id,
             title=new_title,
             body=new_body,
-            author=author or _profile_author(),
+            author=author or kb._profile_author(),
         )
     if not ok:
         # Race: someone else promoted / archived the task between our
