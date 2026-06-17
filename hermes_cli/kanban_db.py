@@ -10058,14 +10058,16 @@ def write_kanban_dispatcher_heartbeat(
     *,
     tick_health: str = "ok",
     now: Optional[int] = None,
+    boards: Optional[list[dict]] = None,
 ) -> dict:
     ts = int(time.time()) if now is None else int(now)
     board_counts: list[dict] = []
     boards_payload: list[dict] = []
-    try:
-        boards = list_boards(include_archived=False)
-    except Exception:
-        boards = [read_board_metadata(DEFAULT_BOARD)]
+    if boards is None:
+        try:
+            boards = list_boards(include_archived=False)
+        except Exception:
+            boards = [read_board_metadata(DEFAULT_BOARD)]
 
     for board in boards:
         slug = board.get("slug") or DEFAULT_BOARD
@@ -15408,14 +15410,32 @@ def claim_unseen_events_for_sub(
         if row is None:
             return 0, 0, []
         old_cursor = int(row["last_event_id"])
-        new_cursor, events = unseen_events_for_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            kinds=kinds,
+        # Inline the event-query body from unseen_events_for_sub, reusing
+        # old_cursor already fetched above — avoids a second SELECT on
+        # kanban_notify_subs inside the same BEGIN IMMEDIATE transaction.
+        kind_list = list(kinds) if kinds else None
+        q = (
+            "SELECT * FROM task_events WHERE task_id = ? AND id > ? "
+            + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
+            + "ORDER BY id ASC"
         )
+        params: list[Any] = [task_id, old_cursor]
+        if kind_list:
+            params.extend(kind_list)
+        rows = conn.execute(q, params).fetchall()
+        events: list[Event] = []
+        new_cursor = old_cursor
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else None
+            except Exception:
+                payload = None
+            events.append(Event(
+                id=r["id"], task_id=r["task_id"], kind=r["kind"],
+                payload=payload, created_at=r["created_at"],
+                run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+            ))
+            new_cursor = max(new_cursor, int(r["id"]))
         if not events:
             return old_cursor, old_cursor, []
         conn.execute(

@@ -856,6 +856,11 @@ class GatewayKanbanWatchersMixin:
                         )
                         continue
                     runs_by_event_id = d.get("runs_by_event_id") or {}
+                    # Track the cursor up to the last *successfully* delivered
+                    # event so that a mid-batch send failure only rewinds to
+                    # the failed event, not the start of the whole batch
+                    # (FINDING #6 — duplicate reports on partial-batch failure).
+                    delivered_cursor: int = d.get("old_cursor", 0)
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -1010,7 +1015,12 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: artifact delivery for %s failed: %s",
                                         sub["task_id"], art_exc,
                                     )
-                            # Reset the failure counter on success.
+                            # Reset the failure counter on success.  Advance
+                            # delivered_cursor so a subsequent send failure in
+                            # the same batch only rewinds to HERE, not to the
+                            # start of the batch (FINDING #6 duplicate-report
+                            # fix).
+                            delivered_cursor = int(ev.id)
                             sub_fail_counts.pop(sub_key, None)
                         except Exception as exc:
                             fails = sub_fail_counts.get(sub_key, 0) + 1
@@ -1030,11 +1040,16 @@ class GatewayKanbanWatchersMixin:
                                 await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
                                 sub_fail_counts.pop(sub_key, None)
                             else:
+                                # Rewind only to the last successfully delivered
+                                # event (delivered_cursor), NOT all the way back
+                                # to old_cursor.  This prevents already-sent
+                                # events from being re-claimed and re-delivered
+                                # on the next tick (FINDING #6).
                                 await asyncio.to_thread(
                                     self._kanban_rewind,
                                     sub,
                                     d["cursor"],
-                                    d.get("old_cursor", 0),
+                                    delivered_cursor,
                                     board_slug,
                                 )
                             # Rewind the pre-send claim on transient failure so
@@ -1854,24 +1869,29 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         pass
 
-        def _tick_once() -> "list[tuple[str, Optional[object]]]":
+        def _tick_once(boards: "Optional[list[dict]]" = None) -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
 
             Enumerating boards on every tick keeps the dispatcher honest
             when users create a new board mid-run: no restart required,
             the next tick picks it up automatically.
+
+            ``boards`` may be passed in from the outer tick to avoid a
+            redundant list_boards scan; if None it is fetched here
+            (preserves independent callability).
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            if boards is None:
+                try:
+                    boards = _kb.list_boards(include_archived=False)
+                except Exception:
+                    boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 out.append((slug, _tick_once_for_board(slug)))
             return out
 
-        def _ready_nonempty() -> bool:
+        def _ready_nonempty(boards: "Optional[list[dict]]" = None) -> bool:
             """Cheap probe: is there at least one ready+assigned+unclaimed
             task on ANY board whose assignee maps to a real Hermes profile
             (i.e. one the dispatcher would actually spawn for)?
@@ -1882,11 +1902,16 @@ class GatewayKanbanWatchersMixin:
             of those is "correctly idle", not "stuck". Filtering them out
             here keeps the stuck-warn fire only on real failures (broken
             PATH, missing venv, credential loss for a real Hermes profile).
+
+            ``boards`` may be passed in from the outer tick to avoid a
+            redundant list_boards scan; if None it is fetched here
+            (preserves independent callability).
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            if boards is None:
+                try:
+                    boards = _kb.list_boards(include_archived=False)
+                except Exception:
+                    boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 conn = None
@@ -1922,10 +1947,14 @@ class GatewayKanbanWatchersMixin:
         if auto_decompose_per_tick < 1:
             auto_decompose_per_tick = 1
 
-        def _auto_decompose_tick() -> int:
+        def _auto_decompose_tick(boards: "Optional[list[dict]]" = None) -> int:
             """Run the auto-decomposer for up to N triage tasks across all
             boards. Returns the number of triage tasks that were
             successfully decomposed or specified this tick.
+
+            ``boards`` may be passed in from the outer tick to avoid a
+            redundant list_boards scan; if None it is fetched here
+            (preserves independent callability).
             """
             try:
                 from hermes_cli import kanban_decompose as _decomp
@@ -1934,10 +1963,11 @@ class GatewayKanbanWatchersMixin:
                     "kanban auto-decompose: import failed (%s); skipping", exc,
                 )
                 return 0
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            if boards is None:
+                try:
+                    boards = _kb.list_boards(include_archived=False)
+                except Exception:
+                    boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
 
             def _bump_decompose_counter(target_id: str, *, ok: bool) -> None:
                 """Fail-soft decompose-failure bookkeeping.
@@ -2042,9 +2072,20 @@ class GatewayKanbanWatchersMixin:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
             try:
+                # Fetch the board list once per tick and share it across all
+                # helpers so they don't each repeat the boards-dir scan.
+                # FINDING #1: list_boards was previously called 4× per tick.
+                def _fetch_boards() -> "list[dict]":
+                    try:
+                        return _kb.list_boards(include_archived=False)
+                    except Exception:
+                        return [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+
+                tick_boards = await asyncio.to_thread(_fetch_boards)
+
                 if auto_decompose_enabled:
-                    await asyncio.to_thread(_auto_decompose_tick)
-                results = await asyncio.to_thread(_tick_once)
+                    await asyncio.to_thread(_auto_decompose_tick, tick_boards)
+                results = await asyncio.to_thread(_tick_once, tick_boards)
                 any_spawned = False
                 for slug, res in (results or []):
                     if res is not None and getattr(res, "spawned", None):
@@ -2063,7 +2104,7 @@ class GatewayKanbanWatchersMixin:
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
                 # Health telemetry (aggregate across boards)
-                ready_pending = await asyncio.to_thread(_ready_nonempty)
+                ready_pending = await asyncio.to_thread(_ready_nonempty, tick_boards)
                 if ready_pending and not any_spawned:
                     bad_ticks += 1
                 else:
@@ -2104,6 +2145,7 @@ class GatewayKanbanWatchersMixin:
                     await asyncio.to_thread(
                         _kb.write_kanban_dispatcher_heartbeat,
                         tick_health="ok",
+                        boards=tick_boards,
                     )
                 except Exception as exc:
                     logger.debug(
