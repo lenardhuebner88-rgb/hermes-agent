@@ -174,6 +174,15 @@ export const FlowSizingResponseSchema = z.object({
   gate: FlowGateResponseSchema,
 });
 
+export const FlowReleaseResponseSchema = z.object({
+  ok: z.boolean().catch(false),
+  task_id: z.string().catch(""),
+  released: z.coerce.number().catch(0),
+  released_ids: z.array(z.string()).catch([]),
+  release_level: FlowGateReleaseLevelSchema,
+  assignee_overrides: z.record(z.string(), z.string().nullable()).catch({}),
+});
+
 export const FlowTimeoutSweepResponseSchema = z.object({
   ok: z.boolean().catch(false),
   timeout_seconds: z.coerce.number().catch(1800),

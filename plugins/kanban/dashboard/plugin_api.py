@@ -4771,10 +4771,15 @@ class PlanSpecPathBody(BaseModel):
 
 
 @router.get("/planspecs")
-def list_planspecs(scope: Literal["open", "all"] = Query("open")):
+def list_planspecs(
+    scope: Literal["open", "all"] = Query("open"),
+    valid: Optional[bool] = Query(None),
+    limit: Optional[int] = Query(None, ge=0, le=500),
+    q: Optional[str] = Query(None, max_length=256),
+):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
-    records = planspecs.list_planspecs(scope=scope)
+    records = planspecs.list_planspecs(scope=scope, valid=valid, limit=limit, search=q)
     return {"planspecs": records, "count": len(records)}
 
 
@@ -5403,6 +5408,7 @@ def _release_flow_gate(
         },
     )
     return {
+        "ok": True,
         "task_id": root_id,
         "released": len(released),
         "released_ids": released,
@@ -5555,6 +5561,11 @@ def flow_gate_timeout_sweep(
     conn = _conn(board=board)
     try:
         cutoff = int(time.time()) - timeout_seconds
+        # Scope the sweep to genuine Flow/PlanSpec gate roots only: a root that
+        # carries an explicit ``flow_plan``/``specified``(planspec_ingest) event
+        # marker, or whose tenant is one of the gate-owning tenants. A bare
+        # "parent with scheduled children" is NOT swept — otherwise unrelated
+        # ``scheduled`` tasks could be released by accident (B4-F2).
         rows = conn.execute(
             """
             SELECT DISTINCT root.id
@@ -5564,6 +5575,19 @@ def flow_gate_timeout_sweep(
              WHERE child.status = 'scheduled'
                AND root.created_at <= ?
                AND root.status != 'archived'
+               AND (
+                    root.tenant IN ('planspec', 'flow-capture')
+                    OR EXISTS (
+                         SELECT 1 FROM task_events e
+                          WHERE e.task_id = root.id
+                            AND (
+                                 e.kind = 'flow_plan'
+                                 OR (e.kind = 'specified'
+                                     AND json_extract(e.payload, '$.source')
+                                         = 'planspec_ingest')
+                            )
+                    )
+               )
             """,
             (cutoff,),
         ).fetchall()

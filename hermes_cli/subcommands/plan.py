@@ -55,6 +55,12 @@ def plan_command(args: argparse.Namespace) -> int:
             result = planspecs.ingest_planspec(args.path, board=args.board, author=args.author)
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
+            elif result.get("already_ingested"):
+                print(
+                    f"Already ingested {result['path']} → existing root "
+                    f"{result['root_task_id']} with {len(result['child_ids'])} subtasks "
+                    f"(no new chain created)"
+                )
             else:
                 print(
                     f"Ingested {result['path']} → root {result['root_task_id']} "

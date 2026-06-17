@@ -128,6 +128,43 @@ def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
     assert by_name["draft.md"]["closed_reason"] == "invalid PlanSpec"
 
 
+def test_list_planspecs_filters_valid_and_limits_server_side(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    first_valid = _write_planspec(plans_root, "2026-06-16-alpha.md")
+    second_valid = _write_planspec(plans_root, "2026-06-16-beta.md")
+    display_path = _write_display_plangate(plans_root)
+
+    records = planspecs.list_planspecs(plans_root=plans_root, valid=True, limit=1)
+    invalid_records = planspecs.list_planspecs(plans_root=plans_root, valid=False)
+    no_limit = planspecs.list_planspecs(plans_root=plans_root, valid=True, limit=0)
+
+    assert [item["path"] for item in records] == [str(first_valid.resolve(strict=False))]
+    assert [item["path"] for item in invalid_records] == [str(display_path.resolve(strict=False))]
+    assert [item["path"] for item in no_limit] == [
+        str(first_valid.resolve(strict=False)),
+        str(second_valid.resolve(strict=False)),
+    ]
+
+
+def test_list_planspecs_searches_topic_filename_agent_and_path(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    alpha = _write_planspec(plans_root, "2026-06-16-alpha.md")
+    beta = _write_planspec(plans_root, "2026-06-16-beta.md")
+    text = beta.read_text(encoding="utf-8")
+    beta.write_text(text.replace('topic: "Planspec Hub"', 'topic: "Release Train"'), encoding="utf-8")
+
+    by_topic = planspecs.list_planspecs(plans_root=plans_root, search="train")
+    by_filename = planspecs.list_planspecs(plans_root=plans_root, search="alpha")
+    by_agent = planspecs.list_planspecs(plans_root=plans_root, search="Hermes")
+
+    assert [item["path"] for item in by_topic] == [str(beta.resolve(strict=False))]
+    assert [item["path"] for item in by_filename] == [str(alpha.resolve(strict=False))]
+    assert [item["path"] for item in by_agent] == [
+        str(alpha.resolve(strict=False)),
+        str(beta.resolve(strict=False)),
+    ]
+
+
 def test_parse_binding_planspec_blocks_closed_status(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
@@ -182,6 +219,51 @@ def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path)
         assert child2.assignee == "coder-claude"
         assert kb.parent_ids(conn, child2.id) == [child1.id]
         assert set(kb.parent_ids(conn, root.id)) == {child1.id, child2.id}
+
+
+def test_ingest_planspec_is_idempotent_on_reingest(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    second = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert first["ok"] is True
+    assert first["already_ingested"] is False
+    assert first["idempotency_key"]
+    # Re-ingest of the identical file is a no-op that links back to the
+    # existing chain instead of minting a duplicate.
+    assert second["ok"] is True
+    assert second["already_ingested"] is True
+    assert second["root_task_id"] == first["root_task_id"]
+    assert set(second["child_ids"]) == set(first["child_ids"])
+    assert second["subtask_count"] == 2
+    assert second["idempotency_key"] == first["idempotency_key"]
+    with kb.connect_closing() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+        root = kb.get_task(conn, first["root_task_id"])
+    # root + 2 subtasks only — the second ingest created nothing.
+    assert total == 3
+    assert root is not None and root.idempotency_key == first["idempotency_key"]
+
+
+def test_ingest_planspec_reingest_after_edit_creates_new_chain(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("Document schema", "Document schema v2"), encoding="utf-8")
+    second = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    # Edited content -> new content-hash -> new key -> a fresh chain.
+    assert second["already_ingested"] is False
+    assert second["root_task_id"] != first["root_task_id"]
+    assert second["idempotency_key"] != first["idempotency_key"]
+    with kb.connect_closing() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+    # Two independent chains: 2 * (root + 2 subtasks).
+    assert total == 6
 
 
 def test_sprint_prompt_preserves_binding_subtasks(tmp_path: Path):

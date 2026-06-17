@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -156,9 +157,17 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     )
 
 
-def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScope = "open") -> list[dict[str, Any]]:
+def list_planspecs(
+    *,
+    plans_root: Path = DEFAULT_PLANS_ROOT,
+    scope: PlanSpecScope = "open",
+    valid: bool | None = None,
+    limit: int | None = None,
+    search: str | None = None,
+) -> list[dict[str, Any]]:
     if scope not in ("open", "all"):
         raise ValueError("scope must be 'open' or 'all'")
+    valid_filter = valid
     root = plans_root.expanduser().resolve(strict=False)
     paths = sorted(root.glob("*/plans/*.md"), key=lambda p: str(p).lower())
     records: list[dict[str, Any]] = []
@@ -231,8 +240,23 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScop
             )
     if scope == "open":
         records = [item for item in records if item["open"]]
+    if valid_filter is not None:
+        records = [item for item in records if item["valid"] is valid_filter]
+    query = (search or "").strip().lower()
+    if query:
+        records = [item for item in records if _planspec_record_matches_query(item, query)]
     records.sort(key=lambda item: (item["open"] is False, item["valid"] is False, item["path"]), reverse=False)
+    if limit and limit > 0:
+        records = records[:limit]
     return records
+
+
+def _planspec_record_matches_query(item: dict[str, Any], query: str) -> bool:
+    haystack = "\n".join(
+        str(item.get(field) or "")
+        for field in ("topic", "filename", "agent", "path", "status", "freigabe")
+    ).lower()
+    return query in haystack
 
 
 def mark_planspec_not_needed(
@@ -292,6 +316,20 @@ def build_root_body(spec: BindingPlanSpec) -> str:
     )
 
 
+def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
+    """Deterministic idempotency key for a PlanSpec ingest.
+
+    Combines the resolved source path with a SHA-256 of the file's raw
+    bytes (the content-hash). Re-ingesting the identical file — same path,
+    same content — yields the same key, so the second run links back to the
+    existing chain instead of minting a duplicate. Editing the PlanSpec
+    (new content) or moving it (new path) produces a new key, hence a fresh
+    chain. The key is stamped onto the root task and queried on re-ingest.
+    """
+    content_hash = hashlib.sha256(spec.path.read_bytes()).hexdigest()
+    return f"planspec-ingest:{spec.path}:{content_hash}"
+
+
 def ingest_planspec(
     path: str | Path,
     *,
@@ -300,8 +338,35 @@ def ingest_planspec(
     plans_root: Path = DEFAULT_PLANS_ROOT,
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
+    idempotency_key = ingest_idempotency_key(spec)
     conn = kanban_db.connect(board=board)
     try:
+        # Idempotent re-ingest: if this exact PlanSpec was already ingested
+        # (same source path + content), point back at the existing chain's
+        # root instead of creating a second one. The root carries the key as
+        # the durable marker; its subtasks are its tree-parents (the K2/F1
+        # sink convention), so ``parent_ids`` recovers the existing chain.
+        existing = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            root_id = existing["id"]
+            existing_children = kanban_db.parent_ids(conn, root_id)
+            return {
+                "ok": True,
+                "already_ingested": True,
+                "path": str(spec.path),
+                "root_task_id": root_id,
+                "child_ids": existing_children,
+                "children": spec.children,
+                "freigabe": spec.freigabe,
+                "live_test_depth": spec.live_test_depth,
+                "subtask_count": len(existing_children),
+                "idempotency_key": idempotency_key,
+            }
+
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
         root_id = kanban_db.create_task(
             conn,
@@ -312,6 +377,7 @@ def ingest_planspec(
             tenant="planspec",
             priority=0,
             triage=True,
+            idempotency_key=idempotency_key,
         )
         with kanban_db.write_txn(conn):
             cur = conn.execute(
@@ -340,6 +406,7 @@ def ingest_planspec(
             raise PlanSpecBlocked([f"could not ingest taskgraph for root {root_id}"])
         return {
             "ok": True,
+            "already_ingested": False,
             "path": str(spec.path),
             "root_task_id": root_id,
             "child_ids": child_ids,
@@ -347,6 +414,7 @@ def ingest_planspec(
             "freigabe": spec.freigabe,
             "live_test_depth": spec.live_test_depth,
             "subtask_count": len(child_ids),
+            "idempotency_key": idempotency_key,
         }
     finally:
         conn.close()

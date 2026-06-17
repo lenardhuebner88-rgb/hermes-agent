@@ -203,6 +203,10 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
   it("keeps the PlanSpec hub open-scoped and readable on phones", () => {
     expect(src).toMatch(/Planspec-Hub/);
     expect(src).toMatch(/offen · Vault/);
+    expect(src).toMatch(/PlanSpecSearch/);
+    expect(src).toMatch(/Nur gültige/);
+    expect(src).toMatch(/usePlanSpecs\(\{ limit: 8, valid: validOnly \? true : null, search: planspecSearch \}\)/);
+    expect(src).not.toMatch(/plans\.data\?\.planspecs \?\? \[\]\)\.slice\(0, 8\)/);
     expect(src).toMatch(/aria-expanded=\{plansOpen\}/);
     expect(src).toMatch(/Offene PlanSpecs/);
     expect(src).toMatch(/plansOpen \? <div className="mt-3 grid gap-2">/);

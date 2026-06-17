@@ -76,6 +76,24 @@ def client(kanban_home):
     return TestClient(app)
 
 
+def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
+    from hermes_cli import planspecs
+
+    calls = []
+
+    def fake_list_planspecs(**kwargs):
+        calls.append(kwargs)
+        return [{"path": "/tmp/one.md", "valid": True, "open": True, "errors": []}]
+
+    monkeypatch.setattr(planspecs, "list_planspecs", fake_list_planspecs)
+
+    response = client.get("/api/plugins/kanban/planspecs?scope=open&valid=true&limit=8")
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert calls == [{"scope": "open", "valid": True, "limit": 8, "search": None}]
+
+
 # ---------------------------------------------------------------------------
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------
@@ -3858,6 +3876,7 @@ def test_flow_release_unblocks_scheduled_children_dag_correct(client):
     r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
     assert r.status_code == 200, r.text
     body = r.json()
+    assert body["ok"] is True
     assert body["released"] == 3, body
     assert set(body["released_ids"]) == set(child_ids)
 
@@ -3973,6 +3992,53 @@ def test_flow_gate_timeout_sweep_releases_old_roots(client):
     assert st[child_ids[0]] == "ready"
     assert st[child_ids[1]] == "ready"
     assert st[child_ids[2]] == "todo"
+
+
+def test_flow_gate_timeout_sweep_scopes_to_flow_planspec_roots(client):
+    """B4-F2: the timeout-sweep releases ONLY roots that carry an explicit
+    flow/planspec marker (``flow_plan``/``specified``-event or a flow/planspec
+    tenant). A foreign root that merely holds ``scheduled`` children for
+    unrelated reasons must be left untouched."""
+    now = int(time.time())
+    old = now - 4000
+
+    # Eligible via tenant.
+    flow_root, flow_children = _setup_gated_root(tenant="flow-capture")
+    plan_root, plan_children = _setup_gated_root(tenant="planspec")
+    # Eligible via explicit event marker despite a foreign tenant.
+    marked_root, marked_children = _setup_gated_root(tenant="manual")
+    ingested_root, ingested_children = _setup_gated_root(tenant="manual")
+    # NOT eligible: foreign tenant, no marker — a parent that just happens to
+    # hold scheduled children. Must NOT be released by the sweep.
+    foreign_root, foreign_children = _setup_gated_root(tenant="manual")
+
+    roots = [flow_root, plan_root, marked_root, ingested_root, foreign_root]
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            for r in roots:
+                conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (old, r))
+        kb.add_event(conn, marked_root, "flow_plan", {"spec": "x.md", "gated": True})
+        kb.add_event(conn, ingested_root, "specified", {"source": "planspec_ingest"})
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-gate/timeout-sweep",
+        json={"timeout_seconds": 1800},
+    )
+    assert r.status_code == 200, r.text
+    released_roots = {row["task_id"] for row in r.json()["released_roots"]}
+    assert flow_root in released_roots
+    assert plan_root in released_roots
+    assert marked_root in released_roots
+    assert ingested_root in released_roots
+    assert foreign_root not in released_roots
+
+    with kb.connect() as conn:
+        # Foreign children remain held; eligible flow children get released.
+        assert all(
+            kb.get_task(conn, c).status == "scheduled" for c in foreign_children
+        )
+        assert kb.get_task(conn, flow_children[0]).status == "ready"
+        assert kb.get_task(conn, ingested_children[0]).status == "ready"
 
 
 def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
