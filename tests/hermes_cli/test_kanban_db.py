@@ -213,6 +213,99 @@ def test_profile_outcome_stats_fails_soft_when_task_runs_absent():
     assert kb.profile_outcome_stats(conn) == {}
 
 
+def _insert_token_run(
+    conn,
+    *,
+    task_id: str,
+    profile: str,
+    started_at: int,
+    ended_at: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
+):
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
+        "outcome, input_tokens, output_tokens) "
+        "VALUES (?, ?, 'done', ?, ?, 'completed', ?, ?)",
+        (task_id, profile, started_at, ended_at, input_tokens, output_tokens),
+    )
+
+
+def test_subscription_token_totals_since_epoch_includes_lower_boundary(
+    kanban_home, monkeypatch,
+):
+    """Kimi Abo-Limits: since_epoch is an inclusive rolling-window lower bound."""
+    monkeypatch.setattr(
+        kb,
+        "_profile_subscription",
+        lambda profile: "kimi" if profile == "reviewer" else None,
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="token window")
+        with kb.write_txn(conn):
+            _insert_token_run(
+                conn, task_id=task_id, profile="reviewer",
+                started_at=999, ended_at=1009, input_tokens=100, output_tokens=10,
+            )
+            _insert_token_run(
+                conn, task_id=task_id, profile="reviewer",
+                started_at=1000, ended_at=1010, input_tokens=200, output_tokens=20,
+            )
+            _insert_token_run(
+                conn, task_id=task_id, profile="reviewer",
+                started_at=1001, ended_at=1011, input_tokens=300, output_tokens=30,
+            )
+
+        totals = kb.subscription_token_totals(
+            conn, subscription="kimi", since_epoch=1000,
+        )
+
+    assert totals == {
+        "subscription": "kimi",
+        "since_epoch": 1000,
+        "runs": 2,
+        "input_tokens": 500,
+        "output_tokens": 50,
+        "total_tokens": 550,
+    }
+
+
+def test_subscription_token_totals_excludes_non_kimi_profiles(
+    kanban_home, monkeypatch,
+):
+    """Kimi Abo-Limits: only profiles resolved to subscription='kimi' count."""
+    subscriptions = {
+        "reviewer": "kimi",
+        "coder": "chatgpt",
+        "premium": "claude",
+        "critic": None,
+    }
+    monkeypatch.setattr(kb, "_profile_subscription", subscriptions.get)
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="token subscriptions")
+        with kb.write_txn(conn):
+            for profile, tokens_in, tokens_out in [
+                ("reviewer", 100, 10),
+                ("coder", 200, 20),
+                ("premium", 300, 30),
+                ("critic", 400, 40),
+            ]:
+                _insert_token_run(
+                    conn, task_id=task_id, profile=profile,
+                    started_at=2000, ended_at=2010,
+                    input_tokens=tokens_in, output_tokens=tokens_out,
+                )
+
+        totals = kb.subscription_token_totals(
+            conn, subscription="kimi", since_epoch=2000,
+        )
+
+    assert totals["runs"] == 1
+    assert totals["input_tokens"] == 100
+    assert totals["output_tokens"] == 10
+    assert totals["total_tokens"] == 110
+
+
 def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
     with kb.connect() as conn:
         base = 1_700_000_000
