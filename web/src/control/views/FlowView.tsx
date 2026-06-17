@@ -174,13 +174,16 @@ function RecoveryStrip() {
 }
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
-  const plans = usePlanSpecs();
+  const [planspecSearch, setPlanspecSearch] = useState("");
+  const [validOnly, setValidOnly] = useState(false);
+  const plans = usePlanSpecs({ limit: 8, valid: validOnly ? true : null, search: planspecSearch });
   const [plansOpen, setPlansOpen] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
   const [promptByPath, setPromptByPath] = useState<Record<string, string>>({});
-  const items = (plans.data?.planspecs ?? []).slice(0, 8);
+  const items = plans.data?.planspecs ?? [];
   const validCount = items.filter((item) => item.valid).length;
+  const hasFilters = Boolean(planspecSearch.trim()) || validOnly;
 
   const setRowError = useCallback((path: string, message: string | null) => {
     setErrorByPath((current) => {
@@ -251,7 +254,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
     }
   }, [plans, setRowError]);
 
-  if (!plans.loading && !plans.error && items.length === 0) return null;
+  if (!plans.loading && !plans.error && items.length === 0 && !hasFilters) return null;
 
   return (
     <FleetPanel eyebrow="Planspec-Hub" meta={`${validCount}/${items.length} offen · Vault`}>
@@ -265,6 +268,28 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
         <span className="min-w-0 flex-1 break-words text-sm font-semibold text-white">Offene PlanSpecs</span>
         <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
       </button>
+      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <label className="min-w-0" htmlFor="PlanSpecSearch">
+          <span className="sr-only">PlanSpec-Suche</span>
+          <input
+            id="PlanSpecSearch"
+            type="search"
+            value={planspecSearch}
+            onChange={(event) => setPlanspecSearch(event.target.value)}
+            placeholder="PlanSpecs suchen…"
+            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/20 px-3 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-[var(--hc-accent-border)]"
+          />
+        </label>
+        <label className="inline-flex min-h-11 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 text-sm hc-soft">
+          <input
+            type="checkbox"
+            checked={validOnly}
+            onChange={(event) => setValidOnly(event.target.checked)}
+            className="h-4 w-4 accent-[var(--hc-accent-text)]"
+          />
+          Nur gültige
+        </label>
+      </div>
       {plans.error ? <ToneCallout tone="amber">{plans.error}</ToneCallout> : null}
       {plansOpen && plans.loading && plans.data == null ? <SkeletonCard rows={3} /> : null}
       {plansOpen ? <div className="mt-3 grid gap-2">

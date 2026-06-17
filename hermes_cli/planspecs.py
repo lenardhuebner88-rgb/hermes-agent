@@ -156,9 +156,17 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     )
 
 
-def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScope = "open") -> list[dict[str, Any]]:
+def list_planspecs(
+    *,
+    plans_root: Path = DEFAULT_PLANS_ROOT,
+    scope: PlanSpecScope = "open",
+    valid: bool | None = None,
+    limit: int | None = None,
+    search: str | None = None,
+) -> list[dict[str, Any]]:
     if scope not in ("open", "all"):
         raise ValueError("scope must be 'open' or 'all'")
+    valid_filter = valid
     root = plans_root.expanduser().resolve(strict=False)
     paths = sorted(root.glob("*/plans/*.md"), key=lambda p: str(p).lower())
     records: list[dict[str, Any]] = []
@@ -231,8 +239,23 @@ def list_planspecs(*, plans_root: Path = DEFAULT_PLANS_ROOT, scope: PlanSpecScop
             )
     if scope == "open":
         records = [item for item in records if item["open"]]
+    if valid_filter is not None:
+        records = [item for item in records if item["valid"] is valid_filter]
+    query = (search or "").strip().lower()
+    if query:
+        records = [item for item in records if _planspec_record_matches_query(item, query)]
     records.sort(key=lambda item: (item["open"] is False, item["valid"] is False, item["path"]), reverse=False)
+    if limit and limit > 0:
+        records = records[:limit]
     return records
+
+
+def _planspec_record_matches_query(item: dict[str, Any], query: str) -> bool:
+    haystack = "\n".join(
+        str(item.get(field) or "")
+        for field in ("topic", "filename", "agent", "path", "status", "freigabe")
+    ).lower()
+    return query in haystack
 
 
 def mark_planspec_not_needed(

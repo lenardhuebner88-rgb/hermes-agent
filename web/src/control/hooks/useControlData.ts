@@ -600,10 +600,26 @@ export function useBoard() {
   return usePolling<BoardResponse>("kanban/board", boardLoader, 8000);
 }
 
-export function usePlanSpecs() {
+export interface PlanSpecQueryOptions {
+  limit?: number;
+  valid?: boolean | null;
+  search?: string;
+}
+
+function planSpecsUrl(options: PlanSpecQueryOptions = {}) {
+  const params = new URLSearchParams({ scope: "open" });
+  if (options.limit && options.limit > 0) params.set("limit", String(options.limit));
+  if (options.valid != null) params.set("valid", String(options.valid));
+  const query = options.search?.trim();
+  if (query) params.set("q", query);
+  return `/api/plugins/kanban/planspecs?${params.toString()}`;
+}
+
+export function usePlanSpecs(options: PlanSpecQueryOptions = {}) {
+  const key = `kanban/planspecs:${options.limit ?? "all"}:${options.valid ?? "any"}:${options.search?.trim() ?? ""}`;
   return usePolling<PlanSpecsResponse>(
-    "kanban/planspecs",
-    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/planspecs?scope=open"), "kanban/planspecs"),
+    key,
+    async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options)), "kanban/planspecs"),
     15000,
   );
 }

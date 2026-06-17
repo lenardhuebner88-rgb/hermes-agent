@@ -76,6 +76,24 @@ def client(kanban_home):
     return TestClient(app)
 
 
+def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
+    from hermes_cli import planspecs
+
+    calls = []
+
+    def fake_list_planspecs(**kwargs):
+        calls.append(kwargs)
+        return [{"path": "/tmp/one.md", "valid": True, "open": True, "errors": []}]
+
+    monkeypatch.setattr(planspecs, "list_planspecs", fake_list_planspecs)
+
+    response = client.get("/api/plugins/kanban/planspecs?scope=open&valid=true&limit=8")
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert calls == [{"scope": "open", "valid": True, "limit": 8, "search": None}]
+
+
 # ---------------------------------------------------------------------------
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------

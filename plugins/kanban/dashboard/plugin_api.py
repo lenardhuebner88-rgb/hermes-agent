@@ -4771,10 +4771,15 @@ class PlanSpecPathBody(BaseModel):
 
 
 @router.get("/planspecs")
-def list_planspecs(scope: Literal["open", "all"] = Query("open")):
+def list_planspecs(
+    scope: Literal["open", "all"] = Query("open"),
+    valid: Optional[bool] = Query(None),
+    limit: Optional[int] = Query(None, ge=0, le=500),
+    q: Optional[str] = Query(None, max_length=256),
+):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
-    records = planspecs.list_planspecs(scope=scope)
+    records = planspecs.list_planspecs(scope=scope, valid=valid, limit=limit, search=q)
     return {"planspecs": records, "count": len(records)}
 
 
