@@ -98,6 +98,10 @@ export interface PlanSpecRecord {
   open: boolean;
   closed_reason: string | null;
   errors: string[];
+  root_task_id: string | null;
+  kanban_run_status: "queued" | "running" | "completed" | null;
+  kanban_root_status: string | null;
+  kanban_child_statuses: string[];
 }
 
 export interface PlanSpecsResponse {

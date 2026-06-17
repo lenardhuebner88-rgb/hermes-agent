@@ -51,7 +51,7 @@ import {
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
-import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus } from "../lib/types";
+import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -69,6 +69,13 @@ import { useClientNowSeconds } from "../lib/clock";
 const MAX_CARDS = 12;
 const MAX_DELIVERED = 8;
 const VERIFIER_GATE_TERMINAL_GRACE_MS = 60_000;
+
+function planSpecRunBadge(item: PlanSpecRecord): { tone: ToneName; label: string; dot: "live" | "warn" | "ready" | "idle" } {
+  if (item.kanban_run_status === "completed") return { tone: "emerald", label: "erledigt", dot: "ready" };
+  if (item.kanban_run_status === "running") return { tone: "cyan", label: "läuft", dot: "live" };
+  if (item.kanban_run_status === "queued") return { tone: "violet", label: "queued", dot: "idle" };
+  return item.valid ? { tone: "emerald", label: "offen", dot: "live" } : { tone: "amber", label: "blocked", dot: "warn" };
+}
 
 function flowTaskDomId(taskId: string): string {
   return `flow-task-${encodeURIComponent(taskId)}`;
@@ -299,6 +306,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const closeBusy = busyPath === `${item.path}:close`;
           const rowError = errorByPath[item.path];
           const prompt = promptByPath[item.path];
+          const runBadge = planSpecRunBadge(item);
           return (
             <div key={item.path} className="min-w-0 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
               <div className="flex min-w-0 flex-wrap items-start gap-2">
@@ -307,13 +315,14 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   <p className="break-words text-sm font-semibold leading-snug text-white">{item.topic}</p>
                   <p className="mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal">{item.path}</p>
                 </div>
-                <StatusPill tone={item.valid ? "emerald" : "amber"} label={item.valid ? "offen" : "blocked"} dot={item.valid ? "live" : "warn"} />
+                <StatusPill tone={runBadge.tone} label={runBadge.label} dot={runBadge.dot} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
                 <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
+                {item.root_task_id ? <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-dim">Root {item.root_task_id}</span> : null}
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
               {rowError ? <p className="mt-2 break-words text-[0.75rem] text-red-300">{rowError}</p> : null}

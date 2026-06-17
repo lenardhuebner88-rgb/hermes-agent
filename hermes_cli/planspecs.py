@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -17,6 +18,7 @@ from hermes_cli.plan_compiler import CompileBlocked, TaskgraphHints, _extract_fr
 DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
 PlanSpecScope = Literal["open", "all"]
+PlanSpecKanbanRunStatus = Literal["queued", "running", "completed"]
 
 _CLOSED_STATUS_PREFIXES = (
     "archived",
@@ -82,6 +84,70 @@ def _is_display_only_open_plan(frontmatter: dict[str, Any], status: str) -> bool
         return False
     slug = _status_slug(status)
     return slug.startswith("signiert") or slug.startswith("signed")
+
+
+def _derive_kanban_run_status(root_status: str, child_statuses: list[str]) -> PlanSpecKanbanRunStatus:
+    if root_status == "done":
+        return "completed"
+    queued_statuses = {"triage", "todo", "scheduled", "ready"}
+    if root_status not in queued_statuses or any(status not in queued_statuses for status in child_statuses):
+        return "running"
+    return "queued"
+
+
+def _planspec_kanban_runs(paths: list[Path]) -> dict[str, dict[str, Any]]:
+    wanted = {str(path.resolve(strict=False)) for path in paths}
+    if not wanted:
+        return {}
+    try:
+        conn = kanban_db.connect()
+    except Exception:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT e.task_id, e.payload, e.created_at, e.id, t.status AS root_status
+            FROM task_events e
+            JOIN tasks t ON t.id = e.task_id
+            WHERE e.kind = 'specified'
+            ORDER BY e.created_at ASC, e.id ASC
+            """
+        ).fetchall()
+        runs: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or payload.get("source") != "planspec_ingest":
+                continue
+            raw_path = str(payload.get("path") or "").strip()
+            if not raw_path:
+                continue
+            resolved_path = str(Path(raw_path).expanduser().resolve(strict=False))
+            if resolved_path not in wanted:
+                continue
+            child_rows = conn.execute(
+                """
+                SELECT t.status
+                FROM tasks t
+                JOIN task_links l ON l.parent_id = t.id
+                WHERE l.child_id = ?
+                ORDER BY t.id ASC
+                """,
+                (row["task_id"],),
+            ).fetchall()
+            child_statuses = [str(child["status"] or "") for child in child_rows]
+            root_status = str(row["root_status"] or "")
+            runs[resolved_path] = {
+                "root_task_id": row["task_id"],
+                "kanban_run_status": _derive_kanban_run_status(root_status, child_statuses),
+                "kanban_root_status": root_status,
+                "kanban_child_statuses": child_statuses,
+            }
+        return runs
+    finally:
+        conn.close()
 
 
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
@@ -170,8 +236,12 @@ def list_planspecs(
     valid_filter = valid
     root = plans_root.expanduser().resolve(strict=False)
     paths = sorted(root.glob("*/plans/*.md"), key=lambda p: str(p).lower())
+    kanban_runs = _planspec_kanban_runs(paths)
     records: list[dict[str, Any]] = []
     for path in paths:
+        resolved_path = str(path.resolve(strict=False))
+        kanban_run = kanban_runs.get(resolved_path)
+        kanban_run_status = str(kanban_run.get("kanban_run_status") or "") if kanban_run else None
         try:
             text = path.read_text(encoding="utf-8")
             frontmatter, body = _extract_frontmatter(text)
@@ -199,13 +269,17 @@ def list_planspecs(
             valid = not errors and binding
             closed = _closed_reason(status)
             display_only_open = not errors and not binding and _is_display_only_open_plan(frontmatter, status)
-            open_record = closed is None and (valid or display_only_open)
+            kanban_completed = kanban_run_status == "completed"
+            open_record = closed is None and not kanban_completed and (valid or display_only_open)
             record_errors = list(errors)
             if display_only_open:
                 record_errors.append("display-only: taskgraph_hints.binding is missing; Kanban ingest disabled")
+            closed_reason = closed
+            if closed_reason is None and kanban_completed and kanban_run is not None:
+                closed_reason = f"completed in Kanban: {kanban_run['root_task_id']}"
             records.append(
                 {
-                    "path": str(path.resolve(strict=False)),
+                    "path": resolved_path,
                     "agent": path.parent.parent.name,
                     "filename": path.name,
                     "topic": topic,
@@ -216,14 +290,18 @@ def list_planspecs(
                     "subtask_count": len(hints.subtasks) if hints else 0,
                     "valid": valid,
                     "open": open_record,
-                    "closed_reason": closed if closed else (None if open_record else "not a binding PlanSpec"),
+                    "closed_reason": closed_reason if closed_reason else (None if open_record else "not a binding PlanSpec"),
                     "errors": record_errors,
+                    "root_task_id": kanban_run.get("root_task_id") if kanban_run else None,
+                    "kanban_run_status": kanban_run_status,
+                    "kanban_root_status": kanban_run.get("kanban_root_status") if kanban_run else None,
+                    "kanban_child_statuses": kanban_run.get("kanban_child_statuses") if kanban_run else [],
                 }
             )
         except Exception as exc:
             records.append(
                 {
-                    "path": str(path.resolve(strict=False)),
+                    "path": resolved_path,
                     "agent": path.parent.parent.name,
                     "filename": path.name,
                     "topic": path.stem,
@@ -236,6 +314,10 @@ def list_planspecs(
                     "open": False,
                     "closed_reason": "invalid PlanSpec",
                     "errors": [str(exc)],
+                    "root_task_id": kanban_run.get("root_task_id") if kanban_run else None,
+                    "kanban_run_status": kanban_run_status,
+                    "kanban_root_status": kanban_run.get("kanban_root_status") if kanban_run else None,
+                    "kanban_child_statuses": kanban_run.get("kanban_child_statuses") if kanban_run else [],
                 }
             )
     if scope == "open":

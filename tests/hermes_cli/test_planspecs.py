@@ -128,6 +128,38 @@ def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
     assert by_name["draft.md"]["closed_reason"] == "invalid PlanSpec"
 
 
+def test_list_planspecs_reports_ingested_kanban_run_status(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    queued = planspecs.list_planspecs(plans_root=plans_root, scope="all")[0]
+    assert queued["kanban_run_status"] == "queued"
+    assert queued["root_task_id"] == result["root_task_id"]
+    assert queued["open"] is True
+
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (result["child_ids"][0],))
+    running = planspecs.list_planspecs(plans_root=plans_root, scope="all")[0]
+    assert running["kanban_run_status"] == "running"
+    assert running["open"] is True
+
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = 123 WHERE id IN (?, ?, ?)",
+                (result["root_task_id"], *result["child_ids"]),
+            )
+
+    open_records = planspecs.list_planspecs(plans_root=plans_root)
+    completed = planspecs.list_planspecs(plans_root=plans_root, scope="all")[0]
+    assert open_records == []
+    assert completed["kanban_run_status"] == "completed"
+    assert completed["open"] is False
+    assert completed["closed_reason"] == f"completed in Kanban: {result['root_task_id']}"
+
+
 def test_list_planspecs_filters_valid_and_limits_server_side(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     first_valid = _write_planspec(plans_root, "2026-06-16-alpha.md")

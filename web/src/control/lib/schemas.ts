@@ -120,6 +120,10 @@ export const PlanSpecRecordSchema = z.object({
   open: z.boolean().catch(false),
   closed_reason: z.string().nullable().catch(null),
   errors: z.array(z.string()).catch([]),
+  root_task_id: z.string().nullable().catch(null),
+  kanban_run_status: z.enum(["queued", "running", "completed"]).nullable().catch(null),
+  kanban_root_status: z.string().nullable().catch(null),
+  kanban_child_statuses: z.array(z.string()).catch([]),
 });
 
 export const PlanSpecsResponseSchema = z.object({
