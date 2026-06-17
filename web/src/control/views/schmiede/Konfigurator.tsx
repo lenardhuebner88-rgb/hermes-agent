@@ -128,7 +128,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs hc-dim">8–10 = gut · 5–7 = akzeptabel · &lt;5 = Drift-Risiko. „–" = für diesen Task-Typ nicht relevant.</p>
+          <p className="mt-2 text-xs hc-dim">Volle Punktzahl = gut · unter der Hälfte = Drift-Risiko. Es zählen nur die für diesen Task-Typ relevanten Checks; „–" = nicht relevant.</p>
         </FleetPanel>
       ) : null}
     </div>

@@ -42,6 +42,10 @@ export function score(promptText: string, taskTypeId: string): HeuristicResult {
     if (!applies) return { id: d.id, label: d.label, status: "na" as const, rationale: d.rationale };
     return { id: d.id, label: d.label, status: d.test(promptText) ? "pass" : ("fail" as const), rationale: d.rationale };
   });
-  const passed = checks.filter((c) => c.status !== "fail").length;
-  return { score: passed, max: DETECTORS.length, checks };
+  // Only checks that apply to this task type count — 'na' must neither earn a
+  // point nor enlarge the denominator (else a perfect audit caps below max and
+  // a weak prompt looks decent because its na checks are mistaken for passes).
+  const applicable = checks.filter((c) => c.status !== "na");
+  const passed = applicable.filter((c) => c.status === "pass").length;
+  return { score: passed, max: applicable.length, checks };
 }

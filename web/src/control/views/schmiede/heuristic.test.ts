@@ -9,10 +9,21 @@ Done-when: a prioritized report is delivered.
 Stop: if exploitability is uncertain, mark [Uncertain].`;
 
 describe("score", () => {
-  it("scores a strong audit prompt >= 8 with max 10", () => {
+  it("scores a strong audit prompt at full marks over the applicable checks only", () => {
     const r = score(STRONG_AUDIT, "audit");
-    expect(r.max).toBe(10);
-    expect(r.score).toBeGreaterThanOrEqual(8);
+    // audit has 6 applicable checks (4 universal + read-only + severity-label);
+    // plan-first/behavior-preservation/regression-test/clarification-gate are na
+    // and must NOT be counted toward score or max.
+    expect(r.max).toBe(6);
+    expect(r.score).toBe(6);
+  });
+
+  it("does not let non-applicable (na) checks inflate the score or max", () => {
+    // A bare refactor prompt satisfies none of its 5 applicable checks.
+    // Buggy behaviour counted the 5 na checks as 'not fail' → score 5/10.
+    const r = score("Refactor the thing.", "refactor");
+    expect(r.max).toBe(5);
+    expect(r.score).toBe(0);
   });
 
   it("marks non-applicable checks as na (e.g. plan-first on audit)", () => {

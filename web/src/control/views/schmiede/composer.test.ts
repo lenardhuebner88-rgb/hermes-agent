@@ -8,12 +8,14 @@ const CATALOG: PromptForgeCatalog = {
     { id: "role", letter: "A", label: "Role", description: "", body: "You are a [role].", source: "", category: "core" },
     { id: "goal", letter: "B", label: "Goal", description: "", body: "goal-block", source: "", category: "core" },
     { id: "scope-constraints", letter: "G", label: "Scope", description: "", body: "scope-block", source: "", category: "core" },
+    { id: "grounding", letter: "C", label: "Grounding", description: "", body: "GROUNDING-BLOCK", source: "", category: "long-run" },
     { id: "persistence", letter: "E", label: "Persistence", description: "", body: "KEEP-GOING-BASE", source: "", category: "core" },
     { id: "verification", letter: "I", label: "Verification", description: "", body: "VERIFY-BLOCK", source: "", category: "core" },
+    { id: "output-format", letter: "L", label: "Output", description: "", body: "OUTPUT-FORMAT-BLOCK", source: "", category: "optional" },
   ],
   taskTypes: [
-    { id: "audit", label: "Audit", blockIds: ["role", "goal"], typeBody: "AUDIT-BODY do not modify any files", defaultDoneWhen: "report delivered", checklist: [], rawTemplate: "", source: "" },
-    { id: "feature", label: "Feature", blockIds: ["role", "goal"], typeBody: "FEATURE-BODY", defaultDoneWhen: "tests pass", checklist: [], rawTemplate: "", source: "" },
+    { id: "audit", label: "Audit", blockIds: ["role", "goal", "scope-constraints", "grounding", "output-format", "verification"], typeBody: "AUDIT-BODY do not modify any files", defaultDoneWhen: "report delivered", checklist: [], rawTemplate: "", source: "" },
+    { id: "feature", label: "Feature", blockIds: ["role", "goal", "grounding", "scope-constraints", "persistence", "verification"], typeBody: "FEATURE-BODY", defaultDoneWhen: "tests pass", checklist: [], rawTemplate: "", source: "" },
   ],
   modes: [
     { id: "stop-on-doubt", label: "Stop", description: "", overrides: { reversibilityGate: "REV-GATE wait for explicit confirmation", escalation: "ESC-HALT" }, rawPreset: "", source: "" },
@@ -53,6 +55,18 @@ describe("compose", () => {
     expect(out).toContain("AUDIT-BODY");
     expect(out).toContain("VERIFY-BLOCK");
     expect(out).toContain("Done-when: report delivered");
+  });
+
+  it("includes grounding and output-format blocks when the task type lists them", () => {
+    const out = compose(sel({ taskTypeId: "audit" }), CATALOG);
+    expect(out).toContain("GROUNDING-BLOCK");
+    expect(out).toContain("OUTPUT-FORMAT-BLOCK");
+  });
+
+  it("omits blocks the task type does not list (feature has no output-format)", () => {
+    const out = compose(sel({ taskTypeId: "feature", slots: { task: "t", scope: "s" } }), CATALOG);
+    expect(out).toContain("GROUNDING-BLOCK");
+    expect(out).not.toContain("OUTPUT-FORMAT-BLOCK");
   });
 
   it("uses base persistence unless the mode overrides it", () => {

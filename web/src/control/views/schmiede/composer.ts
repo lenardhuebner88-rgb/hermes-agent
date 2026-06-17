@@ -14,16 +14,22 @@ export function compose(selection: ForgeSelection, catalog: PromptForgeCatalog):
   const task = selection.slots.task.trim() || "[describe the task: file + symptom + outcome]";
   const scope = selection.slots.scope.trim() || "[scope: file / directory boundary]";
 
+  // Blocks the catalog flags for this task type but that aren't slots/mode-driven
+  // are woven in at their canonical position (grounding early, output-format last).
+  const inBlocks = (id: string) => taskType.blockIds.includes(id);
+
   const parts: string[] = [];
   parts.push(blockBody(catalog, "role")); // A
   parts.push(`Goal: ${task}`); // B (slot)
   parts.push(`Scope: ${scope}`); // G (slot)
+  if (inBlocks("grounding")) parts.push(blockBody(catalog, "grounding")); // C
   parts.push(taskType.typeBody); // type-specific core
   parts.push(mode.overrides.persistence ?? blockBody(catalog, "persistence")); // E (mode wins)
   parts.push(blockBody(catalog, "verification")); // I
   parts.push(`Done-when: ${taskType.defaultDoneWhen}`); // F
   if (mode.overrides.reversibilityGate) parts.push(mode.overrides.reversibilityGate); // H
   if (mode.overrides.escalation) parts.push(mode.overrides.escalation); // J
+  if (inBlocks("output-format")) parts.push(blockBody(catalog, "output-format")); // L
 
   const core = parts.filter((p) => p && p.trim()).join("\n\n");
   return wrapForTarget(core, target, selection, taskType);
