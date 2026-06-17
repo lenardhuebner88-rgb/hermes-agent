@@ -31,6 +31,13 @@ def kb_home(tmp_path, monkeypatch):
     orch.mkdir(parents=True)
     (orch / "CLAUDE.md").write_text("# Verfassung\n\nTriage zuerst.\n", encoding="utf-8")
     (orch / "PLAYBOOK.md").write_text("# Playbook\n\n## Lektion 1\n\nDeploy grün.\n", encoding="utf-8")
+    orch_docs = orch / "docs"
+    orch_docs.mkdir()
+    (orch_docs / "LOOP_ENGINEERING.md").write_text("# Loop Engineering\n\nAnleitung.\n", encoding="utf-8")
+    (orch_docs / "LOOP_ENGINEERING_PROMPTS.md").write_text("# Ops-Loops\n\nDrei Prompts.\n", encoding="utf-8")
+    (orch_docs / "LOOP_ENGINEERING_BUILD_KIT.md").write_text(
+        "# Build-Baukasten\n\nGenerative Loops.\n", encoding="utf-8"
+    )
 
     skills = tmp_path / ".claude" / "skills"
     (skills / "orchestrate").mkdir(parents=True)
@@ -96,6 +103,22 @@ def test_canon_docs_present_with_curated_summary_and_heading_count(kb_home):
     assert topo["updated_ts"] > 0
     # Karten tragen nie den Body.
     assert "body_md" not in topo
+
+
+def test_orchestration_loop_docs_present(kb_home):
+    # Loop-Engineering-Baukasten lebt im Orchestrierungs-Regal (feste Registry).
+    out = kn.list_knowledge()
+    orch = next(c for c in out["collections"] if c["id"] == "orchestrierung")
+    by_id = {d["id"]: d for d in orch["docs"]}
+    assert "kb::doc::orch-loop-build-kit" in by_id
+    kit = by_id["kb::doc::orch-loop-build-kit"]
+    assert kit["title"] == "Loop Engineering — Build-Baukasten"
+    assert kit["source_ref"] == "orchestration/docs/LOOP_ENGINEERING_BUILD_KIT.md"
+    assert kit["updated_ts"] > 0
+    # Lesbar: der Body kommt über read_knowledge_doc, nicht über die Karte.
+    assert "body_md" not in kit
+    doc = kn.read_knowledge_doc("kb::doc::orch-loop-build-kit")
+    assert doc is not None and "Generative Loops." in doc["body_md"]
 
 
 def test_skill_scanned_with_frontmatter_title_and_summary(kb_home):

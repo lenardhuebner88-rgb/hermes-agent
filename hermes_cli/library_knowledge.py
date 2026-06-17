@@ -170,6 +170,24 @@ _STATIC_DOCS: tuple[_StaticDoc, ...] = (
         "Die gesammelten Orchestrierungs-Lessons aus echten Läufen, selbst gepflegt.",
         ("orchestration", "PLAYBOOK.md"), ("lessons", "playbook"),
     ),
+    _StaticDoc(
+        "orch-loop-engineering", "orchestrierung", "Loop Engineering — Anleitung",
+        "Das Paradigma hinter selbstlaufenden Agent-Loops: Anatomie, die fünf "
+        "Bausteine, naiv vs. state-of-the-art, Mechanik in unserer Umgebung.",
+        ("orchestration", "docs", "LOOP_ENGINEERING.md"), ("loops", "prompting", "agenten"),
+    ),
+    _StaticDoc(
+        "orch-loop-prompts", "orchestrierung", "Loop Engineering — 3 Ops-Loops",
+        "Kopierfertige reaktive /loop-Prompts: Backlog-Drain, Fleet-Watchdog und "
+        "adversarialer Verify-Gate — fürs Kanban-Fleet und die Qualität.",
+        ("orchestration", "docs", "LOOP_ENGINEERING_PROMPTS.md"), ("loops", "ops", "kanban"),
+    ),
+    _StaticDoc(
+        "orch-loop-build-kit", "orchestrierung", "Loop Engineering — Build-Baukasten",
+        "Generative Build-Loops: Spec-Vorlage, fünf Muster und drei vollständige "
+        "/loop-Prompts für Features, Dashboard-Tabs und Kanban-Weiterentwicklung.",
+        ("orchestration", "docs", "LOOP_ENGINEERING_BUILD_KIT.md"), ("loops", "bauen", "dashboard"),
+    ),
 )
 
 _STATIC_INDEX: dict[str, _StaticDoc] = {d.key: d for d in _STATIC_DOCS}
