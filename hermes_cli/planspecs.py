@@ -13,7 +13,14 @@ from typing import Any, Literal
 import yaml
 
 from hermes_cli import kanban_db
-from hermes_cli.plan_compiler import CompileBlocked, TaskgraphHints, _extract_frontmatter, taskgraph_hints_to_children
+from hermes_cli.plan_compiler import (
+    AcceptanceCriterion,
+    CompileBlocked,
+    TaskgraphHints,
+    _extract_frontmatter,
+    _normalize_acceptance_criteria,
+    taskgraph_hints_to_children,
+)
 
 DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
@@ -135,8 +142,21 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     if findings:
         raise PlanSpecBlocked(findings)
 
+    # Parse plan-level acceptance_criteria from frontmatter for AC threading.
+    raw_ac = frontmatter.get("acceptance_criteria")
+    plan_ac: list[str | AcceptanceCriterion] = []
+    if isinstance(raw_ac, list):
+        ac_findings: list[str] = []
+        plan_ac = _normalize_acceptance_criteria(raw_ac, ac_findings)
+        # ac_findings are informational only — a malformed AC criterion must
+        # not block ingest (we drop it and continue).
+
     try:
-        children = taskgraph_hints_to_children(hints)
+        children = taskgraph_hints_to_children(
+            hints,
+            plan_ac=plan_ac,
+            planspec_source=str(resolved),
+        )
     except CompileBlocked as exc:
         raise PlanSpecBlocked(exc.findings) from exc
 
@@ -482,6 +502,13 @@ def ingest_planspec(
             )
             if cur.rowcount != 1:
                 raise PlanSpecBlocked([f"root task {root_id} left triage before scheduling"])
+        # A2: stamp freigabe + live_test_depth from the PlanSpec frontmatter
+        # onto the root row so the fields are queryable without parsing the body.
+        with kanban_db.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET freigabe = ?, live_test_depth = ? WHERE id = ?",
+                (spec.freigabe, spec.live_test_depth, root_id),
+            )
         kanban_db.add_event(conn, root_id, "specified", {"source": "planspec_ingest", "path": str(spec.path)})
         if not kanban_db.schedule_task(conn, root_id, reason="Planspec ingest: held before release"):
             raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])

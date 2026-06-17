@@ -30,6 +30,10 @@ class BindingSubtask(BaseModel):
 
     ``deps`` are symbolic ids that are resolved to sibling parent indices right
     before inserting into the kanban graph.
+
+    ``acceptance_criteria`` is an optional per-subtask list of criteria ids or
+    full AcceptanceCriterion objects.  When absent, the caller falls back to the
+    plan-level criteria whose ``applies_to`` includes this subtask's id.
     """
 
     id: str
@@ -37,6 +41,7 @@ class BindingSubtask(BaseModel):
     lane: str
     deps: list[str] = Field(default_factory=list)
     body: str = ""
+    acceptance_criteria: list[Any] = Field(default_factory=list)
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -287,16 +292,72 @@ def _kind_for_planspec_lane(lane: str) -> str:
     return "code"
 
 
-def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[dict[str, Any]]:
+def _ac_bullets_for_subtask(
+    subtask: "BindingSubtask",
+    plan_ac: "list[str | AcceptanceCriterion]",
+) -> list[str]:
+    """Return the AC bullet lines that apply to *subtask*.
+
+    Priority order:
+    1. Per-subtask ``acceptance_criteria`` list (id strings or full dicts from
+       the subtask block itself).
+    2. Fallback: plan-level AC entries whose ``applies_to`` includes this
+       subtask's id.
+
+    Each line is formatted as ``- AC-<id>: <statement>`` so that
+    ``_parse_acceptance_criteria`` (kanban_db.py) can pick them up via its
+    ``\\bAC-\\w+`` bullet regex.
+    """
+    # Per-subtask AC wins when present.
+    if subtask.acceptance_criteria:
+        findings: list[str] = []
+        normalized = _normalize_acceptance_criteria(subtask.acceptance_criteria, findings)
+        bullets: list[str] = []
+        for item in normalized:
+            if isinstance(item, str):
+                # Free-form string — embed as-is; add a generic AC- prefix so
+                # the parser still recognises it.
+                bullets.append(f"- AC-{subtask.id}: {item}")
+            else:
+                bullets.append(f"- AC-{item.id}: {item.statement}")
+        return bullets
+
+    # Fallback: plan-level AC that apply to this subtask.
+    bullets = []
+    for item in plan_ac:
+        if isinstance(item, AcceptanceCriterion):
+            if subtask.id in item.applies_to:
+                bullets.append(f"- AC-{item.id}: {item.statement}")
+        # Free-form plan-level strings have no applies_to → skip in fallback.
+    return bullets
+
+
+def taskgraph_hints_to_children(
+    hints: "TaskgraphHints | dict[str, Any]",
+    *,
+    plan_ac: "list[str | AcceptanceCriterion] | None" = None,
+    planspec_source: "str | None" = None,
+) -> list[dict[str, Any]]:
     """Translate binding frontmatter hints into kanban ``children``.
 
     The output shape is accepted by :func:`kanban_db.decompose_triage_task`.
     It is deterministic and LLM-free: dependency ids become parent indices in
     the same order the PlanSpec lists subtasks.
+
+    Args:
+        hints: The binding taskgraph hints (as a model or raw dict).
+        plan_ac: Plan-level acceptance criteria list (``AcceptanceCriterion``
+            or free-form strings).  Used as fallback AC for subtasks that carry
+            no per-subtask ``acceptance_criteria``.  Pass ``None`` or ``[]`` to
+            disable AC threading (backward-compatible).
+        planspec_source: Absolute path of the originating ``.md`` file.
+            Stored in each child dict as ``planspec_source`` so
+            :func:`kanban_db.decompose_triage_task` can persist it.
     """
     model = hints if isinstance(hints, TaskgraphHints) else TaskgraphHints.model_validate(hints)
     if not model.binding:
         raise CompileBlocked(["taskgraph_hints.binding must be true for ingest"])
+    effective_plan_ac: list[str | AcceptanceCriterion] = list(plan_ac) if plan_ac else []
     index_by_id = {task.id: index for index, task in enumerate(model.subtasks)}
     children: list[dict[str, Any]] = []
     for task in model.subtasks:
@@ -308,18 +369,25 @@ def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[
         body_parts.append(f"Lane: {task.lane}")
         if task.deps:
             body_parts.append("Depends on: " + ", ".join(task.deps))
-        children.append(
-            {
-                "title": task.title,
-                "body": "\n\n".join(body_parts),
-                "assignee": task.lane,
-                "kind": _kind_for_planspec_lane(task.lane),
-                "parents": deps,
-                "planspec_id": task.id,
-                "planspec_lane": task.lane,
-                "planspec_deps": list(task.deps),
-            }
-        )
+        # Thread AC bullets into the body so _parse_acceptance_criteria can
+        # populate tasks.acceptance_criteria for planspec-sourced children.
+        ac_bullets = _ac_bullets_for_subtask(task, effective_plan_ac)
+        if ac_bullets:
+            body_parts.append("\n".join(ac_bullets))
+        child: dict[str, Any] = {
+            "title": task.title,
+            "body": "\n\n".join(body_parts),
+            "assignee": task.lane,
+            "kind": _kind_for_planspec_lane(task.lane),
+            "parents": deps,
+            "planspec_id": task.id,
+            "planspec_lane": task.lane,
+            "planspec_deps": list(task.deps),
+            "planspec_subtask_id": task.id,
+        }
+        if planspec_source is not None:
+            child["planspec_source"] = planspec_source
+        children.append(child)
     return children
 
 

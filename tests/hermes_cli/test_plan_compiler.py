@@ -377,6 +377,9 @@ def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
             "planspec_id": "S1",
             "planspec_lane": "coder",
             "planspec_deps": [],
+            # A2: planspec_subtask_id is always populated; planspec_source is
+            # absent when the caller doesn't pass planspec_source=...
+            "planspec_subtask_id": "S1",
         },
         {
             "title": "Verify",
@@ -387,6 +390,7 @@ def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
             "planspec_id": "S2",
             "planspec_lane": "verifier",
             "planspec_deps": ["S1"],
+            "planspec_subtask_id": "S2",
         },
     ]
 

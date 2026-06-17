@@ -7799,12 +7799,18 @@ def decompose_triage_task(
             child_ac = _parse_acceptance_criteria(
                 body if isinstance(body, str) else None
             )
+            # A2: PlanSpec provenance columns — populated when the child dict
+            # carries planspec_subtask_id / planspec_source (set by
+            # taskgraph_hints_to_children).  NULL on non-planspec children.
+            child_planspec_subtask_id = child.get("planspec_subtask_id")
+            child_planspec_source = child.get("planspec_source")
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
-                " acceptance_criteria, epic_id, kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " acceptance_criteria, epic_id, kind, "
+                " planspec_subtask_id, planspec_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7819,6 +7825,8 @@ def decompose_triage_task(
                     child_ac,
                     root_epic_id,
                     kind,
+                    child_planspec_subtask_id if isinstance(child_planspec_subtask_id, str) else None,
+                    child_planspec_source if isinstance(child_planspec_source, str) else None,
                 ),
             )
             _append_event(
