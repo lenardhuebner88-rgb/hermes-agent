@@ -395,6 +395,79 @@ class TestPortalEndpoint:
         assert isinstance(body["features"], list)
 
 
+class TestAccountUsageEndpoint:
+    @pytest.fixture(autouse=True)
+    def _setup(self, _isolate_hermes_home):
+        self.client, _ = _client()
+
+    def test_lists_subscription_usage_for_dashboard_and_caches(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+        import agent.account_usage as account_usage
+        import hermes_cli.web_server as ws
+
+        calls = []
+
+        def fake_fetch(provider, **kwargs):
+            calls.append((provider, kwargs))
+            return AccountUsageSnapshot(
+                provider=provider,
+                source="test",
+                fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                plan="Pro" if provider == "openai-codex" else None,
+                windows=(AccountUsageWindow(label="Window", used_percent=25.0),),
+                details=(f"{provider} detail",),
+            )
+
+        monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
+        ws._ACCOUNT_USAGE_CACHE.clear()
+
+        first = self.client.get("/api/account-usage")
+        second = self.client.get("/api/account-usage")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert [row["provider"] for row in first.json()["providers"]] == [
+            "anthropic",
+            "openai-codex",
+            "kimi",
+        ]
+        codex = [row for row in first.json()["providers"] if row["provider"] == "openai-codex"][0]
+        assert codex["available"] is True
+        assert codex["plan"] == "Pro"
+        assert codex["windows"][0]["label"] == "Window"
+        assert codex["windows"][0]["used_percent"] == 25.0
+        assert codex["details"] == ["openai-codex detail"]
+        assert all(row["cached"] is False for row in first.json()["providers"])
+        assert all(row["cached"] is True for row in second.json()["providers"])
+        assert len(calls) == 3
+
+    def test_unavailable_reason_replaces_500_and_scrubs_exception_secrets(self, monkeypatch):
+        import agent.account_usage as account_usage
+        import hermes_cli.web_server as ws
+
+        ws._ACCOUNT_USAGE_CACHE.clear()
+        secret = "sk-ant...heck"
+
+        def fake_fetch(provider, **kwargs):
+            if provider == "anthropic":
+                raise RuntimeError(f"upstream rejected token {secret}")
+            return None
+
+        monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
+
+        r = self.client.get("/api/account-usage")
+
+        assert r.status_code == 200
+        body = r.json()
+        by_provider = {row["provider"]: row for row in body["providers"]}
+        assert by_provider["anthropic"]["available"] is False
+        assert by_provider["anthropic"]["unavailable_reason"] == "usage_unavailable"
+        assert by_provider["openai-codex"]["unavailable_reason"] == "usage_unavailable"
+        assert secret not in r.text
+
+
 class TestSessionManagementEndpoints:
     @pytest.fixture(autouse=True)
     def _setup(self, _isolate_hermes_home):
@@ -699,6 +772,7 @@ class TestAdminEndpointsAuthGate:
             "/api/ops/checkpoints",
             "/api/curator",
             "/api/portal",
+            "/api/account-usage",
             "/api/system/stats",
             "/api/hermes/update/check",
         ],
