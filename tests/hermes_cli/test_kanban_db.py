@@ -51,6 +51,34 @@ def test_task_kind_column_migration_is_idempotent(kanban_home):
     assert cols.count("kind") == 1
 
 
+_PLANSPEC_COLS = [
+    "planspec_subtask_id",
+    "planspec_source",
+    "freigabe",
+    "live_test_depth",
+]
+
+
+def test_planspec_columns_exist_after_migration(kanban_home):
+    """A1: all four planspec columns must be present after init/migration."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    for col in _PLANSPEC_COLS:
+        assert col in cols, f"column '{col}' missing from tasks after migration"
+
+
+def test_planspec_columns_migration_is_idempotent(kanban_home):
+    """A1: running the migration twice must be a no-op (no exception, no duplicate)."""
+    with kb.connect() as conn:
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+    for col in _PLANSPEC_COLS:
+        assert cols.count(col) == 1, (
+            f"column '{col}' appears {cols.count(col)} times after double migration"
+        )
+
+
 def test_create_task_persists_optional_kind(kanban_home):
     with kb.connect() as conn:
         code_id = kb.create_task(conn, title="code task", kind="code")

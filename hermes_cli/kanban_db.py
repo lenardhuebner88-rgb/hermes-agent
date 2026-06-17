@@ -2134,6 +2134,24 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "auto_retry_count INTEGER NOT NULL DEFAULT 0",
         )
 
+    # A1 (kanban-chain-haertung): PlanSpec provenance columns. All four are
+    # plain nullable TEXT — no default needed; NULL on every pre-A1 row
+    # preserves the exact behaviour those rows had before the columns existed.
+    if "planspec_subtask_id" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "planspec_subtask_id", "planspec_subtask_id TEXT"
+        )
+    if "planspec_source" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "planspec_source", "planspec_source TEXT"
+        )
+    if "freigabe" not in cols:
+        _add_column_if_missing(conn, "tasks", "freigabe", "freigabe TEXT")
+    if "live_test_depth" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "live_test_depth", "live_test_depth TEXT"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
