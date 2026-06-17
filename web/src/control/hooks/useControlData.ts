@@ -3,6 +3,7 @@ import { fetchJSON } from "@/lib/api";
 import type { PromptForgeCatalog } from "../views/schmiede/catalog";
 import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
 import {
+  AccountUsageResponseSchema,
   BacklogDetailSchema,
   BacklogResponseSchema,
   OrchestrationDetailSchema,
@@ -43,7 +44,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -578,6 +579,14 @@ export function useHermesWorkers() {
     "workers/active",
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
     5000,
+  );
+}
+
+export function useAccountUsage() {
+  return usePolling<AccountUsageResponse>(
+    "account-usage",
+    async () => parseOrThrow(AccountUsageResponseSchema, await fetchJSON<unknown>("/api/account-usage"), "account-usage"),
+    60000,
   );
 }
 
