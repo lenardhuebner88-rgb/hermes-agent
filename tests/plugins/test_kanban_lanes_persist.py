@@ -228,6 +228,46 @@ def test_persist_rejects_unknown_profile(kanban_home, client):
     assert detail["error"] == "unknown profiles"
 
 
+def test_persist_hermes_without_provider_preserves_existing(kanban_home, client):
+    # A profile the operator deliberately pinned to a provider earlier.
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="pinned-lane",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3.7-max",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+
+    # Persist a new model WITHOUT a provider (e.g. a catalog pick that carries
+    # no provider). The pinned provider must survive — not be clobbered to "".
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={"profiles": {"coder": {"worker_runtime": "hermes", "provider": None, "model": "gpt-5.5"}}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] == ["coder"]
+
+    cfg = yaml.safe_load((kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["model"]["default"] == "gpt-5.5"          # model updated
+    assert cfg["model"]["provider"] == "openrouter"       # provider PRESERVED
+
+    active = next(l for l in response.json()["lanes"] if l["active"])
+    assert active["profiles"]["coder"]["model"] == "gpt-5.5"
+    assert active["profiles"]["coder"]["provider"] == "openrouter"  # lane provider preserved
+
+
 def test_persist_creates_missing_config_yaml(kanban_home, client):
     profile_dir = kanban_home / "profiles" / "coder"
     profile_dir.mkdir(parents=True, exist_ok=True)

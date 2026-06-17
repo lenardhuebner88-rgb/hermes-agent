@@ -3466,9 +3466,15 @@ def persist_lane_models_endpoint(
                     atomic_roundtrip_yaml_update(config_path, "worker_runtime", "claude-cli")
                 else:
                     atomic_roundtrip_yaml_update(config_path, "model.default", entry.model)
-                    atomic_roundtrip_yaml_update(
-                        config_path, "model.provider", entry.provider or ""
-                    )
+                    # Only write the provider when one was supplied. Writing an
+                    # empty string would clobber a provider the operator pinned
+                    # earlier (e.g. openrouter) on a no-op save and can break
+                    # model resolution for ambiguous slugs. Absent provider =
+                    # leave the existing config key untouched.
+                    if entry.provider:
+                        atomic_roundtrip_yaml_update(
+                            config_path, "model.provider", entry.provider
+                        )
                     atomic_roundtrip_yaml_update(config_path, "worker_runtime", "hermes")
                 written.append(name)
             except Exception as exc:
@@ -3482,7 +3488,13 @@ def persist_lane_models_endpoint(
             existing = active_entry.get(name) or {}
             lane_profiles[name] = {
                 "worker_runtime": entry.worker_runtime,
-                "provider": entry.provider if entry.worker_runtime != "claude-cli" else None,
+                # Mirror the config behaviour: an absent provider preserves the
+                # lane's existing one instead of clobbering it with null.
+                "provider": (
+                    None
+                    if entry.worker_runtime == "claude-cli"
+                    else (entry.provider or existing.get("provider"))
+                ),
                 "model": entry.model,
                 "fallback_providers": existing.get("fallback_providers") or [],
             }
