@@ -11090,14 +11090,13 @@ def auto_retry_blocked_tasks(
             ).fetchone()
             if latest is None or latest["status"] != "blocked":
                 continue
-            if escalated:
-                conn.execute(
+            conn.execute(
                     """
                     UPDATE tasks
                        SET status = 'ready',
                            auto_retry_count = ?,
-                           assignee = ?,
-                           model_override = ?,
+                           assignee = COALESCE(?, assignee),
+                           model_override = COALESCE(?, model_override),
                            claim_lock = NULL,
                            claim_expires = NULL,
                            worker_pid = NULL
@@ -11105,23 +11104,10 @@ def auto_retry_blocked_tasks(
                     """,
                     (
                         attempt,
-                        AUTO_RETRY_ESCALATION_PROFILE,
-                        AUTO_RETRY_ESCALATION_MODEL,
+                        AUTO_RETRY_ESCALATION_PROFILE if escalated else None,
+                        AUTO_RETRY_ESCALATION_MODEL if escalated else None,
                         task_id,
                     ),
-                )
-            else:
-                conn.execute(
-                    """
-                    UPDATE tasks
-                       SET status = 'ready',
-                           auto_retry_count = ?,
-                           claim_lock = NULL,
-                           claim_expires = NULL,
-                           worker_pid = NULL
-                     WHERE id = ? AND status = 'blocked'
-                    """,
-                    (attempt, task_id),
                 )
             feedback = (
                 f"Auto-Retry {attempt}/{retry_limit} after blocked run "

@@ -1706,7 +1706,7 @@ async def get_status():
     # Try local PID check first (same-host).  If that fails and a remote
     # GATEWAY_HEALTH_URL is configured, probe the gateway over HTTP so the
     # dashboard works when the gateway runs in a separate container.
-    gateway_pid = get_running_pid()
+    gateway_pid = await asyncio.to_thread(get_running_pid)
     gateway_running = gateway_pid is not None
     remote_health_body: dict | None = None
 
@@ -1738,7 +1738,7 @@ async def get_status():
 
     # Prefer the detailed health endpoint response (has full state) when the
     # local runtime status file is absent or stale (cross-container).
-    runtime = read_runtime_status()
+    runtime = await asyncio.to_thread(read_runtime_status)
     if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
         runtime = remote_health_body
 
@@ -1771,17 +1771,21 @@ async def get_status():
     active_sessions = 0
     try:
         from hermes_state import SessionDB
-        db = SessionDB()
-        try:
-            sessions = db.list_sessions_rich(limit=50)
-            now = time.time()
-            active_sessions = sum(
-                1 for s in sessions
-                if s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0))) < 300
-            )
-        finally:
-            db.close()
+
+        def _count_active_sessions() -> int:
+            db = SessionDB()
+            try:
+                sessions = db.list_sessions_rich(limit=50)
+                now = time.time()
+                return sum(
+                    1 for s in sessions
+                    if s.get("ended_at") is None
+                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                )
+            finally:
+                db.close()
+
+        active_sessions = await asyncio.to_thread(_count_active_sessions)
     except Exception:
         pass
 
@@ -2247,10 +2251,10 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
         )
     except RuntimeError as exc:
         # Required summary-report upload failed (offline / paste service down).
-        raise HTTPException(status_code=502, detail=f"Upload failed: {exc}")
+        raise HTTPException(status_code=502, detail=safe_detail(exc, "Upload failed", log=_log))
     except Exception as exc:
         _log.exception("debug share failed")
-        raise HTTPException(status_code=500, detail=f"Failed: {exc}")
+        raise HTTPException(status_code=500, detail=safe_detail(exc, "Failed", log=_log))
 
     return {
         "ok": True,
@@ -6933,7 +6937,7 @@ async def prune_sessions_endpoint(body: SessionPrune):
 
 
 @app.get("/api/logs")
-async def get_logs(
+def get_logs(
     file: str = "agent",
     lines: int = 100,
     level: Optional[str] = None,

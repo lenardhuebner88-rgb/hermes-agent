@@ -824,7 +824,7 @@ def _today_digest_item(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, 
         "verification_state": verification_state,
         "verifier_verdict": verifier_verdict,
         "verdict_label": _verdict_label(verification_state, verifier_verdict),
-        "result_quality": result.get("result_quality") or _result_quality_badge(verification_state, profile=result.get("profile")),
+        "result_quality": result.get("result_quality"),
         "gate_evidence": result.get("verifier_evidence") or result.get("verification") or [],
         "deliverable": primary_deliverable,
         "deliverable_excerpt": _deliverable_excerpt(result["task_id"], primary_deliverable),
@@ -5687,134 +5687,6 @@ def get_flow_plan(task_id: str):
         filename=path.name,
         content_disposition_type="inline",
     )
-
-
-# ---------------------------------------------------------------------------
-# Orchestration settings (kanban.orchestrator_profile / default_assignee /
-# auto_decompose) — surfaced to the dashboard's settings panel
-# ---------------------------------------------------------------------------
-
-class OrchestrationSettingsBody(BaseModel):
-    orchestrator_profile: Optional[ShortText] = None
-    default_assignee: Optional[ShortText] = None
-    auto_decompose: Optional[bool] = None
-    auto_promote_children: Optional[bool] = None
-
-
-@router.get("/orchestration")
-def get_orchestration_settings():
-    """Return the current kanban orchestration knobs from config.yaml
-    plus the resolved effective values (filling in fallbacks)."""
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config() or {}
-    except Exception:
-        cfg = {}
-    kanban_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
-    explicit_orch = (kanban_cfg.get("orchestrator_profile") or "").strip()
-    explicit_default = (kanban_cfg.get("default_assignee") or "").strip()
-    auto_decompose = bool(kanban_cfg.get("auto_decompose", True))
-    auto_promote_children = bool(kanban_cfg.get("auto_promote_children", True))
-
-    # Resolve fallbacks the same way the decomposer does.
-    resolved_orch = explicit_orch
-    resolved_default = explicit_default
-    try:
-        from hermes_cli import profiles as profiles_mod
-        active_default = profiles_mod.get_active_profile_name() or "default"
-        if not resolved_orch or not profiles_mod.profile_exists(resolved_orch):
-            resolved_orch = active_default
-        if not resolved_default or not profiles_mod.profile_exists(resolved_default):
-            resolved_default = active_default
-    except Exception:
-        active_default = "default"
-        if not resolved_orch:
-            resolved_orch = active_default
-        if not resolved_default:
-            resolved_default = active_default
-
-    return {
-        "orchestrator_profile": explicit_orch,
-        "default_assignee": explicit_default,
-        "auto_decompose": auto_decompose,
-        "auto_promote_children": auto_promote_children,
-        "resolved_orchestrator_profile": resolved_orch,
-        "resolved_default_assignee": resolved_default,
-        "active_profile": active_default,
-    }
-
-
-@router.put("/orchestration")
-def set_orchestration_settings(payload: OrchestrationSettingsBody):
-    """Update the kanban orchestration knobs in ~/.hermes/config.yaml.
-
-    Each field is optional — only fields explicitly passed are
-    written. ``orchestrator_profile`` / ``default_assignee`` accept
-    empty strings to clear the override and fall back to the default
-    profile.
-    """
-    try:
-        from hermes_cli.config import load_config, save_config
-        cfg = load_config() or {}
-    except Exception:
-        log.exception("failed to load config")
-        raise HTTPException(status_code=500, detail="failed to load config")
-
-    kanban_section = cfg.setdefault("kanban", {})
-    if not isinstance(kanban_section, dict):
-        kanban_section = {}
-        cfg["kanban"] = kanban_section
-
-    # Validate any non-empty profile names exist before saving.
-    try:
-        from hermes_cli import profiles as profiles_mod
-    except Exception:
-        profiles_mod = None  # type: ignore
-
-    if payload.orchestrator_profile is not None:
-        name = (payload.orchestrator_profile or "").strip()
-        if name and profiles_mod is not None:
-            try:
-                if not profiles_mod.profile_exists(name):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"profile '{name}' does not exist",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                pass  # fail open if the lookup itself errors
-        kanban_section["orchestrator_profile"] = name
-
-    if payload.default_assignee is not None:
-        name = (payload.default_assignee or "").strip()
-        if name and profiles_mod is not None:
-            try:
-                if not profiles_mod.profile_exists(name):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"profile '{name}' does not exist",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                pass
-        kanban_section["default_assignee"] = name
-
-    if payload.auto_decompose is not None:
-        kanban_section["auto_decompose"] = bool(payload.auto_decompose)
-
-    if payload.auto_promote_children is not None:
-        kanban_section["auto_promote_children"] = bool(payload.auto_promote_children)
-
-    try:
-        save_config(cfg)
-    except Exception:
-        log.exception("failed to save config")
-        raise HTTPException(status_code=500, detail="failed to save config")
-
-    # Echo back the resolved state (callers usually re-render from it).
-    return get_orchestration_settings()
 
 
 @router.websocket("/events")
