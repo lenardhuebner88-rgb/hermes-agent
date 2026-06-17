@@ -1057,12 +1057,14 @@ export function useFlowGate(rootId: string | null, onDone?: () => void | Promise
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const aliveRef = useRef(true);
+  const inFlightRef = useRef(false);
   useEffect(() => () => { aliveRef.current = false; }, []);
   const reload = useCallback(async (): Promise<FlowGateResponse | null> => {
     if (!rootId) {
       if (aliveRef.current) setData(null);
       return null;
     }
+    inFlightRef.current = true;
     if (aliveRef.current) setLoading(true);
     try {
       const parsed = parseOrThrow(
@@ -1080,6 +1082,7 @@ export function useFlowGate(rootId: string | null, onDone?: () => void | Promise
       if (aliveRef.current) setError(detail);
       return null;
     } finally {
+      inFlightRef.current = false;
       if (aliveRef.current) setLoading(false);
     }
   }, [rootId]);
@@ -1089,7 +1092,7 @@ export function useFlowGate(rootId: string | null, onDone?: () => void | Promise
     }, 0);
     if (!rootId) return () => window.clearTimeout(initial);
     const interval = window.setInterval(() => {
-      if (!document.hidden) void reload();
+      if (!document.hidden && !inFlightRef.current) void reload();
     }, 10000);
     return () => {
       window.clearTimeout(initial);
@@ -1162,12 +1165,14 @@ export function useChainGraph(rootId: string | null) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const aliveRef = useRef(true);
+  const inFlightRef = useRef(false);
   useEffect(() => () => { aliveRef.current = false; }, []);
   const reload = useCallback(async (): Promise<ChainGraphResponse | null> => {
     if (!rootId) {
       if (aliveRef.current) setData(null);
       return null;
     }
+    inFlightRef.current = true;
     if (aliveRef.current) setLoading(true);
     try {
       const parsed = parseOrThrow(
@@ -1185,6 +1190,7 @@ export function useChainGraph(rootId: string | null) {
       if (aliveRef.current) setError(detail);
       return null;
     } finally {
+      inFlightRef.current = false;
       if (aliveRef.current) setLoading(false);
     }
   }, [rootId]);
@@ -1194,7 +1200,7 @@ export function useChainGraph(rootId: string | null) {
     }, 0);
     if (!rootId) return () => window.clearTimeout(initial);
     const interval = window.setInterval(() => {
-      if (!document.hidden) void reload();
+      if (!document.hidden && !inFlightRef.current) void reload();
     }, 8000);
     return () => {
       window.clearTimeout(initial);

@@ -6,7 +6,7 @@
  * `toneClasses(tone)` ist der einzige Ort, der dieses Muster kodiert — nutze es
  * für Pills, Callouts und getönte Flächen, statt die Klassen überall zu wiederholen.
  */
-import type { ToneName, Priority } from './types';
+import type { ToneName } from './types';
 
 /** Tailwind-Klassen für eine getönte Fläche (Pill/Callout/Chip). */
 export const toneClasses = (tone: ToneName): string => TONE_CLASS[tone];
@@ -48,14 +48,6 @@ export const profileLabel: Record<string, string> = {
   'coder-claude': 'Coder (Claude)', premium: 'Premium', reviewer: 'Reviewer',
 };
 
-export const priorityLabel: Record<Priority, string> = { high: 'Hoch', med: 'Mittel', low: 'Niedrig' };
-export const priorityTone: Record<Priority, ToneName> = { high: 'rose', med: 'amber', low: 'zinc' };
-
-/** CSS-Variable für die Agenten-Farbe (siehe theme.css --agent-*). */
-export const agentColorVar: Record<string, string> = {
-  main: '--agent-atlas', 'sre-expert': '--agent-forge', 'frontend-guru': '--agent-pixel',
-  'efficiency-auditor': '--agent-lens', james: '--agent-james', spark: '--agent-spark',
-};
 
 /** Status-Punkt-Variante (siehe .mc-dot-* in theme.css). */
 export type DotKind = 'live' | 'warn' | 'error' | 'ready' | 'idle' | 'offline';

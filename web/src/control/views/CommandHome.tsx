@@ -31,7 +31,7 @@ import type { AccountUsageProvider, AccountUsageResponse, AccountUsageWindow, Bo
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
-import { fmtAge, nowSec } from "../lib/derive";
+import { fmtAge, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge, StatusPill } from "../components/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { Eyebrow, Text } from "../components/primitives";
@@ -512,8 +512,6 @@ export function AccountUsageTile({ usage, loading, error }: { usage: AccountUsag
 function StatsPulse({ onOpen }: { onOpen: () => void }) {
   const daily = useHermesRunsDaily();
   const series = (daily.data?.series ?? []).slice(-14);
-  const fmtTokens = (v: number) =>
-    v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)} M` : v >= 1_000 ? `${Math.round(v / 1_000)} k` : String(v);
   const hasSeries = series.length > 0 && series.some((p) => p.done_tasks > 0 || (p.output_tokens ?? 0) > 0);
   const hasSourceProblem = Boolean(daily.isStale || daily.errorObj || daily.error);
   if (!hasSeries && !hasSourceProblem) return null;

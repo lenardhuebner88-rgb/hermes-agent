@@ -50,6 +50,3 @@ export const tokens = {
   hit: { min: 44, tab: 60 },
   dur: { fast: 150, med: 200, slow: 400, pulse: 2000 },
 } as const;
-
-/** LED-Glow als box-shadow für einen Status-Hex. */
-export const ledGlow = (hex: string) => `0 0 6px ${hex}`;

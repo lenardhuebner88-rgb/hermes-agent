@@ -132,7 +132,12 @@ function formatInline(text: string, keyPrefix = ""): React.ReactNode[] {
     if (m.index > last) parts.push(text.slice(last, m.index));
     const key = `${keyPrefix}-${m.index}`;
     if (m[1] && m[2]) {
-      parts.push(<a key={key} href={m[2]} className="text-cyan-300 underline underline-offset-2" target="_blank" rel="noreferrer">{m[1]}</a>);
+      const href = m[2].trim();
+      if (!/^(https?:|mailto:|#)/i.test(href)) {
+        parts.push(m[1]);
+      } else {
+        parts.push(<a key={key} href={href} className="text-cyan-300 underline underline-offset-2" target="_blank" rel="noreferrer">{m[1]}</a>);
+      }
     } else if (m[3]) {
       parts.push(<code key={key} className="rounded bg-white/10 px-1 font-mono text-xs text-amber-200">{m[3]}</code>);
     } else if (m[4] ?? m[6]) {
