@@ -2202,6 +2202,10 @@ DEFAULT_CONFIG = {
         # values is an operator decision.
         "daily_token_cap_per_profile": None,
         "daily_cost_cap_usd": None,
+        # Optional Kimi subscription token caps used by /usage to render rolling
+        # 5h/7d percentage gauges. Unset keeps /usage details-only for Kimi.
+        "cap_tokens_5h": None,
+        "cap_tokens_7d": None,
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or

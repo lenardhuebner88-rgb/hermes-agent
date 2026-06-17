@@ -1,5 +1,8 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
+import hermes_cli.config as hermes_config
+import hermes_cli.kanban_db as kanban_db
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
@@ -47,6 +50,11 @@ class _RoutingClient:
 
     def get(self, url, headers=None):
         return _Response(self._payloads[url])
+
+
+@contextmanager
+def _dummy_connection():
+    yield object()
 
 
 def test_fetch_account_usage_codex(monkeypatch):
@@ -201,3 +209,60 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def test_fetch_account_usage_kimi_returns_details_without_configured_caps(monkeypatch):
+    monkeypatch.setattr(hermes_config, "load_config", lambda: {"kanban": {}})
+    monkeypatch.setattr(kanban_db, "connect_closing", lambda: _dummy_connection())
+    monkeypatch.setattr(
+        kanban_db,
+        "subscription_token_totals",
+        lambda conn, *, subscription, since_epoch: {
+            "subscription": subscription,
+            "since_epoch": since_epoch,
+            "runs": 2 if since_epoch else 0,
+            "input_tokens": 700,
+            "output_tokens": 300,
+            "total_tokens": 1000,
+        },
+    )
+
+    snapshot = fetch_account_usage("kimi")
+
+    assert snapshot is not None
+    assert snapshot.provider == "kimi"
+    assert snapshot.source == "kanban_subscription_tokens"
+    assert snapshot.windows == ()
+    assert "Kimi 5h tokens: 1,000 across 2 runs" in snapshot.details
+    assert "Kimi 7d tokens: 1,000 across 2 runs" in snapshot.details
+
+
+def test_fetch_account_usage_kimi_uses_configured_token_caps_for_percent_windows(monkeypatch):
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {"kanban": {"cap_tokens_5h": 2000, "cap_tokens_7d": 8000}},
+    )
+    monkeypatch.setattr(kanban_db, "connect_closing", lambda: _dummy_connection())
+
+    totals_by_call = iter(
+        [
+            {"runs": 1, "input_tokens": 800, "output_tokens": 200, "total_tokens": 1000},
+            {"runs": 3, "input_tokens": 1500, "output_tokens": 500, "total_tokens": 2000},
+        ]
+    )
+    monkeypatch.setattr(
+        kanban_db,
+        "subscription_token_totals",
+        lambda conn, *, subscription, since_epoch: next(totals_by_call),
+    )
+
+    snapshot = fetch_account_usage("kimi")
+
+    assert snapshot is not None
+    assert snapshot.windows == (
+        AccountUsageWindow(label="Kimi 5h", used_percent=50.0, detail="1,000 / 2,000 tokens"),
+        AccountUsageWindow(label="Kimi 7d", used_percent=25.0, detail="2,000 / 8,000 tokens"),
+    )
+    assert "Kimi 5h tokens: 1,000 across 1 run" in snapshot.details
+    assert "Kimi 7d tokens: 2,000 across 3 runs" in snapshot.details
