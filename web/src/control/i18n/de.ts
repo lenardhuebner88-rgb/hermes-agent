@@ -706,7 +706,7 @@ export const de = {
   ketten: {
     eyebrow: "Ketten",
     title: "Task-Ketten",
-    subtitle: "Eine laufende Kette als DAG — Stationen, Status, Assignee und live Heartbeat.",
+    subtitle: "Eine laufende Kette als Pipeline — Fortschritt, Status und live Heartbeat.",
     loading: "lädt …",
     loadError: "Kette konnte nicht geladen werden.",
     emptyTitle: "Keine aktive Kette",
@@ -720,6 +720,9 @@ export const de = {
     heartbeatLabel: "Heartbeat",
     heartbeatNow: "jetzt",
     statusLabel: "Status",
+    progressLabel: "Fortschritt",
+    progressOf: (done: number, total: number) => `${done} von ${total} Subtasks`,
+    waitingOnPredecessor: "Wartet auf Vorgänger",
     checkedAt: (label: string) => `aktualisiert vor ${label}`,
   },
 } as const;

@@ -248,6 +248,9 @@ export interface ChainGraphNode {
   completed_at: number | null;
   last_heartbeat_at: number | null;
   runtime_seconds: number | null;
+  /** Subtask rollup for the progress bar; null when the node has no children
+   *  or the backend does not (yet) emit it — the card degrades gracefully. */
+  progress: { done: number; total: number } | null;
   latest_run: ChainGraphRun | null;
 }
 

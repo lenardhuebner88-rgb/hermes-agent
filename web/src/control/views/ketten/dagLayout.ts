@@ -47,6 +47,16 @@ export function computeLevels(nodes: ChainGraphNode[], edges: ChainGraphEdge[]):
     .map(([level, levelNodes]) => ({ level, nodes: levelNodes }));
 }
 
+/**
+ * Linearize the DAG into a single vertical-pipeline order: by level ascending,
+ * then by id within a level (stable). `computeLevels` already returns levels in
+ * ascending order with nodes sorted by id, so a flat concat preserves it. The
+ * pipeline view renders nodes top-to-bottom in this order.
+ */
+export function linearizeNodes(nodes: ChainGraphNode[], edges: ChainGraphEdge[]): ChainGraphNode[] {
+  return computeLevels(nodes, edges).flatMap((lvl) => lvl.nodes);
+}
+
 export function statusTone(status: string): "emerald" | "cyan" | "amber" | "red" | "zinc" {
   if (status === "done") return "emerald";
   if (status === "running") return "cyan";

@@ -254,6 +254,7 @@ const ChainGraphNodeSchema = z.object({
   completed_at: z.coerce.number().nullable().catch(null),
   last_heartbeat_at: z.coerce.number().nullable().catch(null),
   runtime_seconds: z.coerce.number().nullable().catch(null),
+  progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
   latest_run: ChainGraphRunSchema.nullable().catch(null),
 });
 
