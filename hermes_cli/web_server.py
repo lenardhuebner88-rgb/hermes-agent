@@ -247,37 +247,103 @@ class _BodySizeLimitMiddleware:
     of its own — the existing 100 MB file cap only fired AFTER the full
     data-URL had been buffered and decoded (transiently several GB possible;
     part of the 2026-06-11 dashboard memory-peak audit). Pure ASGI (not
-    BaseHTTPMiddleware) so the check costs a header scan per request;
-    chunked requests without Content-Length pass through unchanged.
+    BaseHTTPMiddleware) so the check costs a header scan per request.
+
+    Two-path design:
+    - Content-Length present: cheap O(1) header comparison (unchanged).
+    - No Content-Length (chunked / Transfer-Encoding: chunked): wraps the
+      ASGI ``receive`` callable to accumulate body bytes; aborts with 413
+      the moment the running total exceeds the cap.  This closes the
+      chunked-body RAM-exhaustion DoS vector (Finding #12).
     """
 
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    async def _send_413(send):
+        body = b'{"detail":"Request body is too large"}'
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            for key, value in scope.get("headers", []):
-                if key == b"content-length":
-                    try:
-                        declared = int(value)
-                    except ValueError:
-                        declared = -1
-                    if declared > _MAX_HTTP_BODY_BYTES:
-                        body = (
-                            b'{"detail":"Request body is too large"}'
-                        )
-                        await send({
-                            "type": "http.response.start",
-                            "status": 413,
-                            "headers": [
-                                (b"content-type", b"application/json"),
-                                (b"content-length", str(len(body)).encode()),
-                            ],
-                        })
-                        await send({"type": "http.response.body", "body": body})
-                        return
-                    break
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            # WebSocket / lifespan: pass straight through, no body accounting.
+            await self.app(scope, receive, send)
+            return
+
+        has_content_length = False
+        for key, value in scope.get("headers", []):
+            if key == b"content-length":
+                has_content_length = True
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = -1
+                if declared > _MAX_HTTP_BODY_BYTES:
+                    await self._send_413(send)
+                    return
+                break
+
+        if has_content_length:
+            # Fast path: Content-Length was present and within limits.
+            await self.app(scope, receive, send)
+            return
+
+        # --- Chunked / no Content-Length path ---
+        # Eagerly consume the full body (up to limit + 1 bytes) BEFORE the app
+        # runs so we can 413 even for handlers that never read the body.
+        # Buffering up to _MAX_HTTP_BODY_BYTES mirrors what FastAPI would do
+        # anyway; we just do it here so we can gate on the total size first.
+        limit = _MAX_HTTP_BODY_BYTES
+        chunks: list[bytes] = []
+        total = 0
+        more = True
+        while more:
+            message = await receive()
+            msg_type = message.get("type")
+            if msg_type == "http.disconnect":
+                # Client disconnected before sending body; let the app see it.
+                _disconnect_msg = message
+
+                async def _disconnect_receive():
+                    return _disconnect_msg
+
+                await self.app(scope, _disconnect_receive, send)
+                return
+            if msg_type == "http.request":
+                chunk = message.get("body", b"")
+                total += len(chunk)
+                if total > limit:
+                    await self._send_413(send)
+                    return
+                chunks.append(chunk)
+                more = bool(message.get("more_body", False))
+            else:
+                # Unexpected message type; pass everything through unchanged.
+                await self.app(scope, receive, send)
+                return
+
+        # Body fits; reconstruct a synthetic receive for the app.
+        buffered_body = b"".join(chunks)
+        body_delivered = False
+
+        async def _replay_receive():
+            nonlocal body_delivered
+            if not body_delivered:
+                body_delivered = True
+                return {"type": "http.request", "body": buffered_body, "more_body": False}
+            # App is asking for more after we said more_body=False; return disconnect.
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, _replay_receive, send)
 
 
 # Added after GZip → runs OUTSIDE it: oversized requests are rejected before

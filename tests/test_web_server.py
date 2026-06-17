@@ -113,10 +113,16 @@ def test_body_size_limit_rejects_oversized_requests_before_buffering(monkeypatch
     assert inner_called["v"]
     assert sent == []
 
-    # Chunked (no Content-Length) passes through.
+    # Chunked (no Content-Length) within the limit passes through.
+    # Finding #12 fix: chunked bodies are now body-counted, so a proper
+    # async receive callable returning an empty body is required.
     inner_called["v"] = False
+
+    async def empty_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
     scope["headers"] = []
-    asyncio.run(mw(scope, None, send))
+    asyncio.run(mw(scope, empty_receive, send))
     assert inner_called["v"]
 
 
