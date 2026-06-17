@@ -36,6 +36,61 @@ function watchPage(page: Page): PageWatch {
   };
 }
 
+async function mockControlApis(page: Page) {
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = path === "/api/dashboard/plugins" ? [] : path === "/api/account-usage" ? {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "anthropic",
+          available: true,
+          source: "oauth",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Account limits",
+          plan: "Max",
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "5h", used_percent: 82, reset_at: null, detail: "Reset rollierend" },
+            { label: "Weekly", used_percent: null, reset_at: null, detail: "Limit unbekannt" },
+          ],
+          details: ["Details sichtbar"],
+        },
+      ],
+    } : path === "/api/health-status" ? {
+      overall: "healthy",
+      subsystems: {
+        gateway: { status: "healthy" },
+        autoresearch: { status: "healthy" },
+        kanban_db: { status: "healthy" },
+      },
+    } : path.includes("/workers/active") ? {
+      workers: [],
+      count: 0,
+      checked_at: Math.floor(Date.now() / 1000),
+    } : path.includes("/kanban/board") ? {
+      columns: [],
+      now: Math.floor(Date.now() / 1000),
+    } : path.includes("/runs/today-digest") ? {
+      count: 0,
+      items: [],
+    } : path.includes("/runs/daily") ? {
+      series: [],
+    } : path.includes("/autoresearch/proposals") ? {
+      proposals: [],
+      count: 0,
+    } : path.includes("/family-organizer/backlog") ? {
+      items: [],
+    } : path.includes("/orchestration/backlog") ? {
+      items: [],
+    } : path.includes("/metrics-lite") ? {
+      routes: [],
+    } : {};
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+  });
+}
+
 // probe = Hero-Eyebrow des Tabs; filter({ visible: true }) ist nötig, weil
 // dieselben Wörter auch in versteckten Nav-/Overflow-Links vorkommen.
 const TABS: Array<{ path: string; probe: string }> = [
@@ -89,4 +144,21 @@ test.describe("Control Smoke (live)", () => {
     await page.waitForTimeout(1_000);
     watch.assertClean();
   });
+
+  for (const viewport of [
+    { name: "Desktop", size: { width: 1440, height: 1000 } },
+    { name: "Tablet", size: { width: 820, height: 1180 } },
+  ]) {
+    test(`Abo-Limits Tile rendert Gauges und unbekannte Limits (${viewport.name})`, async ({ page }) => {
+      await page.setViewportSize(viewport.size);
+      await mockControlApis(page);
+
+      await page.goto("/control");
+
+      await expect(page.getByText("Abo-Limits").filter({ visible: true })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole("meter", { name: /5h: 82% genutzt/ })).toBeVisible();
+      await expect(page.getByText("Limit unbekannt").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Details sichtbar").filter({ visible: true })).toBeVisible();
+    });
+  }
 });

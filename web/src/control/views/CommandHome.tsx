@@ -17,6 +17,7 @@ import { ArrowRight, ChevronRight, Inbox as InboxIcon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import {
+  useAccountUsage,
   useBoard,
   useDecisionInbox,
   useFixRedispatch,
@@ -26,7 +27,7 @@ import {
   useSystemHealth,
 } from "../hooks/useControlData";
 import type { Density } from "../hooks/useDensity";
-import type { BoardTask, ToneName, Worker } from "../lib/types";
+import type { AccountUsageProvider, AccountUsageResponse, AccountUsageWindow, BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
@@ -53,6 +54,7 @@ export function CommandHome({ density }: { density: Density }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
+  const accountUsage = useAccountUsage();
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
@@ -142,6 +144,9 @@ export function CommandHome({ density }: { density: Density }) {
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
+
+      {/* ── ABO-LIMITS ──────────────────────────────────────────────────────── */}
+      <AccountUsageTile usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} />
 
       {/* ── THE QUEUE ───────────────────────────────────────────────────────── */}
       {!calm && !settling ? (
@@ -384,6 +389,120 @@ function DecisionRow({ item, onOpen, fix }: { item: InboxItem; onOpen: () => voi
         <ChevronRight className="h-4 w-4 hc-dim" />
       </button>
     </div>
+  );
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "openai-codex") return "OpenAI Codex";
+  if (provider === "anthropic") return "Anthropic";
+  if (provider === "kimi") return "Kimi";
+  return provider;
+}
+
+function limitTone(value: number | null): ToneName {
+  if (value == null) return "zinc";
+  if (value >= 90) return "red";
+  if (value >= 75) return "amber";
+  return "emerald";
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+function AccountGauge({ window }: { window: AccountUsageWindow }) {
+  const used = typeof window.used_percent === "number" && Number.isFinite(window.used_percent)
+    ? Math.max(0, Math.min(100, window.used_percent))
+    : null;
+  const tone = limitTone(used);
+  const label = used == null ? "Limit unbekannt" : `${formatPercent(used)} genutzt`;
+  const free = used == null ? null : `${formatPercent(100 - used)} frei`;
+  const color = tone === "red" ? "#f87171" : tone === "amber" ? "#fbbf24" : tone === "emerald" ? "#34d399" : "#71717a";
+  const bg = used == null
+    ? "conic-gradient(rgba(161,161,170,.28) 0 100%)"
+    : `conic-gradient(${color} 0 ${used}%, rgba(255,255,255,.10) ${used}% 100%)`;
+  return (
+    <div className="min-w-0 rounded-lg border border-white/10 bg-white/[.025] p-3">
+      <div className="flex items-center gap-3">
+        <div
+          role="meter"
+          aria-label={`${window.label}: ${label}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={used ?? undefined}
+          className="grid h-14 w-14 shrink-0 place-items-center rounded-full"
+          style={{ background: bg }}
+        >
+          <span className="grid h-10 w-10 place-items-center rounded-full bg-[var(--hc-surface-1,#0b1020)] text-[0.66rem] font-semibold text-white">
+            {used == null ? "?" : formatPercent(used)}
+          </span>
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-white">{window.label}</p>
+          <p className="text-xs hc-soft">{label}{free ? ` · ${free}` : ""}</p>
+          {window.detail || window.reset_at ? <p className="mt-1 truncate text-[0.68rem] hc-dim">{window.detail ?? `Reset ${window.reset_at}`}</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AccountProviderCard({ provider }: { provider: AccountUsageProvider }) {
+  const tone: ToneName = provider.available ? (provider.windows.some((w) => (w.used_percent ?? 0) >= 90) ? "red" : provider.windows.some((w) => (w.used_percent ?? 0) >= 75) ? "amber" : "emerald") : "zinc";
+  return (
+    <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-white">{provider.provider}</p>
+          <p className="text-xs hc-dim">{provider.plan ?? provider.source ?? providerLabel(provider.provider)}</p>
+        </div>
+        <StatusPill tone={tone} label={provider.available ? (provider.cached ? "Cache" : "Live") : "Nicht verfügbar"} dot={provider.available ? "live" : "idle"} />
+      </div>
+      {provider.windows.length ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {provider.windows.map((window) => <AccountGauge key={`${provider.provider}-${window.label}`} window={window} />)}
+        </div>
+      ) : provider.available ? (
+        <p className="mt-3 rounded-lg border border-dashed border-[var(--hc-border-strong)] px-3 py-2 text-sm hc-soft">Limit unbekannt</p>
+      ) : (
+        <p className="mt-3 rounded-lg border border-dashed border-[var(--hc-border-strong)] px-3 py-2 text-sm hc-soft">{provider.unavailable_reason ?? "usage_unavailable"}</p>
+      )}
+      {provider.details.length ? (
+        <ul className="mt-3 space-y-1 text-xs hc-soft">
+          {provider.details.map((detail) => <li key={detail}>• {detail}</li>)}
+        </ul>
+      ) : null}
+    </article>
+  );
+}
+
+export function AccountUsageTile({ usage, loading, error }: { usage: AccountUsageResponse | null; loading: boolean; error: string | null }) {
+  const providers = usage?.providers ?? [];
+  const available = providers.filter((provider) => provider.available).length;
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Eyebrow>Abo-Limits</Eyebrow>
+          <StatusPill
+            tone={error ? "amber" : providers.length === 0 ? "zinc" : available === providers.length ? "emerald" : "amber"}
+            label={loading ? "lädt…" : error ? "teilweise unbekannt" : providers.length === 0 ? "Limit unbekannt" : `${available}/${providers.length} verfügbar`}
+            dot={error ? "warn" : providers.length === 0 ? "idle" : "live"}
+          />
+        </div>
+        {usage ? <span className="text-xs hc-dim">TTL {usage.cache_ttl_seconds}s</span> : null}
+      </div>
+      {loading ? (
+        <div className="hc-skeleton h-28 w-full rounded-xl" />
+      ) : providers.length ? (
+        <div className="grid gap-3 lg:grid-cols-3">
+          {providers.map((provider) => <AccountProviderCard key={provider.provider} provider={provider} />)}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-[var(--hc-border-strong)] px-4 py-4 text-sm hc-soft">Limit unbekannt — noch keine Abo-Daten geladen.</div>
+      )}
+      {error ? <p className="text-xs text-amber-300/80">{error}</p> : null}
+    </section>
   );
 }
 

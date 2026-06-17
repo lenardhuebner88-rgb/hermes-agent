@@ -81,6 +81,31 @@ export const WorkersResponseSchema = z.object({
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
 
+const AccountUsageWindowSchema = z.object({
+  label: z.string().catch("Limit"),
+  used_percent: z.coerce.number().nullable().catch(null),
+  reset_at: z.string().nullable().catch(null),
+  detail: z.string().nullable().catch(null),
+});
+
+const AccountUsageProviderSchema = z.object({
+  provider: z.string().catch("unknown"),
+  available: z.boolean().catch(false),
+  source: z.string().nullable().catch(null),
+  fetched_at: z.string().nullable().catch(null),
+  title: z.string().catch("Account limits"),
+  plan: z.string().nullable().catch(null),
+  windows: z.array(AccountUsageWindowSchema).catch([]),
+  details: z.array(z.string()).catch([]),
+  unavailable_reason: z.string().nullable().catch(null),
+  cached: z.boolean().catch(false),
+});
+
+export const AccountUsageResponseSchema = z.object({
+  providers: z.array(AccountUsageProviderSchema).catch([]),
+  cache_ttl_seconds: z.coerce.number().catch(60),
+});
+
 export const PlanSpecRecordSchema = z.object({
   path: z.string().catch(""),
   agent: z.string().catch(""),

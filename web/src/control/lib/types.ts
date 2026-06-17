@@ -59,6 +59,31 @@ export interface WorkersResponse {
   checked_at: number;
 }
 
+export interface AccountUsageWindow {
+  label: string;
+  used_percent: number | null;
+  reset_at: string | null;
+  detail: string | null;
+}
+
+export interface AccountUsageProvider {
+  provider: string;
+  available: boolean;
+  source: string | null;
+  fetched_at: string | null;
+  title: string;
+  plan: string | null;
+  windows: AccountUsageWindow[];
+  details: string[];
+  unavailable_reason: string | null;
+  cached: boolean;
+}
+
+export interface AccountUsageResponse {
+  providers: AccountUsageProvider[];
+  cache_ttl_seconds: number;
+}
+
 export interface PlanSpecRecord {
   path: string;
   agent: string;
