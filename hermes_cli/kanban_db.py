@@ -13947,6 +13947,56 @@ def _profile_subscription(profile: Optional[str]) -> Optional[str]:
     return sub
 
 
+def subscription_token_totals(
+    conn: sqlite3.Connection,
+    *,
+    subscription: str,
+    since_epoch: int,
+) -> dict:
+    """Token totals for a paid-subscription lane since ``since_epoch``.
+
+    Caller-neutral helper for rolling Abo limits (e.g. Kimi 5h/7d): it reads
+    closed ``task_runs`` only, uses ``_profile_subscription`` for attribution
+    instead of profile-name heuristics, and returns a small aggregate that does
+    not alter ``runs_costs``' dashboard-facing response shape. The lower bound
+    is inclusive, matching the dispatcher budget queries (``started_at >= ?``).
+    NULL token columns count as zero so partially stamped rows remain
+    fail-soft.
+    """
+    sub = str(subscription or "").strip().lower()
+    since = int(since_epoch)
+    totals = {
+        "subscription": sub,
+        "since_epoch": since,
+        "runs": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+    if not sub:
+        return totals
+
+    for row in conn.execute(
+        "SELECT profile, COUNT(*) AS runs, "
+        "COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS input_tokens, "
+        "COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens "
+        "FROM task_runs "
+        "WHERE ended_at IS NOT NULL AND started_at >= ? AND profile IS NOT NULL "
+        "GROUP BY profile",
+        (since,),
+    ).fetchall():
+        profile = (row["profile"] or "").strip()
+        if _profile_subscription(profile) != sub:
+            continue
+        in_tok = int(row["input_tokens"] or 0)
+        out_tok = int(row["output_tokens"] or 0)
+        totals["runs"] += int(row["runs"] or 0)
+        totals["input_tokens"] += in_tok
+        totals["output_tokens"] += out_tok
+        totals["total_tokens"] += in_tok + out_tok
+    return totals
+
+
 def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     """F4 (Statistik): Kosten-Sicht — heute + N-Tage-Fenster gesamt und pro
     Profil. Liest ausschließlich gestempelte ``task_runs``-Spalten plus
