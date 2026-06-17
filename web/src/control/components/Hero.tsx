@@ -89,7 +89,7 @@ export function Hero({
             {title}
           </Text>
           {subtitle != null ? (
-            <Text variant="body" className="mt-1.5 hc-soft" >{subtitle}</Text>
+            <Text variant="body" className="mt-1.5 line-clamp-2 hc-soft" >{subtitle}</Text>
           ) : null}
         </div>
         {status || action ? (

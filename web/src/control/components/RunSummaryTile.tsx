@@ -1,5 +1,5 @@
 import { de } from "../i18n/de";
-import { fmtAge } from "../lib/derive";
+import { fmtAge, fmtDur } from "../lib/derive";
 import type { RunSummaryResponse } from "../lib/schemas";
 import { FleetEmptyState, FleetPanel, FleetPod } from "./fleet/atoms";
 import { ToneCallout } from "./atoms";
@@ -9,13 +9,6 @@ function fmtCost(value: number | null): string {
   if (value === 0) return "$0.00";
   if (value < 0.01) return `<$0.01`;
   return `$${value.toFixed(2)}`;
-}
-
-function fmtDuration(seconds: number | null): string {
-  if (seconds == null) return "—";
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 /**
@@ -49,8 +42,8 @@ export function RunSummaryTile({
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <FleetPod label={de.runSummary.podCompleted} value={loading && !data ? "—" : (data?.completed_roots ?? 0)} />
         <FleetPod label={de.runSummary.podCost} value={loading && !data ? "—" : fmtCost(data?.total_cost_usd ?? null)} />
-        <FleetPod label={de.runSummary.podP50} value={loading && !data ? "—" : fmtDuration(data?.cycle_time_p50_seconds ?? null)} />
-        <FleetPod label={de.runSummary.podP90} value={loading && !data ? "—" : fmtDuration(data?.cycle_time_p90_seconds ?? null)} />
+        <FleetPod label={de.runSummary.podP50} value={loading && !data ? "—" : data?.cycle_time_p50_seconds != null ? fmtDur(data.cycle_time_p50_seconds) : "—"} />
+        <FleetPod label={de.runSummary.podP90} value={loading && !data ? "—" : data?.cycle_time_p90_seconds != null ? fmtDur(data.cycle_time_p90_seconds) : "—"} />
       </div>
 
       <div className="mt-3">
@@ -72,7 +65,7 @@ export function RunSummaryTile({
                   </p>
                 </div>
                 <div className="flex shrink-0 items-baseline gap-3 hc-mono text-xs">
-                  <span className="text-zinc-200">{fmtDuration(root.cycle_time_seconds)}</span>
+                  <span className="text-zinc-200">{root.cycle_time_seconds != null ? fmtDur(root.cycle_time_seconds) : "—"}</span>
                   <span className="text-emerald-200">{fmtCost(root.cost_usd)}</span>
                 </div>
               </li>

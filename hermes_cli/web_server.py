@@ -2118,6 +2118,7 @@ def _account_usage_payload(snapshot: Any, provider: str) -> Dict[str, Any]:
         windows.append(
             {
                 "label": str(getattr(window, "label", "") or ""),
+                "window_key": getattr(window, "window_key", None),
                 "used_percent": getattr(window, "used_percent", None),
                 "reset_at": _isoformat_or_none(getattr(window, "reset_at", None)),
                 "detail": getattr(window, "detail", None),

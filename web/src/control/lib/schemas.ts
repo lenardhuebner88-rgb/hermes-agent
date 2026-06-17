@@ -83,6 +83,7 @@ export const WorkersResponseSchema = z.object({
 
 const AccountUsageWindowSchema = z.object({
   label: z.string().catch("Limit"),
+  window_key: z.string().nullable().catch(null),
   used_percent: z.coerce.number().nullable().catch(null),
   reset_at: z.string().nullable().catch(null),
   detail: z.string().nullable().catch(null),

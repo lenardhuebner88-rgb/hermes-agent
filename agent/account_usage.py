@@ -28,6 +28,10 @@ class AccountUsageWindow:
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
     detail: Optional[str] = None
+    # Stable, language-independent classifier so the frontend never has to guess
+    # the window kind from (English) label strings: "session" | "weekly" |
+    # "opus_week" | "sonnet_week" | other. None for legacy/unknown windows.
+    window_key: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -454,7 +458,10 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
     payload = response.json() or {}
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
-    for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+    for key, label, wkey in (
+        ("primary_window", "Session", "session"),
+        ("secondary_window", "Weekly", "weekly"),
+    ):
         window = rate_limit.get(key) or {}
         used = window.get("used_percent")
         if used is None:
@@ -464,6 +471,7 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
                 label=label,
                 used_percent=float(used),
                 reset_at=_parse_dt(window.get("reset_at")),
+                window_key=wkey,
             )
         )
     details: list[str] = []
@@ -508,12 +516,12 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
     payload = response.json() or {}
     windows: list[AccountUsageWindow] = []
     mapping = (
-        ("five_hour", "Current session"),
-        ("seven_day", "Current week"),
-        ("seven_day_opus", "Opus week"),
-        ("seven_day_sonnet", "Sonnet week"),
+        ("five_hour", "Current session", "session"),
+        ("seven_day", "Current week", "weekly"),
+        ("seven_day_opus", "Opus week", "opus_week"),
+        ("seven_day_sonnet", "Sonnet week", "sonnet_week"),
     )
-    for key, label in mapping:
+    for key, label, wkey in mapping:
         window = payload.get(key) or {}
         util = window.get("utilization")
         if util is None:
@@ -524,6 +532,7 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
                 label=label,
                 used_percent=used,
                 reset_at=_parse_dt(window.get("resets_at")),
+                window_key=wkey,
             )
         )
     details: list[str] = []
@@ -669,6 +678,7 @@ def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
                         label=f"Kimi {label}",
                         used_percent=(total_tokens / cap) * 100.0,
                         detail=f"{pretty_total} / {_format_token_total(cap)} tokens",
+                        window_key="session" if label == "5h" else "weekly",
                     )
                 )
 

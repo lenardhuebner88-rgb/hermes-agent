@@ -13,6 +13,7 @@ import { de } from "../i18n/de";
 import { fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
 import {
+  useAccountUsage,
   useEpics,
   useHermesReliability,
   useHermesRunsCosts,
@@ -20,7 +21,9 @@ import {
   useHermesRunSummary,
 } from "../hooks/useControlData";
 import type { CostBucket, CostProfileRow, Epic, ReliabilityProfile, RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
+import type { SubscriptionLane } from "../lib/accountUsage";
 import { Hero } from "../components/Hero";
+import { AccountUsageTile } from "../components/AccountUsageTile";
 import { StaleBadge, ToneCallout } from "../components/atoms";
 import { SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetPanel, FleetEmptyState } from "../components/fleet/atoms";
@@ -143,8 +146,8 @@ export function CostBreakdownPanel({ data }: { data: RunsCostsResponse | null })
 }
 
 export function AboTokenPanel({ data }: { data: RunsCostsResponse | null }) {
+  const buckets = useMemo(() => subscriptionTokenBuckets(data?.profiles ?? []), [data]);
   if (!data) return <SkeletonCard rows={3} />;
-  const buckets = subscriptionTokenBuckets(data.profiles);
   return (
     <FleetPanel eyebrow={de.stats.subscriptionTokens} meta={de.stats.subscriptionTokensHint}>
       {buckets.length ? (
@@ -182,8 +185,20 @@ function ReliabilityTable({ profiles, baseline, minN }: {
       <table className="w-full min-w-[34rem] border-separate border-spacing-0 text-sm">
         <thead>
           <tr className="text-left">
-            {[de.stats.colProfile, de.stats.colRuns, de.stats.colCompleted, de.stats.colRetry, de.stats.colVerdicts, de.stats.colDelta].map((h) => (
-              <th key={h} className="hc-eyebrow border-b border-[var(--hc-border)] px-2 pb-2 font-semibold">{h}</th>
+            {[
+              { h: de.stats.colProfile },
+              { h: de.stats.colRuns },
+              { h: de.stats.colCompleted },
+              { h: de.stats.colRetry, hide: true },
+              { h: de.stats.colVerdicts },
+              { h: de.stats.colDelta, hide: true },
+            ].map(({ h, hide }) => (
+              <th
+                key={h}
+                className={`hc-eyebrow border-b border-[var(--hc-border)] px-2 pb-2 font-semibold${hide ? " hidden sm:table-cell" : ""}`}
+              >
+                {h}
+              </th>
             ))}
           </tr>
         </thead>
@@ -203,7 +218,7 @@ function ReliabilityTable({ profiles, baseline, minN }: {
                     <div className="w-20"><RateBar rate={p.completed_rate} /></div>
                   </div>
                 </td>
-                <td className="hc-mono border-b border-[var(--hc-border)] px-2 py-2.5">{fmtPct(p.retry_rate)}</td>
+                <td className="hc-mono hidden border-b border-[var(--hc-border)] px-2 py-2.5 sm:table-cell">{fmtPct(p.retry_rate)}</td>
                 <td className="border-b border-[var(--hc-border)] px-2 py-2.5">
                   {p.judged === 0 ? (
                     <span className="hc-type-label hc-dim">{de.stats.noJudgements}</span>
@@ -214,7 +229,7 @@ function ReliabilityTable({ profiles, baseline, minN }: {
                     </span>
                   )}
                 </td>
-                <td className="hc-mono border-b border-[var(--hc-border)] px-2 py-2.5">
+                <td className="hc-mono hidden border-b border-[var(--hc-border)] px-2 py-2.5 sm:table-cell">
                   {delta == null ? <span className="hc-dim">—</span> : (
                     <span className={delta > 0 ? "text-emerald-300" : delta < 0 ? "text-red-300" : "hc-soft"}>
                       {delta > 0 ? "▲" : delta < 0 ? "▼" : "•"} {Math.abs(delta)} pp
@@ -311,7 +326,7 @@ export function StatsSignalPanel({ last7, reliabilityProfiles }: { last7: RunsDa
           <p className="hc-hero-statement max-w-2xl text-2xl text-[var(--hc-text)] lg:text-3xl">
             {de.stats.signalStatement(roots, tasks)}
           </p>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             <div className="rounded-xl border border-[var(--hc-border)] bg-white/[.035] p-3">
               <span className="hc-eyebrow">{de.stats.signalRoots}</span>
               <strong className="mt-2 block hc-mono text-lg text-[var(--hc-text)]">{fmtRoots(roots)}</strong>
@@ -412,7 +427,7 @@ export function WertBilanzPanel({ last7 }: { last7: RunsDailyPoint[] }) {
   );
   return (
     <FleetPanel eyebrow={de.stats.valueBalance} meta={de.stats.valueBalanceHint}>
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <FleetPod label={de.stats.classNutzer} value={sums.nutzer} />
         <FleetPod label={de.stats.classHaertung} value={sums.haertung} />
         <FleetPod label={de.stats.classMeta} value={sums.meta} />
@@ -426,6 +441,7 @@ export function StatistikView() {
   const reliability = useHermesReliability();
   const summary = useHermesRunSummary();
   const costs = useHermesRunsCosts();
+  const account = useAccountUsage();
   const epics = useEpics();
   const now = nowSec();
   const openEpics = useMemo(() => (epics.data?.epics ?? []).filter((e) => e.status === "open"), [epics.data]);
@@ -434,7 +450,24 @@ export function StatistikView() {
   const last7 = series.slice(-7);
   const today = series[series.length - 1];
   const rootsWeek = last7.reduce((acc, p) => acc + p.done_roots, 0);
+  // H1: alle Tages-Serien einmal memoizieren (statt points() pro Render in JSX).
   const costSeries = useMemo(() => points(series, (p) => p.cost_usd), [series]);
+  const rootsSeries = useMemo(() => points(series, (p) => p.done_roots), [series]);
+  const tasksSeries = useMemo(() => points(series, (p) => p.done_tasks), [series]);
+  const tokensSeries = useMemo(() => points(series, (p) => p.output_tokens), [series]);
+  const cycleSeries = useMemo(() => points(series, (p) => p.cycle_time_p50_seconds), [series]);
+  // M2: stabile Referenzen für die Reliability-Tabelle + Signal-Ring.
+  const reliabilityProfiles = useMemo(() => reliability.data?.profiles ?? [], [reliability.data]);
+  const reliabilityBaseline = useMemo(() => reliability.data?.baseline ?? [], [reliability.data]);
+  const reliabilityMinN = reliability.data?.min_n ?? 5;
+  // A6: Worker-Run-Verbrauch je Abo-Lane (7d) für den Abgleich im Cockpit.
+  const laneUsage = useMemo(() => {
+    const m: Partial<Record<SubscriptionLane, { tokens: number; runs: number }>> = {};
+    for (const b of subscriptionTokenBuckets(costs.data?.profiles ?? [])) {
+      m[b.key] = { tokens: b.inputTokens + b.outputTokens, runs: b.runs };
+    }
+    return m;
+  }, [costs.data]);
   const hasCost = series.some((p) => (p.cost_usd ?? 0) > 0);
   const hasTokens = series.some((p) => (p.output_tokens ?? 0) > 0);
   const loadingFirst = daily.loading && daily.data == null;
@@ -468,6 +501,11 @@ export function StatistikView() {
 
       {daily.error ? <ToneCallout tone="red">{de.stats.loadError}<br />{daily.error}</ToneCallout> : null}
 
+      {/* Abo-Limits-Cockpit — die echten Provider-Fenster (5-Std/Woche) ganz oben,
+          wo der Operator nach Usage schaut; pro Abo der Worker-Run-Abgleich. Teilt
+          den /api/account-usage-Poll mit dem Start-Tab (dedupli­zierender Store). */}
+      <AccountUsageTile usage={account.data} loading={account.loading && !account.data} error={account.error} laneUsage={laneUsage} />
+
       {/* Offene Epics — die Vorhaben-Ebene über den Tages-Charts. Nur gezeigt,
           wenn es offene Epics gibt (kein Rauschen für den Nicht-Nutzer). */}
       {openEpics.length ? (
@@ -482,27 +520,27 @@ export function StatistikView() {
         <FleetEmptyState title={de.stats.empty} desc="" />
       ) : (
         <>
-          <StatsSignalPanel last7={last7} reliabilityProfiles={reliability.data?.profiles ?? []} />
+          <StatsSignalPanel last7={last7} reliabilityProfiles={reliabilityProfiles} />
           <WertBilanzPanel last7={last7} />
           <WochenvergleichPanel series={series} />
 
           <div className="grid gap-3 lg:grid-cols-2">
             <FleetPanel eyebrow={de.stats.throughput} meta={de.stats.throughputHint}>
-              <DayBars points={points(series, (p) => p.done_roots)} />
+              <DayBars points={rootsSeries} />
               <p className="mt-3 hc-type-label hc-dim">{de.stats.tasksLine}</p>
-              <Sparkline points={points(series, (p) => p.done_tasks)} stroke="var(--hc-cyan)" />
+              <Sparkline points={tasksSeries} stroke="var(--hc-cyan)" />
             </FleetPanel>
 
             <div className="space-y-3">
               <FleetPanel eyebrow={de.stats.costs} meta={de.stats.costsHint}>
                 {hasCost ? (
-                  <DayBars points={costSeries} color="var(--hc-amber)" valueFmt={(v) => fmtUsd(v)} />
+                  <DayBars points={costSeries} color="var(--hc-amber)" valueFmt={fmtUsd} />
                 ) : null}
                 <p className="mt-2 hc-type-label hc-soft">{de.stats.costNote}</p>
                 {hasTokens ? (
                   <>
                     <p className="mt-3 hc-type-label hc-dim">{de.stats.tokensLine}</p>
-                    <Sparkline points={points(series, (p) => p.output_tokens)} stroke="var(--hc-accent-2)" valueFmt={(v) => fmtTokens(v)} />
+                    <Sparkline points={tokensSeries} stroke="var(--hc-accent-2)" valueFmt={fmtTokens} />
                   </>
                 ) : null}
               </FleetPanel>
@@ -513,21 +551,21 @@ export function StatistikView() {
 
           <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
             <FleetPanel eyebrow={de.stats.cycle} meta={de.stats.cycleHint}>
-              <Sparkline points={points(series, (p) => p.cycle_time_p50_seconds)} stroke="var(--hc-emerald)" valueFmt={(v) => fmtDur(v)} />
+              <Sparkline points={cycleSeries} stroke="var(--hc-emerald)" valueFmt={fmtDur} />
               <div className="mt-3 grid grid-cols-2 gap-2">
-                <FleetPod label="p50 · 24h" value={summary.data?.cycle_time_p50_seconds != null ? fmtDur(summary.data.cycle_time_p50_seconds) : "—"} />
-                <FleetPod label="p90 · 24h" value={summary.data?.cycle_time_p90_seconds != null ? fmtDur(summary.data.cycle_time_p90_seconds) : "—"} />
+                <FleetPod label={de.stats.cycleP50Window} value={summary.data?.cycle_time_p50_seconds != null ? fmtDur(summary.data.cycle_time_p50_seconds) : "—"} />
+                <FleetPod label={de.stats.cycleP90Window} value={summary.data?.cycle_time_p90_seconds != null ? fmtDur(summary.data.cycle_time_p90_seconds) : "—"} />
               </div>
             </FleetPanel>
 
-            <FleetPanel eyebrow={de.stats.reliability} meta={de.stats.reliabilityHint(reliability.data?.min_n ?? 5)}>
+            <FleetPanel eyebrow={de.stats.reliability} meta={de.stats.reliabilityHint(reliabilityMinN)}>
               {reliability.error ? <ToneCallout tone="red">{reliability.error}</ToneCallout> : reliability.loading && reliability.data == null ? (
                 <SkeletonCard rows={4} />
               ) : (
                 <ReliabilityTable
-                  profiles={reliability.data?.profiles ?? []}
-                  baseline={reliability.data?.baseline ?? []}
-                  minN={reliability.data?.min_n ?? 5}
+                  profiles={reliabilityProfiles}
+                  baseline={reliabilityBaseline}
+                  minN={reliabilityMinN}
                 />
               )}
               {/* F6: Absprung ins Issue-Board (Detail-Seite der Statistik). */}

@@ -61,6 +61,7 @@ export interface WorkersResponse {
 
 export interface AccountUsageWindow {
   label: string;
+  window_key: string | null;
   used_percent: number | null;
   reset_at: string | null;
   detail: string | null;

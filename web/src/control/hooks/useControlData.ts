@@ -696,7 +696,8 @@ export const epicsLoader = async () =>
   parseOrThrow(EpicsResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/epics"), "kanban/epics");
 
 export function useEpics() {
-  return usePolling<EpicsResponse>("kanban/epics", epicsLoader, 15000);
+  // M1: Epics ändern sich selten (Vorhaben-Ebene) — 60 s statt 15 s spart Polls.
+  return usePolling<EpicsResponse>("kanban/epics", epicsLoader, 60000);
 }
 
 // Epic-Schreibpfade (Phase-1-API): anlegen, schließen, ganze Kette zuordnen.

@@ -78,7 +78,7 @@ describe("AboTokenPanel", () => {
       />,
     );
 
-    expect(html).toContain("Abo-Tokenverbrauch");
+    expect(html).toContain("Verbrauch (Worker-Runs)");
     expect(html).toContain("ChatGPT/Codex Abo");
     expect(html).toContain("Claude Max Abo");
     expect(html).toContain("Kimi Abo");

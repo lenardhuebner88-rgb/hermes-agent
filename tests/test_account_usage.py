@@ -261,8 +261,8 @@ def test_fetch_account_usage_kimi_uses_configured_token_caps_for_percent_windows
 
     assert snapshot is not None
     assert snapshot.windows == (
-        AccountUsageWindow(label="Kimi 5h", used_percent=50.0, detail="1,000 / 2,000 tokens"),
-        AccountUsageWindow(label="Kimi 7d", used_percent=25.0, detail="2,000 / 8,000 tokens"),
+        AccountUsageWindow(label="Kimi 5h", used_percent=50.0, detail="1,000 / 2,000 tokens", window_key="session"),
+        AccountUsageWindow(label="Kimi 7d", used_percent=25.0, detail="2,000 / 8,000 tokens", window_key="weekly"),
     )
     assert "Kimi 5h tokens: 1,000 across 1 run" in snapshot.details
     assert "Kimi 7d tokens: 2,000 across 3 runs" in snapshot.details
