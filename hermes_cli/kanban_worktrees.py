@@ -62,9 +62,14 @@ _IGNORED_DIRTY_PATHS = (
 # branch diff. Gate runs themselves produce these (the verifier's
 # `ruff`/`pytest` in the worktree writes __pycache__), so counting them as
 # "uncommitted changes" would park every chain whose repo doesn't gitignore
-# them — observed live in the 2026-06-11 E2E probe.
+# them — observed live in the 2026-06-11 E2E probe. `.playwright-mcp` is the
+# Playwright-MCP visual-check output dir (console/network traces + page
+# snapshots, and any screenshot written there): a UI-verification run inside
+# the worktree drops `.playwright-mcp/console-*.log` + `page-*.yml`, which
+# parked chain t_7567c379 on 2026-06-17 — same byproduct class as __pycache__.
 _IGNORED_DIRTY_DIR_PARTS = frozenset({
     "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv",
+    ".playwright-mcp",
 })
 _IGNORED_DIRTY_SUFFIXES = (".pyc", ".pyo")
 

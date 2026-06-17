@@ -895,7 +895,9 @@ def test_deliverable_md_alone_does_not_block_clean_close(repo):
 def test_cache_byproducts_do_not_count_as_dirty(repo):
     """Gate runs write __pycache__/.pytest_cache into the worktree; in repos
     without a .gitignore those must NOT park the chain (live E2E finding
-    2026-06-11: verifier's ruff run created util.cpython-311.pyc → park)."""
+    2026-06-11: verifier's ruff run created util.cpython-311.pyc → park).
+    `.playwright-mcp` (UI-verification trace/snapshot dir) is the same class —
+    it parked chain t_7567c379 on 2026-06-17."""
     info = _provisioned_chain(repo, "t_cache")
     wt = info["path"]
     (wt / "__pycache__").mkdir()
@@ -903,6 +905,9 @@ def test_cache_byproducts_do_not_count_as_dirty(repo):
     (wt / ".pytest_cache").mkdir()
     (wt / ".pytest_cache" / "CACHEDIR.TAG").write_text("tag")
     (wt / "stray.pyc").write_bytes(b"\x00")
+    (wt / ".playwright-mcp").mkdir()
+    (wt / ".playwright-mcp" / "console-2026-06-17T17-30-15.log").write_text("[]")
+    (wt / ".playwright-mcp" / "page-2026-06-17T17-30-16.yml").write_text("a: 1")
     assert kwt.dirty_files(wt) == []
     out = kwt.integrate_chain(repo, wt, info["branch"], "main",
                               gate_runner=_ok_gate)

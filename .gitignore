@@ -17,6 +17,7 @@ __pycache__/
 .notebooklm-home/
 .notebooklm-cli-venv/
 .notebooklm-playwright/
+.playwright-mcp/
 .pip-cache/
 .uv-cache/
 compose.hermes.local.yml
