@@ -720,6 +720,9 @@ export const de = {
     heartbeatLabel: "Heartbeat",
     heartbeatNow: "jetzt",
     statusLabel: "Status",
+    progressLabel: "Fortschritt",
+    progressOf: (done: number, total: number) => `${done} von ${total} Subtasks`,
+    waitingOnPredecessor: "Wartet auf Vorgänger",
     checkedAt: (label: string) => `aktualisiert vor ${label}`,
   },
 } as const;

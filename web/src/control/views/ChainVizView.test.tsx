@@ -7,10 +7,10 @@ const controlPage = readFileSync(fileURLToPath(new URL("../ControlPage.tsx", imp
 const hooks = readFileSync(fileURLToPath(new URL("../hooks/useControlData.ts", import.meta.url)), "utf8");
 
 describe("ChainVizView live wiring", () => {
-  it("polls the chain-graph endpoint and delegates SVG DAG rendering to KettenGraph", () => {
+  it("polls the chain-graph endpoint and delegates pipeline DAG rendering to KettenGraph", () => {
     expect(src).toMatch(/useChainGraph/);
     expect(hooks).toMatch(/chain-graph/);
-    // Renders a bezier SVG DAG via KettenGraph (not a flat grid with outgoingByNode chips).
+    // Renders a vertical pipeline DAG via KettenGraph (not a flat grid with outgoingByNode chips).
     expect(src).toMatch(/KettenGraph/);
     // Passes nodes + edges from the chain-graph hook down to KettenGraph.
     expect(src).toMatch(/graph\.data\.nodes/);
@@ -22,14 +22,17 @@ describe("ChainVizView live wiring", () => {
     expect(src).toMatch(/useSearchParams/);
   });
 
-  it("uses richer latest_run fields for runtime and heartbeat (via ChainNodeCard)", () => {
+  it("prefers richer latest_run runtime over task-level runtime (via ChainNodeCard)", () => {
     const cardSrc = readFileSync(
       fileURLToPath(new URL("./ketten/ChainNodeCard.tsx", import.meta.url)),
       "utf8",
     );
     expect(cardSrc).toMatch(/latest_run/);
     expect(cardSrc).toMatch(/runtime_seconds/);
-    expect(cardSrc).toMatch(/last_heartbeat_at/);
+    // Heartbeat age was removed from the card — liveness now shows as the
+    // pulsing node dot on the pipeline line (KettenGraph), and the card
+    // renders a progress bar instead.
+    expect(cardSrc).toMatch(/progress/);
   });
 
   it("is routed as the /control/ketten tab", () => {

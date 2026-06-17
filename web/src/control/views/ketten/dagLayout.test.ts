@@ -16,6 +16,7 @@ function makeNode(id: string, status: ChainGraphNode["status"] = "todo"): ChainG
     completed_at: null,
     last_heartbeat_at: null,
     runtime_seconds: null,
+    progress: null,
     latest_run: null,
   };
 }

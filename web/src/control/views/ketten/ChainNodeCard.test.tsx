@@ -16,6 +16,7 @@ const node: ChainGraphNode = {
   completed_at: null,
   last_heartbeat_at: 1_700_000_000,
   runtime_seconds: 125,
+  progress: null,
   latest_run: null,
 };
 
@@ -33,17 +34,29 @@ describe("ChainNodeCard", () => {
     expect(html).toContain("Fokus");
   });
 
-  it("shows runtime and heartbeat age", () => {
-    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_012} />);
+  it("shows runtime in the progress meta row", () => {
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_010} />);
+    // 125s → "2m"
     expect(html).toContain("2m");
-    expect(html).toContain("Heartbeat");
-    expect(html).toContain("12s");
   });
 
-  it("shows 'now' for very fresh heartbeats", () => {
-    const fresh: ChainGraphNode = { ...node, last_heartbeat_at: 1_700_000_000, runtime_seconds: 0 };
-    const html = renderToStaticMarkup(<ChainNodeCard node={fresh} isRoot={false} now={1_700_000_001} />);
-    expect(html).toContain("jetzt");
+  it("no longer renders heartbeat text on the card (liveness moved to the pipeline dot)", () => {
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_012} />);
+    expect(html).not.toContain("Heartbeat");
+    expect(html).not.toContain("jetzt");
+  });
+
+  it("renders a progress bar with percent and subtask counter", () => {
+    const withProgress: ChainGraphNode = { ...node, progress: { done: 1, total: 2 } };
+    const html = renderToStaticMarkup(<ChainNodeCard node={withProgress} isRoot={false} now={1_700_000_010} />);
+    expect(html).toContain("width:50%");
+    expect(html).toContain("50% — 1 von 2 Subtasks");
+  });
+
+  it("shows 'waiting on predecessor' for an open node with deps and no progress", () => {
+    const waiting: ChainGraphNode = { ...node, status: "todo", parents: ["t_dep"], runtime_seconds: null };
+    const html = renderToStaticMarkup(<ChainNodeCard node={waiting} isRoot={false} now={1_700_000_010} />);
+    expect(html).toContain("Wartet auf Vorgänger");
   });
 
   it("prefers latest_run runtime_seconds over task-level runtime_seconds", () => {
