@@ -7659,6 +7659,127 @@ def test_c1_budget_held_surfaces_in_decision_queue(
 
 
 # ---------------------------------------------------------------------------
+# C1 kanban-chain-haertung: tree_root_woke + release_gate_parked
+# ---------------------------------------------------------------------------
+
+
+def test_c1_tree_root_woke_all_children_done(kanban_home):
+    """A decompose root that is 'ready' with all children 'done' surfaces
+    as tree_root_woke. Reuses the same all-children-done predicate as
+    recompute_ready (only 'done' counts; not archived/failed)."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="root task", assignee="orchestrator")
+        child1 = kb.create_task(conn, title="child A", assignee="coder")
+        child2 = kb.create_task(conn, title="child B", assignee="coder")
+        # Link children to root
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (root, child1),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (root, child2),
+            )
+        # Complete both children
+        _set_task_status(conn, child1, "done")
+        _set_task_status(conn, child2, "done")
+        # Root is now ready (woken up by completion)
+        _set_task_status(conn, root, "ready")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(root, result) == ["tree_root_woke"]
+    row = next(d for d in result["decisions"] if d["task_id"] == root)
+    assert row["suggested_command"] == f"hermes kanban show {root}"
+    assert row["age_seconds"] is not None
+    # Same shape as existing kinds
+    for key in ("kind", "task_id", "title", "reason", "age_seconds", "suggested_command"):
+        assert key in row, f"missing key {key!r} in tree_root_woke entry"
+
+
+def test_c1_tree_root_woke_not_emitted_if_child_not_done(kanban_home):
+    """Root must NOT appear when even one child is not yet done."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="root task", assignee="orchestrator")
+        child1 = kb.create_task(conn, title="child A", assignee="coder")
+        child2 = kb.create_task(conn, title="child B", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (root, child1),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (root, child2),
+            )
+        # Only child1 done; child2 still todo
+        _set_task_status(conn, child1, "done")
+        # child2 stays in 'todo' (default)
+        _set_task_status(conn, root, "ready")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(root, result) == []
+
+
+def test_c1_tree_root_woke_no_children_excluded(kanban_home):
+    """A ready task with NO children must NOT appear as tree_root_woke
+    (it was never decomposed)."""
+    with kb.connect() as conn:
+        leaf = kb.create_task(conn, title="plain ready", assignee="coder")
+        _set_task_status(conn, leaf, "ready")
+        result = kb.decision_queue(conn)
+    assert "tree_root_woke" not in _kinds_for(leaf, result)
+
+
+def test_c1_release_gate_parked_surfaces_in_decision_queue(kanban_home):
+    """A non-terminal task with a release_gate_parked event surfaces in the
+    decision queue with a suggested_command from _RELEASE_GATE_COMMANDS."""
+    from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
+
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="release gate task", assignee="verifier")
+        # Record the release_gate_parked event (status stays blocked/non-terminal)
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task, "release_gate_parked",
+                {
+                    "state": "GREEN_CODE_NOT_RUNTIME_ACTIVATED",
+                    "reason": "awaiting release-gate GO",
+                    "commands": list(_RELEASE_GATE_COMMANDS),
+                },
+            )
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(task, result) == ["release_gate_parked"]
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    # suggested_command must come from _RELEASE_GATE_COMMANDS, not be empty
+    assert row["suggested_command"]
+    assert row["suggested_command"] in _RELEASE_GATE_COMMANDS
+    assert row["reason"] == "awaiting release-gate GO"
+    # Same shape as existing kinds
+    for key in ("kind", "task_id", "title", "reason", "age_seconds", "suggested_command"):
+        assert key in row, f"missing key {key!r} in release_gate_parked entry"
+
+
+def test_c1_release_gate_parked_excluded_when_done(kanban_home):
+    """A task that carries release_gate_parked but is already done must NOT
+    appear in the decision queue."""
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="done gate", assignee="verifier")
+        with kb.write_txn(conn):
+            kb._append_event(conn, task, "release_gate_parked", {"reason": "GO"})
+        _set_task_status(conn, task, "done")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(task, result) == []
+
+
+# ---------------------------------------------------------------------------
 # F5 (night-sprint): scores-Tabelle + Review-Verdicts als Eval-Baseline
 # ---------------------------------------------------------------------------
 

@@ -14612,6 +14612,67 @@ def decision_queue(
     except Exception:
         pass
 
+    # 6) tree_root_woke — a decompose ROOT that is 'ready' AND all its children
+    #    are 'done'.  "all children done" reuses the same predicate as
+    #    recompute_ready (p["status"] == "done") via a NOT-EXISTS subquery so
+    #    the condition is never subtly different from what promoted the root.
+    #    A root with no children at all is excluded (it was never decomposed).
+    try:
+        for row in conn.execute(
+            "SELECT t.id AS task_id, t.title AS title, t.created_at AS created_at "
+            "FROM tasks t "
+            "WHERE t.status = 'ready' "
+            # has at least one child
+            "  AND EXISTS (SELECT 1 FROM task_links WHERE parent_id = t.id) "
+            # every child is done (same predicate recompute_ready uses)
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM task_links l2 "
+            "    JOIN tasks t2 ON t2.id = l2.child_id "
+            "    WHERE l2.parent_id = t.id AND t2.status != 'done'"
+            "  )",
+        ).fetchall():
+            if row["task_id"] in seen:
+                continue
+            _add(
+                "tree_root_woke", row["task_id"], row["title"],
+                "Decompose root is ready — all children done; root awaits finalization",
+                _age(row["created_at"]),
+                f"hermes kanban show {row['task_id']}",
+            )
+    except Exception:
+        pass
+
+    # 7) release_gate_parked — tasks carrying a 'release_gate_parked' event
+    #    that are NOT in a terminal state (not done/archived).  The
+    #    suggested_command is sourced from _RELEASE_GATE_COMMANDS in
+    #    kanban_worktrees (imported lazily to avoid circular deps).
+    try:
+        from hermes_cli import kanban_worktrees as _kwt  # lazy: avoids import cycle
+        _rgc = _kwt._RELEASE_GATE_COMMANDS
+        suggested = next(iter(_rgc), None) or f"hermes kanban show <id>"
+        for row in conn.execute(
+            "SELECT e.task_id, e.payload, e.created_at AS event_at, "
+            "t.title AS title, MAX(e.id) "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = 'release_gate_parked' "
+            "  AND t.status NOT IN ('done', 'archived') "
+            "GROUP BY e.task_id",
+        ).fetchall():
+            if row["task_id"] in seen:
+                continue
+            payload = _payload_dict(row["payload"])
+            reason = (
+                str(payload.get("reason") or "").strip()
+                or "Release gate parked — awaiting GO"
+            )
+            _add(
+                "release_gate_parked", row["task_id"], row["title"],
+                reason, _age(row["event_at"]),
+                suggested,
+            )
+    except Exception:
+        pass
+
     # Oldest decisions first (most likely to be stale/forgotten); unknown ages
     # sort to the end.
     rows.sort(
