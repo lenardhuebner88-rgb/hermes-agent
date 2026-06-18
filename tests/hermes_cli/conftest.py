@@ -54,3 +54,19 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
         lambda *_a, **_k: [],
         raising=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _disable_spec_judge_by_default(request, monkeypatch):
+    """Disable the PlanSpec quality judge for every test by default.
+
+    ``planspecs.ingest_planspec`` now runs a synchronous LLM judge after the
+    deterministic rubric. The auxiliary client auto-detects providers from the
+    process environment, so on a box with provider keys exported (e.g. the
+    nightly green-gate full-suite run) an unmarked ingest test could fire a
+    real, paid model call. Default the judge OFF; tests that exercise it opt in
+    with ``@pytest.mark.spec_judge`` and mock the aux client themselves.
+    """
+    if request.node.get_closest_marker("spec_judge"):
+        return
+    monkeypatch.setenv("HERMES_PLANSPEC_JUDGE", "0")
