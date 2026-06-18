@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 _log = logging.getLogger(__name__)
 
@@ -609,6 +609,479 @@ def _create_parked_release_gate_child(
             {"child_id": child_id, **payload},
         )
     return child_id
+
+
+# ---------------------------------------------------------------------------
+# Release-gate executor (R2 / P2-release-executor)
+#
+# The parked release-gate child above documents the activation commands but
+# nothing runs them. This executor processes such a child end to end: it runs
+# the gate in the LIVE checkout (the commands are hardcoded to that path), and
+# on green reports success to the board. On RED it spawns a BOUNDED fixer on
+# the ``coder-claude`` lane EXCLUSIVELY inside the chain worktree/branch — the
+# fixer reads the gate error, fixes, and the gate is re-run. After the retry
+# budget (``kanban.release_gate_fixer_max_retries``, default 2) it escalates to
+# the operator. Hard boundary: the fixer never edits live-main; only the gate's
+# build/smoke touch the live checkout. The event trail is purely additive
+# (``release_gate_executed`` / ``release_gate_fix_attempt``).
+# ---------------------------------------------------------------------------
+
+# The release-gate commands are hardcoded to the live checkout, so the fixer's
+# chain worktree is provisioned under the SAME repo (its ``.worktrees/kanban/``
+# namespace), never the live working tree.
+LIVE_CHECKOUT_ROOT = Path("/home/piet/.hermes/hermes-agent")
+# npm build + loopback smoke can be slow; keep generous so a slow-but-green
+# build is not misreported as red.
+RELEASE_GATE_COMMAND_TIMEOUT = 1800
+RELEASE_GATE_FIXER_TIMEOUT = 1800
+
+
+class ReleaseGateError(RuntimeError):
+    """A release-gate executor precondition failed (e.g. the task is not a
+    release-gate child, or a hard isolation invariant would be violated)."""
+
+
+def release_gate_fixer_max_retries() -> int:
+    """Bounded fixer retry budget. ``HERMES_RELEASE_GATE_FIXER_MAX_RETRIES``
+    (env) wins for tests/operator one-offs, then config
+    ``kanban.release_gate_fixer_max_retries``, default 2. Clamped to >= 0.
+
+    Same root-config-not-profile-config rationale as :func:`isolation_mode`."""
+    env = (os.environ.get("HERMES_RELEASE_GATE_FIXER_MAX_RETRIES") or "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            value = (root_cfg.get("kanban") or {}).get(
+                "release_gate_fixer_max_retries"
+            )
+            # bool is an int subclass — reject it explicitly.
+            if isinstance(value, bool):
+                value = None
+            if isinstance(value, int) and value >= 0:
+                return value
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                return max(0, int(value.strip()))
+    except Exception:
+        pass
+    return 2
+
+
+def _release_gate_context(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[dict]:
+    """Read the chain context off the most recent ``release_gate_parked``
+    event for *task_id*. Returns ``None`` when the task is not a release-gate
+    child (no such event)."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'release_gate_parked' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return None
+    return {
+        "root_id": payload.get("root_id") or task_id,
+        "source_task": payload.get("source_task"),
+        "merge_commit": payload.get("merge_commit"),
+        "commands": payload.get("commands") or list(_RELEASE_GATE_COMMANDS),
+    }
+
+
+def _resolve_fixer_worktree(
+    root_id: str, repo_root: Optional[Path] = None,
+) -> tuple[Path, str]:
+    """``(worktree_path, branch)`` for the chain fixer — always under
+    ``<repo>/.worktrees/kanban/<root_id>`` on ``kanban/<root_id>``.
+
+    Hard isolation invariant: the path MUST be a provisioned-worktree path
+    (under the worktree namespace), never the live checkout root. A computed
+    path that fails that check means the namespace structure is wrong — refuse
+    rather than risk the fixer running against live-main."""
+    if not root_id:
+        raise ReleaseGateError("cannot resolve fixer worktree without a root id")
+    repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+    wt = repo_root / WORKTREES_DIRNAME / WORKTREES_NAMESPACE / root_id
+    if split_provisioned_path(wt) is None or wt.resolve() == repo_root.resolve():
+        raise ReleaseGateError(
+            f"refusing fixer worktree {wt!r}: not isolated from live checkout"
+        )
+    return wt, chain_branch(root_id)
+
+
+def _default_release_gate_runner(
+    commands: Optional[Sequence[str]] = None,
+) -> tuple[bool, str]:
+    """Run the release-gate commands as one shell sequence in the live
+    checkout and return ``(ok, output_tail)``. The commands are a fixed,
+    code-defined tuple (web build + artifact check + loopback smoke), joined
+    with ``&&`` so the leading ``cd <web>`` carries to ``npm run build`` —
+    no untrusted input reaches the shell."""
+    cmds = list(commands or _RELEASE_GATE_COMMANDS)
+    script = " && ".join(cmds)
+    cwd = str(LIVE_CHECKOUT_ROOT) if LIVE_CHECKOUT_ROOT.is_dir() else None
+    try:
+        proc = subprocess.run(  # noqa: S602 -- fixed code-defined commands
+            ["bash", "-c", script],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=RELEASE_GATE_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"release-gate timed out after {RELEASE_GATE_COMMAND_TIMEOUT}s"
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"release-gate command error: {exc}"
+    ok = proc.returncode == 0
+    tail = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
+    return ok, tail
+
+
+def _release_gate_fixer_prompt(
+    *, gate_error: str, attempt: int, task_id: str, root_id: str,
+) -> str:
+    commands = "\n".join(_RELEASE_GATE_COMMANDS)
+    return (
+        "You are a bounded Hermes release-gate fixer running headless on the "
+        "coder-claude lane. The dashboard release gate for chain "
+        f"`{root_id}` is RED (fixer attempt {attempt}).\n\n"
+        "Gate commands (run in the live checkout — do NOT edit there):\n"
+        f"{commands}\n\n"
+        "Most recent gate output:\n"
+        f"{(gate_error or '')[-3000:]}\n\n"
+        "Your job: read the error, find and fix the root cause in THIS git "
+        "worktree, then verify locally by running `npm run build` inside this "
+        "worktree's `web/` directory. Commit your fix on this branch.\n\n"
+        "HARD RULES: work ONLY in this worktree/branch. NEVER edit, checkout, "
+        "switch, push, or merge the live checkout or any other branch — "
+        "integration happens outside your run after review. Make the minimal "
+        "change that turns the gate green."
+    )
+
+
+def _spawn_release_gate_fixer_process(
+    *, worktree: Path, branch: str, prompt: str, task_id: str, root_id: str,
+) -> None:
+    """Spawn the coder-claude fixer process, blocking until it finishes, with
+    ``cwd`` pinned to the isolated *worktree*. Reuses the claude-CLI worker
+    env contract (caged via ``HERMES_KANBAN_TASK``, no provider keys, web
+    egress tools denied). Separated out so tests can assert isolation without
+    spawning a real model."""
+    import shutil
+
+    cmd = [
+        os.environ.get("HERMES_CLAUDE_BIN") or "claude",
+        "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--disallowedTools", "WebFetch,WebSearch",
+        "--output-format", "json",
+        "--settings", '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+    ]
+    try:
+        from hermes_cli import kanban_db as kb
+
+        lane = kb._active_lane_entry_for_profile("coder-claude")
+        model = (lane or {}).get("model")
+        if model:
+            cmd.extend(["--model", model])
+    except Exception:
+        pass
+
+    env = dict(os.environ)
+    hermes_dir = os.path.dirname(
+        shutil.which("hermes") or "/home/piet/.local/bin/hermes"
+    )
+    env["PATH"] = hermes_dir + os.pathsep + env.get("PATH", "")
+    # Cage the fixer to its own task + worktree branch (guard-dangerous-ops
+    # keys off HERMES_KANBAN_TASK; the worker may never push/merge).
+    env["HERMES_KANBAN_TASK"] = task_id
+    env["HERMES_KANBAN_WORKSPACE"] = str(worktree)
+    env["HERMES_KANBAN_BRANCH"] = branch
+    env["MEMSEARCH_NO_WATCH"] = "1"
+    # The claude CLI runs on the subscription — strip any provider key so
+    # billing never silently switches to the API.
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        env.pop(key, None)
+
+    subprocess.run(  # noqa: S603 -- argv is a fixed list built above
+        cmd,
+        cwd=str(worktree),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=RELEASE_GATE_FIXER_TIMEOUT,
+    )
+
+
+def _default_release_gate_fixer(
+    *,
+    worktree: Path,
+    branch: str,
+    gate_error: str,
+    attempt: int,
+    task_id: str,
+    root_id: str,
+    repo_root: Optional[Path] = None,
+) -> None:
+    """Default fixer: (re)create the isolated chain worktree and spawn a
+    coder-claude fixer inside it. The chain worktree is removed after the
+    merge that created the release-gate child, so ``ensure_worktree`` recreates
+    it (idempotent) on the chain branch. The live checkout is never modified
+    here — only the gate's build/smoke run there, via the gate runner."""
+    repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+    ensure_worktree(repo_root, root_id)
+    prompt = _release_gate_fixer_prompt(
+        gate_error=gate_error, attempt=attempt, task_id=task_id, root_id=root_id,
+    )
+    _spawn_release_gate_fixer_process(
+        worktree=Path(worktree), branch=branch, prompt=prompt,
+        task_id=task_id, root_id=root_id,
+    )
+
+
+def _record_release_gate_executed(
+    conn: sqlite3.Connection, task_id: str, *,
+    attempt: int, ok: bool, output: str, root_id: str,
+    fixer_error: Optional[str] = None,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    payload = {
+        "attempt": attempt,
+        "ok": bool(ok),
+        "root_id": root_id,
+        "output_tail": (output or "")[-2000:],
+        "commands": list(_RELEASE_GATE_COMMANDS),
+    }
+    if fixer_error:
+        payload["fixer_error"] = fixer_error
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "release_gate_executed", payload)
+    except Exception:
+        _log.warning("could not record release_gate_executed for %s",
+                     task_id, exc_info=True)
+
+
+def _record_release_gate_fix_attempt(
+    conn: sqlite3.Connection, task_id: str, *,
+    attempt: int, gate_error: str, root_id: str, worktree: str, branch: str,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    payload = {
+        "attempt": attempt,
+        "root_id": root_id,
+        "lane": "coder-claude",
+        "worktree": worktree,
+        "branch": branch,
+        "gate_error_tail": (gate_error or "")[-2000:],
+    }
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "release_gate_fix_attempt", payload)
+    except Exception:
+        _log.warning("could not record release_gate_fix_attempt for %s",
+                     task_id, exc_info=True)
+
+
+def _finish_release_gate_green(
+    conn: sqlite3.Connection, task_id: str, root_id: str, fixer_attempts: int,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    note = (
+        f"✅ Release-gate green for chain `{root_id}` after {fixer_attempts} "
+        "bounded fixer attempt(s). Dashboard build + artifact check + "
+        "loopback smoke passed in the live checkout."
+    )
+    try:
+        kb.add_comment(conn, task_id, "verifier", note)
+    except Exception:
+        _log.debug("release-gate green comment failed", exc_info=True)
+    # Transition the parked child to done. Public path first (unblock the
+    # blocked child, then complete); deterministic UPDATE fallback so a green
+    # gate always lands as done on the board.
+    moved = False
+    try:
+        task = kb.get_task(conn, task_id)
+        if task is not None and task.status == "blocked":
+            kb.unblock_task(conn, task_id)
+        moved = kb.complete_task(
+            conn, task_id, result="release-gate green",
+            summary=f"release gate green after {fixer_attempts} fixer attempt(s)",
+        )
+    except Exception:
+        _log.debug("release-gate green public transition failed", exc_info=True)
+    if not moved:
+        try:
+            with kb.write_txn(conn):
+                # Only promote a still-open gate child — never resurrect a
+                # concurrently archived/failed task.
+                conn.execute(
+                    "UPDATE tasks SET status = 'done' WHERE id = ? "
+                    "AND status IN ('blocked', 'ready', 'todo', 'running')",
+                    (task_id,),
+                )
+                kb._append_event(
+                    conn, task_id, "release_gate_green",
+                    {"root_id": root_id, "fixer_attempts": fixer_attempts},
+                )
+        except Exception:
+            _log.warning("could not mark release-gate child %s done",
+                         task_id, exc_info=True)
+
+
+def _escalate_release_gate(
+    conn: sqlite3.Connection, task_id: str, root_id: str, *,
+    attempts: int, last_error: str,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    payload = {
+        "task": {"id": task_id},
+        "why_now": (
+            f"Release gate for chain {root_id} still red after {attempts} "
+            "bounded fixer attempt(s)"
+        ),
+        "attempts_already_made": attempts,
+        "evidence": {
+            "last_error": (last_error or "")[-2000:],
+            "root_id": root_id,
+        },
+        "recommended_human_action": (
+            "Inspect the chain worktree fix and the gate output; decide a "
+            "manual fix or revert before the staged deploy. Council review is "
+            "required on this release path."
+        ),
+        "blocked_action_boundary": list(getattr(kb, "OPERATOR_ONLY_ACTIONS", ())),
+    }
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
+    except Exception:
+        _log.warning("could not record operator_escalation for %s",
+                     task_id, exc_info=True)
+    try:
+        kb.add_comment(
+            conn, task_id, "verifier",
+            f"⛔ Release-gate still red after {attempts} bounded fixer "
+            "attempt(s) → operator_escalation. The fixer worked only in the "
+            "chain worktree; live-main was never edited.",
+        )
+    except Exception:
+        _log.debug("release-gate escalation comment failed", exc_info=True)
+    # Keep the child blocked (it already is). Re-block defensively if some
+    # other path moved it.
+    try:
+        task = kb.get_task(conn, task_id)
+        if task is not None and task.status not in ("blocked", "archived"):
+            kb.block_task(conn, task_id, reason="release-gate persistent red")
+    except Exception:
+        _log.debug("release-gate re-block failed", exc_info=True)
+
+
+def execute_release_gate(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    gate_runner=None,
+    fixer_runner=None,
+    max_retries: Optional[int] = None,
+    repo_root: Optional[Path] = None,
+    board: Optional[str] = None,
+) -> dict:
+    """Process a parked release-gate child end to end.
+
+    Runs the gate in the live checkout. On green: report success + mark the
+    child done. On red: spawn up to *max_retries* bounded coder-claude fixers
+    inside the chain worktree/branch (never live-main), re-running the gate
+    after each. Persistent red → ``operator_escalation`` and the child stays
+    blocked.
+
+    ``gate_runner``/``fixer_runner`` are injectable seams (defaults wire to the
+    live subprocess gate and the claude-CLI fixer). Returns a result dict with
+    ``status`` (``"green"`` | ``"escalated"``) and ``fixer_attempts``.
+    """
+    ctx = _release_gate_context(conn, task_id)
+    if ctx is None:
+        raise ReleaseGateError(
+            f"{task_id} is not a release-gate child "
+            "(no release_gate_parked event)"
+        )
+    root_id = ctx["root_id"]
+    if max_retries is None:
+        max_retries = release_gate_fixer_max_retries()
+    max_retries = max(0, int(max_retries))
+    gate_runner = gate_runner or _default_release_gate_runner
+    fixer_runner = fixer_runner or _default_release_gate_fixer
+    repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+
+    # Attempt 0: bare gate run.
+    ok, output = gate_runner()
+    _record_release_gate_executed(
+        conn, task_id, attempt=0, ok=ok, output=output, root_id=root_id,
+    )
+    if ok:
+        _finish_release_gate_green(conn, task_id, root_id, 0)
+        return {"status": "green", "fixer_attempts": 0, "root_id": root_id}
+
+    fixer_attempts = 0
+    while fixer_attempts < max_retries:
+        fixer_attempts += 1
+        worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
+        _record_release_gate_fix_attempt(
+            conn, task_id, attempt=fixer_attempts, gate_error=output,
+            root_id=root_id, worktree=str(worktree), branch=branch,
+        )
+        fix_error = None
+        try:
+            fixer_runner(
+                worktree=worktree, branch=branch, gate_error=output,
+                attempt=fixer_attempts, task_id=task_id, root_id=root_id,
+            )
+        except Exception as exc:  # the fixer is best-effort; record + retry/escalate
+            fix_error = f"{type(exc).__name__}: {exc}"
+            _log.warning("release-gate fixer attempt %d failed for %s: %s",
+                         fixer_attempts, task_id, fix_error, exc_info=True)
+        # Re-run the gate after the fixer.
+        ok, output = gate_runner()
+        _record_release_gate_executed(
+            conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
+            root_id=root_id, fixer_error=fix_error,
+        )
+        if ok:
+            _finish_release_gate_green(conn, task_id, root_id, fixer_attempts)
+            return {
+                "status": "green",
+                "fixer_attempts": fixer_attempts,
+                "root_id": root_id,
+            }
+
+    _escalate_release_gate(
+        conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
+    )
+    return {
+        "status": "escalated",
+        "fixer_attempts": fixer_attempts,
+        "root_id": root_id,
+    }
 
 
 def _terminal_status(status: str) -> bool:
