@@ -5087,3 +5087,39 @@ def test_planspecs_detail_resolves_path_exactly_once(client, monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert calls["n"] == 1, f"path resolved {calls['n']}× — TOCTOU window between resolutions"
+
+
+def test_planspecs_detail_null_byte_path_is_400_not_500(client):
+    """An embedded NUL byte in ``path`` makes Path.resolve() raise ValueError.
+    The handler must surface that as a 400 (malformed path), NOT let it become
+    an unhandled 500, and must not leak the server path."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/home/piet/vault/03-Agents/x\x00.md"},
+    )
+    assert r.status_code == 400, r.text
+    body = r.json()
+    findings = body.get("detail", {}).get("findings", [])
+    assert findings, body
+    # path-free message: never echo the resolved server path / raw param
+    assert not any("/home/piet" in f for f in findings), findings
+
+
+def test_resolve_planspec_path_raises_typed_not_found():
+    """The 404-vs-400 split must rest on a typed exception, not on substring-
+    matching the human finding text. ``resolve_planspec_path`` raises
+    ``PlanSpecNotFound`` (a ``PlanSpecBlocked`` subclass) for a missing file
+    under root, and a *plain* ``PlanSpecBlocked`` for traversal — so a future
+    wording change of the finding can't silently flip 404 → 400."""
+    from hermes_cli import planspecs as _ps
+
+    with pytest.raises(_ps.PlanSpecNotFound):
+        _ps.resolve_planspec_path(
+            "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist-xyz.md"
+        )
+
+    with pytest.raises(_ps.PlanSpecBlocked) as exc_info:
+        _ps.resolve_planspec_path("/etc/passwd")
+    assert not isinstance(exc_info.value, _ps.PlanSpecNotFound), (
+        "traversal/outside-root must be a 400-class block, not a not-found"
+    )

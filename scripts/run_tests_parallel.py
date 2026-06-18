@@ -70,9 +70,13 @@ _DEFAULT_ROOTS = ["tests"]
 #                        setup. The dedicated job sidesteps both costs.
 _SKIP_PARTS = {"integration", "e2e", "docker"}
 
-# Per-file wall-clock cap. Override
-# via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
-_DEFAULT_FILE_TIMEOUT_SECONDS = 140.0 # set by observing the slowest file at commit time was ~100s in CI and adding some leeway
+# Per-file wall-clock cap. Override via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
+# Headroom matters: the slowest files (test_run_agent.py ~120s solo,
+# test_kanban_dashboard_plugin.py ~56s solo) sit close to the cap, and on the
+# live homeserver — which runs the dashboard + agent sessions concurrently —
+# 8-way parallel load stretches them past a 140s cap and SIGKILLs them without
+# a real failure. 180s keeps the full suite usable as a green gate here.
+_DEFAULT_FILE_TIMEOUT_SECONDS = 180.0
 
 # Duration cache: maps relative file paths to last-observed subprocess
 # wall-clock seconds. Used by ``--slice`` to distribute files across

@@ -39,24 +39,31 @@ def _find_chrome() -> str:
     pytest.skip("no Chrome binary found")
 
 
+def _free_tcp_port() -> int:
+    """Return an unused localhost TCP port (OS-assigned via bind-to-0)."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 @pytest.fixture
 def chrome_cdp(request):
     """Start a headless Chrome with --remote-debugging-port, yield its WS URL.
 
-    Uses a unique port per xdist worker to avoid cross-worker collisions.
+    Uses a fresh OS-assigned port per fixture to avoid cross-test collisions.
     Always launches with ``--site-per-process`` so cross-origin iframes
     become real OOPIFs (needed by the iframe interaction tests).
     """
 
-    # xdist worker_id is "master" in single-process mode or "gw0".."gwN" otherwise.
-    # Under subprocess-per-file isolation there's no xdist, so we fall back
-    # to "master" via the session-scoped fixture below.
-    worker_id = request.getfixturevalue("worker_id") if "worker_id" in request.fixturenames else "master"
-    if worker_id == "master":
-        port_offset = 0
-    else:
-        port_offset = int(worker_id.lstrip("gw"))
-    port = 9225 + port_offset
+    # A fresh OS-assigned port per fixture. The per-file subprocess runner has
+    # no xdist ``worker_id``, so the old ``9225 + offset`` scheme handed every
+    # test the same fixed port; under parallel system load a slow-to-die Chrome
+    # from the previous test still held 9225 when the next one launched, and the
+    # supervisor then attached to the stale browser UUID → ``WebSocket HTTP 404``
+    # flake. An OS-assigned free port eliminates that collision.
+    port = _free_tcp_port()
     profile = tempfile.mkdtemp(prefix="hermes-supervisor-test-")
     proc = subprocess.Popen(
         [

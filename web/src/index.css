@@ -12,6 +12,15 @@
    Tailwind's JIT purge. */
 @source '../node_modules/@nous-research/ui/dist';
 
+/* Test files never render in production, but Tailwind v4's automatic content
+   detection still scans them. A string literal like `[file:line]` in a
+   *.test.ts (e.g. control/views/schmiede/heuristic.test.ts) is otherwise read
+   as an arbitrary-property class `{file:line}`, which esbuild then flags as an
+   invalid CSS property at minify time. Excluding tests removes that warning at
+   the root for every current and future test file. */
+@source not './**/*.test.ts';
+@source not './**/*.test.tsx';
+
 /* ------------------------------------------------------------------ */
 /* JetBrains Mono — bundled for the embedded TUI (/chat tab).          */
 /* Gives the terminal a proper monospace font even on systems where    */

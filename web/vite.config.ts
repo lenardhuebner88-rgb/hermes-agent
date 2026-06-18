@@ -91,6 +91,14 @@ export default defineConfig({
   build: {
     outDir: "../hermes_cli/web_dist",
     emptyOutDir: true,
+    // The eager entry chunk is ~785 kB minified (app bootstrap; React core is
+    // already split into `vendor-react` below, heavy routes ChatPage/xterm and
+    // ControlPage are already React.lazy code-split). That's a deliberate,
+    // measured baseline — Vite's stock 500 kB warning threshold sits under it
+    // and fired on every build as pure noise. A documented 900 kB ceiling still
+    // flags a real regression (a deeper eager-bundle reduction lives on the
+    // perf track, not here).
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         // React core + router made up ~900 kB (pre-minify) of the 1 MB

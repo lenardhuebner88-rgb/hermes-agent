@@ -49,6 +49,18 @@ class PlanSpecBlocked(RuntimeError):
         super().__init__("; ".join(findings))
 
 
+class PlanSpecNotFound(PlanSpecBlocked):
+    """No ``.md`` file exists at the (valid, under-root) resolved path.
+
+    A typed subclass so HTTP callers can map *missing file* → 404 and every
+    other block → 400 via ``except``-ordering, instead of substring-matching
+    the human-readable finding text (which silently breaks if the wording in
+    :func:`resolve_planspec_path` ever changes). It still *is-a*
+    ``PlanSpecBlocked``, so every existing ``except PlanSpecBlocked`` keeps
+    catching it unchanged.
+    """
+
+
 @dataclass(frozen=True)
 class BindingPlanSpec:
     path: Path
@@ -96,7 +108,14 @@ def _is_display_only_open_plan(frontmatter: dict[str, Any], status: str) -> bool
 
 
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
-    candidate = Path(path).expanduser().resolve(strict=False)
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+    except ValueError as exc:
+        # An embedded NUL byte (or other OS-rejected path) makes realpath()
+        # raise ValueError. Surface it as a 400-class block instead of letting
+        # it propagate as an unhandled 500. Stay path-free (see #13 below): the
+        # message must not echo the attacker-influenced ``path``.
+        raise PlanSpecBlocked(["planspec path is malformed"]) from exc
     root = plans_root.expanduser().resolve(strict=False)
     # #13: error findings are surfaced verbatim to the dashboard / HTTP callers.
     # Never embed the resolved server-side path (``root`` / ``candidate``) — that
@@ -106,7 +125,7 @@ def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_
     if candidate.suffix.lower() != ".md":
         raise PlanSpecBlocked(["planspec path must point to a markdown file"])
     if not candidate.is_file():
-        raise PlanSpecBlocked(["planspec file not found"])
+        raise PlanSpecNotFound(["planspec file not found"])
     return candidate
 
 

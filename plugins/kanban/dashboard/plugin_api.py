@@ -4960,8 +4960,9 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
       - rejects anything whose resolved absolute path is not under
         ``DEFAULT_PLANS_ROOT`` (/home/piet/vault/03-Agents)
       - rejects non-``.md`` suffixes
-      - raises ``PlanSpecBlocked`` (→ 400) for traversal; the "file not found"
-        finding maps to 404.
+      - raises ``PlanSpecNotFound`` (→ 404) when the file is missing and
+        ``PlanSpecBlocked`` (→ 400) for traversal / bad suffix / malformed path
+        / malformed spec.
 
     #13: the path is resolved + read EXACTLY ONCE (inside parse_binding_planspec)
     — we do NOT validate first and then re-resolve+read separately, which would
@@ -4972,15 +4973,15 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
     """
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
-    # Single resolution+read: distinguish 404 (file missing) from 400 (traversal /
-    # bad path / malformed spec) off the one exception this raises.
+    # Single resolution+read. Distinguish 404 (file missing) from 400 (traversal /
+    # bad path / malformed spec) off the *exception type* — not by substring-
+    # matching the finding text, which would silently break if wording changes.
     try:
         spec = planspecs.parse_binding_planspec(path)
+    except planspecs.PlanSpecNotFound as exc:
+        raise HTTPException(status_code=404, detail={"findings": exc.findings})
     except planspecs.PlanSpecBlocked as exc:
-        findings = exc.findings
-        if findings and "file not found" in findings[0]:
-            raise HTTPException(status_code=404, detail={"findings": findings})
-        raise HTTPException(status_code=400, detail={"findings": findings})
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
     fm = spec.frontmatter
 
