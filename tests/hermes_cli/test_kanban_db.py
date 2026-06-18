@@ -7671,15 +7671,18 @@ def test_c1_tree_root_woke_all_children_done(kanban_home):
         root = kb.create_task(conn, title="root task", assignee="orchestrator")
         child1 = kb.create_task(conn, title="child A", assignee="coder")
         child2 = kb.create_task(conn, title="child B", assignee="coder")
-        # Link children to root
+        # A decompose root DEPENDS ON its subtasks: the root is the child_id and
+        # each subtask is a parent_id (the same direction decompose_triage_task
+        # creates and recompute_ready reads). Building the links the other way
+        # round would make this test pass while the production query never fires.
         with kb.write_txn(conn):
             conn.execute(
                 "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (root, child1),
+                (child1, root),
             )
             conn.execute(
                 "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (root, child2),
+                (child2, root),
             )
         # Complete both children
         _set_task_status(conn, child1, "done")
@@ -7707,11 +7710,11 @@ def test_c1_tree_root_woke_not_emitted_if_child_not_done(kanban_home):
         with kb.write_txn(conn):
             conn.execute(
                 "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (root, child1),
+                (child1, root),
             )
             conn.execute(
                 "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (root, child2),
+                (child2, root),
             )
         # Only child1 done; child2 still todo
         _set_task_status(conn, child1, "done")

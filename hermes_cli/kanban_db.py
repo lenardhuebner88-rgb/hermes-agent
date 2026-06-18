@@ -14612,30 +14612,30 @@ def decision_queue(
     except Exception:
         pass
 
-    # 6) tree_root_woke — a decompose ROOT that is 'ready' AND all its children
-    #    are 'done'.  "all children done" reuses the same predicate as
-    #    recompute_ready (p["status"] == "done") via a NOT-EXISTS subquery so
-    #    the condition is never subtly different from what promoted the root.
-    #    A root with no children at all is excluded (it was never decomposed).
+    # 6) tree_root_woke — a decompose ROOT that is 'ready' AND all its subtasks
+    #    are 'done'.  A decompose root DEPENDS ON its subtasks, so in task_links
+    #    the root is the child_id and the subtasks are the parent_ids — the same
+    #    direction recompute_ready uses (JOIN l.parent_id WHERE l.child_id = root)
+    #    to promote the root.  A root with no subtasks at all is excluded.
     try:
         for row in conn.execute(
             "SELECT t.id AS task_id, t.title AS title, t.created_at AS created_at "
             "FROM tasks t "
             "WHERE t.status = 'ready' "
-            # has at least one child
-            "  AND EXISTS (SELECT 1 FROM task_links WHERE parent_id = t.id) "
-            # every child is done (same predicate recompute_ready uses)
+            # has at least one subtask (the root is the dependent child_id)
+            "  AND EXISTS (SELECT 1 FROM task_links WHERE child_id = t.id) "
+            # every subtask (parent) is done — same predicate recompute_ready uses
             "  AND NOT EXISTS ("
             "    SELECT 1 FROM task_links l2 "
-            "    JOIN tasks t2 ON t2.id = l2.child_id "
-            "    WHERE l2.parent_id = t.id AND t2.status != 'done'"
+            "    JOIN tasks t2 ON t2.id = l2.parent_id "
+            "    WHERE l2.child_id = t.id AND t2.status != 'done'"
             "  )",
         ).fetchall():
             if row["task_id"] in seen:
                 continue
             _add(
                 "tree_root_woke", row["task_id"], row["title"],
-                "Decompose root is ready — all children done; root awaits finalization",
+                "Decompose root is ready — all subtasks done; root awaits finalization",
                 _age(row["created_at"]),
                 f"hermes kanban show {row['task_id']}",
             )

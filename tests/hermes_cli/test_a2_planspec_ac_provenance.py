@@ -150,11 +150,13 @@ def test_taskgraph_hints_to_children_threads_plan_level_ac():
 
     s1_body = children[0]["body"]
     s2_body = children[1]["body"]
-    # S1 gets AC-X; S2 gets AC-Y
-    assert "AC-AC-X" in s1_body, f"Expected AC-AC-X bullet in S1 body; got:\n{s1_body}"
+    # S1 gets AC-X; S2 gets AC-Y. The token is the id with a single AC- marker
+    # (no doubled "AC-AC-" prefix even though the id already starts with "AC").
+    assert "AC-X" in s1_body, f"Expected AC-X bullet in S1 body; got:\n{s1_body}"
+    assert "AC-AC-X" not in s1_body, "AC- prefix must not be doubled"
     assert "X applies to S1" in s1_body
-    assert "AC-AC-X" not in s2_body
-    assert "AC-AC-Y" in s2_body, f"Expected AC-AC-Y bullet in S2 body; got:\n{s2_body}"
+    assert "AC-X" not in s2_body
+    assert "AC-Y" in s2_body, f"Expected AC-Y bullet in S2 body; got:\n{s2_body}"
     assert "Y applies to S2" in s2_body
 
 
@@ -196,6 +198,124 @@ def test_taskgraph_hints_to_children_planspec_source_none_omits_key():
     # planspec_subtask_id is always present; planspec_source may be absent
     assert "planspec_subtask_id" in children[0]
     assert "planspec_source" not in children[0]
+
+
+def test_ac_token_not_doubled_for_ids_starting_with_ac():
+    """#6: an AC id that already starts with 'AC' yields a single AC- token,
+    not a doubled 'AC-AC...' prefix."""
+    from hermes_cli.plan_compiler import AcceptanceCriterion
+
+    plan_ac = [
+        AcceptanceCriterion(
+            id="AC1-persist-child-ac",
+            scope_level="child",
+            statement="must persist",
+            verification="test",
+            done_signal="green",
+            applies_to=["S1"],
+        ),
+    ]
+    hints = TaskgraphHints(
+        binding=True, subtasks=[BindingSubtask(id="S1", title="T", lane="coder")]
+    )
+    body = taskgraph_hints_to_children(hints, plan_ac=plan_ac)[0]["body"]
+    assert "AC-1-persist-child-ac" in body
+    assert "AC-AC1" not in body
+
+
+def test_plan_level_ac_without_applies_to_threads_to_all_subtasks():
+    """#3: a structured plan-level AC with empty applies_to is plan-wide and
+    threads into every subtask instead of being silently dropped."""
+    from hermes_cli.plan_compiler import AcceptanceCriterion
+
+    plan_ac = [
+        AcceptanceCriterion(
+            id="AC-GLOBAL",
+            scope_level="plan",
+            statement="applies everywhere",
+            verification="test",
+            done_signal="green",
+            # no applies_to → plan-wide
+        ),
+    ]
+    hints = TaskgraphHints(
+        binding=True,
+        subtasks=[
+            BindingSubtask(id="S1", title="T1", lane="coder"),
+            BindingSubtask(id="S2", title="T2", lane="coder"),
+        ],
+    )
+    children = taskgraph_hints_to_children(hints, plan_ac=plan_ac)
+    assert "applies everywhere" in children[0]["body"]
+    assert "applies everywhere" in children[1]["body"]
+
+
+def test_free_form_plan_level_ac_threads_to_all_subtasks():
+    """#3: a free-form plan-level AC string (no applies_to possible) is plan-wide."""
+    hints = TaskgraphHints(
+        binding=True,
+        subtasks=[
+            BindingSubtask(id="S1", title="T1", lane="coder"),
+            BindingSubtask(id="S2", title="T2", lane="coder"),
+        ],
+    )
+    children = taskgraph_hints_to_children(
+        hints, plan_ac=["free-form global criterion"]
+    )
+    assert "free-form global criterion" in children[0]["body"]
+    assert "free-form global criterion" in children[1]["body"]
+
+
+def test_invalid_per_subtask_ac_falls_back_to_plan_level():
+    """#2: when a subtask's own acceptance_criteria are ALL invalid, the
+    plan-level fallback still applies (child is not left with no AC)."""
+    from hermes_cli.plan_compiler import AcceptanceCriterion
+
+    plan_ac = [
+        AcceptanceCriterion(
+            id="AC-FALLBACK",
+            scope_level="child",
+            statement="fallback criterion",
+            verification="test",
+            done_signal="green",
+            applies_to=["S1"],
+        ),
+    ]
+    hints = TaskgraphHints(
+        binding=True,
+        subtasks=[
+            BindingSubtask(
+                id="S1", title="T1", lane="coder",
+                # structurally-invalid AC dict (missing required fields)
+                acceptance_criteria=[{"id": "broken"}],
+            ),
+        ],
+    )
+    body = taskgraph_hints_to_children(hints, plan_ac=plan_ac)[0]["body"]
+    assert "fallback criterion" in body
+
+
+def test_multiline_ac_statement_collapsed_to_single_line():
+    """#5: a multi-line AC statement is collapsed so it stays on one bullet line
+    and survives _parse_acceptance_criteria (which matches only the first line)."""
+    from hermes_cli.plan_compiler import AcceptanceCriterion
+
+    plan_ac = [
+        AcceptanceCriterion(
+            id="AC-ML",
+            scope_level="child",
+            statement="line one\nline two\nline three",
+            verification="test",
+            done_signal="green",
+            applies_to=["S1"],
+        ),
+    ]
+    hints = TaskgraphHints(
+        binding=True, subtasks=[BindingSubtask(id="S1", title="T", lane="coder")]
+    )
+    body = taskgraph_hints_to_children(hints, plan_ac=plan_ac)[0]["body"]
+    ac_line = next(ln for ln in body.splitlines() if ln.startswith("- AC-ML"))
+    assert "line one line two line three" in ac_line
 
 
 # ---------------------------------------------------------------------------

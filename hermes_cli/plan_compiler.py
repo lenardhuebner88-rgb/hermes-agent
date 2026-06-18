@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 import sys
@@ -292,6 +293,33 @@ def _kind_for_planspec_lane(lane: str) -> str:
     return "code"
 
 
+logger = logging.getLogger(__name__)
+
+# Strip a leading "AC"/"AC-"/"AC_" (with optional separators) from an AC id so an
+# id that already starts with "AC" (e.g. "AC1-foo") yields a single clean
+# "AC-1-foo" token instead of a doubled "AC-AC1-foo". The "AC" is only stripped
+# when followed by a separator or digit, so words like "ACCOUNT" are left intact.
+_AC_PREFIX_RE = re.compile(r"^ac(?=[-_\s\d])[-_\s]*", re.IGNORECASE)
+
+
+def _ac_token(ac_id: str, *, fallback: str) -> str:
+    """Build a single ``AC-<core>`` token for an AC bullet.
+
+    Guarantees the ``AC-`` marker that ``_parse_acceptance_criteria``
+    (kanban_db.py) requires, without doubling it for ids that already start with
+    ``AC``. Falls back to *fallback* when stripping leaves nothing.
+    """
+    core = _AC_PREFIX_RE.sub("", (ac_id or "").strip()).strip()
+    return f"AC-{core or fallback}"
+
+
+def _ac_statement_oneline(text: str) -> str:
+    """Collapse whitespace/newlines so a multi-line statement survives the
+    single-line bullet round-trip through ``_parse_acceptance_criteria``, which
+    only matches the first line of each bullet."""
+    return " ".join(str(text).split())
+
+
 def _ac_bullets_for_subtask(
     subtask: "BindingSubtask",
     plan_ac: "list[str | AcceptanceCriterion]",
@@ -308,28 +336,47 @@ def _ac_bullets_for_subtask(
     ``_parse_acceptance_criteria`` (kanban_db.py) can pick them up via its
     ``\\bAC-\\w+`` bullet regex.
     """
-    # Per-subtask AC wins when present.
+    def _bullets(items: "list[str | AcceptanceCriterion]") -> list[str]:
+        out: list[str] = []
+        for n, item in enumerate(items, start=1):
+            if isinstance(item, str):
+                # Free-form string — synthesise a unique AC-<n> token per item so
+                # multiple free-form criteria don't collapse onto one shared id.
+                out.append(f"- AC-{n}: {_ac_statement_oneline(item)}")
+            else:
+                out.append(
+                    f"- {_ac_token(item.id, fallback=str(n))}: "
+                    f"{_ac_statement_oneline(item.statement)}"
+                )
+        return out
+
+    # 1. Per-subtask AC wins — but only when it yields at least one bullet. If
+    #    the subtask carries acceptance_criteria that are ALL invalid (every item
+    #    drops to findings), fall through to the plan-level fallback rather than
+    #    silently leaving the child with no AC at all.
     if subtask.acceptance_criteria:
         findings: list[str] = []
         normalized = _normalize_acceptance_criteria(subtask.acceptance_criteria, findings)
-        bullets: list[str] = []
-        for item in normalized:
-            if isinstance(item, str):
-                # Free-form string — embed as-is; add a generic AC- prefix so
-                # the parser still recognises it.
-                bullets.append(f"- AC-{subtask.id}: {item}")
-            else:
-                bullets.append(f"- AC-{item.id}: {item.statement}")
-        return bullets
+        if findings:
+            logger.warning(
+                "PlanSpec subtask %s: %d acceptance_criteria dropped: %s",
+                subtask.id, len(findings), "; ".join(findings),
+            )
+        bullets = _bullets(normalized)
+        if bullets:
+            return bullets
 
-    # Fallback: plan-level AC that apply to this subtask.
-    bullets = []
+    # 2. Fallback: plan-level AC that apply to this subtask. An entry with no
+    #    explicit applies_to (incl. free-form plan-level strings) is plan-wide
+    #    and threads into every subtask rather than being silently dropped.
+    fallback: list[str | AcceptanceCriterion] = []
     for item in plan_ac:
         if isinstance(item, AcceptanceCriterion):
-            if subtask.id in item.applies_to:
-                bullets.append(f"- AC-{item.id}: {item.statement}")
-        # Free-form plan-level strings have no applies_to → skip in fallback.
-    return bullets
+            if not item.applies_to or subtask.id in item.applies_to:
+                fallback.append(item)
+        else:
+            fallback.append(item)
+    return _bullets(fallback)
 
 
 def taskgraph_hints_to_children(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -21,6 +22,8 @@ from hermes_cli.plan_compiler import (
     _normalize_acceptance_criteria,
     taskgraph_hints_to_children,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
@@ -148,8 +151,13 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     if isinstance(raw_ac, list):
         ac_findings: list[str] = []
         plan_ac = _normalize_acceptance_criteria(raw_ac, ac_findings)
-        # ac_findings are informational only — a malformed AC criterion must
-        # not block ingest (we drop it and continue).
+        # A malformed plan-level AC criterion must not block ingest (we drop it
+        # and continue) — but it must NOT vanish silently, so log it.
+        if ac_findings:
+            logger.warning(
+                "PlanSpec %s: %d plan-level acceptance_criteria dropped: %s",
+                resolved, len(ac_findings), "; ".join(ac_findings),
+            )
 
     try:
         children = taskgraph_hints_to_children(
