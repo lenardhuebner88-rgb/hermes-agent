@@ -1908,7 +1908,7 @@ export function FlowView() {
       )}
 
       {loadingFirst ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><SkeletonCard rows={4} /><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>
+        <div data-testid="flow-skeleton" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><SkeletonCard rows={4} /><SkeletonCard rows={4} /><SkeletonCard rows={4} /></div>
       ) : (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-5">

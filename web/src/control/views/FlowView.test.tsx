@@ -230,3 +230,19 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/collapsible/);
   });
 });
+
+describe("FlowView loading guard", () => {
+  it("renders a flow-skeleton container when loadingFirst is true (board.loading && board.data == null)", () => {
+    // Source-Contract: the guard branch (loadingFirst ? …) must include a
+    // container with data-testid="flow-skeleton" so callers and tests can
+    // assert the initial-load skeleton is present instead of an empty list.
+    expect(src).toMatch(/loadingFirst \? \(/);
+    expect(src).toMatch(/data-testid="flow-skeleton"/);
+    // The testid must appear inside the loadingFirst branch, not after the else.
+    const loadingBranchStart = src.indexOf("loadingFirst ? (");
+    const skeletonIdx = src.indexOf('data-testid="flow-skeleton"');
+    const elseBranchStart = src.indexOf(") : (\n        <div className=\"grid gap-4 xl:grid-cols");
+    expect(skeletonIdx).toBeGreaterThan(loadingBranchStart);
+    expect(skeletonIdx).toBeLessThan(elseBranchStart);
+  });
+});
