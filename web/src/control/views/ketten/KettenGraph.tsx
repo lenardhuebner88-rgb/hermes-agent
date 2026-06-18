@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
+import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ChainNodeCard } from "./ChainNodeCard";
 import { linearizeNodes } from "./dagLayout";
 import type { ChainGraphEdge, ChainGraphNode } from "../../lib/types";
@@ -24,7 +25,8 @@ export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
     return Math.round((progressed / ordered.length) * 100);
   }, [ordered]);
 
-  if (nodes.length === 0) return null;
+  if (nodes.length === 0)
+    return <FleetEmptyState title="Keine Knoten" desc="Die Kette enthält keine verarbeitbaren Tasks." />;
 
   return (
     <div className="relative min-w-0 max-w-full rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)] p-4">

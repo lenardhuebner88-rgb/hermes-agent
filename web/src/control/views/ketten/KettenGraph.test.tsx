@@ -89,8 +89,9 @@ describe("KettenGraph", () => {
     expect(html).toContain("Wartet auf Vorgänger");
   });
 
-  it("renders nothing when nodes are empty", () => {
+  it("shows empty-state when nodes are empty", () => {
     const html = renderToStaticMarkup(<KettenGraph nodes={[]} edges={[]} rootId="a" />);
-    expect(html).toBe("");
+    expect(html).toContain("Keine Knoten");
+    expect(html).toContain("Die Kette enthält keine verarbeitbaren Tasks.");
   });
 });
