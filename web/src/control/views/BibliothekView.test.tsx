@@ -190,6 +190,14 @@ describe("LesesaalBody (Such-Input Accessibility)", () => {
   });
 });
 
+describe("LesesaalBody Erst-Lade-Skeleton (B1)", () => {
+  it("zeigt SkeletonCard (aria-busy) statt leerer Fläche wenn data noch null ist und kein error vorliegt", () => {
+    // renderToStaticMarkup führt keinen useEffect aus → data bleibt null, error bleibt null
+    const html = renderToStaticMarkup(<LesesaalBody />);
+    expect(html).toContain('aria-busy="true"');
+  });
+});
+
 describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3)", () => {
   it("Wissen-Modus (default): beide Tab-Buttons tragen aria-controls; nur Wissen-Panel im DOM", () => {
     // Default-Render: mode="wissen"

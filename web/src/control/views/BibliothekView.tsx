@@ -372,6 +372,8 @@ export function LesesaalBody() {
 
       {reading ? (
         <ReadingView item={reading} neighbors={neighbors} onNavigate={setReading} onBack={() => setReading(null)} />
+      ) : data === null && !error ? (
+        <SkeletonCard rows={4} />
       ) : data !== null && items.length === 0 ? (
         <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
       ) : isFrontpage ? (
