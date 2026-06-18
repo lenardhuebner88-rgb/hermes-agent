@@ -5296,6 +5296,169 @@ def test_4a_rate_limited_loop_parks_once(kanban_home):
     assert escalations[0].payload["attempts_already_made"] == 3
 
 
+# ---------------------------------------------------------------------------
+# Heiler: transient re-integration retry lane (no_silent_stall_sweep §5)
+# ---------------------------------------------------------------------------
+
+def _make_integration_parked(conn, reason_suffix, *, title="parked finalizer"):
+    """Create a task blocked with an ``integration parked: <reason>`` event."""
+    tid = kb.create_task(conn, title=title, assignee="coder")
+    kb.claim_task(conn, tid)
+    kb.block_task(conn, tid, reason=f"integration parked: {reason_suffix}")
+    return tid
+
+
+def _patch_integrate(monkeypatch, outcomes):
+    """Patch maybe_integrate_on_complete; record call task_ids.
+
+    ``outcomes`` may be a list (popped per call) or a callable(task_id)->dict.
+    """
+    import hermes_cli.kanban_worktrees as kwt
+    calls = []
+
+    def fake(conn, task_id, **kw):
+        calls.append(task_id)
+        if callable(outcomes):
+            return outcomes(task_id)
+        return outcomes.pop(0) if outcomes else None
+
+    monkeypatch.setattr(kwt, "maybe_integrate_on_complete", fake)
+    return calls
+
+
+def test_integration_retry_transient_park_reintegrates_and_completes(
+    kanban_home, monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = _make_integration_parked(
+            conn, "chain worktree has uncommitted changes: foo.py",
+        )
+        calls = _patch_integrate(monkeypatch, [{
+            "action": "merged", "branch": "kanban/chain-x",
+            "merge_commit": "abc123def456", "target": "main",
+        }])
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert calls == [tid]                       # re-integration WAS attempted
+    assert task.status == "done"                # completed, NOT ready
+    assert task.integration_retry_count == 1
+    assert kb.INTEGRATION_RETRY_EVENT in kinds
+    assert kb.INTEGRATION_RETRY_SUCCEEDED_EVENT in kinds
+    assert "operator_escalation" not in kinds   # no premature escalation
+    assert {
+        "task_id": tid, "class": "integration_retry", "action": "reintegrated",
+    } in summary["self_healed"]
+
+
+@pytest.mark.parametrize("reason_suffix", [
+    "merge conflict/failure (aborted): foo.py",
+    "post-merge gate failed: vitest 3 failing",
+])
+def test_integration_retry_non_transient_not_retried_escalates(
+    kanban_home, monkeypatch, reason_suffix,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = _make_integration_parked(conn, reason_suffix)
+        calls = _patch_integrate(monkeypatch, [])  # any call would be a bug
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert calls == []                          # merge conflict/red gate: NO retry
+    assert task.status == "blocked"
+    assert task.integration_retry_count == 0
+    assert len(escalations) == 1               # classified + escalated
+    assert {"task_id": tid, "class": "integration_parked"} in summary["parked"]
+
+
+def test_integration_retry_count_separate_from_auto_retry_count(
+    kanban_home, monkeypatch,
+):
+    now = 1_900_000_000
+    reason = "dirty files in live checkout overlap the branch diff: a.py"
+    with kb.connect() as conn:
+        tid = _make_integration_parked(conn, reason)
+        # Re-park (still transient) so the task stays blocked and we can read
+        # the counters without it completing.
+        _patch_integrate(monkeypatch, [{"action": "parked", "reason": reason}])
+        kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+
+    assert task.integration_retry_count == 1    # OWN counter advanced
+    assert task.auto_retry_count == 0           # shared premium/opus ladder untouched
+    assert task.status == "blocked"             # re-parked, NOT ready
+
+
+def test_integration_retry_bounded_escalates_after_two_rounds(
+    kanban_home, monkeypatch,
+):
+    reason = (
+        "live checkout has an operation in progress (rebase): "
+        ".git/rebase-merge"
+    )
+    with kb.connect() as conn:
+        tid = _make_integration_parked(conn, reason)
+        calls = _patch_integrate(
+            monkeypatch, lambda _t: {"action": "parked", "reason": reason},
+        )
+        s1 = kb.no_silent_stall_sweep(conn, now=1_900_000_000)
+        t1 = kb.get_task(conn, tid)
+        s2 = kb.no_silent_stall_sweep(conn, now=1_900_000_100)
+        t2 = kb.get_task(conn, tid)
+        s3 = kb.no_silent_stall_sweep(conn, now=1_900_000_200)
+        t3 = kb.get_task(conn, tid)
+        s4 = kb.no_silent_stall_sweep(conn, now=1_900_000_300)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert t1.integration_retry_count == 1 and t1.status == "blocked"
+    assert t2.integration_retry_count == 2 and t2.status == "blocked"
+    assert len(calls) == 2                       # only 2 transient retry rounds
+    assert t3.status == "blocked"                # bounded — never ready
+    assert len(escalations) == 1                 # escalated exactly once (round 3)
+    assert {
+        "task_id": tid, "class": "integration_retry_exhausted",
+    } in s3["parked"]
+    assert s4["parked"] == []                    # idempotent: no 2nd escalation
+    assert s1["parked"] == [] and s2["parked"] == []
+
+
+def test_integration_retry_repark_turned_non_transient_escalates(
+    kanban_home, monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = _make_integration_parked(
+            conn, "chain worktree has uncommitted changes: foo.py",
+        )
+        # First (and only) attempt re-parks with a NON-transient reason.
+        calls = _patch_integrate(monkeypatch, [{
+            "action": "parked",
+            "reason": "merge conflict/failure (aborted): foo.py",
+        }])
+        s1 = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert calls == [tid]                        # one attempt happened
+    assert task.integration_retry_count == 1
+    assert task.status == "blocked"
+    assert len(escalations) == 1                 # reclassified → escalate, stop
+    assert {"task_id": tid, "class": "integration_parked"} in s1["parked"]
+
+
 def test_4a_funnel_root_skipped_but_funnel_build_child_dispatches(
     kanban_home, all_assignees_spawnable, tmp_path,
 ):
