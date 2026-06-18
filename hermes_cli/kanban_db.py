@@ -905,6 +905,7 @@ class Task:
     # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
     kind: Optional[str] = None
     auto_retry_count: int = 0
+    integration_retry_count: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1004,6 +1005,10 @@ class Task:
             ),
             auto_retry_count=(
                 row["auto_retry_count"] if "auto_retry_count" in keys else 0
+            ),
+            integration_retry_count=(
+                row["integration_retry_count"]
+                if "integration_retry_count" in keys else 0
             ),
         )
 
@@ -1216,7 +1221,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- NULL = unknown/unspecified.
     kind                 TEXT,
     -- Bounded, opt-in automatic retry count for worker-blocked runs.
-    auto_retry_count     INTEGER NOT NULL DEFAULT 0
+    auto_retry_count     INTEGER NOT NULL DEFAULT 0,
+    -- Bounded transient re-integration retry count (Heiler lane). Kept
+    -- SEPARATE from auto_retry_count so a re-integration round never trips
+    -- the premium/opus escalation ladder that auto_retry_count drives; gates
+    -- the no-silent-stall integration-retry path.
+    integration_retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2136,6 +2146,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "auto_retry_count",
             "auto_retry_count INTEGER NOT NULL DEFAULT 0",
         )
+    if "integration_retry_count" not in cols:
+        # Heiler lane: bounded transient re-integration retry counter, kept
+        # separate from auto_retry_count (which escalates to premium/opus).
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "integration_retry_count",
+            "integration_retry_count INTEGER NOT NULL DEFAULT 0",
+        )
 
     # A1 (kanban-chain-haertung): PlanSpec provenance columns. All four are
     # plain nullable TEXT — no default needed; NULL on every pre-A1 row
@@ -2628,6 +2647,19 @@ NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
 NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
+# Heiler: transient re-integration retry lane (no_silent_stall_sweep §5).
+# An integration-parked task whose park reason is classified ``transient`` by
+# ``kanban_worktrees._integration_park_class`` (dirty overlap / in-progress git
+# op / wrong branch) is re-run through the integration path instead of sitting
+# in blocked-limbo. Bounded by its OWN counter (``integration_retry_count``,
+# never the shared ``auto_retry_count``) so it cannot trip the premium/opus
+# escalation ladder; after the limit it escalates to the operator.
+INTEGRATION_RETRY_EVENT = "integration_retry"
+INTEGRATION_RETRY_SUCCEEDED_EVENT = "integration_retry_succeeded"
+INTEGRATION_RETRY_LIMIT = 2
+INTEGRATION_RETRY_BACKOFF_SECONDS = 60
+INTEGRATION_RETRY_EXHAUSTED_CLASS = "integration_retry_exhausted"
+INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
@@ -10041,6 +10073,64 @@ def _park_budget_runaway(
         return True
 
 
+def _finalize_integration_retry(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: dict,
+    *,
+    now: int,
+) -> bool:
+    """Drive a successfully re-integrated parked task ``blocked -> done``.
+
+    Heiler lane: when a transient re-integration round merges (or finds the
+    branch already integrated), the task must finish on the *done* path — NOT
+    ``blocked -> ready`` (that would re-spawn a worker against an already-merged
+    branch, the exact limbo the old auto_retry_blocked lane caused). We do not
+    call :func:`complete_task` here because the integration already happened
+    (branch + worktree are gone); re-running its hook would re-park on a missing
+    branch. The closing run was already ended when the task first parked.
+    """
+    action = outcome.get("action")
+    merge_commit = outcome.get("merge_commit")
+    summary_line = (
+        f"integration retry {action}: merged "
+        f"{outcome.get('branch')} into {outcome.get('target')}"
+        + (f" as {str(merge_commit)[:12]}" if merge_commit else "")
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'done',
+                   result       = ?,
+                   completed_at = ?,
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ? AND status = 'blocked'
+            """,
+            (summary_line, int(now), task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, INTEGRATION_RETRY_SUCCEEDED_EVENT,
+            {
+                "action": action,
+                "branch": outcome.get("branch"),
+                "target": outcome.get("target"),
+                "merge_commit": merge_commit,
+            },
+        )
+        # Mirror the normal done-path completion signal so dashboards/notifiers
+        # render the finish without a second SQL round-trip.
+        _append_event(
+            conn, task_id, "completed",
+            {"summary": summary_line[:400], "result_len": len(summary_line)},
+        )
+    return True
+
+
 def no_silent_stall_sweep(
     conn: sqlite3.Connection,
     *,
@@ -10062,6 +10152,7 @@ def no_silent_stall_sweep(
         "self_healed": [],
         "parked": [],
         "skipped_funnel": [],
+        "integration_retried": [],
     }
 
     def _old_enough(task_id: str, kind: str, fallback_at: Optional[int]) -> bool:
@@ -10177,30 +10268,154 @@ def no_silent_stall_sweep(
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
-    # 5) integration_parked: already blocked, but add the human escalation.
+    # 5) integration_parked (Heiler lane): a TRANSIENT park (dirty overlap /
+    #    in-progress git op / wrong branch) is re-run through the integration
+    #    path up to INTEGRATION_RETRY_LIMIT times before escalating. A
+    #    non-transient park (merge conflict / red post-merge gate / unknown) is
+    #    NEVER retried — it is classified and escalated to the operator. We
+    #    never move a parked task to ``ready`` (that re-spawned a worker against
+    #    an already-merged branch — the old auto_retry_blocked failure mode).
+    from hermes_cli import kanban_worktrees as _kwt
     for row in conn.execute(
         "SELECT * FROM tasks WHERE status = 'blocked'"
     ).fetchall():
+        task_id = row["id"]
         if _is_funnel_root_task(conn, row):
-            summary["skipped_funnel"].append(row["id"])
+            summary["skipped_funnel"].append(task_id)
+            continue
+        # Once escalated, the operator owns it — never retry again.
+        if (
+            _has_stall_marker(conn, task_id, INTEGRATION_PARKED_STALL_CLASS)
+            or _has_stall_marker(conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS)
+        ):
             continue
         blocked_event = conn.execute(
             "SELECT payload FROM task_events "
             "WHERE task_id = ? AND kind = 'blocked' "
             "ORDER BY id DESC LIMIT 1",
-            (row["id"],),
+            (task_id,),
         ).fetchone()
         reason = _decision_event_reason(
             blocked_event["payload"] if blocked_event else None
         ) or ""
         if not reason.startswith("integration parked:"):
             continue
-        stall_class = "integration_parked"
-        if _park_stall_once(
-            conn, row, stall_class=stall_class, reason=reason,
-            evidence={"attempts": 1}, now=ts,
+
+        park_class = _kwt._integration_park_class(reason)
+        try:
+            retry_count = int(row["integration_retry_count"] or 0)
+        except (IndexError, KeyError, TypeError):
+            retry_count = 0
+
+        # Non-transient (merge conflict / red gate / unknown): classify and
+        # escalate once. Dovetails with the operator/S4-ledger lane.
+        if park_class != "transient":
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=reason, evidence={"attempts": retry_count or 1}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+            continue
+
+        # Transient but exhausted: bounded — escalate to the operator.
+        if retry_count >= INTEGRATION_RETRY_LIMIT:
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_RETRY_EXHAUSTED_CLASS,
+                reason=reason, evidence={"attempts": retry_count}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_RETRY_EXHAUSTED_CLASS}
+                )
+            continue
+
+        # Transient backoff: don't burn the bounded retries faster than the
+        # blocker (git lock / dirty tree) can plausibly clear.
+        last_at = (
+            _latest_event_at(conn, task_id, INTEGRATION_RETRY_EVENT)
+            or _latest_event_at(conn, task_id, "blocked")
+            or row["created_at"]
+        )
+        if last_at is not None and (
+            int(last_at) + INTEGRATION_RETRY_BACKOFF_SECONDS > ts
         ):
-            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+            continue
+
+        # Claim this retry round: bump the OWN counter atomically (CAS on the
+        # observed value) so concurrent sweeps cannot double-attempt.
+        attempt = retry_count + 1
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET integration_retry_count = ? "
+                "WHERE id = ? AND status = 'blocked' "
+                "AND integration_retry_count = ?",
+                (attempt, task_id, retry_count),
+            )
+            claimed = cur.rowcount == 1
+            if claimed:
+                _append_event(
+                    conn, task_id, INTEGRATION_RETRY_EVENT,
+                    {
+                        "attempt": attempt,
+                        "limit": INTEGRATION_RETRY_LIMIT,
+                        "reason": reason[:500],
+                    },
+                )
+        if not claimed:
+            continue
+
+        # Re-run the integration path. Opens its own txn internally, so it must
+        # run OUTSIDE the counter txn above. Fail-soft: a crash here just leaves
+        # the task blocked for the next sweep (counter already advanced).
+        try:
+            outcome = _kwt.maybe_integrate_on_complete(conn, task_id) or {}
+        except Exception:
+            _log.warning(
+                "integration-retry hook failed for %s", task_id, exc_info=True,
+            )
+            outcome = {}
+        action = outcome.get("action")
+
+        if action in ("merged", "clean"):
+            if _finalize_integration_retry(conn, task_id, outcome, now=ts):
+                summary["self_healed"].append(
+                    {
+                        "task_id": task_id,
+                        "class": "integration_retry",
+                        "action": "reintegrated",
+                    }
+                )
+        elif action == "parked":
+            new_reason = str(outcome.get("reason") or "")
+            if _kwt._integration_park_class(new_reason) == "transient":
+                # Still transient — leave blocked; retry again next sweep (until
+                # the bounded limit). The counter already advanced.
+                summary["integration_retried"].append(
+                    {"task_id": task_id, "attempt": attempt}
+                )
+            elif _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=f"integration parked: {new_reason}",
+                evidence={"attempts": attempt}, now=ts,
+            ):
+                # Re-park reclassified to non-transient → stop retrying.
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+        elif action == "rebase_conflict":
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=reason, evidence={"attempts": attempt}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+        else:
+            # deferred / None (e.g. open siblings re-appeared) — leave blocked.
+            summary["integration_retried"].append(
+                {"task_id": task_id, "attempt": attempt}
+            )
 
     # 6) legacy gave_up without a 3B escalation: backfill exactly once.
     for row in conn.execute(
