@@ -4,6 +4,7 @@ import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ChainNodeCard } from "./ChainNodeCard";
 import { linearizeNodes } from "./dagLayout";
 import type { ChainGraphEdge, ChainGraphNode } from "../../lib/types";
+import { de } from "../../i18n/de";
 
 interface KettenGraphProps {
   nodes: ChainGraphNode[];
@@ -26,7 +27,7 @@ export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
   }, [ordered]);
 
   if (nodes.length === 0)
-    return <FleetEmptyState title="Keine Knoten" desc="Die Kette enthält keine verarbeitbaren Tasks." />;
+    return <FleetEmptyState title={de.ketten.emptyGraphTitle} desc={de.ketten.emptyGraphDesc} />;
 
   return (
     <div className="relative min-w-0 max-w-full rounded-xl border border-[var(--hc-border)] bg-[var(--hc-panel)] p-4">

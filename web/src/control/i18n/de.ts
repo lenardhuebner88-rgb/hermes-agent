@@ -764,6 +764,8 @@ export const de = {
     loadError: "Kette konnte nicht geladen werden.",
     emptyTitle: "Keine aktive Kette",
     emptyDesc: "Sobald eine Aufgabe mit Abhängigkeiten läuft, erscheint ihre Kette hier als DAG.",
+    emptyGraphTitle: "Keine Knoten",
+    emptyGraphDesc: "Die Kette enthält keine verarbeitbaren Tasks.",
     chooseChain: "Kette wählen",
     noChains: "keine aktiven Ketten",
     focusRoot: "Fokus",
