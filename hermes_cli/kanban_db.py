@@ -1393,7 +1393,10 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # _rebuild_drifted_tables) changes WITHOUT a matching SCHEMA_SQL change —
 # e.g. a new data backfill or event-kind rename. Schema changes themselves
 # already invalidate the stamp via the SCHEMA_SQL hash below.
-_SCHEMA_GENERATION = 2
+# gen 3 (#11): idx_events_kind was added to the migration pass only (not
+# SCHEMA_SQL), so already-stamped boards must re-run the additive pass once to
+# backfill it — without this bump connect()'s fast path would skip it forever.
+_SCHEMA_GENERATION = 3
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
