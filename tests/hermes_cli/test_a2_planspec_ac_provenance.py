@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs
 from hermes_cli.plan_compiler import (
@@ -606,5 +607,86 @@ def test_phase4_planspec_source_for_task_reads_child_row_directly(kanban_home, t
         with kb.connect() as conn:
             result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
             assert kb.planspec_source_for_task(conn, result["child_ids"][0]) == str(path.resolve())
+    finally:
+        monkeypatch.undo()
+
+
+def _uireal_cli_args(task_id: str, **extra) -> "object":
+    """Build a parsed ``hermes kanban release-uireal <id>`` namespace."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    argv = ["kanban", "release-uireal", task_id]
+    for key, value in extra.items():
+        argv += [f"--{key.replace('_', '-')}", str(value)]
+    return parser.parse_args(argv)
+
+
+def _ingest_uireal_root(plans_root: Path, tmp_path: Path, *, ui_real: bool, name: str) -> str:
+    path = _write_planspec_with_ac(plans_root, name=name)
+    if ui_real:
+        text = path.read_text(encoding="utf-8").replace(
+            "live_test_depth: contract", "live_test_depth: ui-real"
+        )
+        path.write_text(text, encoding="utf-8")
+    result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+    return result["root_task_id"]
+
+
+def test_cli_release_uireal_flips_held_root_and_is_idempotent(kanban_home, tmp_path: Path):
+    """Phase4 A2: the operator CLI releases a held ui-real root (scheduled->todo),
+    stamps a uireal_released event, and a second call stays green (idempotent)."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id = _ingest_uireal_root(
+                plans_root, tmp_path, ui_real=True, name="2026-06-18-uireal-cli.md"
+            )
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "scheduled"
+
+        assert kc.kanban_command(_uireal_cli_args(root_id, author="operator-test")) == 0
+
+        with kb.connect() as conn:
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "todo"
+            kinds = [
+                r["kind"]
+                for r in conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ?", (root_id,)
+                ).fetchall()
+            ]
+        assert "uireal_released" in kinds
+        # Idempotent: re-releasing an already-released root still exits 0.
+        assert kc.kanban_command(_uireal_cli_args(root_id)) == 0
+    finally:
+        monkeypatch.undo()
+
+
+def test_cli_release_uireal_noop_on_non_uireal_root(kanban_home, tmp_path: Path):
+    """A contract/smoke root is not a ui-real release target -> exit 1, no change."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id = _ingest_uireal_root(
+                plans_root, tmp_path, ui_real=False, name="2026-06-18-contract-cli.md"
+            )
+            before = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"]
+        assert kc.kanban_command(_uireal_cli_args(root_id)) == 1
+        with kb.connect() as conn:
+            after = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"]
+        assert after == before
     finally:
         monkeypatch.undo()

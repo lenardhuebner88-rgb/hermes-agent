@@ -1622,6 +1622,10 @@ def get_task(
         if diag_list:
             task_d["diagnostics"] = diag_list
             task_d["warnings"] = _warnings_summary_from_diagnostics(diag_list)
+        # Card->PlanSpec 1-hop: resolve the originating PlanSpec straight off the
+        # task's own row (no parent->root walk) so the drawer can deep-link a
+        # card to its spec. None for non-PlanSpec tasks.
+        task_d["planspec_source"] = kanban_db.planspec_source_for_task(conn, task_id)
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
