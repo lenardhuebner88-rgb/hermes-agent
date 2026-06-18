@@ -1712,6 +1712,33 @@ class GatewayKanbanWatchersMixin:
                         daily_cost_cap_usd,
                     )
 
+        # G1 per-task input-token runaway guard. The respawn preflight sums
+        # input_tokens across ALL of a task's runs; when the cumulative input
+        # exceeds this cap the task is PARKED (blocked) + escalated rather than
+        # advisory-held. Default ON at 2_000_000 (config default); None / a
+        # non-positive value disables it. Catches a single task burning the
+        # subscription quota via a runaway retry / oversized-context loop.
+        raw_per_task_input_cap = kanban_cfg.get("per_task_input_token_cap", None)
+        per_task_input_token_cap = None
+        if raw_per_task_input_cap is not None:
+            try:
+                per_task_input_token_cap = int(raw_per_task_input_cap)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.per_task_input_token_cap=%r; ignoring",
+                    raw_per_task_input_cap,
+                )
+                per_task_input_token_cap = None
+            else:
+                if per_task_input_token_cap < 1:
+                    # 0 / negative = guard explicitly disabled.
+                    per_task_input_token_cap = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: per_task_input_token_cap=%d",
+                        per_task_input_token_cap,
+                    )
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1808,6 +1835,7 @@ class GatewayKanbanWatchersMixin:
                     serialize_by_repo=serialize_by_repo,
                     daily_token_cap_per_profile=daily_token_cap_per_profile,
                     daily_cost_cap_usd=daily_cost_cap_usd,
+                    per_task_input_token_cap=per_task_input_token_cap,
                     auto_retry_blocked=auto_retry_blocked,
                     auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
                 )

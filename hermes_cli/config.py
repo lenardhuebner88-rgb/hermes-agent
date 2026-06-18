@@ -2202,6 +2202,18 @@ DEFAULT_CONFIG = {
         # values is an operator decision.
         "daily_token_cap_per_profile": None,
         "daily_cost_cap_usd": None,
+        # G1 per-task input-token runaway guard. The respawn preflight sums
+        # ``input_tokens`` across ALL of a task's runs (K5a stamps them per run);
+        # when the cumulative input EXCEEDS this cap the task is treated as a
+        # runaway and PARKED (status -> blocked) instead of re-spawned, with a
+        # ``budget_runaway_parked`` event carrying the token sum AND an
+        # ``operator_escalation`` so it surfaces in the decision-queue. Unlike
+        # the C1 ``daily_*`` caps (advisory holds that leave the task ready),
+        # this is a hard park — a single task burning unbounded input tokens via
+        # a runaway retry / oversized-context loop is not self-clearing and needs
+        # an operator. ``None`` or ``0`` disables the guard; any positive int is
+        # the per-task ceiling. Default 2_000_000 input tokens (guard ON).
+        "per_task_input_token_cap": 2_000_000,
         # Optional Kimi subscription token caps used by /usage to render rolling
         # 5h/7d percentage gauges. Unset keeps /usage details-only for Kimi.
         "cap_tokens_5h": None,

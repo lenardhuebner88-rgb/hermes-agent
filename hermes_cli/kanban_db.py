@@ -8377,6 +8377,14 @@ class DispatchResult:
     stays in ``ready`` (advisory, re-evaluated each tick), NOT blocked. Caps
     default OFF (None) → this bucket is always empty → byte-identical to the
     pre-C1 dispatcher. Surfaces in the decision-queue as a ``budget_held`` row."""
+    budget_runaway_parked: list[tuple[str, int]] = field(default_factory=list)
+    """G1: ready tasks PARKED (status -> blocked) this tick because the
+    cumulative ``input_tokens`` across ALL their runs exceeded
+    ``kanban.per_task_input_token_cap``, as ``(task_id, input_token_sum)`` pairs.
+    Unlike ``budget_held`` (advisory hold, stays ``ready``) this is a HARD park
+    with an ``operator_escalation`` — a per-task input-token runaway is not
+    self-clearing. Cap ``None``/``0`` → this bucket is always empty →
+    byte-identical to the pre-G1 dispatcher."""
     auto_retried_blocked: list[tuple[str, int]] = field(default_factory=list)
     """Opt-in blocked-run auto-retries performed this tick as
     ``(task_id, attempt)`` pairs."""
@@ -9900,6 +9908,111 @@ def _has_operator_escalation(conn: sqlite3.Connection, task_id: str) -> bool:
     ).fetchone() is not None
 
 
+# ---------------------------------------------------------------------------
+# G1: per-task cumulative input-token runaway guard
+# ---------------------------------------------------------------------------
+#
+# Token usage is already stamped per run on ``task_runs.input_tokens`` (K5a).
+# The respawn preflight in ``dispatch_once`` sums that column across ALL of a
+# task's runs; if the cumulative input exceeds ``kanban.per_task_input_token_cap``
+# the task is a runaway and gets parked here rather than re-spawned. This is the
+# event/escalation half (the summation + gate live in the dispatch loop). No
+# schema change, no mid-run kill — a runaway is only ever caught at preflight.
+
+BUDGET_RUNAWAY_PARKED_EVENT = "budget_runaway_parked"
+
+
+def _budget_runaway_escalation_payload(
+    *,
+    row: sqlite3.Row,
+    token_sum: int,
+    cap: int,
+    runs: int,
+) -> dict:
+    """Operator-escalation evidence for a per-task input-token runaway. Mirrors
+    the shape of ``_operator_escalation_payload`` so the decision-queue renders
+    it like any other escalation."""
+    return {
+        "task": {
+            "id": row["id"],
+            "title": row["title"] if "title" in row.keys() else None,
+            "status": row["status"] if "status" in row.keys() else None,
+            "assignee": row["assignee"] if "assignee" in row.keys() else None,
+        },
+        "why_now": (
+            f"per-task input-token runaway: {token_sum} cumulative input "
+            f"tokens across {runs} run(s) exceeded the cap of {cap}"
+        ),
+        "attempts_already_made": runs,
+        "evidence": {
+            "input_token_sum": token_sum,
+            "per_task_input_token_cap": cap,
+            "runs": runs,
+        },
+        "recommended_human_action": (
+            "inspect the task's runs for a runaway retry / oversized-context "
+            "loop, decide whether to unblock/reassign/close, and perform any "
+            "required operator-only action outside the worker loop"
+        ),
+        "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+    }
+
+
+def _park_budget_runaway(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    token_sum: int,
+    cap: int,
+    runs: int,
+) -> bool:
+    """G1: park a per-task input-token runaway.
+
+    Sets the task ``blocked`` (clearing any claim), emits a
+    ``budget_runaway_parked`` event with the token sum, and routes it to the
+    decision-queue via the existing ``operator_escalation`` path. Skips
+    already-terminal tasks and funnel roots (same exemptions as
+    ``_park_stall_once``). Returns True iff the task was newly parked. Wrapped
+    in a single ``write_txn`` so the status flip + both events commit atomically.
+    """
+    task_id = row["id"]
+    reason = (
+        f"per-task input-token cap exceeded: {token_sum} > {cap} "
+        f"(cumulative input across {runs} run(s))"
+    )
+    with write_txn(conn):
+        fresh = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if fresh is None or fresh["status"] in ("done", "archived"):
+            return False
+        if _is_funnel_root_task(conn, fresh):
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status NOT IN ('done', 'archived')",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        if fresh["status"] != "blocked":
+            _append_event(conn, task_id, "blocked", {"reason": reason})
+        _append_event(
+            conn, task_id, BUDGET_RUNAWAY_PARKED_EVENT,
+            {"input_token_sum": token_sum, "cap": cap, "runs": runs},
+        )
+        _append_event(
+            conn,
+            task_id,
+            OPERATOR_ESCALATION_EVENT,
+            _budget_runaway_escalation_payload(
+                row=fresh, token_sum=token_sum, cap=cap, runs=runs,
+            ),
+        )
+        return True
+
+
 def no_silent_stall_sweep(
     conn: sqlite3.Connection,
     *,
@@ -11290,6 +11403,7 @@ def dispatch_once(
     serialize_by_repo: bool = True,
     daily_token_cap_per_profile: Optional[int] = None,
     daily_cost_cap_usd: Optional[float] = None,
+    per_task_input_token_cap: Optional[int] = None,
     auto_retry_blocked: bool = False,
     auto_retry_blocked_backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
 ) -> DispatchResult:
@@ -11480,6 +11594,35 @@ def dispatch_once(
             if float(_total_cost or 0) >= _cost_cap:
                 _global_cost_exceeded = True
 
+    # G1 per-task input-token runaway guard preflight. Cap None/0 → guard OFF,
+    # ``_per_task_input_usage`` stays empty and the per-row block below never
+    # fires → byte-identical to the pre-G1 dispatcher. When a cap IS set,
+    # aggregate the cumulative input_tokens (across ALL runs, K5a-stamped; NULLs
+    # count as 0) for THIS tick's ready candidates ONCE here — same "aggregate
+    # once, lookup per row" shape as the C1 caps above. Fresh tasks (no runs)
+    # simply don't appear in the map and read as 0.
+    _per_task_input_cap = per_task_input_token_cap if (
+        isinstance(per_task_input_token_cap, int)
+        and not isinstance(per_task_input_token_cap, bool)
+        and per_task_input_token_cap > 0
+    ) else None
+    _per_task_input_usage: dict[str, tuple[int, int]] = {}
+    if _per_task_input_cap is not None and ready_rows:
+        _ready_ids = [r["id"] for r in ready_rows]
+        for _chunk_start in range(0, len(_ready_ids), 500):
+            _chunk = _ready_ids[_chunk_start:_chunk_start + 500]
+            _placeholders = ",".join("?" * len(_chunk))
+            for urow in conn.execute(
+                "SELECT task_id, "
+                "COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS tok, "
+                "COUNT(*) AS n FROM task_runs "
+                f"WHERE task_id IN ({_placeholders}) GROUP BY task_id",
+                _chunk,
+            ):
+                _per_task_input_usage[urow["task_id"]] = (
+                    int(urow["tok"] or 0), int(urow["n"] or 0)
+                )
+
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -11503,6 +11646,25 @@ def dispatch_once(
         if _is_funnel_root_task(conn, row):
             result.respawn_guarded.append((row["id"], "funnel_protected"))
             continue
+        # G1 per-task input-token runaway guard (additive; cap None/0 → inert,
+        # this block is skipped and the loop is byte-identical to before). The
+        # cumulative input_tokens across ALL of this task's runs was summed once
+        # above. If it EXCEEDS the cap the task is a runaway: park it (blocked)
+        # rather than (re)spawn, record the sum in ``budget_runaway_parked``, and
+        # route it to the decision-queue via the operator_escalation path. No
+        # mid-run kill, no parallel dispatch path — caught only here, at preflight.
+        if _per_task_input_cap is not None:
+            _input_sum, _input_runs = _per_task_input_usage.get(row["id"], (0, 0))
+            if _input_sum > _per_task_input_cap:
+                result.budget_runaway_parked.append((row["id"], _input_sum))
+                if not dry_run:
+                    _park_budget_runaway(
+                        conn, row,
+                        token_sum=_input_sum,
+                        cap=_per_task_input_cap,
+                        runs=_input_runs,
+                    )
+                continue
         # serialize_by_repo: resolve this candidate's repo_root once and reuse it
         # at the guard (3d) and every claim-success re-add. Computed here (above the
         # openclaw branch) so it is in scope at ALL claim paths, including openclaw.

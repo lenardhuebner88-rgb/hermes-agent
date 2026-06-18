@@ -3077,6 +3077,180 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
     assert guarded_evt.payload.get("reason") == "recent_success"
 
 
+# ---------------------------------------------------------------------------
+# G1 per-task cumulative input-token runaway guard (per_task_input_token_cap)
+# ---------------------------------------------------------------------------
+
+def _seed_input_token_run(conn, task_id, *, input_tokens, profile="alice"):
+    """Insert a completed task_run stamped with ``input_tokens`` (K5a).
+
+    The run is dated OUTSIDE the respawn-guard success window so the
+    pre-existing ``recent_success`` guard does not interfere — the per-task
+    token sum is age-independent (it spans ALL runs), so a stale run still
+    counts toward the G1 cap while leaving the task otherwise spawnable."""
+    end = int(time.time()) - kb._RESPAWN_GUARD_SUCCESS_WINDOW - 300
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, outcome, "
+        "started_at, ended_at, input_tokens) "
+        "VALUES (?, ?, 'done', 'completed', ?, ?, ?)",
+        (task_id, profile, end - 300, end, input_tokens),
+    )
+
+
+def test_dispatch_per_task_input_token_guard_parks_over_threshold(
+    kanban_home, all_assignees_spawnable
+):
+    """AC1: when the cumulative input_tokens across all runs exceeds
+    ``per_task_input_token_cap`` the task is PARKED (blocked, not re-spawned),
+    bucketed in ``budget_runaway_parked``, and gets both a
+    ``budget_runaway_parked`` event (with the token sum) and an
+    ``operator_escalation`` event."""
+    spawned_ids = []
+
+    def fake_spawn(task, workspace):
+        spawned_ids.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="runaway", assignee="alice")
+        # Two runs that sum over the 1000-token cap (700 + 600 = 1300).
+        _seed_input_token_run(conn, t, input_tokens=700)
+        _seed_input_token_run(conn, t, input_tokens=600)
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn, per_task_input_token_cap=1000
+        )
+
+    # Not spawned this tick.
+    assert t not in spawned_ids
+    # Bucketed with the summed input tokens.
+    assert (t, 1300) in res.budget_runaway_parked
+    # Hard-parked to blocked (not left advisory-ready).
+    with kb.connect() as conn:
+        assert kb.get_task(conn, t).status == "blocked"
+        events = kb.list_events(conn, t)
+    kinds = [e.kind for e in events]
+    assert "budget_runaway_parked" in kinds
+    assert "operator_escalation" in kinds
+    parked_evt = next(e for e in events if e.kind == "budget_runaway_parked")
+    assert parked_evt.payload.get("input_token_sum") == 1300
+    assert parked_evt.payload.get("cap") == 1000
+
+
+def test_dispatch_per_task_input_token_guard_under_threshold_spawns(
+    kanban_home, all_assignees_spawnable
+):
+    """AC2: a task whose cumulative input_tokens stay under the cap is
+    untouched — spawned normally, not parked, no runaway event."""
+    spawned_ids = []
+
+    def fake_spawn(task, workspace):
+        spawned_ids.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="frugal", assignee="alice")
+        _seed_input_token_run(conn, t, input_tokens=400)
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn, per_task_input_token_cap=1000
+        )
+
+    assert t in spawned_ids
+    assert not res.budget_runaway_parked
+    with kb.connect() as conn:
+        assert kb.get_task(conn, t).status == "running"
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+    assert "budget_runaway_parked" not in kinds
+
+
+def test_dispatch_per_task_input_token_guard_inert_when_cap_none(
+    kanban_home, all_assignees_spawnable
+):
+    """AC3: with the cap unset (None — the dispatch_once default) the guard is
+    inert even for a task far over any sane threshold."""
+    spawned_ids = []
+
+    def fake_spawn(task, workspace):
+        spawned_ids.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="uncapped", assignee="alice")
+        _seed_input_token_run(conn, t, input_tokens=9_000_000)
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)  # no cap kwarg
+
+    assert t in spawned_ids
+    assert not res.budget_runaway_parked
+    with kb.connect() as conn:
+        assert kb.get_task(conn, t).status == "running"
+
+
+def test_dispatch_per_task_input_token_guard_inert_when_cap_zero(
+    kanban_home, all_assignees_spawnable
+):
+    """AC3: an explicit cap of 0 disables the guard (same as None)."""
+    spawned_ids = []
+
+    def fake_spawn(task, workspace):
+        spawned_ids.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="zero-cap", assignee="alice")
+        _seed_input_token_run(conn, t, input_tokens=9_000_000)
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn, per_task_input_token_cap=0
+        )
+
+    assert t in spawned_ids
+    assert not res.budget_runaway_parked
+    with kb.connect() as conn:
+        assert kb.get_task(conn, t).status == "running"
+
+
+def test_dispatch_per_task_input_token_guard_surfaces_in_decision_queue(
+    kanban_home, all_assignees_spawnable
+):
+    """A parked runaway uses the operator_escalation path, so it appears in the
+    decision_queue (Sprint 2 4B wired operator_escalation → decision_queue)."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="runaway-q", assignee="alice")
+        _seed_input_token_run(conn, t, input_tokens=2_500_000)
+        kb.dispatch_once(
+            conn, spawn_fn=lambda task, ws: None, per_task_input_token_cap=1_000_000
+        )
+        dq = kb.decision_queue(conn)
+
+    ids = [item["task_id"] for item in dq.get("decisions", [])]
+    assert t in ids
+    item = next(i for i in dq["decisions"] if i["task_id"] == t)
+    assert item["kind"] == "operator_escalation"
+    assert item["operator_escalation"]["evidence"]["input_token_sum"] == 2_500_000
+
+
+def test_dispatch_per_task_input_token_guard_skips_null_token_runs(
+    kanban_home, all_assignees_spawnable
+):
+    """Runs with NULL input_tokens (no usage data) count as 0 and never trip
+    the guard on their own — fail-soft like the C1 budget caps."""
+    spawned_ids = []
+
+    def fake_spawn(task, workspace):
+        spawned_ids.append(task.id)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="no-usage", assignee="alice")
+        _seed_input_token_run(conn, t, input_tokens=None)
+        _seed_input_token_run(conn, t, input_tokens=None)
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn, per_task_input_token_cap=1000
+        )
+
+    assert t in spawned_ids
+    assert not res.budget_runaway_parked
+
+
+def test_per_task_input_token_cap_config_default_is_two_million():
+    """The config default ships the guard ON at 2_000_000 input tokens."""
+    from hermes_cli.config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["kanban"]["per_task_input_token_cap"] == 2_000_000
+
+
 def test_dispatch_nonspawnable_emits_one_diagnostic_event(kanban_home, monkeypatch):
     """A ready task whose assignee is not a runnable profile leaves a single
     ``nonspawnable`` event so the skip is visible on the board timeline,
