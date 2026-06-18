@@ -22,7 +22,7 @@ const node: ChainGraphNode = {
 
 describe("ChainNodeCard", () => {
   it("renders title, task id, assignee and status pill", () => {
-    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
     expect(html).toContain("Build feature");
     expect(html).toContain("t_abc");
     expect(html).toContain("coder");
@@ -30,32 +30,32 @@ describe("ChainNodeCard", () => {
   });
 
   it("marks the root node with focus badge", () => {
-    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot />);
     expect(html).toContain("Fokus");
   });
 
   it("shows runtime in the progress meta row", () => {
-    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
     // 125s → "2m"
     expect(html).toContain("2m");
   });
 
   it("no longer renders heartbeat text on the card (liveness moved to the pipeline dot)", () => {
-    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} now={1_700_000_012} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
     expect(html).not.toContain("Heartbeat");
     expect(html).not.toContain("jetzt");
   });
 
   it("renders a progress bar with percent and subtask counter", () => {
     const withProgress: ChainGraphNode = { ...node, progress: { done: 1, total: 2 } };
-    const html = renderToStaticMarkup(<ChainNodeCard node={withProgress} isRoot={false} now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={withProgress} isRoot={false} />);
     expect(html).toContain("width:50%");
     expect(html).toContain("50% — 1 von 2 Subtasks");
   });
 
   it("shows 'waiting on predecessor' for an open node with deps and no progress", () => {
     const waiting: ChainGraphNode = { ...node, status: "todo", parents: ["t_dep"], runtime_seconds: null };
-    const html = renderToStaticMarkup(<ChainNodeCard node={waiting} isRoot={false} now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={waiting} isRoot={false} />);
     expect(html).toContain("Wartet auf Vorgänger");
   });
 
@@ -75,7 +75,7 @@ describe("ChainNodeCard", () => {
         heartbeat_age_seconds: 10,
       },
     };
-    const html = renderToStaticMarkup(<ChainNodeCard node={withRun} isRoot={false} now={1_700_000_010} />);
+    const html = renderToStaticMarkup(<ChainNodeCard node={withRun} isRoot={false} />);
     // 200s = 3m, not 60s = 1m
     expect(html).toContain("3m");
   });

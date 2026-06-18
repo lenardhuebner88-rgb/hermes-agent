@@ -39,7 +39,7 @@ const edges: ChainGraphEdge[] = [
 
 describe("KettenGraph", () => {
   it("renders all nodes in a vertical flex-col stack (no CSS grid)", () => {
-    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" />);
     expect(html).toContain("A");
     expect(html).toContain("B");
     expect(html).toContain("C");
@@ -50,7 +50,7 @@ describe("KettenGraph", () => {
 
   it("renders a progress bar with width and subtask counter", () => {
     const withProgress = [makeNode("p", "running", { progress: { done: 2, total: 4 } })];
-    const html = renderToStaticMarkup(<KettenGraph nodes={withProgress} edges={[]} rootId="x" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={withProgress} edges={[]} rootId="x" />);
     expect(html).toContain("width:50%");
     expect(html).toContain("50% — 2 von 4 Subtasks");
     expect(html).toContain('aria-label="Fortschritt"');
@@ -62,8 +62,7 @@ describe("KettenGraph", () => {
         nodes={[makeNode("run", "running"), makeNode("open", "todo"), makeNode("root", "todo")]}
         edges={[]}
         rootId="root"
-        now={0}
-      />,
+             />,
     );
     expect(html).toContain('data-node-dot="running"');
     expect(html).toContain('data-node-dot="open"');
@@ -73,25 +72,25 @@ describe("KettenGraph", () => {
   });
 
   it("renders a vertical pipeline line with a cyan→grey gradient", () => {
-    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" />);
     expect(html).toContain("data-pipeline-line");
     expect(html).toContain("linear-gradient");
     expect(html).toContain("#22d3ee");
   });
 
   it("contains no SVG/path elements (bézier edges removed)", () => {
-    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" />);
     expect(html).not.toContain("<svg");
     expect(html).not.toContain("<path");
   });
 
   it("shows 'waiting on predecessor' for an open node with deps and no progress", () => {
-    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" />);
     expect(html).toContain("Wartet auf Vorgänger");
   });
 
   it("renders nothing when nodes are empty", () => {
-    const html = renderToStaticMarkup(<KettenGraph nodes={[]} edges={[]} rootId="a" now={0} />);
+    const html = renderToStaticMarkup(<KettenGraph nodes={[]} edges={[]} rootId="a" />);
     expect(html).toBe("");
   });
 });

@@ -10,7 +10,6 @@ import { taskStatusLabel } from "../../lib/tones";
 export interface ChainNodeCardProps {
   node: ChainGraphNode;
   isRoot: boolean;
-  now: number;
 }
 
 export const ChainNodeCard = memo(

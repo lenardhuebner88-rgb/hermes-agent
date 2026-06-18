@@ -130,7 +130,7 @@ describe("ChainSelector + KettenGraph integration", () => {
     return renderToStaticMarkup(
       <div>
         <ChainSelector chains={chains} selectedRootId={rootId} onSelect={() => {}} />
-        <KettenGraph nodes={nodes} edges={edges} rootId={rootId} now={0} />
+        <KettenGraph nodes={nodes} edges={edges} rootId={rootId} />
       </div>,
     );
   }
@@ -164,7 +164,7 @@ describe("ChainSelector + KettenGraph integration", () => {
     const html = renderToStaticMarkup(
       <div>
         <ChainSelector chains={emptyChains} selectedRootId={null} onSelect={() => {}} />
-        <KettenGraph nodes={[]} edges={[]} rootId="" now={0} />
+        <KettenGraph nodes={[]} edges={[]} rootId="" />
       </div>,
     );
     expect(html).toContain(de.ketten.noChains);
@@ -184,7 +184,7 @@ describe("ChainSelector + KettenGraph integration", () => {
 
     it("the pipeline graph is width-capped and shrink-safe (min-w-0 / max-w-full)", () => {
       const html = renderToStaticMarkup(
-        <KettenGraph nodes={nodes} edges={edges} rootId={rootId} now={0} />,
+        <KettenGraph nodes={nodes} edges={edges} rootId={rootId} />,
       );
       // These two guards are what stop the long pipeline cards from blowing out
       // a 375px-wide flex column (min-w-0 lets it shrink, max-w-full caps it).

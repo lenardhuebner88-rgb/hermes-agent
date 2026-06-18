@@ -29,7 +29,7 @@ function ChainPanel({ rootId }: { rootId: string }) {
 
   return (
     <>
-      <KettenGraph nodes={graph.data.nodes} edges={graph.data.edges} rootId={graph.data.root_id} now={now} />
+      <KettenGraph nodes={graph.data.nodes} edges={graph.data.edges} rootId={graph.data.root_id} />
       <p className="text-right text-xs text-[var(--hc-text-dim)]">
         {de.ketten.checkedAt(fmtAge(graph.data.checked_at, now))}
       </p>

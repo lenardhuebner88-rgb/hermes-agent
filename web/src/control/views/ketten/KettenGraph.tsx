@@ -8,10 +8,9 @@ interface KettenGraphProps {
   nodes: ChainGraphNode[];
   edges: ChainGraphEdge[];
   rootId: string;
-  now: number;
 }
 
-export function KettenGraph({ nodes, edges, rootId, now }: KettenGraphProps) {
+export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
   const ordered = useMemo(() => linearizeNodes(nodes, edges), [nodes, edges]);
 
   // The pipeline line is cyan up to (and including) the last running/done node,
@@ -58,7 +57,7 @@ export function KettenGraph({ nodes, edges, rootId, now }: KettenGraphProps) {
                       : "border-[var(--hc-border-strong)]",
                 )}
               />
-              <ChainNodeCard node={node} isRoot={isRoot} now={now} />
+              <ChainNodeCard node={node} isRoot={isRoot} />
             </div>
           );
         })}
