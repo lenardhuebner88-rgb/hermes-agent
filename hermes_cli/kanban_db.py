@@ -13506,6 +13506,22 @@ def board_stats(conn: sqlite3.Connection) -> dict:
         )
         if r["dt"] is not None and int(r["dt"]) >= 0
     )
+    queue_waits = sorted(
+        int(r["dt"])
+        for r in conn.execute(
+            "SELECT MIN(r.started_at) - t.created_at AS dt "
+            "FROM tasks t JOIN task_runs r ON r.task_id = t.id "
+            "WHERE t.created_at IS NOT NULL AND r.started_at IS NOT NULL "
+            "GROUP BY t.id"
+        )
+        if r["dt"] is not None and int(r["dt"]) >= 0
+    )
+    run_profiles = [
+        r["profile"] for r in conn.execute(
+            "SELECT DISTINCT profile FROM task_runs "
+            "WHERE profile IS NOT NULL AND TRIM(profile) != ''"
+        )
+    ]
 
     return {
         "by_status": by_status,
@@ -13517,6 +13533,52 @@ def board_stats(conn: sqlite3.Connection) -> dict:
         "cycle_time_p50_seconds": _nearest_rank_percentile(durations, 50),
         "cycle_time_p90_seconds": _nearest_rank_percentile(durations, 90),
         "total_cost_usd_24h": task_runs_cost_usd_sum(conn, since_epoch=day_ago),
+        "queue_wait_p50_seconds": _nearest_rank_percentile(queue_waits, 50),
+        "run_duration_percentiles": run_duration_percentiles(conn, run_profiles),
+    }
+
+
+def autonomy_stats(conn: sqlite3.Connection) -> dict:
+    """Operator-free task acceptance rate from task event history."""
+    accepted = int(conn.execute(
+        "SELECT COUNT(DISTINCT task_id) AS n FROM task_events WHERE kind = 'created'"
+    ).fetchone()["n"] or 0)
+    escalations = int(conn.execute(
+        "SELECT COUNT(DISTINCT task_id) AS n FROM task_events WHERE kind = ?",
+        (OPERATOR_ESCALATION_EVENT,),
+    ).fetchone()["n"] or 0)
+    return {
+        "accepted_tasks": accepted,
+        "operator_escalations": escalations,
+        "autonomy_rate": (1.0 - (escalations / accepted)) if accepted else None,
+    }
+
+
+def chain_completion_stats(conn: sqlite3.Connection) -> dict:
+    """Done roots whose dependency leaves are all done, divided by done roots."""
+    done_roots = conn.execute(
+        "SELECT id FROM tasks "
+        "WHERE status = 'done' AND id NOT IN (SELECT DISTINCT parent_id FROM task_links)"
+    ).fetchall()
+    complete = 0
+    for row in done_roots:
+        member_ids = _root_tree_member_ids(conn, row["id"])
+        leaves = [mid for mid in member_ids if mid != row["id"] and not parent_ids(conn, mid)]
+        if not leaves:
+            complete += 1
+            continue
+        placeholders = ",".join("?" for _ in leaves)
+        open_leaf = conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) AND status != 'done' LIMIT 1",
+            tuple(leaves),
+        ).fetchone()
+        if open_leaf is None:
+            complete += 1
+    total = len(done_roots)
+    return {
+        "done_roots": total,
+        "completed_done_roots": complete,
+        "chain_completion_rate": (complete / total) if total else None,
     }
 
 
@@ -13748,19 +13810,32 @@ def runs_reliability(
 # Schema: Vorschläge sind normale Kanban-Tasks, nur mit diesen Autoren.
 FUNNEL_CREATED_BY = ("family", "discord-idee", "fo-gap-audit")
 
+_VALUE_TITLE_NUTZER_RE = re.compile(
+    r"\[FO\]|^0\d{3}:|FO Mobil|FO NextGen|Abo-Limits|/kitchen|/shopping|"
+    r"Essensplan|Rezept|Einkauf",
+    re.IGNORECASE,
+)
+
 _VALUE_CLASSES = ("nutzer", "haertung", "meta")
 
 
-def value_class(created_by: Optional[str]) -> str:
-    """Wert-Klasse eines gelieferten Roots, abgeleitet aus ``created_by``.
+def value_class(
+    created_by: Optional[str],
+    *,
+    title: Optional[str] = None,
+    epic_id: Optional[str] = None,
+) -> str:
+    """Wert-Klasse eines gelieferten Roots, abgeleitet aus stabilen Task-Signalen.
 
-    v1 bewusst unscharf (kein Schema-Touch): Funnel-Quellen → ``nutzer``,
-    Review-/Verifier-Ketten → ``haertung``, alles andere → ``meta``.
-    Fehlklassifikationen sind im Digest sichtbar; wenn das nervt, ist eine
-    ``value_class``-Spalte der dokumentierte v2-Schritt.
+    Bewusst unscharf (kein Schema-Touch): FO-/Family-Signale über Titel,
+    Funnel-Quellen oder Epic-Zuordnung → ``nutzer``; Review-/Verifier-Ketten
+    → ``haertung``; alles andere → ``meta``. Fehlklassifikationen sind im
+    Digest sichtbar; wenn das nervt, ist eine ``value_class``-Spalte der
+    dokumentierte v2-Schritt.
     """
     c = (created_by or "").strip().lower()
-    if c in FUNNEL_CREATED_BY:
+    t = (title or "").strip()
+    if epic_id or c in FUNNEL_CREATED_BY or _VALUE_TITLE_NUTZER_RE.search(t):
         return "nutzer"
     if c == "kanban-review-chain" or "review" in c or "verif" in c:
         return "haertung"
@@ -13811,7 +13886,7 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
     }
     for row in conn.execute(
-        "SELECT id, created_at, completed_at, created_by FROM tasks "
+        "SELECT id, title, created_at, completed_at, created_by, epic_id FROM tasks "
         "WHERE completed_at IS NOT NULL AND completed_at >= ?",
         (window_start,),
     ).fetchall():
@@ -13822,7 +13897,9 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         b["done_tasks"] += 1
         if row["id"] not in interior:
             b["done_roots"] += 1
-            b["done_roots_by_class"][value_class(row["created_by"])] += 1
+            b["done_roots_by_class"][value_class(
+                row["created_by"], title=row["title"], epic_id=row["epic_id"],
+            )] += 1
             if row["created_at"] is not None:
                 delta = int(row["completed_at"]) - int(row["created_at"])
                 if delta >= 0:

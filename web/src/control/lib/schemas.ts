@@ -106,6 +106,8 @@ export const AccountUsageResponseSchema = z.object({
   providers: z.array(AccountUsageProviderSchema).catch([]),
   cache_ttl_seconds: z.coerce.number().catch(60),
 });
+export type AccountUsageWindow = z.infer<typeof AccountUsageWindowSchema>;
+export type AccountUsageProvider = z.infer<typeof AccountUsageProviderSchema>;
 
 export const PlanSpecRecordSchema = z.object({
   path: z.string().catch(""),
@@ -1072,6 +1074,50 @@ export const RunsCostsResponseSchema = z.object({
 export type CostBucket = z.infer<typeof CostBucketSchema>;
 export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
 export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
+
+// ST5 (Effizienz): die zwei ST2-Aggregate, die die Flotten-Effizienz-Karte
+// braucht. chain_completion_rate = done-Roots, deren Abhängigkeits-Leaves alle
+// done sind, / done-Roots (eigener Endpunkt /stats/chain-completion).
+export const ChainCompletionResponseSchema = z.object({
+  done_roots: z.coerce.number().catch(0),
+  completed_done_roots: z.coerce.number().catch(0),
+  chain_completion_rate: nullableNumber,
+});
+export type ChainCompletionResponse = z.infer<typeof ChainCompletionResponseSchema>;
+
+// board_stats (/stats) trägt seit ST2 queue_wait_p50_seconds (created_at →
+// erster task_runs.started_at). Wir picken nur dieses eine Feld; zod verwirft
+// den Rest des großen Board-Payloads.
+export const BoardStatsResponseSchema = z.object({
+  queue_wait_p50_seconds: nullableNumber,
+});
+export type BoardStatsResponse = z.infer<typeof BoardStatsResponseSchema>;
+
+// ST4 (Statistik-Broadsheet): wiederkehrende Fehler, gruppiert je
+// (Signatur + Profil), gespiegelt aus /runs/issues. Die `outcomes` sind
+// ausschließlich Harness-Lifecycle-Endzustände (crashed/timed_out/spawn_failed/
+// gave_up/iteration_budget_exhausted/blocked) — daher die Fehler-Taxonomie.
+const IssueGroupSchema = z.object({
+  signature: z.string().catch(""),
+  profile: z.string().catch("unbekannt"),
+  count: z.coerce.number().catch(0),
+  first_seen: nullableNumber,
+  last_seen: nullableNumber,
+  outcomes: z.record(z.string(), z.coerce.number()).catch({}),
+  example_run_id: nullableNumber,
+  example_task_id: z.coerce.string().catch(""),
+  example_text: z.string().catch(""),
+});
+export const RunsIssuesResponseSchema = z.object({
+  days: z.coerce.number().catch(30),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  total_failed_runs: z.coerce.number().catch(0),
+  group_count: z.coerce.number().catch(0),
+  truncated: z.boolean().catch(false),
+  issues: z.array(IssueGroupSchema).catch([]),
+});
+export type IssueGroup = z.infer<typeof IssueGroupSchema>;
+export type RunsIssuesResponse = z.infer<typeof RunsIssuesResponseSchema>;
 
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);

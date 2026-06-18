@@ -1,106 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AboTokenPanel, CostBreakdownPanel, StatsSignalPanel, WertBilanzPanel, WochenvergleichPanel } from "./StatistikView";
-import type { RunsCostsResponse, RunsDailyPoint } from "../lib/schemas";
+import {
+  BudgetLedgerSection,
+  EffizienzSection,
+  ErrorTaxonomySection,
+  LatencySection,
+  ReliabilitySection,
+  StatsMasthead,
+} from "./StatistikView";
+import { broadsheet } from "../lib/broadsheetTokens";
+import type {
+  AccountUsageProvider,
+  AccountUsageWindow,
+  CostProfileRow,
+  IssueGroup,
+  ReliabilityProfile,
+  RunsDailyPoint,
+} from "../lib/schemas";
 
-const bucket = (over: Partial<RunsCostsResponse["today"]> = {}): RunsCostsResponse["today"] => ({
-  runs: 0,
-  cost_usd: null,
-  cost_usd_equivalent: null,
-  input_tokens: null,
-  output_tokens: null,
-  ...over,
-});
-
-function fixture(profiles: RunsCostsResponse["profiles"]): RunsCostsResponse {
+function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
   return {
-    days: 7,
-    now: 1_700_000_000,
-    today: bucket({ runs: 3, cost_usd: 0.25, cost_usd_equivalent: 1.5, input_tokens: 6000, output_tokens: 1100 }),
-    window: bucket({ runs: 4, cost_usd: 0.3, input_tokens: 6400, output_tokens: 1180 }),
-    profiles,
+    profile: "coder",
+    runs: 0,
+    tasks: 0,
+    outcomes: {},
+    completed_rate: null,
+    failed_rate: null,
+    retries: 0,
+    retry_rate: null,
+    judged: 0,
+    approved: 0,
+    rejected: 0,
+    approve_rate: null,
+    low_sample: false,
+    ...over,
   };
 }
 
-describe("CostBreakdownPanel (F4)", () => {
-  it("zeigt Kosten heute + Fenster, echte $ getrennt vom ≈ Äquivalent", () => {
-    const html = renderToStaticMarkup(<CostBreakdownPanel data={fixture([])} />);
-    expect(html).toContain("Kosten heute");
-    expect(html).toContain("Kosten · 7 Tage");
-    // heute: echte $ und das Äquivalent klar als ≈ daneben — nie addiert.
-    expect(html).toContain("$ 0.25 · ≈ $ 1.50");
-    // Fenster ohne Äquivalent: nur echte $.
-    expect(html).toContain("$ 0.30");
-    expect(html).toContain("Noch keine Kosten-Stamps");
-  });
-
-  it("rendert Top-Profile in Backend-Reihenfolge mit Runs, $, ≈ und Tokens", () => {
-    const html = renderToStaticMarkup(
-      <CostBreakdownPanel
-        data={fixture([
-          { profile: "premium", subscription: "claude", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.5, input_tokens: 5000, output_tokens: 900 },
-          { profile: "coder", subscription: "chatgpt", runs: 2, cost_usd: 0.3, cost_usd_equivalent: null, input_tokens: 1400, output_tokens: 280 },
-          { profile: "verifier", subscription: "chatgpt", runs: 1, cost_usd: null, cost_usd_equivalent: null, input_tokens: null, output_tokens: null },
-        ])}
-      />,
-    );
-    // Reihenfolge bleibt die des Backends (Burn-sortiert); profileLabel
-    // mappt coder→Coder, premium bleibt roh.
-    expect(html.indexOf("premium")).toBeLessThan(html.indexOf("Coder"));
-    expect(html).toContain("2 Runs");
-    expect(html).toContain("≈ $ 1.50");
-    // Verifier ohne Stamps: ehrliches — statt erfundener Nullen.
-    const verifierRow = html.slice(html.indexOf("Verifier"));
-    expect(verifierRow).toContain("—");
-  });
-
-  it("zeigt Skeleton solange keine Daten da sind", () => {
-    const html = renderToStaticMarkup(<CostBreakdownPanel data={null} />);
-    expect(html).not.toContain("Kosten heute");
-  });
-});
-
-describe("AboTokenPanel", () => {
-  it("bucketet nach der server-aufgelösten Abo-Lane, nicht nach dem Profilnamen", () => {
-    const html = renderToStaticMarkup(
-      <AboTokenPanel
-        data={fixture([
-          // ChatGPT/Codex: zwei Codex-Profile (coder + verifier) summieren sich.
-          { profile: "coder", subscription: "chatgpt", runs: 2, cost_usd: 0.0, cost_usd_equivalent: 0.8, input_tokens: 1000, output_tokens: 200 },
-          { profile: "verifier", subscription: "chatgpt", runs: 1, cost_usd: 0.0, cost_usd_equivalent: null, input_tokens: 1000, output_tokens: 100 },
-          { profile: "coder-claude", subscription: "claude", runs: 1, cost_usd: 0.0, cost_usd_equivalent: 1.2, input_tokens: 3000, output_tokens: 400 },
-          // Kimi-Lane heißt "reviewer" — Namensheuristik würde sie fälschlich
-          // Claude zuschlagen; die server-gegroundete Lane bucketet korrekt.
-          { profile: "reviewer", subscription: "kimi", runs: 3, cost_usd: 0.0, cost_usd_equivalent: null, input_tokens: 500, output_tokens: 50 },
-          // API-Lane (kein Abo): muss ausgeschlossen bleiben.
-          { profile: "critic", subscription: null, runs: 5, cost_usd: 0.0, cost_usd_equivalent: 9.0, input_tokens: 99999, output_tokens: 9999 },
-        ])}
-      />,
-    );
-
-    expect(html).toContain("Verbrauch (Worker-Runs)");
-    expect(html).toContain("ChatGPT/Codex Abo");
-    expect(html).toContain("Claude Max Abo");
-    expect(html).toContain("Kimi Abo");
-    // ChatGPT summiert coder+verifier: In 2000 → "2 k", Out 300.
-    expect(html).toContain("In 2 k · Out 300");
-    expect(html).toContain("In 3 k · Out 400");
-    // Kimi = reviewer-Tokens (In 500 · Out 50 = 550), trotz Profilname ohne "kimi".
-    expect(html).toContain("In 500 · Out 50");
-    expect(html).toContain("550");
-    // API-Lane critic (99999 Tokens) darf nirgends auftauchen.
-    expect(html).not.toContain("99");
-  });
-
-  it("zeigt einen ruhigen Leerzustand ohne gestempelte Tokens", () => {
-    const html = renderToStaticMarkup(<AboTokenPanel data={fixture([])} />);
-    expect(html).toContain("Noch kein Abo-Tokenverbrauch");
-  });
-});
-
-// T5: Wert-Bilanz-Kachel — Wochenbilanz nach Klasse (nutzer/haertung/meta).
-
-function dailyPoint(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
+function daily(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
   return {
     date: "2026-06-10",
     done_roots: 0,
@@ -116,95 +53,254 @@ function dailyPoint(over: Partial<RunsDailyPoint> = {}): RunsDailyPoint {
   };
 }
 
-describe("WochenvergleichPanel", () => {
-  it("vergleicht die letzten 7 Tage mit den 7 Tagen davor inkl. Roots-Prozentdelta", () => {
-    const previous = Array.from({ length: 7 }, (_, i) => dailyPoint({
-      date: `2026-06-${String(i + 1).padStart(2, "0")}`,
-      done_roots: 2,
-      done_tasks: 4,
-      output_tokens: 1000,
-      cost_usd: 0.1,
-    }));
-    const current = Array.from({ length: 7 }, (_, i) => dailyPoint({
-      date: `2026-06-${String(i + 8).padStart(2, "0")}`,
-      done_roots: 3,
-      done_tasks: 6,
-      output_tokens: 2000,
-      cost_usd: 0.2,
-    }));
+function issue(outcomes: Record<string, number>): IssueGroup {
+  return {
+    signature: "x",
+    profile: "coder",
+    count: Object.values(outcomes).reduce((a, b) => a + b, 0),
+    first_seen: 0,
+    last_seen: 0,
+    outcomes,
+    example_run_id: 0,
+    example_task_id: "",
+    example_text: "",
+  };
+}
 
-    const html = renderToStaticMarkup(<WochenvergleichPanel series={[...previous, ...current]} />);
+function uwindow(over: Partial<AccountUsageWindow> = {}): AccountUsageWindow {
+  return { label: "Limit", window_key: null, used_percent: null, reset_at: null, detail: null, ...over };
+}
+function provider(over: Partial<AccountUsageProvider> = {}): AccountUsageProvider {
+  return {
+    provider: "anthropic",
+    available: true,
+    source: "oauth_usage_api",
+    fetched_at: null,
+    title: "Account limits",
+    plan: null,
+    windows: [],
+    details: [],
+    unavailable_reason: null,
+    cached: false,
+    ...over,
+  };
+}
+function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
+  return {
+    profile: "coder",
+    subscription: null,
+    runs: 0,
+    cost_usd: null,
+    cost_usd_equivalent: null,
+    input_tokens: null,
+    output_tokens: null,
+    ...over,
+  };
+}
 
-    expect(html).toContain("Wochenvergleich");
-    expect(html).toContain("letzte 7 Tage vs. 7 Tage davor");
-    expect(html).toContain("Roots geliefert");
-    expect(html).toContain(">21<");
-    expect(html).toContain("+7");
-    expect(html).toContain("+50 %");
-    expect(html).toContain("Tasks geliefert");
-    expect(html).toContain("+14");
-    expect(html).toContain("Out-Tokens");
-    expect(html).toContain("+7 k");
-    expect(html).toContain("gemessene $");
-    expect(html).toContain("+ $ 0.70");
-  });
-
-  it("blendet gemessene Kosten aus, wenn die Daily-Series keine Kostenwerte enthält", () => {
-    const html = renderToStaticMarkup(<WochenvergleichPanel series={[dailyPoint({ done_roots: 1 })]} />);
-
-    expect(html).toContain("Wochenvergleich");
-    expect(html).not.toContain("gemessene $");
-  });
-});
-
-describe("StatsSignalPanel", () => {
-  it("rendert ein visuelles Signalbild mit typografischer Hero-Zahl und gewichteter Abschlussrate", () => {
+describe("StatsMasthead (ST4)", () => {
+  it("leads with the fleet Akzeptanzrate and the three Stütz-KPIs", () => {
     const html = renderToStaticMarkup(
-      <StatsSignalPanel
-        last7={[
-          dailyPoint({ done_roots: 2, done_tasks: 5, output_tokens: 1200 }),
-          dailyPoint({ done_roots: 3, done_tasks: 7, output_tokens: 1800 }),
+      <StatsMasthead
+        now={1781769600} // 2026-06-18T08:00:00Z → "18. Juni"
+        profiles={[
+          // Phantom (not in the roster) — the masthead must drop it before
+          // counting, exactly like the leaderboard. If filtering regressed, its
+          // 1000/1000 verdicts + 50 runs would crater the 91 % / 90 % below.
+          profile({ profile: "w", runs: 50, outcomes: { completed: 50 }, completed_rate: 1, judged: 2000, approved: 1000, rejected: 1000 }),
+          profile({ profile: "coder", runs: 20, outcomes: { completed: 19 }, completed_rate: 0.95, judged: 108, approved: 100, rejected: 8 }),
+          profile({ profile: "verifier", runs: 10, outcomes: { completed: 8 }, completed_rate: 0.8, judged: 22, approved: 18, rejected: 4 }),
         ]}
-        reliabilityProfiles={[
-          { profile: "coder", runs: 8, tasks: 8, outcomes: { completed: 6 }, completed_rate: 0.75, failed_rate: 0.125, retries: 1, retry_rate: 0.125, judged: 2, approved: 2, rejected: 0, approve_rate: 1, low_sample: false },
-          { profile: "verifier", runs: 2, tasks: 2, outcomes: { completed: 1 }, completed_rate: 0.5, failed_rate: 0, retries: 0, retry_rate: 0, judged: 0, approved: 0, rejected: 0, approve_rate: null, low_sample: true },
+        baseline={[
+          profile({ approved: 90, rejected: 10 }),
+          profile({ profile: "unbekannt", approved: 500, rejected: 0 }), // phantom baseline → dropped, Δ stays +1 pp
+        ]}
+        series={[
+          daily({ cost_usd: 1.0, done_roots: 2, done_roots_by_class: { nutzer: 3, haertung: 1, meta: 0 } }),
+          daily({ cost_usd: 1.08, done_roots: 0, done_roots_by_class: { nutzer: 2, haertung: 0, meta: 1 } }),
         ]}
       />,
     );
+    // Acceptance = 118/130 = 91 %.
+    expect(html).toContain("Akzeptanzrate");
+    expect(html).toContain('class="sb-mast"');
+    expect(html).toContain("91");
+    expect(html).toContain("118 abgenommen · 12 verworfen");
+    // Δ vs the 90 % baseline → +1 pp, ok-status.
+    expect(html).toContain("1 pp ggü. 30 Tg");
+    expect(html).toContain("sb-d sb-ok");
+    // Masthead meta carries the German date + window.
+    expect(html).toContain("18. Juni · 7 Tage");
+    // Supporting KPIs: Autonomie (accent) 27/30 = 90 %, $1.04/Lieferung, 5 Nutzer.
+    expect(html).toContain("sb-n sb-accent");
+    expect(html).toContain("Autonomie");
+    expect(html).toContain("90");
+    expect(html).toContain("Kosten je Lieferung");
+    expect(html).toContain("$ 1.04");
+    expect(html).toContain("Nutzerwert");
+  });
 
-    expect(html).toContain("Signalbild");
-    expect(html).toContain("hc-stats-signal");
-    expect(html).toContain("hc-hero-statement");
-    expect(html).toContain("aria-label=\"Abschlussrate 70 %\"");
-    expect(html).toContain("5 Roots");
-    expect(html).toContain("12 Tasks");
-    expect(html).toContain("3 k Tokens");
+  it("stays calm with em-dashes when there are no verdicts/cost", () => {
+    const html = renderToStaticMarkup(
+      <StatsMasthead now={1781769600} profiles={[profile({ runs: 0 })]} baseline={[]} series={[]} stale />,
+    );
+    expect(html).toContain("Noch keine Verifier-Urteile im Fenster");
+    expect(html).toContain("keine 30-Tage-Baseline");
+    expect(html).toContain("veraltet");
   });
 });
 
-describe("WertBilanzPanel (T5)", () => {
-  it("summiert die Woche pro Klasse", () => {
+describe("LatencySection (ST4)", () => {
+  it("renders p50/p90 as a two-figure card", () => {
+    const html = renderToStaticMarkup(<LatencySection p50={240} p90={1020} />);
+    expect(html).toContain("sb-twin");
+    expect(html).toContain("Median · p50");
+    expect(html).toContain("4m");
+    expect(html).toContain("p90");
+    expect(html).toContain("17m");
+  });
+
+  it("shows em-dashes when latency is unknown", () => {
+    const html = renderToStaticMarkup(<LatencySection p50={null} p90={null} />);
+    expect(html).toContain("—");
+  });
+});
+
+describe("ReliabilitySection (ST4)", () => {
+  it("phantom-filters and ranks the roster by completion rate", () => {
     const html = renderToStaticMarkup(
-      <WertBilanzPanel
-        last7={[
-          dailyPoint({ done_roots_by_class: { nutzer: 2, haertung: 1, meta: 4 } }),
-          dailyPoint({ done_roots_by_class: { nutzer: 1, haertung: 0, meta: 3 } }),
+      <ReliabilitySection
+        profiles={[
+          profile({ profile: "w", runs: 99, completed_rate: 1 }), // phantom
+          profile({ profile: "coder", runs: 20, completed_rate: 0.95 }),
+          profile({ profile: "premium", runs: 2, completed_rate: 1, low_sample: true }),
         ]}
       />,
     );
-    expect(html).toContain("Wert-Bilanz");
-    expect(html).toContain("Nutzer-Feature");
-    expect(html).toContain("Härtung");
-    expect(html).toContain("Meta");
-    // Summen 3 / 1 / 7 stehen als Pod-Werte im Markup.
-    expect(html).toContain(">3<");
-    expect(html).toContain(">1<");
-    expect(html).toContain(">7<");
+    expect(html).toContain("Verlässlichkeit");
+    // Phantom "w" (99 runs) is dropped.
+    expect(html).not.toContain("99 Läufe");
+    // Coder (well-sampled) ranks above low-sample Premium.
+    expect(html.indexOf("Coder")).toBeLessThan(html.indexOf("Premium"));
+    expect(html).toContain("sb-sc sb-ok"); // coder 95 % → ok ink
+    expect(html).toContain("20 Läufe");
   });
 
-  it("rendert Nullen bei leerer Woche", () => {
-    const html = renderToStaticMarkup(<WertBilanzPanel last7={[]} />);
-    expect(html).toContain("Wert-Bilanz");
-    expect(html).toContain(">0<");
+  it("renders a calm empty state with no roster runs", () => {
+    const html = renderToStaticMarkup(<ReliabilitySection profiles={[profile({ profile: "w" })]} />);
+    expect(html).toContain("Noch keine Profil-Läufe im Fenster.");
+  });
+});
+
+describe("ErrorTaxonomySection (ST4)", () => {
+  it("buckets the failures and renders the harness-lifecycle verdict", () => {
+    const html = renderToStaticMarkup(
+      <ErrorTaxonomySection
+        issues={[issue({ crashed: 4, spawn_failed: 1 }), issue({ timed_out: 3 }), issue({ gave_up: 2 })]}
+      />,
+    );
+    expect(html).toContain("Fehler-Taxonomie");
+    expect(html).toContain("sb-estack");
+    expect(html).toContain(`background:${broadsheet.errorSeries[0]}`);
+    expect(html).toContain("Prozess tot");
+    expect(html).toContain("Zeitüberschreitung");
+    expect(html).toContain("Budget erschöpft");
+    expect(html).toContain("<b>5</b>"); // dead bucket count
+    // The Befund line bolds "Harness-Lifecycle".
+    expect(html).toContain("<b>Harness-Lifecycle</b>");
+    expect(html).toContain("Issues — wiederkehrende Fehler");
+  });
+
+  it("shows a clean-window verdict and no bar when there are no issues", () => {
+    const html = renderToStaticMarkup(<ErrorTaxonomySection issues={[]} />);
+    expect(html).toContain("sauberes Fenster");
+    expect(html).not.toContain("sb-estack");
+  });
+});
+
+describe("BudgetLedgerSection (ST5)", () => {
+  it("orders providers Engpass-first, leads with the bottleneck, tags Kimi estimated", () => {
+    const html = renderToStaticMarkup(
+      <BudgetLedgerSection
+        providers={[
+          provider({ provider: "kimi", source: "kanban_subscription_tokens", title: "Kimi subscription tokens", windows: [] }),
+          provider({
+            provider: "anthropic",
+            source: "oauth_usage_api",
+            windows: [
+              uwindow({ window_key: "session", used_percent: 30 }),
+              uwindow({ window_key: "weekly", used_percent: 92, reset_at: "2026-06-19T00:00:00Z" }),
+            ],
+          }),
+          provider({ provider: "openai-codex", source: "usage_api", windows: [uwindow({ window_key: "weekly", used_percent: 40 })] }),
+        ]}
+      />,
+    );
+    expect(html).toContain("Budget-Ledger");
+    expect(html).toContain("sb-led-row");
+    // Engpass lead names the tightest window (Claude · Woche · 92 %).
+    expect(html).toContain("sb-lead");
+    expect(html).toContain("Claude Woche bei 92 %");
+    // Claude (92 %) sorts before ChatGPT (40 %); both render.
+    expect(html.indexOf("ChatGPT")).toBeGreaterThan(0);
+    expect(html).toContain("sb-led-fig sb-crit"); // 92 % → crit ink
+    // Kimi is flagged estimated and has no provider limit.
+    expect(html).toContain("sb-tagm");
+    expect(html).toContain("geschätzt");
+    expect(html).toContain("kein Provider-Limit");
+  });
+
+  it("renders a calm empty state when no provider limits are available", () => {
+    const html = renderToStaticMarkup(<BudgetLedgerSection providers={[]} />);
+    expect(html).toContain("Keine Limit-Daten verfügbar.");
+  });
+
+  it("carries an unavailable provider through without a meter", () => {
+    const html = renderToStaticMarkup(
+      <BudgetLedgerSection
+        providers={[provider({ provider: "anthropic", available: false, unavailable_reason: "no oauth token", windows: [] })]}
+      />,
+    );
+    expect(html).toContain("no oauth token");
+    expect(html).toContain("—");
+  });
+});
+
+describe("EffizienzSection (ST5)", () => {
+  it("shows the three efficiency KPIs and the per-lane token burn", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[profile({ runs: 80, rejected: 8 }), profile({ runs: 20, rejected: 2 })]}
+        costs={[
+          costRow({ profile: "coder", input_tokens: 1_200_000, output_tokens: 0, runs: 12 }),
+          costRow({ profile: "w", input_tokens: 9_000_000, output_tokens: 0, runs: 1 }), // phantom → dropped
+        ]}
+        chainRate={0.75}
+        queueWaitSeconds={240}
+      />,
+    );
+    expect(html).toContain("Flotten-Effizienz");
+    // Chain-Completion 75 % (accent), Queue-Wait p50 = 4m, Gate 10/100 = 10 %.
+    expect(html).toContain("Ketten-Abschluss");
+    expect(html).toContain("sb-n sb-accent");
+    expect(html).toContain("75");
+    expect(html).toContain("Queue-Wartezeit");
+    expect(html).toContain("4m");
+    expect(html).toContain("Gate-Quote");
+    // Token-Burn leaderboard: coder 1.2 M, phantom dropped.
+    expect(html).toContain("Token-Burn je Lane");
+    expect(html).toContain("sb-lr");
+    expect(html).toContain("1.2 M");
+    expect(html).toContain("Coder");
+    expect(html).toContain("12 Läufe");
+    expect(html).not.toContain("9.0 M");
+  });
+
+  it("stays calm with em-dashes and an empty-burn note when nothing ran", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection profiles={[]} costs={[]} chainRate={null} queueWaitSeconds={null} />,
+    );
+    expect(html).toContain("Noch kein Token-Burn im Fenster.");
+    expect(html).toContain("—");
   });
 });

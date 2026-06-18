@@ -20,6 +20,9 @@ import {
   ReliabilityResponseSchema,
   RunsDailyResponseSchema,
   RunsCostsResponseSchema,
+  ChainCompletionResponseSchema,
+  BoardStatsResponseSchema,
+  RunsIssuesResponseSchema,
   DecisionQueueResponseSchema,
   TodayDigestResponseSchema,
   BlockedCompletionsResponseSchema,
@@ -38,7 +41,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1357,6 +1360,47 @@ export function useHermesRunsCosts() {
       RunsCostsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/costs?days=7"),
       "runs/costs",
+    ),
+    60000,
+  );
+}
+
+// ST5 (Effizienz): die zwei ST2-Aggregate für die Flotten-Effizienz-Karte —
+// Ketten-Abschlussrate (eigener Endpunkt) und Queue-Wartezeit-p50 (aus dem
+// board_stats /stats-Payload). Gleiche langsame Aggregate-Kadenz wie F4.
+export function useChainCompletion() {
+  return usePolling<ChainCompletionResponse>(
+    "stats/chain-completion",
+    async () => parseOrThrow(
+      ChainCompletionResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/stats/chain-completion"),
+      "stats/chain-completion",
+    ),
+    60000,
+  );
+}
+
+export function useBoardStats() {
+  return usePolling<BoardStatsResponse>(
+    "stats/board",
+    async () => parseOrThrow(
+      BoardStatsResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/stats"),
+      "stats",
+    ),
+    60000,
+  );
+}
+
+// ST4 (Statistik-Broadsheet): wiederkehrende Fehler für die Fehler-Taxonomie —
+// dieselbe Quelle wie das Issue-Board (F6), langsam gepollt (30-Tage-Aggregat).
+export function useHermesRunsIssues() {
+  return usePolling<RunsIssuesResponse>(
+    "runs/issues",
+    async () => parseOrThrow(
+      RunsIssuesResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/issues?days=30&limit=50"),
+      "runs/issues",
     ),
     60000,
   );
