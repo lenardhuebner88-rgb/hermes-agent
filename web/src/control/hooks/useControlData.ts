@@ -1844,32 +1844,39 @@ export function usePlanSpecDetail(path: string | null): { data: PlanSpecDetailRe
   const [error, setError] = useState<string | null>(null);
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
-
-  useEffect(() => {
+  // State transitions live in an async callback (not directly in the effect) so
+  // the on-demand fetch follows the same shape as useChainGraph/useFlowGate.
+  const load = useCallback(async (): Promise<void> => {
     if (!path) {
-      setData(null);
-      setError(null);
-      setLoading(false);
+      if (aliveRef.current) {
+        setData(null);
+        setError(null);
+        setLoading(false);
+      }
       return;
     }
-    let cancelled = false;
-    setLoading(true);
-    setData(null);
-    setError(null);
-    void fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`)
-      .then((raw) => {
-        if (cancelled || !aliveRef.current) return;
-        setData(parseOrThrow(PlanSpecDetailResponseSchema, raw, "planspecs/detail"));
-      })
-      .catch((e) => {
-        if (cancelled || !aliveRef.current) return;
-        setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled && aliveRef.current) setLoading(false);
-      });
-    return () => { cancelled = true; };
+    if (aliveRef.current) {
+      setLoading(true);
+      setData(null);
+      setError(null);
+    }
+    try {
+      const parsed = parseOrThrow(
+        PlanSpecDetailResponseSchema,
+        await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`),
+        "planspecs/detail",
+      );
+      if (aliveRef.current) setData(parsed);
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
   }, [path]);
+  useEffect(() => {
+    const initial = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(initial);
+  }, [load]);
 
   return { data, loading, error };
 }
