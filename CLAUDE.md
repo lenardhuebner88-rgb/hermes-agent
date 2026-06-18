@@ -35,7 +35,7 @@ Schlanker Auto-Load-Einstieg. Tiefe Architektur + die 9 Known Pitfalls stehen in
   (lint:control = eslint über fork-eigenen Code `src/control` + `vite.config.ts` + `e2e` —
   Upstream-Dateien wie `src/App.tsx` NICHT mit-aufräumen, dort urteilt der Verifier diff-relativ)
 - Python: `scripts/run_tests.sh` (mit pytest-timeout) + `ruff`
-- **Testumfang:** targeted by default — `scripts/run_tests.sh $(scripts/affected-tests.sh)` beim
+- **Testumfang:** targeted by default — `scripts/run-affected.sh` beim
   Bauen/Verifizieren; vor Deploy/Push einmal Collection-Sweep (`pytest --co -q tests/`) + betroffene
   Tests; die **komplette** Suite läuft nur nachts (`green-gate-heartbeat`). Regel: AGENTS.md → *Test
   scope* / Canon `conventions-gates.md`. NICHT Worker und Verifier beide die Vollsuite fahren lassen.

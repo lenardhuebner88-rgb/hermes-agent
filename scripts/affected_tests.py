@@ -4,9 +4,11 @@ scope the interactive path uses (worker build, verifier re-check, pre-deploy
 smoke). The full suite runs only nightly (green-gate-heartbeat); see
 ``AGENTS.md`` → Testing and ``00-Canon/conventions-gates.md`` → Test-Scope.
 
-Splice it straight into the canonical runner::
+Run the affected tests via the safe wrapper — it skips pytest when nothing is
+affected, instead of letting an empty ``$(...)`` collapse into a bare
+``run_tests.sh`` = the full suite::
 
-    scripts/run_tests.sh $(scripts/affected-tests.sh)
+    scripts/run-affected.sh
 
 Mapping rule (changed source -> its test file): ``<pkg>/<name>.py`` maps to
 ``tests/<pkg>/test_<name>.py``; changed ``test_*.py`` files run themselves.
@@ -21,8 +23,9 @@ Usage::
     scripts/affected_tests.py HEAD~1         # everything changed since HEAD~1
     scripts/affected_tests.py main...HEAD    # explicit range / ref
 
-Prints a single space-separated line (empty when no ``.py`` changed, so the
-caller cleanly skips pytest).
+Prints a single space-separated line (empty when no ``.py`` changed). Consume it
+through ``scripts/run-affected.sh``, which skips pytest on empty output — a bare
+``run_tests.sh $(scripts/affected-tests.sh)`` would instead run the FULL suite.
 """
 from __future__ import annotations
 

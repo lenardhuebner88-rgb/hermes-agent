@@ -82,7 +82,7 @@ kanban_complete(
 Code changes DO get reviewed — but you request that review by **completing**, not blocking. When your code task is done and your gates pass, call `kanban_complete` with the structured handoff. If you're a code role (e.g. `coder`, `premium`), the **review gate** automatically parks your completion in `review` and hands it to an independent `verifier` profile, which re-runs the real gates (tests/build/lint) on your actual changes and renders the verdict: APPROVED → the task moves to `done`; REQUEST_CHANGES → it's blocked for a follow-up fix with the failing command output attached. **That verifier IS the review** — so completing is how you ask for it.
 
 **Test scope = your diff, not the whole repo.** Run only the tests your change touches —
-`scripts/run_tests.sh $(scripts/affected-tests.sh)` (+ `ruff` on changed `.py`, frontend gates only when
+`scripts/run-affected.sh` (+ `ruff` on changed `.py`, frontend gates only when
 `web/` is in the diff). Do **not** run the full ~31k-test suite, and the verifier won't either — it re-runs
 the *same targeted scope*. The full suite runs only nightly (`green-gate-heartbeat`). Rule:
 `00-Canon/conventions-gates.md` → *Test-Scope*.

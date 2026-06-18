@@ -1300,7 +1300,7 @@ scripts/run_tests.sh tests/gateway/                   # one directory
 scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
 scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
-scripts/run_tests.sh $(scripts/affected-tests.sh)     # only the tests your diff touches (targeted scope)
+scripts/run-affected.sh                               # only the tests your diff touches; skips if none (never the full suite)
 ```
 
 ### Subprocess-per-test isolation
@@ -1365,7 +1365,7 @@ interactive path. That double-run (worker *and* verifier each firing all ~31k
 tests) is wasted half-hours, not safety.
 
 - **Building / verifying a task:** run only the tests your diff touches —
-  `scripts/run_tests.sh $(scripts/affected-tests.sh)` (+ `ruff` on changed `.py`,
+  `scripts/run-affected.sh` (+ `ruff` on changed `.py`,
   and the frontend gates only when `web/` is in the diff). The verifier re-runs
   this *same targeted scope* independently — it is a second opinion on the
   affected slice, not a second full run.
