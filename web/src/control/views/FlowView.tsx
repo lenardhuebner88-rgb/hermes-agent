@@ -45,12 +45,15 @@ import {
   useHermesRecentResults,
   useHermesReviewVerdicts,
   usePlanSpecs,
+  usePlanSpecDetail,
   useSystemHealth,
   useHermesWorkers,
   useRunInspect,
   useTaskAction,
   useTaskDetail,
 } from "../hooks/useControlData";
+import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
+import { planSpecKanbanTone, planSpecKanbanLabel } from "./flow/planSpecKanban";
 import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
@@ -85,23 +88,6 @@ function scrollToFlowTask(taskId: string): void {
 }
 
 // Enrichment for a board task, gathered from the live sidecar endpoints.
-interface PlanSpecDetailSubtask {
-  id: string;
-  title: string;
-  lane: string;
-  deps: string[];
-}
-
-interface PlanSpecDetailResponse {
-  goal: string;
-  acceptance_criteria: Array<{ id?: string; statement?: string } & Record<string, unknown>>;
-  anti_scope: string[];
-  evidence_required: string[];
-  freigabe: string;
-  live_test_depth: string;
-  subtasks: PlanSpecDetailSubtask[];
-}
-
 export interface Enriched {
   workerProfile?: string | null;
   workerHeartbeat?: number | null;
@@ -223,22 +209,6 @@ function RecoveryStrip() {
   );
 }
 
-function planSpecKanbanTone(state: PlanSpecRecord["kanban_state"]): ToneName {
-  if (state === "completed" || state === "done") return "emerald";
-  if (state === "blocked") return "red";
-  if (state === "running") return "amber";
-  if (state === "queued") return "violet";
-  return "zinc";
-}
-
-function planSpecKanbanLabel(item: PlanSpecRecord): string {
-  if (item.kanban_state === "completed" || item.kanban_state === "done") return "erledigt";
-  if (item.kanban_state === "blocked") return "blocked";
-  if (item.kanban_state === "running") return "läuft";
-  if (item.kanban_state === "queued") return "geplant";
-  return item.valid ? "offen" : "blocked";
-}
-
 function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
   if (!item.kanban_root_task_id || item.kanban_child_total <= 0) return null;
   const bits = [`${item.kanban_child_done}/${item.kanban_child_total} done`];
@@ -247,82 +217,6 @@ function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
   return bits.join(" · ");
 }
 
-
-function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: {
-  item: PlanSpecRecord;
-  detail: PlanSpecDetailResponse | null;
-  loading: boolean;
-  error: string | null;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="PlanSpec Details">
-      <div className="flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--hc-border)] bg-[var(--hc-surface)] shadow-2xl">
-        <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
-          <FileText className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" />
-          <div className="min-w-0 flex-1">
-            <Eyebrow>PlanSpec</Eyebrow>
-            <h2 className="mt-1 break-words text-lg font-semibold text-white">{item.topic}</h2>
-            <p className="mt-1 break-all hc-mono text-[0.72rem] hc-dim">{item.path}</p>
-          </div>
-          <button type="button" onClick={onClose} className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5" aria-label="PlanSpec schließen">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <div className="flex flex-wrap gap-1.5">
-            <StatusPill tone={planSpecKanbanTone(item.kanban_state)} label={planSpecKanbanLabel(item)} />
-            <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
-            <span className="rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
-            {item.kanban_root_task_id ? (
-              <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100 hover:brightness-110">
-                Root {item.kanban_root_task_id} → Kette
-              </Link>
-            ) : null}
-          </div>
-          {loading ? <SkeletonCard rows={4} /> : null}
-          {error ? <ToneCallout tone="amber">{error}</ToneCallout> : null}
-          {detail ? (
-            <div className="mt-4 grid gap-4">
-              <section className="rounded-xl border border-[var(--hc-border)] bg-black/10 p-3">
-                <Eyebrow>Ziel</Eyebrow>
-                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed hc-soft">{detail.goal || item.topic}</p>
-              </section>
-              <section className="rounded-xl border border-[var(--hc-border)] bg-black/10 p-3">
-                <Eyebrow>Acceptance Criteria</Eyebrow>
-                <ul className="mt-2 grid gap-2">
-                  {detail.acceptance_criteria.length ? detail.acceptance_criteria.map((ac, idx) => (
-                    <li key={`${ac.id ?? idx}`} className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-sm hc-soft">
-                      {ac.id ? <span className="mr-2 hc-mono text-[0.7rem] text-cyan-100">{String(ac.id)}</span> : null}
-                      {String(ac.statement ?? "")}
-                    </li>
-                  )) : <li className="text-sm hc-dim">Keine Kriterien im Detail-Payload.</li>}
-                </ul>
-              </section>
-              {detail.anti_scope.length ? (
-                <section className="rounded-xl border border-[var(--hc-border)] bg-black/10 p-3">
-                  <Eyebrow>Nicht im Scope</Eyebrow>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm hc-soft">{detail.anti_scope.map((x) => <li key={x}>{x}</li>)}</ul>
-                </section>
-              ) : null}
-              <section className="rounded-xl border border-[var(--hc-border)] bg-black/10 p-3">
-                <Eyebrow>Subtask-Kette</Eyebrow>
-                <ol className="mt-2 grid gap-2">
-                  {detail.subtasks.map((task, idx) => (
-                    <li key={`${task.id}:${idx}`} className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-white"><span className="hc-mono text-[0.7rem] hc-dim">{idx + 1}</span><strong>{task.title || task.id}</strong></div>
-                      <p className="mt-1 hc-type-label hc-dim">{task.id} · {task.lane || "ohne Lane"}{task.deps.length ? ` · deps: ${task.deps.join(", ")}` : ""}</p>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
   const [planspecSearch, setPlanspecSearch] = useState("");
@@ -333,9 +227,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
   const [promptByPath, setPromptByPath] = useState<Record<string, string>>({});
   const [detailItem, setDetailItem] = useState<PlanSpecRecord | null>(null);
-  const [detailData, setDetailData] = useState<PlanSpecDetailResponse | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const detail = usePlanSpecDetail(detailItem?.path ?? null);
   const items = plans.data?.planspecs ?? [];
   const validCount = items.filter((item) => item.valid).length;
   const hasFilters = Boolean(planspecSearch.trim()) || validOnly;
@@ -408,16 +300,6 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
       setBusyPath(null);
     }
   }, [plans, setRowError]);
-
-  useEffect(() => {
-    if (!detailItem) return;
-    let cancelled = false;
-    void fetchJSON<PlanSpecDetailResponse>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(detailItem.path)}`)
-      .then((data) => { if (!cancelled) setDetailData(data); })
-      .catch((e) => { if (!cancelled) setDetailError(e instanceof Error ? e.message : String(e)); })
-      .finally(() => { if (!cancelled) setDetailLoading(false); });
-    return () => { cancelled = true; };
-  }, [detailItem]);
 
   if (!plans.loading && !plans.error && items.length === 0 && !hasFilters) return null;
 
@@ -500,7 +382,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 <button
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
-                  onClick={() => { setDetailData(null); setDetailError(null); setDetailLoading(true); setDetailItem(item); }}
+                  onClick={() => { setDetailItem(item); }}
                   className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9"
                 >
                   <FileText className="h-3.5 w-3.5" />
@@ -539,10 +421,10 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
       {detailItem ? (
         <PlanSpecDetailDrawer
           item={detailItem}
-          detail={detailData}
-          loading={detailLoading}
-          error={detailError}
-          onClose={() => { setDetailItem(null); setDetailData(null); setDetailError(null); }}
+          detail={detail.data}
+          loading={detail.loading}
+          error={detail.error}
+          onClose={() => { setDetailItem(null); }}
         />
       ) : null}
     </FleetPanel>

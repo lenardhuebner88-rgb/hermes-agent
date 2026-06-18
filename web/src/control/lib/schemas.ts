@@ -1122,6 +1122,32 @@ export const RunsIssuesResponseSchema = z.object({
 export type IssueGroup = z.infer<typeof IssueGroupSchema>;
 export type RunsIssuesResponse = z.infer<typeof RunsIssuesResponseSchema>;
 
+// PlanSpec detail drawer (E2): full structured payload from
+// GET /planspecs/detail?path=…. Every field is optional/tolerant so a
+// partially-written PlanSpec file still opens without throwing.
+const PlanSpecDetailSubtaskSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch(""),
+  lane: z.string().catch(""),
+  deps: z.array(z.string()).catch([]),
+}).passthrough();
+
+export const PlanSpecDetailResponseSchema = z.object({
+  goal: z.string().catch(""),
+  acceptance_criteria: z.array(
+    z.object({ id: z.string().optional(), statement: z.string().optional() })
+      .passthrough()
+      .catch({}),
+  ).catch([]),
+  anti_scope: z.array(z.string()).catch([]),
+  evidence_required: z.array(z.string()).catch([]),
+  freigabe: z.string().catch(""),
+  live_test_depth: z.string().catch(""),
+  subtasks: z.array(PlanSpecDetailSubtaskSchema).catch([]),
+});
+export type PlanSpecDetailResponse = z.infer<typeof PlanSpecDetailResponseSchema>;
+export type PlanSpecDetailSubtask = z.infer<typeof PlanSpecDetailSubtaskSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

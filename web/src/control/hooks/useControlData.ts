@@ -33,6 +33,7 @@ import {
   FlowSizingResponseSchema,
   FlowTimeoutSweepResponseSchema,
   PlanSpecsResponseSchema,
+  PlanSpecDetailResponseSchema,
   EpicsResponseSchema,
   TaskDetailResponseSchema,
   RunInspectSchema,
@@ -41,7 +42,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1830,4 +1831,45 @@ export function usePromptForgeCatalog(): PromptForgeCatalogState {
   }, []);
 
   return { data, error, loading, lastUpdated };
+}
+
+// On-demand PlanSpec detail (E2 drawer): fetches
+// GET /planspecs/detail?path=<encoded> only when `path` is non-null.
+// Returns { data, loading, error } — same shape as the minimal LoadState
+// used by useFlowGate / useChainGraph for on-demand endpoints.
+// Refetches whenever `path` changes (new drawer open). Idle when path is null.
+export function usePlanSpecDetail(path: string | null): { data: PlanSpecDetailResponse | null; loading: boolean; error: string | null } {
+  const [data, setData] = useState<PlanSpecDetailResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  useEffect(() => {
+    if (!path) {
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setData(null);
+    setError(null);
+    void fetchJSON<unknown>(`/api/plugins/kanban/planspecs/detail?path=${encodeURIComponent(path)}`)
+      .then((raw) => {
+        if (cancelled || !aliveRef.current) return;
+        setData(parseOrThrow(PlanSpecDetailResponseSchema, raw, "planspecs/detail"));
+      })
+      .catch((e) => {
+        if (cancelled || !aliveRef.current) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled && aliveRef.current) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [path]);
+
+  return { data, loading, error };
 }

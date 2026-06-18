@@ -1092,6 +1092,24 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--json", action="store_true", help="Emit JSON result"
     )
 
+    p_release_uireal = sub.add_parser(
+        "release-uireal",
+        help="Explicit operator GO: release a ui-real PlanSpec chain root held "
+             "in 'scheduled' (records a uireal_released event with operator "
+             "identity and flips the root scheduled->todo so its children "
+             "dispatch). Idempotent; smoke/contract chains never need this.",
+    )
+    p_release_uireal.add_argument("task_id", help="ui-real PlanSpec root task id")
+    p_release_uireal.add_argument(
+        "--author",
+        default=None,
+        help="Operator identity recorded on the release event "
+             "(default: active profile name)",
+    )
+    p_release_uireal.add_argument(
+        "--json", action="store_true", help="Emit JSON result"
+    )
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1214,6 +1232,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "gc":       _cmd_gc,
             "epic":     _dispatch_epic,
             "release-gate": _cmd_release_gate,
+            "release-uireal": _cmd_release_uireal,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1566,6 +1585,35 @@ def _cmd_release_gate(args: argparse.Namespace) -> int:
             f"(fixer attempts: {result.get('fixer_attempts', 0)})"
         )
     return 0 if result.get("status") == "green" else 2
+
+
+def _cmd_release_uireal(args: argparse.Namespace) -> int:
+    """Release a ui-real PlanSpec chain root held in 'scheduled' for an explicit
+    operator GO. Records a ``uireal_released`` event with operator identity and
+    flips the root scheduled->todo so its children become dispatchable. Idempotent
+    (a root already released stays released, re-stamping the event).
+
+    Exit codes: 0 released (incl. idempotent re-release); 1 the task is not a
+    releasable ui-real root (not ui-real, not held in scheduled/todo, or unknown)."""
+    author = getattr(args, "author", None) or _profile_author()
+    with kb.connect_closing() as conn:
+        released = kb.release_uireal_root(conn, args.task_id, author=author)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "task_id": args.task_id, "released": released, "author": author,
+        }))
+    elif released:
+        print(
+            f"ui-real root {args.task_id} released by {author} "
+            "(children now dispatchable)."
+        )
+    else:
+        print(
+            f"release-uireal: {args.task_id} is not a held ui-real root "
+            "(not ui-real, not held in scheduled, or unknown) — nothing released.",
+            file=sys.stderr,
+        )
+    return 0 if released else 1
 
 
 def _cmd_assignees(args: argparse.Namespace) -> int:

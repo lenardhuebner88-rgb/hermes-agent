@@ -5064,21 +5064,66 @@ def test_lanes_spawn_check_reports_unknown_profile(client):
 # GET /planspecs/detail
 # ---------------------------------------------------------------------------
 
-_REAL_PLANSPEC = (
-    "/home/piet/vault/03-Agents/Claude-Code/plans/"
-    "2026-06-17-kanban-chain-haertung-planspec.md"
-)
+def _write_open_planspec_fixture(plans_root: Path) -> Path:
+    """A self-contained, valid, OPEN binding PlanSpec for detail-endpoint tests.
+
+    Decoupled from real vault specs on purpose: a hardcoded real planspec
+    legitimately transitions to a closed/shipped status as its work ships,
+    at which point parse_binding_planspec rejects it (closed status) and a
+    test pinned to it would flip red through no fault of the endpoint.
+    """
+    path = plans_root / "Claude-Code" / "plans" / "2026-06-18-detail-fixture.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """---
+status: approved_for_ingest
+topic: "Detail endpoint fixture"
+freigabe: complete
+live_test_depth: contract
+acceptance_criteria:
+  - id: AC-1
+    statement: "The endpoint returns this acceptance criterion."
+anti_scope:
+  - "Nothing extra is in scope."
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: "First subtask"
+      lane: coder
+      deps: []
+---
+
+# Detail endpoint fixture
+
+Body text.
+""",
+        encoding="utf-8",
+    )
+    return path
 
 
-@pytest.mark.skipif(
-    not Path(_REAL_PLANSPEC).exists(),
-    reason="real planspec file not present on this machine",
-)
-def test_planspecs_detail_happy_path(client):
-    """Happy path: real planspec → 200 with all required fields populated."""
+def _bind_detail_plans_root(monkeypatch, plans_root: Path):
+    """Make the detail endpoint resolve+parse under ``plans_root`` (the endpoint
+    calls parse_binding_planspec without a plans_root, which is otherwise bound
+    to the real vault root via the function default)."""
+    from hermes_cli import planspecs as _ps
+
+    real_parse = _ps.parse_binding_planspec
+    monkeypatch.setattr(
+        _ps, "parse_binding_planspec",
+        lambda p, **kw: real_parse(p, plans_root=plans_root),
+    )
+
+
+def test_planspecs_detail_happy_path(client, tmp_path, monkeypatch):
+    """Happy path: a valid OPEN binding planspec → 200 with all fields populated."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_open_planspec_fixture(plans_root)
+    _bind_detail_plans_root(monkeypatch, plans_root)
     r = client.get(
         "/api/plugins/kanban/planspecs/detail",
-        params={"path": _REAL_PLANSPEC},
+        params={"path": str(path)},
     )
     assert r.status_code == 200, r.text
     data = r.json()
@@ -5180,15 +5225,15 @@ def test_planspecs_detail_missing_file_does_not_leak_resolved_path(client):
     assert not any("/home/piet" in f for f in findings), f"resolved path leaked: {findings}"
 
 
-@pytest.mark.skipif(
-    not Path(_REAL_PLANSPEC).exists(),
-    reason="real planspec file not present on this machine",
-)
-def test_planspecs_detail_resolves_path_exactly_once(client, monkeypatch):
+def test_planspecs_detail_resolves_path_exactly_once(client, tmp_path, monkeypatch):
     """#13 (TOCTOU): the handler must resolve the path EXACTLY ONCE — inside
     parse_binding_planspec — not validate-then-re-resolve+read in two separate
     calls, which opens a window for a symlink swap between the two resolutions."""
     from hermes_cli import planspecs as _ps
+
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_open_planspec_fixture(plans_root)
+    _bind_detail_plans_root(monkeypatch, plans_root)
 
     calls = {"n": 0}
     real = _ps.resolve_planspec_path
@@ -5200,7 +5245,7 @@ def test_planspecs_detail_resolves_path_exactly_once(client, monkeypatch):
     monkeypatch.setattr(_ps, "resolve_planspec_path", counting)
     r = client.get(
         "/api/plugins/kanban/planspecs/detail",
-        params={"path": _REAL_PLANSPEC},
+        params={"path": str(path)},
     )
     assert r.status_code == 200, r.text
     assert calls["n"] == 1, f"path resolved {calls['n']}× — TOCTOU window between resolutions"
@@ -5240,3 +5285,43 @@ def test_resolve_planspec_path_raises_typed_not_found():
     assert not isinstance(exc_info.value, _ps.PlanSpecNotFound), (
         "traversal/outside-root must be a 400-class block, not a not-found"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase4 C: GET /tasks/{id} surfaces planspec_source (card->spec 1-hop)
+# ---------------------------------------------------------------------------
+
+
+def test_get_task_surfaces_planspec_source_one_hop(client):
+    """The card-detail endpoint exposes the task's own planspec_source so the
+    drawer can resolve card->spec directly (no parent->root walk)."""
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "spec-sourced card", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task"]["id"]
+
+    spec_path = "/home/piet/vault/03-Agents/Claude-Code/plans/x.md"
+    with kb.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET planspec_source = ? WHERE id = ?", (spec_path, task_id)
+        )
+        conn.commit()
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["task"]["planspec_source"] == spec_path
+
+
+def test_get_task_planspec_source_null_for_plain_task(client):
+    """A non-PlanSpec task reports planspec_source = null (no 2-hop fallback)."""
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "plain card", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task"]["id"]
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["task"]["planspec_source"] is None
