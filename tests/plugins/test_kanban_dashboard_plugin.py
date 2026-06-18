@@ -212,6 +212,56 @@ def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(client
     assert card["status"] == "triage"
 
 
+def test_flow_lean_auto_capture_stays_triage_without_planspec(client, tmp_path, monkeypatch):
+    """Characterize the no-PlanSpec Flow path used by lean+AUTO capture.
+
+    The UI routes lean+AUTO through the plain ``POST /tasks`` endpoint, not
+    ``/tasks/flow-capture``. That keeps the task in triage for the gateway
+    decomposer and must not create a durable flow plan/spec marker.
+    """
+    spec_dir = tmp_path / "flow-plans"
+    monkeypatch.setenv("HERMES_FLOW_PLANS_DIR", str(spec_dir))
+
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "Lean auto no planspec",
+            "assignee": None,
+            "priority": 0,
+            "tenant": "flow-capture",
+            "triage": True,
+            "park": False,
+            "notify_home": False,
+        },
+    )
+    assert r.status_code == 200, r.text
+    task = r.json()["task"]
+    task_id = task["id"]
+    assert task["status"] == "triage"
+    assert task["assignee"] is None
+    assert task["tenant"] == "flow-capture"
+
+    r = client.get("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none")
+    assert r.status_code == 200, r.text
+    tasks = [item for column in r.json()["columns"] for item in column["tasks"]]
+    card = next(item for item in tasks if item["id"] == task_id)
+    assert card["status"] == "triage"
+    assert card["assignee"] is None
+    assert card["tenant"] == "flow-capture"
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}/flow-plan")
+    assert r.status_code == 404
+    assert not (spec_dir / f"{task_id}.md").exists()
+    with kb.connect() as conn:
+        persisted = kb.get_task(conn, task_id)
+        events = [event.kind for event in kb.list_events(conn, task_id)]
+    assert persisted is not None
+    assert persisted.status == "triage"
+    assert persisted.assignee is None
+    assert "flow_plan" not in events
+    assert "specified" not in events
+
+
 def test_board_card_diagnostics_summary_omits_detail(client, monkeypatch):
     """``card_diagnostics=summary`` drops the per-card structured diagnostics
     list (the bulk of the /control poll payload) but keeps the compact

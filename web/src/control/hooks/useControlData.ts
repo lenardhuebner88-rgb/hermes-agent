@@ -1005,6 +1005,23 @@ export interface CaptureResult {
   taskStatus?: string;
   detail?: string;
 }
+
+async function postFlowCapture(title: string, method: CaptureMethod, gate: boolean) {
+  return fetchJSON<{ ok?: boolean; task_id?: string; reason?: string }>("/api/plugins/kanban/tasks/flow-capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(flowCaptureRequest(title, method, gate)),
+  });
+}
+
+async function postPlainCapture(title: string, method: CaptureMethod) {
+  return fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(captureRequest(title, method)),
+  });
+}
+
 export function useCaptureTask(onCreated?: (taskId: string) => void) {
   const [state, setState] = useState<CaptureState>("idle");
   const [error, setError] = useState<string>("");
@@ -1026,11 +1043,7 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
     setError("");
     try {
       if (usesFlowCaptureEndpoint(method, gate)) {
-        const res = await fetchJSON<{ ok?: boolean; task_id?: string; reason?: string }>("/api/plugins/kanban/tasks/flow-capture", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(flowCaptureRequest(title, method, gate)),
-        });
+        const res = await postFlowCapture(title, method, gate);
         if (res.ok === false) {
           const detail = res.reason || "Planung fehlgeschlagen";
           if (aliveRef.current) { setState("error"); setError(detail); }
@@ -1043,11 +1056,7 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
         if (res.task_id) onCreated?.(res.task_id);
         return { ok: true, taskId: res.task_id };
       }
-      const res = await fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(captureRequest(title, method)),
-      });
+      const res = await postPlainCapture(title, method);
       if (aliveRef.current) setState("done");
       if (res.task?.id) onCreated?.(res.task.id);
       return { ok: true, taskId: res.task?.id, taskStatus: res.task?.status };

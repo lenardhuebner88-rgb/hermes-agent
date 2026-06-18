@@ -1734,37 +1734,15 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_max_turns=payload.goal_max_turns,
             model_override=payload.model_override,
         )
-        # Park: move the brand-new task into ``scheduled`` so the autonomous
-        # orchestrator (triage -> auto-specify/decompose) and the dispatcher
-        # (ready -> run) leave it alone until the operator clicks Dispatch in
-        # the Fleet. triage -> todo (direct) then todo -> scheduled
-        # (schedule_task), both inside this handler's write connection so no
-        # 60s gateway tick can interleave. Idempotent re-create of an existing
-        # task is a no-op here (already past triage / not freshly parked).
         if payload.park:
-            fresh = kanban_db.get_task(conn, task_id)
-            if fresh is not None and fresh.status not in ("done", "archived", "scheduled", "running"):
-                if fresh.status == "triage":
-                    _set_status_direct(conn, task_id, "todo")
-                kanban_db.schedule_task(
-                    conn, task_id,
-                    reason="Aus dem Backlog in die Fleet kopiert — wartet auf Dispatch.",
-                )
-        # Subscribe-on-create: route terminal-state notifications for this task
-        # to every configured home channel (same target as the subscribe_home
-        # endpoint). Without this, dashboard-created roots stay unsubscribed and
-        # H1 inheritance has no source sub to propagate to decompose children.
-        # Idempotent (PK collision); no home channels configured -> no-op.
+            _park_task_for_operator(
+                conn,
+                task_id,
+                reason="Aus dem Backlog in die Fleet kopiert — wartet auf Dispatch.",
+                allow_existing_active=False,
+            )
         if payload.notify_home:
-            for home in _configured_home_channels():
-                kanban_db.add_notify_sub(
-                    conn,
-                    task_id=task_id,
-                    platform=home["platform"],
-                    chat_id=home["chat_id"],
-                    thread_id=home["thread_id"] or None,
-                    notifier_profile=_active_profile_name(),
-                )
+            _subscribe_task_to_home_channels(conn, task_id)
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
         # Surface a dispatcher-presence warning so the UI can show a
@@ -2248,6 +2226,35 @@ def _set_status_direct(
     if new_status in {"done", "ready"}:
         kanban_db.recompute_ready(conn)
     return True
+
+
+def _park_task_for_operator(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    allow_existing_active: bool,
+) -> None:
+    fresh = kanban_db.get_task(conn, task_id)
+    if fresh is None:
+        return
+    if not allow_existing_active and fresh.status in ("done", "archived", "scheduled", "running"):
+        return
+    if fresh.status == "triage":
+        _set_status_direct(conn, task_id, "todo")
+    kanban_db.schedule_task(conn, task_id, reason=reason)
+
+
+def _subscribe_task_to_home_channels(conn: sqlite3.Connection, task_id: str) -> None:
+    for home in _configured_home_channels():
+        kanban_db.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform=home["platform"],
+            chat_id=home["chat_id"],
+            thread_id=home["thread_id"] or None,
+            notifier_profile=_active_profile_name(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -5753,22 +5760,14 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
             priority=payload.priority,
             triage=True,
         )
-        fresh = kanban_db.get_task(conn, task_id)
-        if fresh is not None and fresh.status == "triage":
-            _set_status_direct(conn, task_id, "todo")
-        kanban_db.schedule_task(
-            conn, task_id, reason="Flow-Plan: geparkt während der Planung",
+        _park_task_for_operator(
+            conn,
+            task_id,
+            reason="Flow-Plan: geparkt während der Planung",
+            allow_existing_active=True,
         )
         if payload.notify_home:
-            for home in _configured_home_channels():
-                kanban_db.add_notify_sub(
-                    conn,
-                    task_id=task_id,
-                    platform=home["platform"],
-                    chat_id=home["chat_id"],
-                    thread_id=home["thread_id"] or None,
-                    notifier_profile=_active_profile_name(),
-                )
+            _subscribe_task_to_home_channels(conn, task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
