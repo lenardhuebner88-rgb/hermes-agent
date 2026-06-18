@@ -664,6 +664,93 @@ def test_stats_includes_k6_throughput_and_cost_keys(client):
     assert stats["total_cost_usd_24h"] is None  # pre-K5a
 
 
+def test_stats_autonomy_endpoint_counts_operator_escalations(client):
+    conn = kb.connect()
+    try:
+        tasks = [kb.create_task(conn, title=f"task {i}", assignee="coder") for i in range(4)]
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'operator_escalation', NULL, ?)",
+            (tasks[0], int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/stats/autonomy").json()
+    assert data == {
+        "accepted_tasks": 4,
+        "operator_escalations": 1,
+        "autonomy_rate": 0.75,
+    }
+
+
+def test_stats_chain_completion_endpoint_counts_done_roots_with_all_leaves_done(client):
+    conn = kb.connect()
+    try:
+        full_root = kb.create_task(conn, title="full root", assignee="orchestrator")
+        full_leaf_a = kb.create_task(conn, title="full leaf a", assignee="coder")
+        full_leaf_b = kb.create_task(conn, title="full leaf b", assignee="coder")
+        partial_root = kb.create_task(conn, title="partial root", assignee="orchestrator")
+        partial_leaf_done = kb.create_task(conn, title="partial leaf done", assignee="coder")
+        partial_leaf_open = kb.create_task(conn, title="partial leaf open", assignee="coder")
+        for leaf in (full_leaf_a, full_leaf_b):
+            kb.link_tasks(conn, leaf, full_root)
+        for leaf in (partial_leaf_done, partial_leaf_open):
+            kb.link_tasks(conn, leaf, partial_root)
+        conn.execute(
+            "UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?, ?, ?, ?)",
+            (int(time.time()), full_root, full_leaf_a, full_leaf_b, partial_root, partial_leaf_done),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    data = client.get("/api/plugins/kanban/stats/chain-completion").json()
+    assert data == {
+        "done_roots": 2,
+        "completed_done_roots": 1,
+        "chain_completion_rate": 0.5,
+    }
+
+
+def test_stats_payload_includes_queue_wait_p50(client, monkeypatch):
+    monkeypatch.setattr(kb.time, "time", lambda: 1_000)
+    conn = kb.connect()
+    try:
+        task_ids = [kb.create_task(conn, title=f"queued {i}", assignee="coder") for i in range(3)]
+        for task_id, created_at, started_at in zip(task_ids, (100, 200, 300), (110, 230, 390)):
+            conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (created_at, task_id))
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at) VALUES (?, 'coder', 'running', NULL, ?)",
+                (task_id, started_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stats = client.get("/api/plugins/kanban/stats").json()
+    assert stats["oldest_ready_age_seconds"] == 900
+    assert stats["queue_wait_p50_seconds"] == 30
+
+
+def test_stats_payload_includes_run_duration_percentiles(client, monkeypatch):
+    monkeypatch.setattr(kb.time, "time", lambda: 10_000)
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="duration seed", assignee="coder")
+        for start, end in ((9_900, 9_910), (9_920, 9_940), (9_950, 9_980)):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES (?, 'coder', 'done', 'completed', ?, ?)",
+                (task_id, start, end),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stats = client.get("/api/plugins/kanban/stats").json()
+    assert stats["run_duration_percentiles"]["coder"] == {"p50": 20, "p90": 30, "n": 3}
+
+
 def test_runs_summary_groups_completed_tree_by_root(client, kanban_home):
     """K7: a decomposed tree is summarised once at its root; interior work
     nodes are not listed as separate roots."""

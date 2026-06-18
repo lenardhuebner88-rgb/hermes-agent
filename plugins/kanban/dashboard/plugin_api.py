@@ -4512,6 +4512,28 @@ def get_stats(board: Optional[str] = Query(None)):
         conn.close()
 
 
+@router.get("/stats/autonomy")
+def get_stats_autonomy(board: Optional[str] = Query(None)):
+    """Operator-free acceptance rate from task events."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.autonomy_stats(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/stats/chain-completion")
+def get_stats_chain_completion(board: Optional[str] = Query(None)):
+    """Done roots whose dependency leaves are all done."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.chain_completion_stats(conn)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Worker log (read-only; file written by _default_spawn)
 # ---------------------------------------------------------------------------
