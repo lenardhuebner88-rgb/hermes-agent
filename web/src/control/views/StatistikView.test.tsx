@@ -1,13 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  BudgetLedgerSection,
+  EffizienzSection,
   ErrorTaxonomySection,
   LatencySection,
   ReliabilitySection,
   StatsMasthead,
 } from "./StatistikView";
 import { broadsheet } from "../lib/broadsheetTokens";
-import type { IssueGroup, ReliabilityProfile, RunsDailyPoint } from "../lib/schemas";
+import type {
+  AccountUsageProvider,
+  AccountUsageWindow,
+  CostProfileRow,
+  IssueGroup,
+  ReliabilityProfile,
+  RunsDailyPoint,
+} from "../lib/schemas";
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
   return {
@@ -55,6 +64,37 @@ function issue(outcomes: Record<string, number>): IssueGroup {
     example_run_id: 0,
     example_task_id: "",
     example_text: "",
+  };
+}
+
+function uwindow(over: Partial<AccountUsageWindow> = {}): AccountUsageWindow {
+  return { label: "Limit", window_key: null, used_percent: null, reset_at: null, detail: null, ...over };
+}
+function provider(over: Partial<AccountUsageProvider> = {}): AccountUsageProvider {
+  return {
+    provider: "anthropic",
+    available: true,
+    source: "oauth_usage_api",
+    fetched_at: null,
+    title: "Account limits",
+    plan: null,
+    windows: [],
+    details: [],
+    unavailable_reason: null,
+    cached: false,
+    ...over,
+  };
+}
+function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
+  return {
+    profile: "coder",
+    subscription: null,
+    runs: 0,
+    cost_usd: null,
+    cost_usd_equivalent: null,
+    input_tokens: null,
+    output_tokens: null,
+    ...over,
   };
 }
 
@@ -175,5 +215,92 @@ describe("ErrorTaxonomySection (ST4)", () => {
     const html = renderToStaticMarkup(<ErrorTaxonomySection issues={[]} />);
     expect(html).toContain("sauberes Fenster");
     expect(html).not.toContain("sb-estack");
+  });
+});
+
+describe("BudgetLedgerSection (ST5)", () => {
+  it("orders providers Engpass-first, leads with the bottleneck, tags Kimi estimated", () => {
+    const html = renderToStaticMarkup(
+      <BudgetLedgerSection
+        providers={[
+          provider({ provider: "kimi", source: "kanban_subscription_tokens", title: "Kimi subscription tokens", windows: [] }),
+          provider({
+            provider: "anthropic",
+            source: "oauth_usage_api",
+            windows: [
+              uwindow({ window_key: "session", used_percent: 30 }),
+              uwindow({ window_key: "weekly", used_percent: 92, reset_at: "2026-06-19T00:00:00Z" }),
+            ],
+          }),
+          provider({ provider: "openai-codex", source: "usage_api", windows: [uwindow({ window_key: "weekly", used_percent: 40 })] }),
+        ]}
+      />,
+    );
+    expect(html).toContain("Budget-Ledger");
+    expect(html).toContain("sb-led-row");
+    // Engpass lead names the tightest window (Claude · Woche · 92 %).
+    expect(html).toContain("sb-lead");
+    expect(html).toContain("Claude Woche bei 92 %");
+    // Claude (92 %) sorts before ChatGPT (40 %); both render.
+    expect(html.indexOf("ChatGPT")).toBeGreaterThan(0);
+    expect(html).toContain("sb-led-fig sb-crit"); // 92 % → crit ink
+    // Kimi is flagged estimated and has no provider limit.
+    expect(html).toContain("sb-tagm");
+    expect(html).toContain("geschätzt");
+    expect(html).toContain("kein Provider-Limit");
+  });
+
+  it("renders a calm empty state when no provider limits are available", () => {
+    const html = renderToStaticMarkup(<BudgetLedgerSection providers={[]} />);
+    expect(html).toContain("Keine Limit-Daten verfügbar.");
+  });
+
+  it("carries an unavailable provider through without a meter", () => {
+    const html = renderToStaticMarkup(
+      <BudgetLedgerSection
+        providers={[provider({ provider: "anthropic", available: false, unavailable_reason: "no oauth token", windows: [] })]}
+      />,
+    );
+    expect(html).toContain("no oauth token");
+    expect(html).toContain("—");
+  });
+});
+
+describe("EffizienzSection (ST5)", () => {
+  it("shows the three efficiency KPIs and the per-lane token burn", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection
+        profiles={[profile({ runs: 80, rejected: 8 }), profile({ runs: 20, rejected: 2 })]}
+        costs={[
+          costRow({ profile: "coder", input_tokens: 1_200_000, output_tokens: 0, runs: 12 }),
+          costRow({ profile: "w", input_tokens: 9_000_000, output_tokens: 0, runs: 1 }), // phantom → dropped
+        ]}
+        chainRate={0.75}
+        queueWaitSeconds={240}
+      />,
+    );
+    expect(html).toContain("Flotten-Effizienz");
+    // Chain-Completion 75 % (accent), Queue-Wait p50 = 4m, Gate 10/100 = 10 %.
+    expect(html).toContain("Ketten-Abschluss");
+    expect(html).toContain("sb-n sb-accent");
+    expect(html).toContain("75");
+    expect(html).toContain("Queue-Wartezeit");
+    expect(html).toContain("4m");
+    expect(html).toContain("Gate-Quote");
+    // Token-Burn leaderboard: coder 1.2 M, phantom dropped.
+    expect(html).toContain("Token-Burn je Lane");
+    expect(html).toContain("sb-lr");
+    expect(html).toContain("1.2 M");
+    expect(html).toContain("Coder");
+    expect(html).toContain("12 Läufe");
+    expect(html).not.toContain("9.0 M");
+  });
+
+  it("stays calm with em-dashes and an empty-burn note when nothing ran", () => {
+    const html = renderToStaticMarkup(
+      <EffizienzSection profiles={[]} costs={[]} chainRate={null} queueWaitSeconds={null} />,
+    );
+    expect(html).toContain("Noch kein Token-Burn im Fenster.");
+    expect(html).toContain("—");
   });
 });

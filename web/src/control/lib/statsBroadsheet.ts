@@ -12,7 +12,14 @@
  */
 import { broadsheet, type BroadsheetStatus } from "./broadsheetTokens";
 import { profileLabel } from "./tones";
-import type { IssueGroup, ReliabilityProfile, RunsDailyPoint } from "./schemas";
+import type {
+  AccountUsageProvider,
+  AccountUsageWindow,
+  CostProfileRow,
+  IssueGroup,
+  ReliabilityProfile,
+  RunsDailyPoint,
+} from "./schemas";
 
 // ── Phantom filter ──────────────────────────────────────────────────────────
 // The known worker roster — mirrors ~/.hermes/profiles/ and the control-wide
@@ -216,4 +223,120 @@ const MONTHS_DE = [
 export function germanDate(epochSec: number): string {
   const d = new Date(epochSec * 1000);
   return `${d.getUTCDate()}. ${MONTHS_DE[d.getUTCMonth()]}`;
+}
+
+// ── ST5 · Budget-Ledger (Provider-Limits, Engpass zuerst) ───────────────────
+// Aus GET /api/account-usage: pro Provider die knappste (höchstes used_percent)
+// Fenster-Zeile. Claude (anthropic) / ChatGPT (openai-codex) liefern echte
+// OAuth-Fenster (session/weekly); Kimi ist geschätzt (source=
+// kanban_subscription_tokens, kein Provider-Limit) und wird so markiert.
+const PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Claude",
+  "openai-codex": "ChatGPT",
+  kimi: "Kimi",
+};
+const WINDOW_LABEL: Record<string, string> = {
+  session: "Session",
+  weekly: "Woche",
+  opus_week: "Opus · Woche",
+  sonnet_week: "Sonnet · Woche",
+};
+/** source-Wert, der eine geschätzte (kein-Provider-Limit) Bilanz markiert. */
+export const ESTIMATED_SOURCE = "kanban_subscription_tokens";
+
+export interface LedgerEntry {
+  provider: string;
+  label: string;
+  /** menschliches Fenster-Label der knappsten Zeile; "" wenn keine Zeile. */
+  window: string;
+  /** 0..100 used_percent der knappsten Zeile; null wenn unbekannt. */
+  usedPercent: number | null;
+  status: BroadsheetStatus;
+  /** Kimi-Schätzung — kein echtes Provider-Kontingent. */
+  estimated: boolean;
+  resetAt: string | null;
+  available: boolean;
+  unavailableReason: string | null;
+}
+
+/** Auslastungs-Status: je näher am Limit, desto kritischer. */
+export function budgetStatus(usedPercent: number | null): BroadsheetStatus {
+  if (usedPercent == null) return "neutral";
+  if (usedPercent >= 90) return "crit";
+  if (usedPercent >= 75) return "warn";
+  return "ok";
+}
+
+/** Knappstes Fenster (höchstes used_percent); null, wenn kein Fenster ein
+ *  bekanntes used_percent hat (z. B. Kimi ohne konfiguriertes Cap). */
+function tightestWindow(windows: AccountUsageWindow[]): AccountUsageWindow | null {
+  let top: AccountUsageWindow | null = null;
+  for (const w of windows) {
+    if (w.used_percent == null) continue;
+    if (top == null || w.used_percent > (top.used_percent ?? -1)) top = w;
+  }
+  return top;
+}
+
+/** Eine Ledger-Zeile je Provider (knappste Auslastung), Engpass zuerst. */
+export function budgetLedger(providers: AccountUsageProvider[]): LedgerEntry[] {
+  const entries: LedgerEntry[] = providers.map((p) => {
+    const top = tightestWindow(p.windows);
+    const usedPercent = top?.used_percent ?? null;
+    return {
+      provider: p.provider,
+      label: PROVIDER_LABEL[p.provider] ?? p.provider,
+      window: top ? WINDOW_LABEL[top.window_key ?? ""] ?? top.label : "",
+      usedPercent,
+      status: budgetStatus(usedPercent),
+      estimated: p.source === ESTIMATED_SOURCE,
+      resetAt: top?.reset_at ?? null,
+      available: p.available,
+      unavailableReason: p.unavailable_reason,
+    };
+  });
+  // Engpass zuerst: höchstes used_percent oben, unbekannte (null) ans Ende.
+  return entries.sort((a, b) => (b.usedPercent ?? -1) - (a.usedPercent ?? -1));
+}
+
+// ── ST5 · Flotten-Effizienz ─────────────────────────────────────────────────
+// Token-Burn je Lane aus runs_costs().profiles[] (In+Out-Tokens, phantom-
+// gefiltert wie das Leaderboard), absteigend nach Burn. Das ist Lane-
+// Attribution (welche Lane verbrennt das Budget), keine Vanity-Tagesmetrik.
+export interface LaneBurn {
+  profile: string;
+  label: string;
+  /** input + output Tokens im Fenster. */
+  tokens: number;
+  /** ≈ API-Wert (echte $ + Subscription-Äquivalent); null wenn ungestampt. */
+  costEquivalent: number | null;
+  runs: number;
+}
+
+export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
+  return rosterProfiles(profiles)
+    .map((p) => {
+      const tokens = (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
+      const cost = (p.cost_usd ?? 0) + (p.cost_usd_equivalent ?? 0);
+      return {
+        profile: p.profile,
+        label: profileLabel[p.profile] ?? p.profile,
+        tokens,
+        costEquivalent: cost > 0 ? cost : null,
+        runs: p.runs,
+      };
+    })
+    .filter((l) => l.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, limit);
+}
+
+/** Gate-Effektivität = Σ rejected / Σ runs über alle Profile (Reliability-Rows):
+ *  Anteil der Läufe, die das Verifier-Gate abgelehnt hat. Fleet-weit (roh, wie
+ *  die Akzeptanz-Headline). null, wenn keine Läufe im Fenster. */
+export function gateEffectiveness(profiles: ReliabilityProfile[]): number | null {
+  const runs = profiles.reduce((acc, p) => acc + p.runs, 0);
+  if (runs <= 0) return null;
+  const rejected = profiles.reduce((acc, p) => acc + p.rejected, 0);
+  return rejected / runs;
 }

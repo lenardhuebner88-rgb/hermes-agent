@@ -17,14 +17,24 @@
  */
 import { useMemo, type ReactNode } from "react";
 import { de } from "../i18n/de";
-import { fmtClock, fmtDur, nowSec } from "../lib/derive";
+import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import {
+  useAccountUsage,
+  useBoardStats,
+  useChainCompletion,
   useHermesReliability,
+  useHermesRunsCosts,
   useHermesRunsDaily,
   useHermesRunsIssues,
   useHermesRunSummary,
 } from "../hooks/useControlData";
-import type { IssueGroup, ReliabilityProfile, RunsDailyPoint } from "../lib/schemas";
+import type {
+  AccountUsageProvider,
+  CostProfileRow,
+  IssueGroup,
+  ReliabilityProfile,
+  RunsDailyPoint,
+} from "../lib/schemas";
 import {
   BroadsheetShell,
   BroadsheetFooter,
@@ -33,6 +43,7 @@ import {
   ErrorLegend,
   ErrorLegendItem,
   LeaderRow,
+  LedgerRow,
   Masthead,
   SectionRule,
   SupportingStat,
@@ -45,12 +56,16 @@ import {
   acceptance,
   acceptanceDelta,
   autonomy,
+  budgetLedger,
   costPerDelivery,
   errorTaxonomy,
+  gateEffectiveness,
   germanDate,
+  laneBurn,
   leaderboard,
   nutzerwert,
   rosterProfiles,
+  type LedgerEntry,
 } from "../lib/statsBroadsheet";
 
 const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}`);
@@ -196,17 +211,122 @@ export function ErrorTaxonomySection({ issues }: { issues: IssueGroup[] }) {
   );
 }
 
+// ── Budget-Ledger (Provider-Limits, Engpass zuerst) ──────────────────────────
+// GET /api/account-usage: je Provider die knappste Auslastung, Engpass-Zeile
+// oben. Claude/ChatGPT = echter OAuth-Fetch je window_key (session/weekly);
+// Kimi ist geschätzt (kein Provider-Limit) und so getaggt.
+function ledgerFoot(r: LedgerEntry): string {
+  if (!r.available) return r.unavailableReason ?? de.stats.budgetUnavailable;
+  if (r.window) return r.window;
+  return r.estimated ? de.stats.budgetNoLimit : de.stats.budgetNoWindow;
+}
+
+export function BudgetLedgerSection({ providers }: { providers: AccountUsageProvider[] }) {
+  const rows = useMemo(() => budgetLedger(providers), [providers]);
+  // Engpass-Lead: die knappste Zeile, sofern sie schon spürbar (≠ ok) ist.
+  const lead = rows.find((r) => r.usedPercent != null && r.status !== "ok") ?? null;
+  return (
+    <>
+      <SectionRule title={de.stats.secBudget} meta={de.stats.secBudgetMeta} />
+      {lead && lead.usedPercent != null ? (
+        <EngpassLead tone={lead.status === "crit" ? "crit" : "warn"}>
+          {de.stats.budgetLeadPre}
+          <b>{de.stats.budgetLead(lead.label, lead.window, Math.round(lead.usedPercent))}</b>
+        </EngpassLead>
+      ) : null}
+      {rows.length === 0 ? (
+        <Verdict tone="calm">{de.stats.budgetEmpty}</Verdict>
+      ) : (
+        rows.map((r) => (
+          <LedgerRow
+            key={r.provider}
+            name={r.label}
+            tag={r.estimated ? de.stats.budgetEstimated : undefined}
+            figure={r.usedPercent == null ? "—" : `${Math.round(r.usedPercent)} %`}
+            status={r.status}
+            pct={r.usedPercent ?? 0}
+            footLeft={ledgerFoot(r)}
+            footRight={r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined}
+          />
+        ))
+      )}
+    </>
+  );
+}
+
+// ── Flotten-Effizienz (Durchsatz, Gate, Token-Burn je Lane) ──────────────────
+// Drei Effizienz-KPIs (Ketten-Abschluss · Queue-Wartezeit · Gate-Quote) plus
+// Token-Burn je Lane. Bewusst KEINE Vanity-Metriken (Out-Tokens/Tag, roher
+// Abo-Verbrauch) — nur handlungsleitende Effizienz.
+export function EffizienzSection({
+  profiles,
+  costs,
+  chainRate,
+  queueWaitSeconds,
+}: {
+  profiles: ReliabilityProfile[];
+  costs: CostProfileRow[];
+  chainRate: number | null;
+  queueWaitSeconds: number | null;
+}) {
+  const lanes = useMemo(() => laneBurn(costs), [costs]);
+  const gate = gateEffectiveness(profiles);
+  return (
+    <>
+      <SectionRule title={de.stats.secEffizienz} meta={de.stats.secEffizienzMeta} />
+      <SupportingStats>
+        <SupportingStat
+          value={pctText(chainRate)}
+          unit={chainRate == null ? undefined : "%"}
+          label={de.stats.effChain}
+          accent
+        />
+        <SupportingStat
+          value={queueWaitSeconds == null ? "—" : fmtDur(queueWaitSeconds)}
+          label={de.stats.effQueue}
+        />
+        <SupportingStat
+          value={pctText(gate)}
+          unit={gate == null ? undefined : "%"}
+          label={de.stats.effGate}
+        />
+      </SupportingStats>
+      <SectionRule title={de.stats.secBurn} meta={de.stats.secBurnMeta} />
+      {lanes.length === 0 ? (
+        <Verdict tone="calm">{de.stats.burnEmpty}</Verdict>
+      ) : (
+        lanes.map((l, i) => (
+          <LeaderRow
+            key={l.profile}
+            rank={i + 1}
+            name={l.label}
+            score={fmtTokens(l.tokens)}
+            status="neutral"
+            latency={de.stats.leaderRuns(l.runs)}
+          />
+        ))
+      )}
+    </>
+  );
+}
+
 export function StatistikView() {
   const reliability = useHermesReliability();
   const summary = useHermesRunSummary();
   const daily = useHermesRunsDaily();
   const issues = useHermesRunsIssues();
+  const accountUsage = useAccountUsage();
+  const costs = useHermesRunsCosts();
+  const chain = useChainCompletion();
+  const board = useBoardStats();
 
   const now = reliability.data?.now ?? nowSec();
   const profiles = useMemo(() => reliability.data?.profiles ?? [], [reliability.data]);
   const baseline = useMemo(() => reliability.data?.baseline ?? [], [reliability.data]);
   const last7 = useMemo(() => (daily.data?.series ?? []).slice(-7), [daily.data]);
   const issueGroups = useMemo(() => issues.data?.issues ?? [], [issues.data]);
+  const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
+  const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
@@ -230,7 +350,15 @@ export function StatistikView() {
 
       <ErrorTaxonomySection issues={issueGroups} />
 
-      {/* ── ST5 seam: Budget-Ledger + Effizienz sections insert here ───────── */}
+      {/* ── ST5: Budget-Ledger (Provider-Limits) + Flotten-Effizienz ───────── */}
+      <BudgetLedgerSection providers={providers} />
+
+      <EffizienzSection
+        profiles={profiles}
+        costs={costProfiles}
+        chainRate={chain.data?.chain_completion_rate ?? null}
+        queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
+      />
 
       <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
     </BroadsheetShell>

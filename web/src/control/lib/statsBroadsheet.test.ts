@@ -3,17 +3,28 @@ import {
   acceptance,
   acceptanceDelta,
   autonomy,
+  budgetLedger,
+  budgetStatus,
   costPerDelivery,
   errorTaxonomy,
+  gateEffectiveness,
   germanDate,
   isRosterProfile,
+  laneBurn,
   leaderboard,
   nutzerwert,
   reliabilityStatus,
   rosterProfiles,
 } from "./statsBroadsheet";
 import { broadsheet } from "./broadsheetTokens";
-import type { IssueGroup, ReliabilityProfile, RunsDailyPoint } from "./schemas";
+import type {
+  AccountUsageProvider,
+  AccountUsageWindow,
+  CostProfileRow,
+  IssueGroup,
+  ReliabilityProfile,
+  RunsDailyPoint,
+} from "./schemas";
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
   return {
@@ -215,5 +226,146 @@ describe("germanDate", () => {
   it("formats a UTC epoch as a German day · month", () => {
     // 2026-06-18T08:00:00Z
     expect(germanDate(1781769600)).toBe("18. Juni");
+  });
+});
+
+// ── ST5 · Budget-Ledger + Flotten-Effizienz ─────────────────────────────────
+function uwindow(over: Partial<AccountUsageWindow> = {}): AccountUsageWindow {
+  return { label: "Limit", window_key: null, used_percent: null, reset_at: null, detail: null, ...over };
+}
+function provider(over: Partial<AccountUsageProvider> = {}): AccountUsageProvider {
+  return {
+    provider: "anthropic",
+    available: true,
+    source: "oauth_usage_api",
+    fetched_at: null,
+    title: "Account limits",
+    plan: null,
+    windows: [],
+    details: [],
+    unavailable_reason: null,
+    cached: false,
+    ...over,
+  };
+}
+function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
+  return {
+    profile: "coder",
+    subscription: null,
+    runs: 0,
+    cost_usd: null,
+    cost_usd_equivalent: null,
+    input_tokens: null,
+    output_tokens: null,
+    ...over,
+  };
+}
+
+describe("budgetStatus", () => {
+  it("escalates toward the limit; null usage is neutral", () => {
+    expect(budgetStatus(null)).toBe("neutral");
+    expect(budgetStatus(10)).toBe("ok");
+    expect(budgetStatus(74)).toBe("ok");
+    expect(budgetStatus(75)).toBe("warn");
+    expect(budgetStatus(89)).toBe("warn");
+    expect(budgetStatus(90)).toBe("crit");
+    expect(budgetStatus(100)).toBe("crit");
+  });
+});
+
+describe("budgetLedger", () => {
+  it("picks the tightest window per provider and orders bottleneck (Engpass) first", () => {
+    const rows = budgetLedger([
+      provider({
+        provider: "openai-codex",
+        source: "usage_api",
+        windows: [
+          uwindow({ window_key: "session", used_percent: 30, label: "Current session" }),
+          uwindow({ window_key: "weekly", used_percent: 55, label: "Current week" }),
+        ],
+      }),
+      provider({
+        provider: "anthropic",
+        source: "oauth_usage_api",
+        windows: [
+          uwindow({ window_key: "session", used_percent: 40 }),
+          uwindow({ window_key: "weekly", used_percent: 92, reset_at: "2026-06-19T00:00:00Z" }),
+        ],
+      }),
+    ]);
+    // anthropic 92 % (weekly) is the Engpass → first; label + window mapped.
+    expect(rows.map((r) => r.provider)).toEqual(["anthropic", "openai-codex"]);
+    expect(rows[0].label).toBe("Claude");
+    expect(rows[0].window).toBe("Woche");
+    expect(rows[0].usedPercent).toBe(92);
+    expect(rows[0].status).toBe("crit");
+    expect(rows[0].resetAt).toBe("2026-06-19T00:00:00Z");
+    // openai-codex tightest window is weekly 55 %.
+    expect(rows[1].label).toBe("ChatGPT");
+    expect(rows[1].usedPercent).toBe(55);
+    expect(rows[1].status).toBe("ok");
+  });
+
+  it("flags Kimi as estimated (kanban_subscription_tokens) and sorts unknown usage last", () => {
+    const rows = budgetLedger([
+      provider({ provider: "kimi", source: "kanban_subscription_tokens", title: "Kimi subscription tokens", windows: [] }),
+      provider({ provider: "anthropic", windows: [uwindow({ window_key: "weekly", used_percent: 12 })] }),
+    ]);
+    // anthropic has a known 12 %, kimi has null → kimi last.
+    expect(rows.map((r) => r.provider)).toEqual(["anthropic", "kimi"]);
+    const kimi = rows.find((r) => r.provider === "kimi")!;
+    expect(kimi.estimated).toBe(true);
+    expect(kimi.usedPercent).toBeNull();
+    expect(kimi.status).toBe("neutral");
+    // a real OAuth provider is never flagged estimated.
+    expect(rows.find((r) => r.provider === "anthropic")!.estimated).toBe(false);
+  });
+
+  it("carries unavailability through instead of inventing usage", () => {
+    const rows = budgetLedger([
+      provider({ provider: "anthropic", available: false, unavailable_reason: "no oauth token", windows: [] }),
+    ]);
+    expect(rows[0].available).toBe(false);
+    expect(rows[0].unavailableReason).toBe("no oauth token");
+    expect(rows[0].usedPercent).toBeNull();
+  });
+});
+
+describe("laneBurn", () => {
+  it("phantom-filters, sums in+out tokens, sorts by burn desc, and caps the list", () => {
+    const rows = laneBurn(
+      [
+        costRow({ profile: "coder", input_tokens: 100, output_tokens: 50, runs: 4 }),
+        costRow({ profile: "w", input_tokens: 9000, output_tokens: 9000, runs: 1 }), // phantom → dropped
+        costRow({ profile: "verifier", input_tokens: 400, output_tokens: 300, runs: 9, cost_usd: 0.2, cost_usd_equivalent: 0.1 }),
+        costRow({ profile: "premium", input_tokens: 0, output_tokens: 0, runs: 2 }), // no burn → dropped
+      ],
+      2,
+    );
+    expect(rows.map((r) => r.profile)).toEqual(["verifier", "coder"]);
+    expect(rows[0].tokens).toBe(700);
+    expect(rows[0].costEquivalent).toBeCloseTo(0.3, 5);
+    expect(rows[0].label).toBe("Verifier");
+    expect(rows[1].tokens).toBe(150);
+    expect(rows[1].costEquivalent).toBeNull(); // unstamped
+  });
+
+  it("is empty when nothing burned tokens", () => {
+    expect(laneBurn([costRow({ profile: "coder", input_tokens: 0, output_tokens: 0 })])).toEqual([]);
+  });
+});
+
+describe("gateEffectiveness", () => {
+  it("is Σ rejected / Σ runs across the rows", () => {
+    const v = gateEffectiveness([
+      profile({ runs: 80, rejected: 8 }),
+      profile({ runs: 20, rejected: 2 }),
+    ]);
+    expect(v).toBeCloseTo(10 / 100, 5);
+  });
+
+  it("is null without any runs", () => {
+    expect(gateEffectiveness([])).toBeNull();
+    expect(gateEffectiveness([profile({ runs: 0, rejected: 0 })])).toBeNull();
   });
 });
