@@ -549,9 +549,12 @@ def validate_constraint_preservation(
 _WORKER_SCOPE_LANES: frozenset[str] = frozenset({
     "admin",
     "coder",
+    "coder-claude",
+    "premium",
     "research",
     "reviewer",
     "critic",
+    "verifier",
 })
 
 _BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (

@@ -5800,6 +5800,10 @@ def _submit_for_review(
     # review txn -> the task stays running/ready (same fail-safe as the
     # hallucination gate). && semantics: stop at the first failure.
     _wg = _worker_gate_config()
+    # #3-A: capture worker_gate stamp for the submitted_for_review payload.
+    # _wg_stamp accumulates the result; set to {"configured": False} when the
+    # gate is disabled/unconfigured, or {"passed": True/False, ...} when it ran.
+    _wg_stamp: dict = {"configured": False}
     if _wg["enabled"]:
         _wg_row = conn.execute(
             "SELECT assignee, workspace_path FROM tasks WHERE id = ?", (task_id,)
@@ -5812,30 +5816,51 @@ def _submit_for_review(
             except Exception:
                 _wg_key = _wg_ws
             _wg_cmds = _wg["repos"].get(_wg_key, _wg["default"])
-            for _cmd in _wg_cmds:
+            if _wg_cmds:
+                # Gate will run — initialize stamp as passed (flip on failure)
+                _wg_run_ts = _dt.datetime.now(_dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
                 try:
-                    _proc = subprocess.run(
-                        shlex.split(_cmd), cwd=_wg_ws,
-                        capture_output=True, text=True,
-                        timeout=_wg["timeout"], check=False,
-                    )
-                except (OSError, subprocess.SubprocessError) as _exc:
-                    _tail = f"{_cmd}: {_exc}"[-4000:]
-                    with write_txn(conn):
-                        _append_event(
-                            conn, task_id, "worker_gate_blocked",
-                            {"command": _cmd, "returncode": -1, "output_tail": _tail},
+                    _wg_commit = subprocess.run(
+                        ["git", "rev-parse", "HEAD"], cwd=_wg_ws,
+                        capture_output=True, text=True, timeout=10, check=False,
+                    ).stdout.strip()[:40]
+                except Exception:
+                    _wg_commit = ""
+                _wg_stamp = {
+                    "passed": True,
+                    "commands": list(_wg_cmds),
+                    "exit_codes": [],
+                    "ts": _wg_run_ts,
+                    "commit": _wg_commit,
+                }
+                for _cmd in _wg_cmds:
+                    try:
+                        _proc = subprocess.run(
+                            shlex.split(_cmd), cwd=_wg_ws,
+                            capture_output=True, text=True,
+                            timeout=_wg["timeout"], check=False,
                         )
-                    raise WorkerGateError(_cmd, -1, _tail)
-                if _proc.returncode != 0:
-                    _tail = ((_proc.stdout or "") + (_proc.stderr or ""))[-4000:]
-                    with write_txn(conn):
-                        _append_event(
-                            conn, task_id, "worker_gate_blocked",
-                            {"command": _cmd, "returncode": _proc.returncode,
-                             "output_tail": _tail},
-                        )
-                    raise WorkerGateError(_cmd, _proc.returncode, _tail)
+                    except (OSError, subprocess.SubprocessError) as _exc:
+                        _tail = f"{_cmd}: {_exc}"[-4000:]
+                        with write_txn(conn):
+                            _append_event(
+                                conn, task_id, "worker_gate_blocked",
+                                {"command": _cmd, "returncode": -1, "output_tail": _tail},
+                            )
+                        raise WorkerGateError(_cmd, -1, _tail)
+                    _wg_stamp["exit_codes"].append(_proc.returncode)
+                    if _proc.returncode != 0:
+                        _wg_stamp["passed"] = False
+                        _tail = ((_proc.stdout or "") + (_proc.stderr or ""))[-4000:]
+                        with write_txn(conn):
+                            _append_event(
+                                conn, task_id, "worker_gate_blocked",
+                                {"command": _cmd, "returncode": _proc.returncode,
+                                 "output_tail": _tail},
+                            )
+                        raise WorkerGateError(_cmd, _proc.returncode, _tail)
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -5904,6 +5929,9 @@ def _submit_for_review(
         # context (A2) and the dashboard. Absent when no git workspace.
         if diff_snapshot:
             payload.update(diff_snapshot)
+        # #3-A: additive worker_gate stamp — gives the verifier machine-readable
+        # gate evidence without changing any existing payload fields.
+        payload["worker_gate"] = _wg_stamp
         _append_event(
             conn, task_id, "submitted_for_review", payload, run_id=run_id,
         )
@@ -13184,6 +13212,56 @@ def _render_review_verifier_section(
             "_No machine diff snapshot was captured. Inspect the workspace "
             "directly (git status / git diff) before judging._"
         )
+
+    # (c) #3-A: worker_gate stamp — one machine-readable line for the verifier
+    # SOUL to match on. Format contract (must match exactly):
+    #   PASSED:  "Coder worker_gate: PASSED (exit 0) at <ts>, commit <sha7>"
+    #   FAILED:  "Coder worker_gate: FAILED (<cmd> exit <n>)"
+    #   N/A:     "Coder worker_gate: not configured for this repo (no coder-side gate ran)"
+    try:
+        _wg_ev_row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        _wg_ev: dict = {}
+        if _wg_ev_row and _wg_ev_row["payload"]:
+            _parsed = json.loads(_wg_ev_row["payload"])
+            if isinstance(_parsed, dict):
+                _wg_ev = _parsed.get("worker_gate") or {}
+    except Exception:
+        _wg_ev = {}
+    lines.append("")
+    if not _wg_ev or _wg_ev.get("configured") is False:
+        lines.append(
+            "Coder worker_gate: not configured for this repo "
+            "(no coder-side gate ran)"
+        )
+    elif _wg_ev.get("passed") is True:
+        _ts = _wg_ev.get("ts", "")
+        _sha = (_wg_ev.get("commit") or "")[:7]
+        lines.append(
+            f"Coder worker_gate: PASSED (exit 0) at {_ts}, commit {_sha}"
+        )
+    else:
+        _cmds = _wg_ev.get("commands") or []
+        _codes = _wg_ev.get("exit_codes") or []
+        # Find the first failing command
+        _fail_cmd = ""
+        _fail_code = 0
+        for _c, _e in zip(_cmds, _codes):
+            if _e != 0:
+                _fail_cmd = _c
+                _fail_code = _e
+                break
+        if not _fail_cmd and _cmds:
+            _fail_cmd = _cmds[-1]
+            _fail_code = _codes[-1] if _codes else -1
+        lines.append(
+            f"Coder worker_gate: FAILED ({_fail_cmd} exit {_fail_code})"
+        )
+
     lines.append("")
     return lines
 
