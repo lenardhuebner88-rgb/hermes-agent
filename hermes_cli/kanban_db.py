@@ -1393,7 +1393,10 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # _rebuild_drifted_tables) changes WITHOUT a matching SCHEMA_SQL change —
 # e.g. a new data backfill or event-kind rename. Schema changes themselves
 # already invalidate the stamp via the SCHEMA_SQL hash below.
-_SCHEMA_GENERATION = 2
+# gen 3 (#11): idx_events_kind was added to the migration pass only (not
+# SCHEMA_SQL), so already-stamped boards must re-run the additive pass once to
+# backfill it — without this bump connect()'s fast path would skip it forever.
+_SCHEMA_GENERATION = 3
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -2134,6 +2137,24 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "auto_retry_count INTEGER NOT NULL DEFAULT 0",
         )
 
+    # A1 (kanban-chain-haertung): PlanSpec provenance columns. All four are
+    # plain nullable TEXT — no default needed; NULL on every pre-A1 row
+    # preserves the exact behaviour those rows had before the columns existed.
+    if "planspec_subtask_id" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "planspec_subtask_id", "planspec_subtask_id TEXT"
+        )
+    if "planspec_source" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "planspec_source", "planspec_source TEXT"
+        )
+    if "freigabe" not in cols:
+        _add_column_if_missing(conn, "tasks", "freigabe", "freigabe TEXT")
+    if "live_test_depth" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "live_test_depth", "live_test_depth TEXT"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -2165,6 +2186,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_run "
         "ON task_events(run_id, id)"
+    )
+    # #11: decision_queue scans ``task_events WHERE kind = 'release_gate_parked'``
+    # (and similar kind filters).  ``kind`` is not the leading column of any
+    # existing index (those lead with task_id), so the scan was full-table on a
+    # large event log.  (kind, task_id) covers the filter + the join to tasks.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_kind "
+        "ON task_events(kind, task_id)"
     )
 
     # K5a: task_runs gained per-run token/cost accounting columns for D7 L1
@@ -2325,6 +2354,7 @@ _REBUILD_SPECS = {
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_task_id ON task_events(task_id, id)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
+            "CREATE INDEX idx_events_kind ON task_events(kind, task_id)",
         ),
     ),
     "task_comments": (
@@ -2952,6 +2982,8 @@ def create_task(
     kind: Optional[str] = None,
     board: Optional[str] = None,
     model_override: Optional[str] = None,
+    freigabe: Optional[str] = None,
+    live_test_depth: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3182,8 +3214,8 @@ def create_task(
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        model_override
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        model_override, freigabe, live_test_depth
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3210,6 +3242,8 @@ def create_task(
                         epic_id,
                         kind,
                         (model_override or "").strip() or None,
+                        freigabe,
+                        live_test_depth,
                     ),
                 )
                 for pid in parents:
@@ -7414,6 +7448,71 @@ def promote_task(
     return True, None
 
 
+def _structured_acceptance_criteria_json(value: Any) -> Optional[str]:
+    """Serialize structured PlanSpec AC dicts for tasks.acceptance_criteria.
+
+    Returns NULL for absent/malformed values so ad-hoc decomposes keep the
+    historical body-parse fallback.
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            statement = str(item.get("statement") or "").strip()
+            if not statement:
+                continue
+            clean = {str(k): v for k, v in item.items() if v is not None}
+            clean["statement"] = statement
+            out.append(clean)
+        elif isinstance(item, str) and item.strip():
+            out.append({"statement": item.strip()})
+    if not out:
+        return None
+    return json.dumps(out, ensure_ascii=False)
+
+
+def planspec_source_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Return a task's PlanSpec source from its own row (1-hop)."""
+    row = conn.execute(
+        "SELECT planspec_source FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    source = row["planspec_source"]
+    return source if isinstance(source, str) and source.strip() else None
+
+
+def release_uireal_root(conn: sqlite3.Connection, task_id: str, *, author: str = "operator") -> bool:
+    """Release a ui-real PlanSpec root held in scheduled state into todo.
+
+    The root still waits on its child parents; this only records explicit
+    operator intent and lets child-release paths proceed without recompute_ready
+    auto-releasing ui-real roots.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, live_test_depth FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["live_test_depth"] != "ui-real":
+            return False
+        if row["status"] == "todo":
+            _append_event(conn, task_id, "uireal_released", {"author": author, "idempotent": True})
+            return True
+        if row["status"] != "scheduled":
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "uireal_released", {"author": author})
+        return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
@@ -7576,6 +7675,16 @@ def _parse_acceptance_criteria(body: Optional[str]) -> Optional[str]:
     Returns the JSON string, or ``None`` when the body is empty, carries no
     recognizable AC bullets, or anything fails — strictly fail-soft so a parse
     miss never aborts a decomposition (the body itself is unchanged regardless).
+
+    #14 — altitude boundary (intentionally lossy, locked by
+    ``test_ac_body_roundtrip_contract_is_locked``): a bullet only carries an
+    ``AC-<id>: <statement>`` prose line, so a planspec criterion's structured
+    fields (``verification``/``done_signal``/``scope_level``/``applies_to``)
+    cannot be recovered here and survive only as a flat ``"AC-…: <stmt>"``
+    string. Those fields live in the source .md and are read structured by the
+    PlanSpec viewer (``GET /planspecs/detail``). Threading the full AC JSON onto
+    the child dict at decompose time (a structured store) is a deliberate
+    follow-up, not a silent behaviour to drift into.
     """
     if not isinstance(body, str) or not body.strip():
         return None
@@ -7732,7 +7841,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id, live_test_depth "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7776,17 +7885,23 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
-            # A1: parse structured acceptance criteria from the child's body.
-            # Fail-soft → NULL; the body is stored verbatim either way.
-            child_ac = _parse_acceptance_criteria(
-                body if isinstance(body, str) else None
-            )
+            # Phase4 D: PlanSpec children can pass structured AC dicts directly.
+            # Ad-hoc decomposes keep the historical body-parse fallback.
+            child_ac = _structured_acceptance_criteria_json(
+                child.get("acceptance_criteria_struct")
+            ) or _parse_acceptance_criteria(body if isinstance(body, str) else None)
+            # A2: PlanSpec provenance columns — populated when the child dict
+            # carries planspec_subtask_id / planspec_source (set by
+            # taskgraph_hints_to_children).  NULL on non-planspec children.
+            child_planspec_subtask_id = child.get("planspec_subtask_id")
+            child_planspec_source = child.get("planspec_source")
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
-                " acceptance_criteria, epic_id, kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " acceptance_criteria, epic_id, kind, "
+                " planspec_subtask_id, planspec_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7801,6 +7916,8 @@ def decompose_triage_task(
                     child_ac,
                     root_epic_id,
                     kind,
+                    child_planspec_subtask_id if isinstance(child_planspec_subtask_id, str) else None,
+                    child_planspec_source if isinstance(child_planspec_source, str) else None,
                 ),
             )
             _append_event(
@@ -7839,9 +7956,15 @@ def decompose_triage_task(
                 (cid, task_id),
             )
 
-        # Flip the root: triage -> todo, set assignee to the orchestrator.
-        sets = ["status = 'todo'"]
-        params: list[Any] = []
+        # Flip the root: normally triage/scheduled -> todo.  Phase4 A keeps
+        # ui-real PlanSpec roots held in scheduled until explicit operator release.
+        root_new_status = (
+            "scheduled"
+            if root_row["live_test_depth"] == "ui-real" and initial_child_status == "scheduled"
+            else "todo"
+        )
+        sets = ["status = ?"]
+        params: list[Any] = [root_new_status]
         if root_assignee is not None:
             sets.append("assignee = ?")
             params.append(root_assignee)
@@ -14659,6 +14782,76 @@ def decision_queue(
                 int(float(age) * 3600) if age is not None else None,
                 f"hermes kanban unblock {primary}" if primary
                 else f"hermes kanban show {tid}",
+            )
+    except Exception:
+        pass
+
+    # 6) tree_root_woke — a decompose ROOT that is 'ready' AND all its subtasks
+    #    are 'done'.  A decompose root DEPENDS ON its subtasks, so in task_links
+    #    the root is the child_id and the subtasks are the parent_ids — the same
+    #    direction recompute_ready uses (JOIN l.parent_id WHERE l.child_id = root)
+    #    to promote the root.  A root with no subtasks at all is excluded.
+    try:
+        for row in conn.execute(
+            "SELECT t.id AS task_id, t.title AS title, t.created_at AS created_at "
+            "FROM tasks t "
+            "WHERE t.status = 'ready' "
+            "  AND (t.planspec_source IS NOT NULL OR EXISTS ("
+            "    SELECT 1 FROM task_events e0 WHERE e0.task_id = t.id AND e0.kind = 'decomposed'"
+            "  )) "
+            # has at least one subtask (the root is the dependent child_id)
+            "  AND EXISTS (SELECT 1 FROM task_links WHERE child_id = t.id) "
+            # every subtask (parent) is done — same predicate recompute_ready uses
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM task_links l2 "
+            "    JOIN tasks t2 ON t2.id = l2.parent_id "
+            "    WHERE l2.child_id = t.id AND t2.status != 'done'"
+            "  )",
+        ).fetchall():
+            if row["task_id"] in seen:
+                continue
+            _add(
+                "tree_root_woke", row["task_id"], row["title"],
+                "Decompose root is ready — all subtasks done; root awaits finalization",
+                _age(row["created_at"]),
+                f"hermes kanban show {row['task_id']}",
+            )
+    except Exception:
+        pass
+
+    # 7) release_gate_parked — tasks carrying a 'release_gate_parked' event
+    #    that are NOT in a terminal state (not done/archived).  The
+    #    suggested_command is the FULL gate sequence: the event payload's own
+    #    ``commands`` list (what the gate actually parked on) joined with
+    #    ``&&``, falling back to the canonical _RELEASE_GATE_COMMANDS.  The old
+    #    ``next(iter(...))`` surfaced only the leading ``cd`` — a no-op alone.
+    try:
+        from hermes_cli import kanban_worktrees as _kwt  # lazy: avoids import cycle
+        _fallback_cmd = " && ".join(_kwt._RELEASE_GATE_COMMANDS) or "hermes kanban show <id>"
+        for row in conn.execute(
+            "SELECT e.task_id, e.payload, e.created_at AS event_at, "
+            "t.title AS title, MAX(e.id) "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = 'release_gate_parked' "
+            "  AND t.status NOT IN ('done', 'archived') "
+            "GROUP BY e.task_id",
+        ).fetchall():
+            if row["task_id"] in seen:
+                continue
+            payload = _payload_dict(row["payload"])
+            reason = (
+                str(payload.get("reason") or "").strip()
+                or "Release gate parked — awaiting GO"
+            )
+            cmds = payload.get("commands")
+            if isinstance(cmds, list) and cmds:
+                suggested = " && ".join(str(c) for c in cmds)
+            else:
+                suggested = _fallback_cmd
+            _add(
+                "release_gate_parked", row["task_id"], row["title"],
+                reason, _age(row["event_at"]),
+                suggested,
             )
     except Exception:
         pass

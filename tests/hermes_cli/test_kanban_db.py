@@ -51,6 +51,34 @@ def test_task_kind_column_migration_is_idempotent(kanban_home):
     assert cols.count("kind") == 1
 
 
+_PLANSPEC_COLS = [
+    "planspec_subtask_id",
+    "planspec_source",
+    "freigabe",
+    "live_test_depth",
+]
+
+
+def test_planspec_columns_exist_after_migration(kanban_home):
+    """A1: all four planspec columns must be present after init/migration."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    for col in _PLANSPEC_COLS:
+        assert col in cols, f"column '{col}' missing from tasks after migration"
+
+
+def test_planspec_columns_migration_is_idempotent(kanban_home):
+    """A1: running the migration twice must be a no-op (no exception, no duplicate)."""
+    with kb.connect() as conn:
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+    for col in _PLANSPEC_COLS:
+        assert cols.count(col) == 1, (
+            f"column '{col}' appears {cols.count(col)} times after double migration"
+        )
+
+
 def test_create_task_persists_optional_kind(kanban_home):
     with kb.connect() as conn:
         code_id = kb.create_task(conn, title="code task", kind="code")
@@ -7631,6 +7659,184 @@ def test_c1_budget_held_surfaces_in_decision_queue(
 
 
 # ---------------------------------------------------------------------------
+# C1 kanban-chain-haertung: tree_root_woke + release_gate_parked
+# ---------------------------------------------------------------------------
+
+
+def test_c1_tree_root_woke_all_children_done(kanban_home):
+    """A decompose root that is 'ready' with all children 'done' surfaces
+    as tree_root_woke. Reuses the same all-children-done predicate as
+    recompute_ready (only 'done' counts; not archived/failed)."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="root task", assignee="orchestrator")
+        child1 = kb.create_task(conn, title="child A", assignee="coder")
+        child2 = kb.create_task(conn, title="child B", assignee="coder")
+        # A decompose root DEPENDS ON its subtasks: the root is the child_id and
+        # each subtask is a parent_id (the same direction decompose_triage_task
+        # creates and recompute_ready reads). Building the links the other way
+        # round would make this test pass while the production query never fires.
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (child1, root),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (child2, root),
+            )
+        kb._append_event(conn, root, "decomposed", {"child_ids": [child1, child2]})
+        # Complete both children
+        _set_task_status(conn, child1, "done")
+        _set_task_status(conn, child2, "done")
+        # Root is now ready (woken up by completion)
+        _set_task_status(conn, root, "ready")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(root, result) == ["tree_root_woke"]
+    row = next(d for d in result["decisions"] if d["task_id"] == root)
+    assert row["suggested_command"] == f"hermes kanban show {root}"
+    assert row["age_seconds"] is not None
+    # Same shape as existing kinds
+    for key in ("kind", "task_id", "title", "reason", "age_seconds", "suggested_command"):
+        assert key in row, f"missing key {key!r} in tree_root_woke entry"
+
+
+def test_c1_tree_root_woke_not_emitted_if_child_not_done(kanban_home):
+    """Root must NOT appear when even one child is not yet done."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="root task", assignee="orchestrator")
+        child1 = kb.create_task(conn, title="child A", assignee="coder")
+        child2 = kb.create_task(conn, title="child B", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (child1, root),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (child2, root),
+            )
+        # Only child1 done; child2 still todo
+        _set_task_status(conn, child1, "done")
+        # child2 stays in 'todo' (default)
+        _set_task_status(conn, root, "ready")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(root, result) == []
+
+
+def test_c1_tree_root_woke_no_children_excluded(kanban_home):
+    """A ready task with NO children must NOT appear as tree_root_woke
+    (it was never decomposed)."""
+    with kb.connect() as conn:
+        leaf = kb.create_task(conn, title="plain ready", assignee="coder")
+        _set_task_status(conn, leaf, "ready")
+        result = kb.decision_queue(conn)
+    assert "tree_root_woke" not in _kinds_for(leaf, result)
+
+
+def test_c1_release_gate_parked_surfaces_in_decision_queue(kanban_home):
+    """A non-terminal task with a release_gate_parked event surfaces in the
+    decision queue with a suggested_command from _RELEASE_GATE_COMMANDS."""
+    from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
+
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="release gate task", assignee="verifier")
+        # Record the release_gate_parked event (status stays blocked/non-terminal)
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task, "release_gate_parked",
+                {
+                    "state": "GREEN_CODE_NOT_RUNTIME_ACTIVATED",
+                    "reason": "awaiting release-gate GO",
+                    "commands": list(_RELEASE_GATE_COMMANDS),
+                },
+            )
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(task, result) == ["release_gate_parked"]
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    # suggested_command must carry the FULL gate sequence, not just the bare cd
+    assert row["suggested_command"]
+    for cmd in _RELEASE_GATE_COMMANDS:
+        assert cmd in row["suggested_command"]
+    assert row["reason"] == "awaiting release-gate GO"
+    # Same shape as existing kinds
+    for key in ("kind", "task_id", "title", "reason", "age_seconds", "suggested_command"):
+        assert key in row, f"missing key {key!r} in release_gate_parked entry"
+
+
+def test_c1_release_gate_parked_excluded_when_done(kanban_home):
+    """A task that carries release_gate_parked but is already done must NOT
+    appear in the decision queue."""
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="done gate", assignee="verifier")
+        with kb.write_txn(conn):
+            kb._append_event(conn, task, "release_gate_parked", {"reason": "GO"})
+        _set_task_status(conn, task, "done")
+
+        result = kb.decision_queue(conn)
+
+    assert _kinds_for(task, result) == []
+
+
+def test_c1_release_gate_suggested_command_carries_full_sequence(kanban_home):
+    """#7: the suggested_command for a release_gate_parked decision must carry the
+    FULL command sequence from the event payload — not just the first bare ``cd``.
+
+    Regression for the original ``next(iter(_RELEASE_GATE_COMMANDS))`` which
+    surfaced only ``cd .../web`` (a no-op alone) instead of the whole gate."""
+    commands = [
+        "cd /home/piet/.hermes/hermes-agent/web",
+        "npm run build",
+        "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
+        "curl -fsS http://127.0.0.1:9119/control >/dev/null",
+    ]
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="gate task", assignee="verifier")
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task, "release_gate_parked",
+                {"reason": "awaiting release-gate GO", "commands": commands},
+            )
+
+        result = kb.decision_queue(conn)
+
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    suggested = row["suggested_command"]
+    # Every command from the payload must be present, chained — not just the cd.
+    for cmd in commands:
+        assert cmd in suggested, f"{cmd!r} missing from suggested_command {suggested!r}"
+    assert "npm run build" in suggested
+    assert suggested != commands[0]  # not the bare leading cd
+
+
+def test_c1_release_gate_suggested_command_falls_back_without_payload_commands(kanban_home):
+    """#7: when the event payload has no ``commands`` list, fall back to the
+    canonical _RELEASE_GATE_COMMANDS sequence (still the full gate, not a bare cd)."""
+    from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
+
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="gate task no cmds", assignee="verifier")
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(conn, task, "release_gate_parked", {"reason": "GO"})
+
+        result = kb.decision_queue(conn)
+
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    suggested = row["suggested_command"]
+    assert suggested
+    for cmd in _RELEASE_GATE_COMMANDS:
+        assert cmd in suggested
+
+
+# ---------------------------------------------------------------------------
 # F5 (night-sprint): scores-Tabelle + Review-Verdicts als Eval-Baseline
 # ---------------------------------------------------------------------------
 
@@ -8148,3 +8354,15 @@ def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
         assert t in result.heartbeated
         assert t not in result.stale
         assert kb.get_task(conn, t).status == "running"
+
+
+def test_phase4_tree_root_woke_excludes_plain_dependency_task(kanban_home):
+    """Phase4 F: tree_root_woke only reports real decomposed roots, not any dependent ready task."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="Parent")
+        child = kb.create_task(conn, title="Plain dependent")
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        kb.link_tasks(conn, parent, child)
+        result = kb.decision_queue(conn)
+    assert "tree_root_woke" not in _kinds_for(child, result)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 import sys
@@ -30,6 +31,10 @@ class BindingSubtask(BaseModel):
 
     ``deps`` are symbolic ids that are resolved to sibling parent indices right
     before inserting into the kanban graph.
+
+    ``acceptance_criteria`` is an optional per-subtask list of criteria ids or
+    full AcceptanceCriterion objects.  When absent, the caller falls back to the
+    plan-level criteria whose ``applies_to`` includes this subtask's id.
     """
 
     id: str
@@ -37,6 +42,7 @@ class BindingSubtask(BaseModel):
     lane: str
     deps: list[str] = Field(default_factory=list)
     body: str = ""
+    acceptance_criteria: list[Any] = Field(default_factory=list)
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -287,16 +293,143 @@ def _kind_for_planspec_lane(lane: str) -> str:
     return "code"
 
 
-def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[dict[str, Any]]:
+logger = logging.getLogger(__name__)
+
+# Strip a leading "AC"/"AC-"/"AC_" (with optional separators) from an AC id so an
+# id that already starts with "AC" (e.g. "AC1-foo") yields a single clean
+# "AC-1-foo" token instead of a doubled "AC-AC1-foo". The "AC" is only stripped
+# when followed by a separator or digit, so words like "ACCOUNT" are left intact.
+_AC_PREFIX_RE = re.compile(r"^ac(?=[-_\s\d])[-_\s]*", re.IGNORECASE)
+
+
+def _ac_token(ac_id: str, *, fallback: str) -> str:
+    """Build a single ``AC-<core>`` token for an AC bullet.
+
+    Guarantees the ``AC-`` marker that ``_parse_acceptance_criteria``
+    (kanban_db.py) requires, without doubling it for ids that already start with
+    ``AC``. Falls back to *fallback* when stripping leaves nothing.
+    """
+    core = _AC_PREFIX_RE.sub("", (ac_id or "").strip()).strip()
+    return f"AC-{core or fallback}"
+
+
+def _ac_statement_oneline(text: str) -> str:
+    """Collapse whitespace/newlines so a multi-line statement survives the
+    single-line bullet round-trip through ``_parse_acceptance_criteria``, which
+    only matches the first line of each bullet."""
+    return " ".join(str(text).split())
+
+
+def _ac_items_for_subtask(
+    subtask: "BindingSubtask",
+    plan_ac: "list[str | AcceptanceCriterion]",
+) -> list[str | AcceptanceCriterion]:
+    """Return normalized AC items that apply to *subtask*."""
+    if subtask.acceptance_criteria:
+        findings: list[str] = []
+        normalized = _normalize_acceptance_criteria(subtask.acceptance_criteria, findings)
+        if findings:
+            logger.warning(
+                "PlanSpec subtask %s: %d acceptance_criteria dropped: %s",
+                subtask.id, len(findings), "; ".join(findings),
+            )
+        if normalized:
+            return normalized
+    fallback: list[str | AcceptanceCriterion] = []
+    for item in plan_ac:
+        if isinstance(item, AcceptanceCriterion):
+            if not item.applies_to or subtask.id in item.applies_to:
+                fallback.append(item)
+        else:
+            fallback.append(item)
+    return fallback
+
+
+def _ac_bullets_for_subtask(
+    subtask: "BindingSubtask",
+    plan_ac: "list[str | AcceptanceCriterion]",
+) -> list[str]:
+    """Return the AC bullet lines that apply to *subtask*.
+
+    Priority order:
+    1. Per-subtask ``acceptance_criteria`` list (id strings or full dicts from
+       the subtask block itself).
+    2. Fallback: plan-level AC entries whose ``applies_to`` includes this
+       subtask's id.
+
+    Each line is formatted as ``- AC-<id>: <statement>`` so that
+    ``_parse_acceptance_criteria`` (kanban_db.py) can pick them up via its
+    ``\\bAC-\\w+`` bullet regex.
+    """
+    def _bullets(items: "list[str | AcceptanceCriterion]") -> list[str]:
+        out: list[str] = []
+        for n, item in enumerate(items, start=1):
+            if isinstance(item, str):
+                # Free-form string — synthesise a unique AC-<n> token per item so
+                # multiple free-form criteria don't collapse onto one shared id.
+                out.append(f"- AC-{n}: {_ac_statement_oneline(item)}")
+            else:
+                out.append(
+                    f"- {_ac_token(item.id, fallback=str(n))}: "
+                    f"{_ac_statement_oneline(item.statement)}"
+                )
+        return out
+
+    # 1. Per-subtask AC wins — but only when it yields at least one bullet. If
+    #    the subtask carries acceptance_criteria that are ALL invalid (every item
+    #    drops to findings), fall through to the plan-level fallback rather than
+    #    silently leaving the child with no AC at all.
+    if subtask.acceptance_criteria:
+        findings: list[str] = []
+        normalized = _normalize_acceptance_criteria(subtask.acceptance_criteria, findings)
+        if findings:
+            logger.warning(
+                "PlanSpec subtask %s: %d acceptance_criteria dropped: %s",
+                subtask.id, len(findings), "; ".join(findings),
+            )
+        bullets = _bullets(normalized)
+        if bullets:
+            return bullets
+
+    # 2. Fallback: plan-level AC that apply to this subtask. An entry with no
+    #    explicit applies_to (incl. free-form plan-level strings) is plan-wide
+    #    and threads into every subtask rather than being silently dropped.
+    fallback: list[str | AcceptanceCriterion] = []
+    for item in plan_ac:
+        if isinstance(item, AcceptanceCriterion):
+            if not item.applies_to or subtask.id in item.applies_to:
+                fallback.append(item)
+        else:
+            fallback.append(item)
+    return _bullets(fallback)
+
+
+def taskgraph_hints_to_children(
+    hints: "TaskgraphHints | dict[str, Any]",
+    *,
+    plan_ac: "list[str | AcceptanceCriterion] | None" = None,
+    planspec_source: "str | None" = None,
+) -> list[dict[str, Any]]:
     """Translate binding frontmatter hints into kanban ``children``.
 
     The output shape is accepted by :func:`kanban_db.decompose_triage_task`.
     It is deterministic and LLM-free: dependency ids become parent indices in
     the same order the PlanSpec lists subtasks.
+
+    Args:
+        hints: The binding taskgraph hints (as a model or raw dict).
+        plan_ac: Plan-level acceptance criteria list (``AcceptanceCriterion``
+            or free-form strings).  Used as fallback AC for subtasks that carry
+            no per-subtask ``acceptance_criteria``.  Pass ``None`` or ``[]`` to
+            disable AC threading (backward-compatible).
+        planspec_source: Absolute path of the originating ``.md`` file.
+            Stored in each child dict as ``planspec_source`` so
+            :func:`kanban_db.decompose_triage_task` can persist it.
     """
     model = hints if isinstance(hints, TaskgraphHints) else TaskgraphHints.model_validate(hints)
     if not model.binding:
         raise CompileBlocked(["taskgraph_hints.binding must be true for ingest"])
+    effective_plan_ac: list[str | AcceptanceCriterion] = list(plan_ac) if plan_ac else []
     index_by_id = {task.id: index for index, task in enumerate(model.subtasks)}
     children: list[dict[str, Any]] = []
     for task in model.subtasks:
@@ -308,18 +441,30 @@ def taskgraph_hints_to_children(hints: TaskgraphHints | dict[str, Any]) -> list[
         body_parts.append(f"Lane: {task.lane}")
         if task.deps:
             body_parts.append("Depends on: " + ", ".join(task.deps))
-        children.append(
-            {
-                "title": task.title,
-                "body": "\n\n".join(body_parts),
-                "assignee": task.lane,
-                "kind": _kind_for_planspec_lane(task.lane),
-                "parents": deps,
-                "planspec_id": task.id,
-                "planspec_lane": task.lane,
-                "planspec_deps": list(task.deps),
-            }
-        )
+        # Thread AC bullets into the body for backwards-readable task bodies,
+        # and pass the structured items separately for the DB store.
+        ac_items = _ac_items_for_subtask(task, effective_plan_ac)
+        ac_bullets = _ac_bullets_for_subtask(task, effective_plan_ac)
+        if ac_bullets:
+            body_parts.append("\n".join(ac_bullets))
+        child: dict[str, Any] = {
+            "title": task.title,
+            "body": "\n\n".join(body_parts),
+            "assignee": task.lane,
+            "kind": _kind_for_planspec_lane(task.lane),
+            "parents": deps,
+            "planspec_lane": task.lane,
+            "planspec_deps": list(task.deps),
+            "planspec_subtask_id": task.id,
+        }
+        if ac_items:
+            child["acceptance_criteria_struct"] = [
+                item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else {"statement": str(item)}
+                for item in ac_items
+            ]
+        if planspec_source is not None:
+            child["planspec_source"] = planspec_source
+        children.append(child)
     return children
 
 

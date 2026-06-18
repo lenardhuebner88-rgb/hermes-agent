@@ -145,6 +145,60 @@ def test_ensure_worktree_symlinks_node_modules(repo):
     assert kwt.dirty_files(wt) == []
 
 
+# ---------------------------------------------------------------------------
+# AC5 — .venv symlink: provision plants it, teardown removes only the link
+# ---------------------------------------------------------------------------
+
+def test_ensure_worktree_symlinks_venv(repo):
+    """Provisioning creates a .venv symlink pointing at repo_root/.venv."""
+    # Plant a fake .venv with a sentinel file — simulates a real venv safely.
+    fake_venv = repo / ".venv"
+    fake_venv.mkdir()
+    sentinel = fake_venv / "pyvenv.cfg"
+    sentinel.write_text("home = /usr/bin\n")
+
+    info = kwt.ensure_worktree(repo, "t_venv")
+    wt = info["path"]
+
+    link = wt / ".venv"
+    assert link.is_symlink(), ".venv inside worktree must be a symlink"
+    # Symlink target must resolve to the repo's .venv, not a copy.
+    assert link.resolve() == fake_venv.resolve()
+    # Sentinel reachable through the symlink.
+    assert (link / "pyvenv.cfg").read_text() == "home = /usr/bin\n"
+    # Must NOT appear as a dirty path (already covered by _IGNORED_DIRTY_PATHS).
+    assert kwt.dirty_files(wt) == []
+
+
+def test_remove_worktree_unlinks_venv_symlink_leaves_real_venv(repo):
+    """remove_worktree unlinks the .venv symlink but never deletes the real venv."""
+    # Plant fake .venv with a sentinel — this is the "real" venv we must not lose.
+    fake_venv = repo / ".venv"
+    fake_venv.mkdir()
+    sentinel = fake_venv / "pyvenv.cfg"
+    sentinel.write_text("home = /usr/bin\n")
+
+    info = kwt.ensure_worktree(repo, "t_venv_rm")
+    wt = info["path"]
+    branch = _git(wt, "symbolic-ref", "--short", "HEAD")
+
+    # Pre-condition: symlink is there.
+    assert (wt / ".venv").is_symlink()
+
+    kwt.remove_worktree(repo, wt, branch)
+
+    # Post-condition: worktree directory is gone (or link is gone).
+    # Either the whole wt dir was removed, or at minimum the symlink is gone.
+    if wt.exists():
+        assert not (wt / ".venv").exists(), \
+            ".venv symlink must be removed even if worktree dir survives"
+
+    # CRITICAL: the real .venv must be entirely intact.
+    assert fake_venv.is_dir(), "real .venv dir must survive remove_worktree"
+    assert sentinel.exists(), "sentinel file inside real .venv must survive"
+    assert sentinel.read_text() == "home = /usr/bin\n"
+
+
 def test_provision_for_task_repo_dir(kanban_home, repo):
     with kb.connect() as conn:
         tid = kb.create_task(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -13,7 +14,16 @@ from typing import Any, Literal
 import yaml
 
 from hermes_cli import kanban_db
-from hermes_cli.plan_compiler import CompileBlocked, TaskgraphHints, _extract_frontmatter, taskgraph_hints_to_children
+from hermes_cli.plan_compiler import (
+    AcceptanceCriterion,
+    CompileBlocked,
+    TaskgraphHints,
+    _extract_frontmatter,
+    _normalize_acceptance_criteria,
+    taskgraph_hints_to_children,
+)
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
@@ -88,12 +98,15 @@ def _is_display_only_open_plan(frontmatter: dict[str, Any], status: str) -> bool
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
     candidate = Path(path).expanduser().resolve(strict=False)
     root = plans_root.expanduser().resolve(strict=False)
+    # #13: error findings are surfaced verbatim to the dashboard / HTTP callers.
+    # Never embed the resolved server-side path (``root`` / ``candidate``) — that
+    # discloses the server's filesystem layout to an attacker-influenced caller.
     if not _is_relative_to(candidate, root):
-        raise PlanSpecBlocked([f"planspec path must be under {root}"])
+        raise PlanSpecBlocked(["planspec path must be under the allowed plans directory"])
     if candidate.suffix.lower() != ".md":
         raise PlanSpecBlocked(["planspec path must point to a markdown file"])
     if not candidate.is_file():
-        raise PlanSpecBlocked([f"planspec file not found: {candidate}"])
+        raise PlanSpecBlocked(["planspec file not found"])
     return candidate
 
 
@@ -135,8 +148,26 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
     if findings:
         raise PlanSpecBlocked(findings)
 
+    # Parse plan-level acceptance_criteria from frontmatter for AC threading.
+    raw_ac = frontmatter.get("acceptance_criteria")
+    plan_ac: list[str | AcceptanceCriterion] = []
+    if isinstance(raw_ac, list):
+        ac_findings: list[str] = []
+        plan_ac = _normalize_acceptance_criteria(raw_ac, ac_findings)
+        # A malformed plan-level AC criterion must not block ingest (we drop it
+        # and continue) — but it must NOT vanish silently, so log it.
+        if ac_findings:
+            logger.warning(
+                "PlanSpec %s: %d plan-level acceptance_criteria dropped: %s",
+                resolved, len(ac_findings), "; ".join(ac_findings),
+            )
+
     try:
-        children = taskgraph_hints_to_children(hints)
+        children = taskgraph_hints_to_children(
+            hints,
+            plan_ac=plan_ac,
+            planspec_source=str(resolved),
+        )
     except CompileBlocked as exc:
         raise PlanSpecBlocked(exc.findings) from exc
 
@@ -464,6 +495,10 @@ def ingest_planspec(
             }
 
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
+        # A2/#8: stamp freigabe + live_test_depth from the PlanSpec frontmatter
+        # as part of the INSERT so the provenance is atomic with row creation —
+        # no separate UPDATE window where a reader sees NULL, and no way for an
+        # exception between INSERT and a follow-up UPDATE to strand the fields.
         root_id = kanban_db.create_task(
             conn,
             title=root_title,
@@ -474,6 +509,8 @@ def ingest_planspec(
             priority=0,
             triage=True,
             idempotency_key=idempotency_key,
+            freigabe=spec.freigabe,
+            live_test_depth=spec.live_test_depth,
         )
         with kanban_db.write_txn(conn):
             cur = conn.execute(

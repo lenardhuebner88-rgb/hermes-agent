@@ -374,9 +374,11 @@ def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
             "assignee": "coder",
             "kind": "code",
             "parents": [],
-            "planspec_id": "S1",
             "planspec_lane": "coder",
             "planspec_deps": [],
+            # A2: planspec_subtask_id is always populated; planspec_source is
+            # absent when the caller doesn't pass planspec_source=...
+            "planspec_subtask_id": "S1",
         },
         {
             "title": "Verify",
@@ -384,11 +386,32 @@ def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
             "assignee": "verifier",
             "kind": "code",
             "parents": [0],
-            "planspec_id": "S2",
             "planspec_lane": "verifier",
             "planspec_deps": ["S1"],
+            "planspec_subtask_id": "S2",
         },
     ]
+
+
+def test_children_carry_only_planspec_subtask_id_not_redundant_planspec_id():
+    """#10: each child dict carries the subtask id under ``planspec_subtask_id``
+    (the A1 migration column name) only — not also under the legacy
+    ``planspec_id`` key, which was always set to the same value and read via a
+    dead ``or`` fallback in plugin_api."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+            ],
+        }
+    )
+    child = children[0]
+    assert child["planspec_subtask_id"] == "S1"
+    assert "planspec_id" not in child, (
+        "redundant legacy key planspec_id should be gone; "
+        "use planspec_subtask_id exclusively"
+    )
 
 
 def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):

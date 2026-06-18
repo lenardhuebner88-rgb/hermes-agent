@@ -4949,6 +4949,93 @@ def mark_planspec_not_needed(payload: PlanSpecPathBody):
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
+@router.get("/planspecs/detail")
+def get_planspec_detail(path: str = Query(..., max_length=1024)):
+    """Return human-readable fields parsed from a PlanSpec .md file.
+
+    The ``path`` parameter is attacker-influenced; security is enforced by
+    ``parse_binding_planspec`` → ``resolve_planspec_path`` (same validator used
+    by all other planspec endpoints) which:
+      - resolves symlinks and ``..`` components via ``Path.resolve(strict=False)``
+      - rejects anything whose resolved absolute path is not under
+        ``DEFAULT_PLANS_ROOT`` (/home/piet/vault/03-Agents)
+      - rejects non-``.md`` suffixes
+      - raises ``PlanSpecBlocked`` (→ 400) for traversal; the "file not found"
+        finding maps to 404.
+
+    #13: the path is resolved + read EXACTLY ONCE (inside parse_binding_planspec)
+    — we do NOT validate first and then re-resolve+read separately, which would
+    open a TOCTOU window for a symlink swap between the two resolutions.  Error
+    findings never carry the resolved server path (see resolve_planspec_path).
+
+    Source = file parse only.  No DB read.
+    """
+    from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+
+    # Single resolution+read: distinguish 404 (file missing) from 400 (traversal /
+    # bad path / malformed spec) off the one exception this raises.
+    try:
+        spec = planspecs.parse_binding_planspec(path)
+    except planspecs.PlanSpecBlocked as exc:
+        findings = exc.findings
+        if findings and "file not found" in findings[0]:
+            raise HTTPException(status_code=404, detail={"findings": findings})
+        raise HTTPException(status_code=400, detail={"findings": findings})
+
+    fm = spec.frontmatter
+
+    # Map acceptance_criteria: list of dicts (structured) or strings (legacy).
+    raw_ac = fm.get("acceptance_criteria") or []
+    if isinstance(raw_ac, list):
+        ac_out = []
+        for item in raw_ac:
+            if isinstance(item, dict):
+                ac_out.append(item)
+            else:
+                ac_out.append({"statement": str(item)})
+    else:
+        ac_out = []
+
+    # Map anti_scope: list of strings or a single string.
+    raw_anti = fm.get("anti_scope") or []
+    if isinstance(raw_anti, list):
+        anti_scope_out = [str(x) for x in raw_anti]
+    elif raw_anti:
+        anti_scope_out = [str(raw_anti)]
+    else:
+        anti_scope_out = []
+
+    # Map evidence_required: list of strings or a single string.
+    raw_ev = fm.get("evidence_required") or []
+    if isinstance(raw_ev, list):
+        evidence_out = [str(x) for x in raw_ev]
+    elif raw_ev:
+        evidence_out = [str(raw_ev)]
+    else:
+        evidence_out = []
+
+    # Map children → subtasks list with {id, title, lane, deps}.
+    subtasks = [
+        {
+            "id": child.get("planspec_subtask_id") or "",
+            "title": child.get("title") or "",
+            "lane": child.get("planspec_lane") or child.get("assignee") or "",
+            "deps": child.get("planspec_deps") or [],
+        }
+        for child in spec.children
+    ]
+
+    return {
+        "goal": str(fm.get("goal") or fm.get("topic") or spec.topic or ""),
+        "acceptance_criteria": ac_out,
+        "anti_scope": anti_scope_out,
+        "evidence_required": evidence_out,
+        "freigabe": spec.freigabe,
+        "live_test_depth": spec.live_test_depth,
+        "subtasks": subtasks,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Flow capture Phase B — backend-driven planning (documented/lean) + gate + spec
 # ---------------------------------------------------------------------------

@@ -57,6 +57,7 @@ _IGNORED_DIRTY_PATHS = (
     ".deliverable.md",
     "node_modules",
     "web/node_modules",
+    ".venv",
 )
 # Tool/cache byproducts that are never commit content and never part of a
 # branch diff. Gate runs themselves produce these (the verifier's
@@ -84,9 +85,11 @@ def _is_ignorable_dirty_path(path: str) -> bool:
     parts = path.rstrip("/").split("/")
     return any(p in _IGNORED_DIRTY_DIR_PARTS for p in parts)
 
-# node_modules locations symlinked into a fresh worktree so frontend gates
-# work without an npm ci (monorepo: .bin lives in the ROOT node_modules).
-_NODE_MODULES_LINKS = ("node_modules", "web/node_modules")
+# node_modules and .venv locations symlinked into a fresh worktree so
+# frontend gates work without an npm ci and Python tests can run without a
+# second venv install.  The .venv symlink is removed by remove_worktree via
+# the same loop — is_symlink()/unlink() so the real venv is never touched.
+_NODE_MODULES_LINKS = ("node_modules", "web/node_modules", ".venv")
 
 FO_REPO_PATH = Path("/home/piet/projects/family-organizer")
 MERGED_GREEN = "MERGED_GREEN"
