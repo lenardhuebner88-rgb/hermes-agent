@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
 import {
   ItemRow,
+  LesesaalBody,
   SavedSearchShelf,
   TopicFollowCard,
   TopicFollowSection,
@@ -177,5 +178,12 @@ describe("Gespeicherte Suchen und aggregierte Themenseite", () => {
     ]);
     expect(shelves.map((s) => s.series)).toEqual(["KI Modell-Brief", "Recherchen"]);
     expect(shelves.flatMap((s) => s.items.map((i) => i.source_ref))).toEqual(["cron:research/ki", "task:t_123"]);
+  });
+});
+
+describe("LesesaalBody (Such-Input Accessibility)", () => {
+  it("das Such-Input trägt aria-label mit demselben Text wie den placeholder", () => {
+    const html = renderToStaticMarkup(<LesesaalBody />);
+    expect(html).toContain('aria-label="Suche in Titel + Text …"');
   });
 });

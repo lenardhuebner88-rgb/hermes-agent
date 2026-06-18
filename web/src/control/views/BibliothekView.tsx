@@ -247,7 +247,7 @@ function ReadingView({ item, neighbors, onNavigate, onBack }: {
 // Lesesaal (Ausgaben) — der bisherige Bibliothek-Inhalt, unverändert in Logik.
 // Der Hero lebt jetzt im Eltern-`BibliothekView`; die Filter (Kategorie-Chips +
 // Suche) sitzen darum in einer eigenen Filterleiste statt im Hero.
-function LesesaalBody() {
+export function LesesaalBody() {
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [data, setData] = useState<LibraryListResponse | null>(null);
