@@ -2159,6 +2159,10 @@ DEFAULT_CONFIG = {
         # same task/profile (spawn_failed, timed_out, or crashed). Reassignment
         # resets the streak for the new profile.
         "failure_limit": 2,
+        # Release-gate executor: how many bounded coder-claude fixer attempts
+        # (worktree-only) to make when the dashboard release gate is red before
+        # escalating to the operator. 0 = escalate immediately on red.
+        "release_gate_fixer_max_retries": 2,
         # Opt-in Dogfood: automatically retry worker-blocked tasks after a
         # short backoff, except human/operator-question blocks. Defaults OFF.
         "auto_retry_blocked": False,

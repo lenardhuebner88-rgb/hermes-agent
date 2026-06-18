@@ -1073,6 +1073,25 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     e_close = epic_sub.add_parser("close", help="Mark an epic closed")
     e_close.add_argument("epic_id", help="Epic id")
 
+    p_release_gate = sub.add_parser(
+        "release-gate",
+        help="Execute a parked release-gate child: run the dashboard gate in "
+             "the live checkout, spawn a bounded coder-claude fixer (worktree-"
+             "only) on red, escalate to the operator on persistent red",
+    )
+    p_release_gate.add_argument("task_id", help="Release-gate child task id")
+    p_release_gate.add_argument(
+        "--max-retries",
+        type=int,
+        default=None,
+        dest="max_retries",
+        help="Bounded fixer retry budget (default: "
+             "kanban.release_gate_fixer_max_retries, fallback 2)",
+    )
+    p_release_gate.add_argument(
+        "--json", action="store_true", help="Emit JSON result"
+    )
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1194,6 +1213,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "decompose":  _cmd_decompose,
             "gc":       _cmd_gc,
             "epic":     _dispatch_epic,
+            "release-gate": _cmd_release_gate,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1516,6 +1536,36 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
         return 1
     print(f"Heartbeat recorded for {args.task_id}")
     return 0
+
+
+def _cmd_release_gate(args: argparse.Namespace) -> int:
+    """Run the release gate on a parked release-gate child: execute the gate
+    commands in the live checkout, and on red spawn a bounded coder-claude
+    fixer in the chain worktree (never live-main) before re-running. Persistent
+    red escalates to the operator.
+
+    Exit codes: 0 green, 2 escalated (operator action needed), 1 precondition
+    error / failure."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    with kb.connect_closing() as conn:
+        try:
+            result = kwt.execute_release_gate(
+                conn,
+                args.task_id,
+                max_retries=getattr(args, "max_retries", None),
+            )
+        except kwt.ReleaseGateError as exc:
+            print(f"release-gate: {exc}", file=sys.stderr)
+            return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result))
+    else:
+        print(
+            f"Release-gate {args.task_id}: {result.get('status')} "
+            f"(fixer attempts: {result.get('fixer_attempts', 0)})"
+        )
+    return 0 if result.get("status") == "green" else 2
 
 
 def _cmd_assignees(args: argparse.Namespace) -> int:

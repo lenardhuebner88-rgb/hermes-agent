@@ -4,6 +4,7 @@ serialized chain integrator (hermes_cli.kanban_worktrees)."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,9 +19,18 @@ from hermes_cli import kanban_worktrees as kwt
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    # Kanban workers inherit dispatcher pins for the live board. Tests must
+    # explicitly clear them before resolving kanban_db_path(), otherwise a
+    # worker-run pytest can write fixture tasks into /home/piet/.hermes/kanban.db.
+    for key in list(os.environ):
+        if key.startswith("HERMES_KANBAN_"):
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path(board="default")
+    live_db = Path("/home/piet/.hermes/kanban.db").resolve()
+    assert db_path.resolve() != live_db
+    assert home.resolve() in db_path.resolve().parents
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
     kb.init_db()
     return home
@@ -1365,3 +1375,219 @@ def test_ensure_worktree_reaps_partial_on_failure(monkeypatch, repo):
         kwt.ensure_worktree(repo, "t_reap")
     assert any(c[:4] == ("worktree", "remove", "--force", "--force") for c in calls)
     assert any(c[:2] == ("worktree", "prune") for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# R2 — Release-gate executor: run gate, bounded coder-claude fixer (worktree-
+# only) on red, escalate on persistent red. (P2-release-executor / AC2.)
+# ---------------------------------------------------------------------------
+
+def _make_release_gate_child(conn, *, root_id=None, merge_commit="abc123def456"):
+    """Create a done source integration + its parked release-gate child,
+    mirroring the production ``_create_parked_release_gate_child`` path.
+    Returns ``(source_id, child_id, root_id)``."""
+    source_id = kb.create_task(
+        conn, title="web slice", assignee="coder", created_by="integrator",
+    )
+    # Source merged & done so the gate child can later be unblocked->done.
+    assert kb.complete_task(conn, source_id, result="merged")
+    root = root_id or source_id
+    child_id = kwt._create_parked_release_gate_child(
+        conn, source_id, root, {"merge_commit": merge_commit},
+    )
+    return source_id, child_id, root
+
+
+def test_release_gate_executor_green_path(kanban_home):
+    """Gate green on first run -> success event, no fixer, child done."""
+    calls = []
+
+    def fake_fixer(**kw):
+        calls.append(kw)
+
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (True, "build ok"),
+            fixer_runner=fake_fixer,
+        )
+        executed = _events(conn, child_id, "release_gate_executed")
+        fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "green"
+    assert result["fixer_attempts"] == 0
+    assert calls == []  # fixer never spawned
+    assert len(executed) == 1
+    assert executed[0]["ok"] is True
+    assert executed[0]["attempt"] == 0
+    assert fix_attempts == []
+    assert child.status == "done"
+
+
+def test_release_gate_executor_red_then_fixer_then_green(kanban_home):
+    """Gate red -> one bounded fixer in the chain worktree -> re-run green."""
+    gate_results = iter([(False, "TS2322 build error"), (True, "build ok")])
+    fixer_calls = []
+
+    def fake_gate():
+        return next(gate_results)
+
+    def fake_fixer(**kw):
+        fixer_calls.append(kw)
+
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=fake_gate,
+            fixer_runner=fake_fixer,
+            max_retries=2,
+        )
+        executed = _events(conn, child_id, "release_gate_executed")
+        fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "green"
+    assert result["fixer_attempts"] == 1
+    # exactly one fixer spawn, on the chain worktree/branch (NOT live-main)
+    assert len(fixer_calls) == 1
+    fc = fixer_calls[0]
+    assert fc["root_id"] == root
+    assert fc["branch"] == kwt.chain_branch(root)
+    assert kwt.split_provisioned_path(fc["worktree"]) is not None
+    assert "TS2322" in fc["gate_error"]  # fixer reads the gate error
+    # event trail: attempt-0 red + attempt-1 green, plus one fix attempt
+    assert [e["ok"] for e in executed] == [False, True]
+    assert len(fix_attempts) == 1
+    assert fix_attempts[0]["attempt"] == 1
+    assert child.status == "done"
+
+
+def test_release_gate_executor_persistent_red_escalates(kanban_home):
+    """Gate stays red after the retry budget -> operator_escalation, child
+    stays blocked, fixer ran exactly max_retries times."""
+    fixer_calls = []
+
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "still broken"),
+            fixer_runner=lambda **kw: fixer_calls.append(kw),
+            max_retries=2,
+        )
+        executed = _events(conn, child_id, "release_gate_executed")
+        fix_attempts = _events(conn, child_id, "release_gate_fix_attempt")
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "escalated"
+    assert result["fixer_attempts"] == 2
+    assert len(fixer_calls) == 2
+    # attempt-0 + 2 re-runs = 3 executed events, all red; 2 fix attempts
+    assert [e["ok"] for e in executed] == [False, False, False]
+    assert len(fix_attempts) == 2
+    assert len(escalations) == 1
+    assert escalations[0]["attempts_already_made"] == 2
+    assert "still broken" in escalations[0]["evidence"]["last_error"]
+    assert child.status == "blocked"
+
+
+def test_release_gate_executor_max_retries_zero_immediate_escalation(kanban_home):
+    """max_retries=0 -> red gate escalates immediately, no fixer."""
+    fixer_calls = []
+
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "broken"),
+            fixer_runner=lambda **kw: fixer_calls.append(kw),
+            max_retries=0,
+        )
+        escalations = _events(conn, child_id, kb.OPERATOR_ESCALATION_EVENT)
+
+    assert result["status"] == "escalated"
+    assert fixer_calls == []
+    assert len(escalations) == 1
+
+
+def test_release_gate_executor_rejects_non_gate_task(kanban_home):
+    """A task without a release_gate_parked event is not a gate child."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="not a gate", assignee="coder")
+        with pytest.raises(kwt.ReleaseGateError):
+            kwt.execute_release_gate(
+                conn, tid, gate_runner=lambda: (True, ""),
+            )
+
+
+def test_resolve_fixer_worktree_is_isolated(tmp_path):
+    """The fixer worktree is always under <repo>/.worktrees/kanban/<root>,
+    never the live checkout root itself."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    wt, branch = kwt._resolve_fixer_worktree("t_root", repo_root=repo)
+    assert wt == repo / kwt.WORKTREES_DIRNAME / kwt.WORKTREES_NAMESPACE / "t_root"
+    assert branch == kwt.chain_branch("t_root")
+    assert wt.resolve() != repo.resolve()
+    assert kwt.split_provisioned_path(wt) is not None
+
+
+def test_default_fixer_provisions_isolated_worktree_not_live(
+    kanban_home, repo, monkeypatch,
+):
+    """The default fixer recreates the chain worktree and spawns the
+    coder-claude process with cwd = the isolated worktree, NEVER the live
+    checkout. The live repo's main working tree is left untouched."""
+    spawned = {}
+
+    def fake_spawn(*, worktree, branch, prompt, task_id, root_id):
+        spawned["worktree"] = Path(worktree)
+        spawned["branch"] = branch
+        spawned["cwd_is_repo_root"] = Path(worktree).resolve() == repo.resolve()
+
+    monkeypatch.setattr(kwt, "_spawn_release_gate_fixer_process", fake_spawn)
+
+    before = _git(repo, "rev-parse", "HEAD")
+    kwt._default_release_gate_fixer(
+        worktree=repo / kwt.WORKTREES_DIRNAME / kwt.WORKTREES_NAMESPACE / "t_root",
+        branch=kwt.chain_branch("t_root"),
+        gate_error="boom",
+        attempt=1,
+        task_id="t_child",
+        root_id="t_root",
+        repo_root=repo,
+    )
+    after = _git(repo, "rev-parse", "HEAD")
+
+    # worktree was actually created, isolated, on the chain branch
+    wt = repo / kwt.WORKTREES_DIRNAME / kwt.WORKTREES_NAMESPACE / "t_root"
+    assert (wt / ".git").exists()
+    assert spawned["cwd_is_repo_root"] is False
+    assert spawned["worktree"].resolve() == wt.resolve()
+    assert spawned["branch"] == kwt.chain_branch("t_root")
+    # live checkout main branch untouched (no commits, branch unchanged)
+    assert before == after
+    assert _git(repo, "symbolic-ref", "--short", "HEAD") == "main"
+
+
+def test_release_gate_fixer_max_retries_config(kanban_home, monkeypatch):
+    """Env override > config.yaml key > default 2."""
+    import yaml
+    from hermes_constants import get_default_hermes_root
+
+    # default when nothing set
+    monkeypatch.delenv("HERMES_RELEASE_GATE_FIXER_MAX_RETRIES", raising=False)
+    assert kwt.release_gate_fixer_max_retries() == 2
+
+    # config.yaml value
+    cfg_path = get_default_hermes_root() / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump({"kanban": {"release_gate_fixer_max_retries": 4}}))
+    assert kwt.release_gate_fixer_max_retries() == 4
+
+    # env wins over config
+    monkeypatch.setenv("HERMES_RELEASE_GATE_FIXER_MAX_RETRIES", "1")
+    assert kwt.release_gate_fixer_max_retries() == 1

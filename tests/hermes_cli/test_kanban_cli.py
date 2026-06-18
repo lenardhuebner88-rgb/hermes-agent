@@ -575,3 +575,60 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# release-gate subcommand wiring (R2)
+# ---------------------------------------------------------------------------
+
+def _release_gate_args(task_id, **extra):
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    argv = ["kanban", "release-gate", task_id]
+    for k, v in extra.items():
+        argv += [f"--{k.replace('_','-')}", str(v)]
+    return parser.parse_args(argv)
+
+
+def test_cli_release_gate_green_exit_zero(kanban_home, monkeypatch, capsys):
+    from hermes_cli import kanban_worktrees as kwt
+
+    captured = {}
+
+    def fake_exec(conn, task_id, *, max_retries=None):
+        captured["task_id"] = task_id
+        captured["max_retries"] = max_retries
+        return {"status": "green", "fixer_attempts": 0, "root_id": task_id}
+
+    monkeypatch.setattr(kwt, "execute_release_gate", fake_exec)
+    args = _release_gate_args("t_gate", max_retries=3)
+    rc = kc.kanban_command(args)
+    assert rc == 0
+    assert captured == {"task_id": "t_gate", "max_retries": 3}
+    assert "green" in capsys.readouterr().out
+
+
+def test_cli_release_gate_escalated_exit_two(kanban_home, monkeypatch):
+    from hermes_cli import kanban_worktrees as kwt
+
+    monkeypatch.setattr(
+        kwt, "execute_release_gate",
+        lambda conn, task_id, *, max_retries=None: {
+            "status": "escalated", "fixer_attempts": 2, "root_id": task_id,
+        },
+    )
+    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    assert rc == 2
+
+
+def test_cli_release_gate_precondition_error_exit_one(kanban_home, monkeypatch, capsys):
+    from hermes_cli import kanban_worktrees as kwt
+
+    def boom(conn, task_id, *, max_retries=None):
+        raise kwt.ReleaseGateError("not a release-gate child")
+
+    monkeypatch.setattr(kwt, "execute_release_gate", boom)
+    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    assert rc == 1
+    assert "not a release-gate child" in capsys.readouterr().err

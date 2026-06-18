@@ -868,6 +868,46 @@ export function useFixRedispatch() {
   return { busyId, doneIds, errorById, run };
 }
 
+// R1: Inline-Repair für ein deliverable_posted_not_completed direkt am
+// CommandHome — die EINE dominante Auflösung: den fehlenden kanban_complete-
+// Schritt nachschließen (POST /tasks/<id>/repair, blocked→done, synth. Run,
+// deliverable_protocol_repaired-Event). confirm:true ist immer gesetzt — der
+// Knopf SELBST ist die Bestätigung (zwei-Klick-Arming in der UI). Der Endpoint
+// gibt eine Guard-Ablehnung als {ok:false} bei HTTP 200 zurück; das fangen wir
+// ab und zeigen den Grund inline, statt zu werfen. `doneIds` hält reparierte
+// Tasks fest, bis der Decision-Queue-Poll die Zeile von selbst fallen lässt.
+export function useRepairDeliverable() {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [doneIds, setDoneIds] = useState<Record<string, boolean>>({});
+  const [errorById, setErrorById] = useState<Record<string, string>>({});
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const run = useCallback(async (taskId: string) => {
+    setBusyId(taskId);
+    setErrorById((prev) => ({ ...prev, [taskId]: "" }));
+    try {
+      const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
+        `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/repair`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true, actor: "control-dashboard" }) },
+      );
+      if (res?.ok === false) {
+        const detail = res.detail || "Repair nicht möglich.";
+        if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+        return { ok: false as const, detail };
+      }
+      if (aliveRef.current) setDoneIds((prev) => ({ ...prev, [taskId]: true }));
+      return { ok: true as const };
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setErrorById((prev) => ({ ...prev, [taskId]: detail }));
+      return { ok: false as const, detail };
+    } finally {
+      if (aliveRef.current) setBusyId(null);
+    }
+  }, []);
+  return { busyId, doneIds, errorById, run };
+}
+
 // fetchJSON throws `Error("409: {\"detail\":\"…\"}")` — pull out the human detail.
 function extractDetail(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);

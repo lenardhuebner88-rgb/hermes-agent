@@ -154,6 +154,8 @@ function recoveryDecisionMeta(kind: string): { label: string; tone: ToneName; do
       return { label: "Decompose fehlgeschlagen", tone: "red", dot: "error" };
     case "stranded_by_stuck_parent":
       return { label: "Parent blockiert", tone: "amber", dot: "warn" };
+    case "deliverable_posted_not_completed":
+      return { label: "Repair nötig", tone: "amber", dot: "warn" };
     default:
       return { label: kind, tone: "zinc", dot: "idle" };
   }

@@ -230,6 +230,26 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[1].tone).toBe("amber");
   });
 
+  it("R1: deliverable_posted_not_completed carries the inline repair anchor and outranks sticky", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "sticky_blocked", task_id: "t2", title: "Blocked one", reason: "needs eyes", age_seconds: 99, suggested_command: null },
+        { kind: "deliverable_posted_not_completed", task_id: "t1", title: "Deliverable da", reason: "kanban_complete fehlt", age_seconds: 10, suggested_command: "hermes kanban show t1" },
+      ],
+    });
+    // deliverable_posted_not_completed (84) outranks sticky_blocked (75)
+    expect(items[0].title).toBe("Deliverable da");
+    expect(items[0].why).toContain("Repair nötig");
+    expect(items[0].repairTaskId).toBe("t1");
+    // only the deliverable row gets the repair anchor; it is not a fix-run row.
+    expect(items[0].fixTaskId).toBeUndefined();
+    expect(items[1].repairTaskId).toBeUndefined();
+  });
+
   it("ignores rows without a task_id and tolerates an absent kanban source", () => {
     const items = buildDecisionInbox({
       proposals: [],

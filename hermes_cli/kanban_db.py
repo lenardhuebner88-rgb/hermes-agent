@@ -14787,6 +14787,11 @@ def decision_queue(
     latest_verdict: dict[str, Optional[str]] = {}
     sticky_ids: set[str] = set()
     last_blocked: dict[str, tuple] = {}  # task_id -> (payload, created_at)
+    # R1: blocked deliverable misses (worker posted a deliverable but exited
+    # without kanban_complete). These carry no 'blocked' event so they would
+    # otherwise fall through every category; the repair endpoint needs them
+    # surfaced under a dedicated kind.
+    last_deliverable_miss: dict[str, tuple] = {}  # task_id -> (payload, created_at)
     try:
         blocked_tasks = conn.execute(
             "SELECT id, title, created_by FROM tasks WHERE status = 'blocked'"
@@ -14831,6 +14836,18 @@ def decision_queue(
                 last_blocked[br["task_id"]] = (br["payload"], br["created_at"])
         except Exception:
             last_blocked = {}
+        try:
+            for dr in conn.execute(
+                "SELECT task_id, payload, created_at, MAX(id) FROM task_events "
+                f"WHERE kind = ? AND task_id IN ({ph}) "
+                "GROUP BY task_id",
+                [DELIVERABLE_POSTED_NOT_COMPLETED, *ids],
+            ).fetchall():
+                last_deliverable_miss[dr["task_id"]] = (
+                    dr["payload"], dr["created_at"],
+                )
+        except Exception:
+            last_deliverable_miss = {}
 
     # 0) no-silent-stall parks — specific classes beat the generic
     #    operator_escalation event that 4A also emits for the same task.
@@ -14914,6 +14931,26 @@ def decision_queue(
                     _age(lb[1] if lb else None),
                     f"hermes kanban show {row['id']}",
                 )
+    except Exception:
+        pass
+
+    # 1b) deliverable_posted_not_completed — blocked because the worker posted a
+    #     deliverable but exited without kanban_complete. Repairable in one click
+    #     via POST /tasks/<id>/repair (R1). More specific than sticky_blocked, and
+    #     these never carry a 'blocked' event so they must be classified here.
+    try:
+        for row in blocked_tasks:
+            if row["id"] in seen:
+                continue
+            dm = last_deliverable_miss.get(row["id"])
+            if dm is None:
+                continue
+            _add(
+                "deliverable_posted_not_completed", row["id"], row["title"],
+                "Deliverable gepostet, aber kanban_complete fehlt — Repair möglich",
+                _age(dm[1]),
+                f"hermes kanban show {row['id']}",
+            )
     except Exception:
         pass
 

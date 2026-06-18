@@ -2855,6 +2855,123 @@ def test_reclaim_endpoint_409_for_non_running_task(client):
     assert r.status_code == 409
 
 
+# ---------------------------------------------------------------------------
+# R1 (P1-repair-action): POST /tasks/<id>/repair — operator nachschließen des
+# fehlenden kanban_complete-Schritts für ein deliverable_posted_not_completed.
+# ---------------------------------------------------------------------------
+def _seed_deliverable_miss(monkeypatch, *, title="repair me"):
+    """Drive a task into the blocked ``deliverable_posted_not_completed`` state
+    (worker posted a deliverable, exited rc=0 without ``kanban_complete``)."""
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title=title, assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.add_comment(
+            conn,
+            tid,
+            "coder",
+            (
+                "# Deliverable: " + title + "\n\n"
+                "The work is complete and mapped to the requested objective. "
+                "Evidence includes the final section list, validation notes, "
+                "and remaining risk. " + "x" * 120
+            ),
+        )
+        pid = 525252
+        kb._set_worker_pid(conn, tid, pid)
+        kb._record_worker_exit(pid, 0)
+        kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "blocked"
+    finally:
+        conn.close()
+    return tid
+
+
+def test_repair_endpoint_requires_confirm(client, monkeypatch):
+    """Without confirm:true the endpoint refuses (ok:false at HTTP 200) and
+    performs no mutation — same guard contract as /workers/<id>/action."""
+    tid = _seed_deliverable_miss(monkeypatch, title="confirm-guard")
+
+    r = client.post(f"/api/plugins/kanban/tasks/{tid}/repair", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert "confirm" in body["detail"]
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, tid).status == "blocked"  # untouched
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "deliverable_protocol_repaired" not in kinds
+    finally:
+        conn.close()
+
+
+def test_repair_endpoint_closes_deliverable_miss(client, monkeypatch):
+    """With confirm:true the missing kanban_complete is closed: blocked→done,
+    a deliverable_protocol_repaired event is emitted, ready is recomputed."""
+    tid = _seed_deliverable_miss(monkeypatch, title="repairable")
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/repair",
+        json={"confirm": True, "actor": "operator-test"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["task_id"] == tid
+
+    conn = kb.connect()
+    try:
+        t = kb.get_task(conn, tid)
+        assert t.status == "done"
+        repair_events = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == "deliverable_protocol_repaired"
+        ]
+        assert repair_events
+        assert repair_events[-1].payload["actor"] == "operator-test"
+        # No review verdict written by a protocol repair.
+        verdicts = conn.execute(
+            "SELECT verdict FROM task_runs WHERE task_id = ?", (tid,),
+        ).fetchall()
+        assert all(row["verdict"] is None for row in verdicts)
+    finally:
+        conn.close()
+
+
+def test_repair_endpoint_guard_when_nothing_to_repair(client):
+    """A task with no repairable deliverable_posted_not_completed evidence is a
+    soft refusal (ok:false at HTTP 200), not a crash."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="nothing-to-repair", assignee="coder")
+    finally:
+        conn.close()
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{tid}/repair",
+        json={"confirm": True},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False
+
+
+def test_decision_queue_surfaces_deliverable_posted_not_completed(client, monkeypatch):
+    """A blocked deliverable-miss surfaces in the decision queue under the
+    dedicated kind so the dashboard can wire the repair button."""
+    tid = _seed_deliverable_miss(monkeypatch, title="surface-me")
+
+    r = client.get("/api/plugins/kanban/decision-queue")
+    assert r.status_code == 200, r.text
+    rows = r.json()["decisions"]
+    match = next((d for d in rows if d["task_id"] == tid), None)
+    assert match is not None
+    assert match["kind"] == "deliverable_posted_not_completed"
+
+
 def test_reassign_endpoint_switches_profile(client):
     """POST /tasks/<id>/reassign changes the assignee field."""
     conn = kb.connect()
