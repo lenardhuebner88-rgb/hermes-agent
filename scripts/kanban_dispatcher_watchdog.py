@@ -44,7 +44,40 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-HERMES_ROOT = Path(os.environ.get("HERMES_HOME", "/home/piet/.hermes"))
+def _default_hermes_root(
+    *, native: Path | None = None, env: str | None = None
+) -> Path:
+    """Resolve the Hermes root the SAME way the heartbeat *writer* does.
+
+    The dispatcher writes the heartbeat to
+    ``hermes_constants.get_default_hermes_root() / "state" / ...``, which
+    collapses a profile-scoped ``HERMES_HOME`` (``<root>/profiles/<name>``)
+    back to ``<root>``. If this watchdog read the raw ``HERMES_HOME`` instead,
+    it would look under ``<root>/profiles/<name>/state`` and falsely report a
+    missing heartbeat whenever it runs inside a profile env — a watchdog that
+    cries wolf. We replicate the collapse here (standalone, no repo import) so
+    the script still works under the systemd ``env python3`` launcher, where
+    the venv editable install is not on ``sys.path``.
+    """
+    native = (Path("~/.hermes").expanduser()) if native is None else native
+    env = os.environ.get("HERMES_HOME", "") if env is None else env
+    if not env:
+        return native
+    env_path = Path(env)
+    try:
+        env_path.resolve().relative_to(native.resolve())
+        # HERMES_HOME is under ~/.hermes (normal or profile mode) → root.
+        return native
+    except ValueError:
+        pass
+    # Docker / custom layout: <root>/profiles/<name> → grandparent is the root.
+    if env_path.parent.name == "profiles":
+        return env_path.parent.parent
+    # Otherwise HERMES_HOME itself is the root.
+    return env_path
+
+
+HERMES_ROOT = _default_hermes_root()
 HEARTBEAT_FILE = HERMES_ROOT / "state" / "kanban_dispatcher_heartbeat.json"
 STATE_FILE = HERMES_ROOT / "state" / "kanban_dispatcher_watchdog_state.json"
 ENV_FILE = HERMES_ROOT / ".env"

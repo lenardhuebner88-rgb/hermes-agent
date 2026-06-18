@@ -145,6 +145,41 @@ def test_evaluate_classifies_states():
     assert healthy is False and reason == "tick_health"
 
 
+def test_default_hermes_root_collapses_profile_path():
+    """The watchdog must read from where the dispatcher writes.
+
+    The writer uses ``get_default_hermes_root()``, which collapses a
+    profile-scoped ``HERMES_HOME`` (``<root>/profiles/<name>``) back to
+    ``<root>``. If the watchdog read the raw ``HERMES_HOME`` it would look in
+    ``<root>/profiles/<name>/state`` and falsely cry "heartbeat missing"
+    whenever it runs inside a profile env.
+    """
+    native = Path("/home/piet/.hermes")
+
+    # Unset → native root.
+    assert wd._default_hermes_root(native=native, env="") == native
+
+    # Profile-scoped HERMES_HOME under the root → collapses to the root.
+    assert (
+        wd._default_hermes_root(native=native, env="/home/piet/.hermes/profiles/verifier")
+        == native
+    )
+
+    # Root itself → native root.
+    assert wd._default_hermes_root(native=native, env="/home/piet/.hermes") == native
+
+    # Docker/custom profile layout outside the native root → grandparent.
+    assert (
+        wd._default_hermes_root(native=native, env="/opt/data/profiles/coder")
+        == Path("/opt/data")
+    )
+
+    # Custom root outside ~/.hermes, not a profile → itself.
+    assert (
+        wd._default_hermes_root(native=native, env="/opt/data") == Path("/opt/data")
+    )
+
+
 def test_alert_send_failure_does_not_persist_bucket(paths, monkeypatch):
     """If Discord rejects the post, we must retry on the next run, not swallow it."""
     _write_heartbeat(paths["heartbeat"], last_tick_at=NOW - 20 * 60, tick_health="ok")
