@@ -29,6 +29,65 @@ DEFAULT_PLANS_ROOT = Path("/home/piet/vault/03-Agents")
 LIVE_TEST_DEPTHS = {"smoke", "contract", "ui-real"}
 PlanSpecScope = Literal["open", "all"]
 
+# --- Deterministic spec-rubric (validate_spec_rubric) ----------------------
+# The on-disk Hermes worker lanes a binding PlanSpec subtask may target. A lane
+# is mapped 1:1 to the Kanban child assignee, so an unknown lane mints a task no
+# roster profile can ever claim. Keep in sync with the lane roster on disk.
+VALID_PLANSPEC_LANES = {
+    "coder",
+    "coder-claude",
+    "premium",
+    "reviewer",
+    "critic",
+    "verifier",
+    "research",
+    "admin",
+    "family-ui",
+    "fo-brain",
+}
+
+# Claude-Code instruments (subagents / panels / slash-commands) that are NOT
+# Hermes worker lanes. Used as a `lane:` they create an unfulfillable contract
+# for a headless Kanban worker; baked into a worker AC they spawn an AC the
+# worker can never satisfy (lesson t_2477e10f → an endless REQUEST_CHANGES loop).
+# NB: ``council`` keeps a legitimate home in the operator ``freigabe`` gate — the
+# rubric only ever scans subtask lanes + ACs, never ``freigabe``, so that stays
+# valid. Exact-match against the single-token ``lane:`` field, so the full set is
+# safe here.
+_CC_INSTRUMENT_LANES = {
+    "council",
+    "minimax-auditor",
+    "ui-verifier",
+    "dep-scout",
+    "log-analyst",
+    "auditor",
+    "integrator",
+    "builder",
+    "mechanic",
+    "scribe",
+    "general-purpose",
+    "explore",
+    "plan",
+}
+
+# High-signal CC-instrument tokens to scan *inside* free-text AC statements. Only
+# hyphenated/compound tool names (plus ``council``) that never occur as innocent
+# prose — bare English words like "auditor"/"builder"/"plan"/"explore" are
+# deliberately excluded so a normal German/English AC sentence cannot false-trip.
+_CC_INSTRUMENT_AC_TOKENS = {
+    "council",
+    "minimax-auditor",
+    "ui-verifier",
+    "dep-scout",
+    "log-analyst",
+}
+
+# Template-residue patterns: a literal ``<…>`` angle placeholder, a TODO/FIXME/TBD
+# marker, or a bare ``…`` / ``...`` ellipsis left over from a spec template.
+_RESIDUE_ANGLE_RE = re.compile(r"<[^<>\n]{1,80}>")
+_RESIDUE_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|TBD)\b", re.IGNORECASE)
+_RESIDUE_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
+
 _CLOSED_STATUS_PREFIXES = (
     "archived",
     "closed",
@@ -476,14 +535,139 @@ def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
     return f"planspec-ingest:{spec.path}:{content_hash}"
 
 
+def _residue_tokens(text: str) -> list[str]:
+    """Return distinct template-residue tokens found in *text* (order-preserving).
+
+    A ``<…>`` angle placeholder reports the whole bracketed token; an ellipsis
+    that sits *inside* an angle placeholder is not reported twice.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    angle_spans: list[tuple[int, int]] = []
+
+    def _add(token: str) -> None:
+        if token and token not in seen:
+            seen.add(token)
+            found.append(token)
+
+    for match in _RESIDUE_ANGLE_RE.finditer(text):
+        angle_spans.append(match.span())
+        _add(match.group(0))
+    for match in _RESIDUE_MARKER_RE.finditer(text):
+        _add(match.group(0))
+    for match in _RESIDUE_ELLIPSIS_RE.finditer(text):
+        if any(start <= match.start() and match.end() <= end for start, end in angle_spans):
+            continue
+        _add(match.group(0))
+    return found
+
+
+def _ac_statements_for_child(child: dict[str, Any]) -> list[str]:
+    """Return the resolved AC statements (own + inherited) threaded into *child*."""
+    statements: list[str] = []
+    for item in child.get("acceptance_criteria_struct") or []:
+        if isinstance(item, dict):
+            statement = str(item.get("statement") or "").strip()
+            if statement:
+                statements.append(statement)
+    return statements
+
+
+def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
+    """Run the deterministic rubric over an already-parsed *spec* and return all
+    findings (empty list = the spec passes the rubric).
+
+    Layered ON TOP of :func:`parse_binding_planspec` (which already validated the
+    structural shape: binding, ids, deps, live_test_depth, freigabe, status). The
+    rubric adds the *quality* checks that keep an under-specified PlanSpec from
+    minting unworkable Kanban tasks. Each finding is its own actionable line.
+    """
+    findings: list[str] = []
+    # ``spec.children`` (from taskgraph_hints_to_children) carry the resolved AC
+    # — per-subtask plus the plan-wide / applies_to-inherited threading — keyed by
+    # planspec_subtask_id. ``spec.hints.subtasks`` carry the verbatim title/body/
+    # lane the author wrote. Use each for what it knows.
+    children_by_id = {str(c.get("planspec_subtask_id") or ""): c for c in spec.children}
+    for subtask in spec.hints.subtasks:
+        sid = subtask.id
+        child = children_by_id.get(sid, {})
+        ac_statements = _ac_statements_for_child(child)
+
+        # 1) Every subtask needs >= 1 AC (own or inherited). The child's resolved
+        #    acceptance_criteria_struct is empty exactly when no AC applies.
+        if not (child.get("acceptance_criteria_struct") or []):
+            findings.append(f"AC-less subtask: {sid}")
+
+        # 2) No template residue in title / body / AC.
+        for token in _residue_tokens(subtask.title):
+            findings.append(f"placeholder residue in {sid}: {token}")
+        for token in _residue_tokens(subtask.body):
+            findings.append(f"placeholder residue in {sid}: {token}")
+        for statement in ac_statements:
+            for token in _residue_tokens(statement):
+                findings.append(f"placeholder residue in {sid}: {token}")
+
+        # 3) + 4a) Lane must be a known Hermes worker lane, and must not be a
+        #    Claude-Code instrument (which gets a more actionable message).
+        lane_norm = subtask.lane.strip().lower()
+        if lane_norm in _CC_INSTRUMENT_LANES:
+            findings.append(f"CC-instrument as lane in {sid}: {subtask.lane}")
+        elif lane_norm not in VALID_PLANSPEC_LANES:
+            findings.append(f"unknown lane: {subtask.lane}")
+
+        # 4b) No CC instrument baked into a worker AC.
+        for statement in ac_statements:
+            low = statement.lower()
+            for token in _CC_INSTRUMENT_AC_TOKENS:
+                if re.search(rf"\b{re.escape(token)}\b", low):
+                    findings.append(f"CC-instrument in AC of {sid}: {token}")
+    return findings
+
+
+def validate_spec_rubric(spec: BindingPlanSpec) -> None:
+    """Deterministic rubric gate over a parsed binding PlanSpec.
+
+    Raises :class:`PlanSpecBlocked` with one actionable finding per violation:
+
+    1. AC-less subtask (no own or inherited acceptance criterion).
+    2. Template residue (``<…>`` placeholder, TODO/FIXME/TBD, bare ``…``/``...``)
+       in a subtask title / body / AC.
+    3. Unknown ``lane`` (not a known Hermes worker lane).
+    4. A Claude-Code instrument used as a ``lane`` or baked into a worker AC.
+
+    Returns ``None`` when the spec passes. Layered on top of the structural
+    validation in :func:`parse_binding_planspec`; meant to run synchronously in
+    :func:`ingest_planspec` before any DB write.
+    """
+    findings = _collect_spec_rubric_findings(spec)
+    if findings:
+        raise PlanSpecBlocked(findings)
+
+
 def ingest_planspec(
     path: str | Path,
     *,
     board: str | None = None,
     author: str = "planspec-ingest",
     plans_root: Path = DEFAULT_PLANS_ROOT,
+    force: bool = False,
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
+    # Deterministic rubric gate — layered ON TOP of parse_binding_planspec's
+    # structural validation and applied BEFORE any DB write. ``--force`` bypasses
+    # it but the skipped reasons are logged so the override is never silent.
+    if force:
+        bypassed = _collect_spec_rubric_findings(spec)
+        if bypassed:
+            logger.warning(
+                "PlanSpec rubric bypassed via --force for %s: %s",
+                spec.path,
+                "; ".join(bypassed),
+            )
+    else:
+        validate_spec_rubric(spec)
     idempotency_key = ingest_idempotency_key(spec)
     conn = kanban_db.connect(board=board)
     try:
