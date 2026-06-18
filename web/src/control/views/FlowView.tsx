@@ -824,6 +824,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                   onClick={() => toggleSizing(c.id)}
                   className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--hc-border-strong)] hc-type-label hc-soft"
                   title="Sizing-Auswahl"
+                  aria-label={selected ? "Aus Auswahl entfernen" : "Zur Auswahl hinzufügen"}
                   aria-pressed={selected}
                 >
                   {selected ? "x" : "+"}
