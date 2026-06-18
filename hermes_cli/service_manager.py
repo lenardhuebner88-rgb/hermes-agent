@@ -417,20 +417,34 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
     the same pattern ``s6-svperms`` and ``fix-attrs.d`` rely on.
     """
     import os
+    import errno
+
+    def _chown_best_effort(path: Path) -> None:
+        # Set hermes ownership where we can. This is best-effort: a
+        # privileged (root) caller inside the container performs the real
+        # chown, while unprivileged callers can't and don't need to — the
+        # slot is hermes-owned by default on their code path. Two ways an
+        # unprivileged caller surfaces, both no-ops here:
+        #   * PermissionError (EPERM/EACCES): ordinary unprivileged host
+        #     user — the historical case.
+        #   * OSError EINVAL: caller runs inside a user namespace whose
+        #     uid/gid map doesn't include the hermes id (e.g. a sandboxed
+        #     worker with `uid_map: 1000 1000 1`). chown to an unmapped id
+        #     reports EINVAL instead of EPERM; same no-op outcome.
+        try:
+            os.chown(path, _HERMES_UID, _HERMES_GID)
+        except PermissionError:
+            pass
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
 
     def _mkdir_owned(path: Path, mode: int) -> None:
         if path.exists():
             return
         path.mkdir(parents=False, exist_ok=False)
         path.chmod(mode)
-        try:
-            os.chown(path, _HERMES_UID, _HERMES_GID)
-        except PermissionError:
-            # Running as the hermes user already — directory is hermes-
-            # owned by default. The chown is a no-op in that case, so
-            # swallowing this keeps both root and unprivileged callers
-            # on one code path.
-            pass
+        _chown_best_effort(path)
 
     # Top-level event/ dir (this is the s6-svlisten1 event-subscription
     # dir at the service root, distinct from supervise/event/).
@@ -453,10 +467,7 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
     if not control.exists():
         os.mkfifo(control, 0o660)
         control.chmod(0o660)
-        try:
-            os.chown(control, _HERMES_UID, _HERMES_GID)
-        except PermissionError:
-            pass
+        _chown_best_effort(control)
 
     # If a log/ subdir is present (the canonical s6 logger pattern —
     # see servicedir(7)), it gets its own s6-supervise instance and
@@ -473,10 +484,7 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
         if not log_control.exists():
             os.mkfifo(log_control, 0o660)
             log_control.chmod(0o660)
-            try:
-                os.chown(log_control, _HERMES_UID, _HERMES_GID)
-            except PermissionError:
-                pass
+            _chown_best_effort(log_control)
 
 
 class S6Error(RuntimeError):
