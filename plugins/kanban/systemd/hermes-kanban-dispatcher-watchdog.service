@@ -1,0 +1,27 @@
+# Hermes Kanban Dispatcher Heartbeat Watchdog — TEMPLATE (R3 / P3-dispatcher-watchdog).
+#
+# Alert-only oneshot: checks the dispatcher heartbeat and posts ONE Discord
+# alert per calendar day when it is stale or unhealthy. It NEVER restarts the
+# gateway or the dispatcher — recovery stays a human decision.
+#
+# NOT auto-armed. The operator installs + enables it (see README.md in this
+# directory). Adjust the ExecStart path if your checkout is not the default
+# /home/piet/.hermes/hermes-agent.
+
+[Unit]
+Description=Hermes kanban dispatcher heartbeat watchdog (alert-only)
+Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 /home/piet/.hermes/hermes-agent/scripts/kanban_dispatcher_watchdog.py
+# Surface a stale/unhealthy heartbeat in the journal too; the script is fail-soft.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

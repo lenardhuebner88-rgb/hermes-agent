@@ -1,0 +1,15 @@
+# Hermes Kanban Dispatcher Heartbeat Watchdog timer — TEMPLATE.
+# Fires the watchdog ~5 min after boot and every 5 min thereafter.
+# NOT auto-armed; the operator enables it (see README.md).
+
+[Unit]
+Description=Hermes kanban dispatcher heartbeat watchdog schedule
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=hermes-kanban-dispatcher-watchdog.service
+
+[Install]
+WantedBy=timers.target
