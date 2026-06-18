@@ -50,6 +50,7 @@ import {
   germanDate,
   leaderboard,
   nutzerwert,
+  rosterProfiles,
 } from "../lib/statsBroadsheet";
 
 const pctText = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}`);
@@ -63,8 +64,11 @@ const ERROR_LABEL: Record<string, string> = {
 };
 
 // ── Masthead ────────────────────────────────────────────────────────────────
-// Acceptance headline + the three supporting KPIs. `profiles`/`baseline` are
-// the phantom-filtered reliability windows; `series` is the last-7 daily slice.
+// Acceptance headline + the three supporting KPIs. `profiles`/`baseline` are the
+// raw reliability windows; the masthead phantom-filters them itself (the same
+// roster gate the leaderboard applies) so the headline acceptance, autonomy and
+// Δ count only real configured workers — never a "w"/"(ohne profil)" sentinel.
+// `series` is the last-7 daily slice.
 export function StatsMasthead({
   profiles,
   baseline,
@@ -78,9 +82,11 @@ export function StatsMasthead({
   now: number;
   stale?: boolean;
 }) {
-  const acc = acceptance(profiles);
-  const delta = acceptanceDelta(profiles, baseline);
-  const aut = autonomy(profiles);
+  const roster = useMemo(() => rosterProfiles(profiles), [profiles]);
+  const rosterBaseline = useMemo(() => rosterProfiles(baseline), [baseline]);
+  const acc = acceptance(roster);
+  const delta = acceptanceDelta(roster, rosterBaseline);
+  const aut = autonomy(roster);
   const cpd = costPerDelivery(series);
   const nutzer = nutzerwert(series);
 

@@ -64,10 +64,17 @@ describe("StatsMasthead (ST4)", () => {
       <StatsMasthead
         now={1781769600} // 2026-06-18T08:00:00Z → "18. Juni"
         profiles={[
+          // Phantom (not in the roster) — the masthead must drop it before
+          // counting, exactly like the leaderboard. If filtering regressed, its
+          // 1000/1000 verdicts + 50 runs would crater the 91 % / 90 % below.
+          profile({ profile: "w", runs: 50, outcomes: { completed: 50 }, completed_rate: 1, judged: 2000, approved: 1000, rejected: 1000 }),
           profile({ profile: "coder", runs: 20, outcomes: { completed: 19 }, completed_rate: 0.95, judged: 108, approved: 100, rejected: 8 }),
           profile({ profile: "verifier", runs: 10, outcomes: { completed: 8 }, completed_rate: 0.8, judged: 22, approved: 18, rejected: 4 }),
         ]}
-        baseline={[profile({ approved: 90, rejected: 10 })]}
+        baseline={[
+          profile({ approved: 90, rejected: 10 }),
+          profile({ profile: "unbekannt", approved: 500, rejected: 0 }), // phantom baseline → dropped, Δ stays +1 pp
+        ]}
         series={[
           daily({ cost_usd: 1.0, done_roots: 2, done_roots_by_class: { nutzer: 3, haertung: 1, meta: 0 } }),
           daily({ cost_usd: 1.08, done_roots: 0, done_roots_by_class: { nutzer: 2, haertung: 0, meta: 1 } }),
