@@ -4,6 +4,7 @@ serialized chain integrator (hermes_cli.kanban_worktrees)."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,9 +19,18 @@ from hermes_cli import kanban_worktrees as kwt
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    # Kanban workers inherit dispatcher pins for the live board. Tests must
+    # explicitly clear them before resolving kanban_db_path(), otherwise a
+    # worker-run pytest can write fixture tasks into /home/piet/.hermes/kanban.db.
+    for key in list(os.environ):
+        if key.startswith("HERMES_KANBAN_"):
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path(board="default")
+    live_db = Path("/home/piet/.hermes/kanban.db").resolve()
+    assert db_path.resolve() != live_db
+    assert home.resolve() in db_path.resolve().parents
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
     kb.init_db()
     return home
