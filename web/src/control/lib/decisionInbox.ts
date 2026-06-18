@@ -34,6 +34,10 @@ export interface InboxItem {
    *  ("Fix-Lauf starten": unblock → ready + Dispatcher-Tick) am CommandHome
    *  frei. Alle anderen Kinds lösen weiter über den Deep-Link auf. */
   fixTaskId?: string;
+  /** R1: nur für `deliverable_posted_not_completed` gesetzt — schaltet den
+   *  Inline-Repair ("Repair starten": POST /tasks/<id>/repair → blocked→done)
+   *  am CommandHome frei. */
+  repairTaskId?: string;
 }
 
 export interface InboxSummary {
@@ -62,6 +66,7 @@ const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneN
   role_fit_held: { weight: 55, tone: "cyan" },
   decompose_failed: { weight: 52, tone: "cyan" },
   stranded_by_stuck_parent: { weight: 50, tone: "cyan" },
+  deliverable_posted_not_completed: { weight: 84, tone: "amber" },
 };
 
 const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
@@ -76,6 +81,7 @@ const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
   role_fit_held: "Rolle passt nicht",
   decompose_failed: "Decompose fehlgeschlagen",
   stranded_by_stuck_parent: "Wartet auf blockierten Vorgänger",
+  deliverable_posted_not_completed: "Deliverable da — Repair nötig",
 };
 
 // Interventions that merely SUMMARIZE a surface already enumerated per-item above
@@ -197,6 +203,9 @@ export function buildDecisionInbox(input: {
       // owning coder — the retry sees the verifier feedback in its
       // worker_context), so it earns the inline action.
       ...(d.kind === "review_rejected" ? { fixTaskId: d.task_id } : {}),
+      // R1: a posted-but-uncompleted deliverable has ONE dominant resolution —
+      // close the missing kanban_complete step — so it earns its inline repair.
+      ...(d.kind === "deliverable_posted_not_completed" ? { repairTaskId: d.task_id } : {}),
     });
   }
 
