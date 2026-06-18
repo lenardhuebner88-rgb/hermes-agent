@@ -412,6 +412,7 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
       type="button"
       role="tab"
       aria-selected={mode === value}
+      aria-controls={`bibliothek-panel-${value}`}
       onClick={() => onChange(value)}
       className={`inline-flex min-h-9 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[0.8rem] font-medium transition-colors ${
         mode === value
@@ -445,7 +446,11 @@ export function BibliothekView({ density }: { density?: Density }) {
       >
         <ModeSwitch mode={mode} onChange={setMode} />
       </Hero>
-      {wissen ? <KnowledgeShelf /> : <LesesaalBody />}
+      {wissen ? (
+        <div id="bibliothek-panel-wissen" role="tabpanel"><KnowledgeShelf /></div>
+      ) : (
+        <div id="bibliothek-panel-lesesaal" role="tabpanel"><LesesaalBody /></div>
+      )}
     </div>
   );
 }

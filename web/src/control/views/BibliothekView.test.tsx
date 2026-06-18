@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CATEGORY_LABEL, countByCategory, groupBySeries, newestPerCategory, seriesNeighbors } from "./BibliothekView.helpers";
 import {
+  BibliothekView,
   ItemRow,
   LesesaalBody,
   SavedSearchShelf,
@@ -185,5 +186,20 @@ describe("LesesaalBody (Such-Input Accessibility)", () => {
   it("das Such-Input trägt aria-label mit demselben Text wie den placeholder", () => {
     const html = renderToStaticMarkup(<LesesaalBody />);
     expect(html).toContain('aria-label="Suche in Titel + Text …"');
+  });
+});
+
+describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3)", () => {
+  it("Wissen-Modus (default): beide Tab-Buttons tragen aria-controls; nur Wissen-Panel im DOM", () => {
+    // Default-Render: mode="wissen"
+    const html = renderToStaticMarkup(<BibliothekView />);
+    // Beide Tab-Buttons haben aria-controls
+    expect(html).toContain('aria-controls="bibliothek-panel-wissen"');
+    expect(html).toContain('aria-controls="bibliothek-panel-lesesaal"');
+    // Nur das aktive Panel ist gemountet — Wissen-Panel vorhanden
+    expect(html).toContain('id="bibliothek-panel-wissen"');
+    expect(html).toContain('role="tabpanel"');
+    // Lesesaal-Panel ist NICHT im DOM (Conditional bleibt erhalten)
+    expect(html).not.toContain('id="bibliothek-panel-lesesaal"');
   });
 });
