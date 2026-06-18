@@ -8703,3 +8703,177 @@ def test_phase4_tree_root_woke_excludes_plain_dependency_task(kanban_home):
         kb.link_tasks(conn, parent, child)
         result = kb.decision_queue(conn)
     assert "tree_root_woke" not in _kinds_for(child, result)
+
+
+# ---------------------------------------------------------------------------
+# S4 Heiler: structured failure-classification + escalation ledger
+# ---------------------------------------------------------------------------
+
+def test_s4_classify_failure_transient():
+    """dirty-overlap / git-op / wrong-branch and provisioning outcomes ->
+    transient. Pure function, no DB."""
+    cls, ev = kb._classify_failure(error="dirty worktree overlap on branch X")
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+    assert ev["signal_source"] == "text"
+    assert ev["matched"]
+
+    cls, ev = kb._classify_failure(error="checkout is on the wrong branch")
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+
+    # Structural outcome mapping wins without any error wording.
+    cls, ev = kb._classify_failure(outcome="spawn_retry")
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+    assert ev["signal_source"] == "outcome"
+
+
+def test_s4_classify_failure_real_bug_and_default():
+    """Red gate / reviewer findings -> real-bug, and an opaque failure with no
+    transient/spec/flaky signal defaults to real-bug."""
+    cls, _ = kb._classify_failure(error="gate failed: pytest 3 tests failed")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+    cls, _ = kb._classify_failure(error="reviewer findings: REQUEST_CHANGES")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+    cls, ev = kb._classify_failure(error="something entirely opaque happened")
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+    assert ev["signal_source"] == "default"
+
+
+def test_s4_classify_failure_flaky():
+    cls, _ = kb._classify_failure(error="test flake: passed on retry")
+    assert cls == kb.HEILER_CLASS_FLAKY
+
+
+def test_s4_classify_failure_bad_spec():
+    cls, _ = kb._classify_failure(error="acceptance criteria cannot be met")
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+
+    # Structural stall_class mapping: repeated decompose failure = spec gap.
+    cls, ev = kb._classify_failure(stall_class="triage_decompose_failed")
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+    assert ev["signal_source"] == "stall_class"
+
+
+def test_s4_classify_failure_conflict_wins_over_stall_class():
+    """Unambiguous merge-conflict markers win even on the integration_parked
+    stall path (which otherwise has no structural mapping)."""
+    cls, _ = kb._classify_failure(error="CONFLICT (content): merge conflict in api.ts")
+    assert cls == kb.HEILER_CLASS_CONFLICT
+
+    cls, _ = kb._classify_failure(
+        stall_class="integration_parked",
+        reason="integration parked: merge conflict in web/src/App.tsx",
+    )
+    assert cls == kb.HEILER_CLASS_CONFLICT
+
+
+def test_s4_record_task_failure_writes_heiler_classification(kanban_home):
+    """A simulated transient block and a red-gate block each write a
+    heiler_classification ledger event with the right class + evidence."""
+    with kb.connect() as conn:
+        transient = kb.create_task(conn, title="transient block", assignee="coder")
+        assert kb.claim_task(conn, transient) is not None
+        kb._record_task_failure(
+            conn, transient,
+            "dirty-overlap: worktree had uncommitted foreign work",
+            outcome="crashed", failure_limit=5,
+            release_claim=True, end_run=True,
+        )
+        real = kb.create_task(conn, title="red gate", assignee="coder")
+        assert kb.claim_task(conn, real) is not None
+        kb._record_task_failure(
+            conn, real,
+            "gate failed: pytest reported 2 tests failed",
+            outcome="crashed", failure_limit=5,
+            release_claim=True, end_run=True,
+        )
+        t_events = [
+            e for e in kb.list_events(conn, transient)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+        r_events = [
+            e for e in kb.list_events(conn, real)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+
+    assert len(t_events) == 1
+    assert t_events[0].payload["class"] == kb.HEILER_CLASS_TRANSIENT
+    assert t_events[0].payload["source"] == "record_task_failure"
+    assert t_events[0].payload["evidence"]["matched"]
+
+    assert len(r_events) == 1
+    assert r_events[0].payload["class"] == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_s4_stall_park_writes_heiler_classification(kanban_home):
+    """no_silent_stall_sweep parking a decompose-failed task writes a
+    bad-spec heiler_classification event alongside the operator_escalation."""
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="undecomposable", assignee="coder", triage=True,
+        )
+        for _ in range(3):
+            kb.record_decompose_failure(conn, tid)
+        kb.no_silent_stall_sweep(conn, now=now)
+        events = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+
+    assert len(events) == 1
+    assert events[0].payload["class"] == kb.HEILER_CLASS_BAD_SPEC
+    assert events[0].payload["source"] == "stall_park"
+    assert events[0].payload["evidence"]["stall_class"] == "triage_decompose_failed"
+
+
+def test_s4_read_escalation_ledger_returns_entries_and_rollup(kanban_home):
+    """read_escalation_ledger returns the classified entries (newest first),
+    a per-class rollup, and honours class/task/limit filters. This is the
+    Stratege's (Phase 1.5) input."""
+    with kb.connect() as conn:
+        transient = kb.create_task(conn, title="transient", assignee="coder")
+        kb.claim_task(conn, transient)
+        kb._record_task_failure(
+            conn, transient, "dirty-overlap git lock contention",
+            outcome="crashed", failure_limit=5,
+            release_claim=True, end_run=True,
+        )
+        real = kb.create_task(conn, title="red", assignee="coder")
+        kb.claim_task(conn, real)
+        kb._record_task_failure(
+            conn, real, "gate failed: tests failed",
+            outcome="crashed", failure_limit=5,
+            release_claim=True, end_run=True,
+        )
+
+        ledger = kb.read_escalation_ledger(conn)
+        by_task = kb.read_escalation_ledger(conn, task_id=transient)
+        only_real = kb.read_escalation_ledger(conn, classes=[kb.HEILER_CLASS_REAL_BUG])
+        limited = kb.read_escalation_ledger(conn, limit=1)
+
+    assert ledger["total"] == 2
+    assert ledger["by_class"] == {
+        kb.HEILER_CLASS_TRANSIENT: 1,
+        kb.HEILER_CLASS_REAL_BUG: 1,
+    }
+    classes_in_order = [e["class"] for e in ledger["entries"]]
+    # newest-first ordering
+    assert classes_in_order[0] == kb.HEILER_CLASS_REAL_BUG
+    assert all("task_title" in e for e in ledger["entries"])
+
+    assert by_task["total"] == 1
+    assert by_task["entries"][0]["task_id"] == transient
+    assert by_task["entries"][0]["class"] == kb.HEILER_CLASS_TRANSIENT
+
+    assert only_real["total"] == 1
+    assert only_real["by_class"] == {kb.HEILER_CLASS_REAL_BUG: 1}
+
+    # limit caps returned entries but the rollup stays over the full window
+    assert len(limited["entries"]) == 1
+    assert limited["total"] == 2
+    assert limited["by_class"] == {
+        kb.HEILER_CLASS_TRANSIENT: 1,
+        kb.HEILER_CLASS_REAL_BUG: 1,
+    }

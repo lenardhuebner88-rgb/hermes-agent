@@ -2644,6 +2644,27 @@ OPERATOR_ONLY_ACTIONS = (
     "secrets/credentials",
 )
 NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
+# S4 Heiler: structured failure-classification ledger (Phase 1).
+# Every block/failure on the no_silent_stall_sweep park path and in
+# ``_record_task_failure`` is classified into one stable class and written as a
+# ``heiler_classification`` task_event (payload = class + evidence). The read
+# side ``read_escalation_ledger`` aggregates them; the Stratege (Phase 1.5)
+# derives root-cause Specs from that rollup. This phase does NOT spawn a fix
+# worker and does NOT change escalation-after-N — that keeps using the existing
+# ``operator_escalation`` event next to the classification.
+HEILER_CLASSIFICATION_EVENT = "heiler_classification"
+HEILER_CLASS_TRANSIENT = "transient"
+HEILER_CLASS_FLAKY = "flaky"
+HEILER_CLASS_REAL_BUG = "real-bug"
+HEILER_CLASS_BAD_SPEC = "bad-spec"
+HEILER_CLASS_CONFLICT = "conflict"
+HEILER_CLASSES = (
+    HEILER_CLASS_TRANSIENT,
+    HEILER_CLASS_FLAKY,
+    HEILER_CLASS_REAL_BUG,
+    HEILER_CLASS_BAD_SPEC,
+    HEILER_CLASS_CONFLICT,
+)
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
 NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
@@ -9439,6 +9460,172 @@ def repair_deliverable_posted_not_completed(
     return True
 
 
+# S4 Heiler: substring signals for ``_classify_failure``, checked in this
+# precedence order against a lower-cased haystack (error + reason + outcome +
+# stall_class). Merge-conflict markers are unambiguous and win first; the broad
+# git/dirty/branch signals come LAST so a red gate or reviewer finding that
+# happens to mention a branch is not mis-read as transient.
+_HEILER_CONFLICT_SIGNALS = (
+    "merge conflict",
+    "merge-konflikt",
+    "conflict (content",
+    "conflict (add/add",
+    "automatic merge failed",
+    "<<<<<<<",
+    "fix conflicts and then commit",
+    "unmerged path",
+)
+_HEILER_TEXT_SIGNALS = (
+    (HEILER_CLASS_BAD_SPEC, (
+        "unerfüllbar",
+        "unfulfillable",
+        "unsatisfiable",
+        "impossible acceptance",
+        "acceptance criteria cannot",
+        "bad spec",
+        "bad-spec",
+        "cannot be decomposed",
+        "no runnable verifier",
+        "no runnable reviewer",
+    )),
+    (HEILER_CLASS_FLAKY, (
+        "flake",
+        "flaky",
+        "passed on retry",
+        "intermittent",
+        "non-deterministic",
+        "nondeterministic",
+    )),
+    (HEILER_CLASS_REAL_BUG, (
+        "request_changes",
+        "requested changes",
+        "request changes",
+        "reviewer finding",
+        "red gate",
+        "gate failed",
+        "gates failed",
+        "gate red",
+        "test failed",
+        "tests failed",
+        "assertionerror",
+        "assertion failed",
+        "lint error",
+        "tsc error",
+        "type error",
+        "build failed",
+    )),
+    (HEILER_CLASS_TRANSIENT, (
+        "dirty",
+        "overlap",
+        "wrong branch",
+        "falscher branch",
+        "git lock",
+        "git-lock",
+        "index.lock",
+        "worktree",
+        "could not provision",
+        "provisioning",
+        "checkout",
+        "rate limit",
+        "rate_limited",
+        "git",
+        "branch",
+    )),
+)
+# Strong structural mappings, independent of free-text error wording.
+_HEILER_OUTCOME_CLASS = {
+    "spawn_retry": HEILER_CLASS_TRANSIENT,
+    "spawn_failed": HEILER_CLASS_TRANSIENT,
+    "rate_limited": HEILER_CLASS_TRANSIENT,
+}
+_HEILER_STALL_CLASS = {
+    "scheduled_overdue": HEILER_CLASS_TRANSIENT,
+    "rate_limited_loop": HEILER_CLASS_TRANSIENT,
+    "review_without_verifier": HEILER_CLASS_BAD_SPEC,
+    "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
+}
+
+
+def _classify_failure(
+    *,
+    error: str = "",
+    outcome: Optional[str] = None,
+    stall_class: Optional[str] = None,
+    reason: str = "",
+) -> tuple[str, dict]:
+    """Classify a block/failure into one stable Heiler class + evidence.
+
+    Pure, deterministic and side-effect-free, so it is trivially unit-testable
+    and safe to call from inside an already-open ``write_txn``. The returned
+    ``evidence`` dict records which signal fired and where, so the Stratege
+    (Phase 1.5) — and a human reading the ledger — can see *why* a class was
+    assigned, not just the label.
+
+    Precedence (first match wins):
+      1. unambiguous merge-conflict markers -> conflict
+      2. structural ``stall_class`` mapping (config/spec/transient by
+         construction)
+      3. structural ``outcome`` mapping (provisioning / quota = transient)
+      4. free-text signals: bad-spec, flaky, real-bug, transient
+      5. default -> real-bug (a failure that reached this path with no
+         transient / spec / flaky signal is most likely a genuine defect:
+         a red gate or reviewer findings)
+    """
+    haystack = " ".join(
+        part for part in (error, reason, outcome or "", stall_class or "")
+        if part
+    ).lower()
+
+    def _ev(matched: str, source: str) -> dict:
+        ev = {"matched": matched, "signal_source": source}
+        if outcome:
+            ev["outcome"] = outcome
+        if stall_class:
+            ev["stall_class"] = stall_class
+        excerpt = (reason or error or "").strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return ev
+
+    for sub in _HEILER_CONFLICT_SIGNALS:
+        if sub in haystack:
+            return HEILER_CLASS_CONFLICT, _ev(sub, "text")
+
+    if stall_class and stall_class in _HEILER_STALL_CLASS:
+        return _HEILER_STALL_CLASS[stall_class], _ev(stall_class, "stall_class")
+
+    if outcome and outcome in _HEILER_OUTCOME_CLASS:
+        return _HEILER_OUTCOME_CLASS[outcome], _ev(outcome, "outcome")
+
+    for cls, subs in _HEILER_TEXT_SIGNALS:
+        for sub in subs:
+            if sub in haystack:
+                return cls, _ev(sub, "text")
+
+    return HEILER_CLASS_REAL_BUG, _ev("default", "default")
+
+
+def _heiler_classification_payload(
+    *,
+    heiler_class: str,
+    evidence: dict,
+    source: str,
+    blocked: bool,
+) -> dict:
+    """Stable payload shape for a ``heiler_classification`` event.
+
+    ``source`` is the originating path (``record_task_failure`` / ``stall_park``)
+    and ``blocked`` whether this failure actually parked/blocked the task — both
+    let the Stratege weight a one-off transient differently from a terminal park.
+    """
+    return {
+        "class": heiler_class,
+        "evidence": evidence,
+        "source": source,
+        "blocked": bool(blocked),
+    }
+
+
 def _operator_escalation_payload(
     *,
     task_id: str,
@@ -9562,6 +9749,9 @@ def _record_task_failure(
             effective_limit = int(failure_limit)
             limit_source = "dispatcher"
 
+        # run_id stays None unless a branch closes an open run; the S4 Heiler
+        # classification event at the end of the txn links to it when present.
+        run_id = None
         if count_failure and failures >= effective_limit:
             # Trip the breaker.
             if release_claim:
@@ -9659,6 +9849,20 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+
+        # S4 Heiler: classify every recorded failure into the structured
+        # ledger (one heiler_classification event per failure) so the Stratege
+        # (Phase 1.5) can aggregate causes. Pure read of error+outcome; emitted
+        # inside this txn so it commits atomically with the status change.
+        h_class, h_ev = _classify_failure(error=error, outcome=outcome)
+        _append_event(
+            conn, task_id, HEILER_CLASSIFICATION_EVENT,
+            _heiler_classification_payload(
+                heiler_class=h_class, evidence=h_ev,
+                source="record_task_failure", blocked=blocked,
+            ),
+            run_id=run_id,
+        )
     return blocked
 
 
@@ -9935,6 +10139,19 @@ def _park_stall_once(
                 stall_class=stall_class,
                 reason=reason,
                 evidence=evidence,
+            ),
+        )
+        # S4 Heiler: classify the parked stall into the structured ledger next
+        # to the operator_escalation (which is unchanged). Idempotent because
+        # _park_stall_once only reaches here on a fresh park.
+        h_class, h_ev = _classify_failure(stall_class=stall_class, reason=reason)
+        _append_event(
+            conn,
+            task_id,
+            HEILER_CLASSIFICATION_EVENT,
+            _heiler_classification_payload(
+                heiler_class=h_class, evidence=h_ev,
+                source="stall_park", blocked=True,
             ),
         )
         _append_stall_marker(
@@ -10448,6 +10665,93 @@ def no_silent_stall_sweep(
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
     return summary
+
+
+def read_escalation_ledger(
+    conn: sqlite3.Connection,
+    *,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    task_id: Optional[str] = None,
+    classes: Optional[Iterable[str]] = None,
+    limit: Optional[int] = None,
+) -> dict:
+    """Read side of the S4 Heiler classification ledger (Phase 1.5 input).
+
+    Aggregates ``heiler_classification`` task_events into a per-class rollup
+    plus the raw entries (newest first), each joined to its task title/status so
+    the Stratege can derive root-cause Specs without a second query. Pure read:
+    no writes, no schema change, no worker spawn — safe to call from a report
+    cron or the dashboard.
+
+    Filters (all optional):
+      * ``since`` / ``until`` — inclusive ``created_at`` window (unix seconds)
+      * ``task_id`` — restrict to a single task
+      * ``classes`` — restrict to a subset of :data:`HEILER_CLASSES`
+      * ``limit`` — cap the number of returned *entries*. The ``by_class``
+        rollup and ``total`` are always computed over the full filtered window,
+        so the counts stay accurate even when the entry list is truncated.
+    """
+    where = ["e.kind = ?"]
+    params: list = [HEILER_CLASSIFICATION_EVENT]
+    if since is not None:
+        where.append("e.created_at >= ?")
+        params.append(int(since))
+    if until is not None:
+        where.append("e.created_at <= ?")
+        params.append(int(until))
+    if task_id is not None:
+        where.append("e.task_id = ?")
+        params.append(task_id)
+
+    class_filter = {str(c) for c in classes} if classes is not None else None
+
+    rows = conn.execute(
+        "SELECT e.id, e.task_id, e.run_id, e.payload, e.created_at, "
+        "t.title AS task_title, t.status AS task_status "
+        "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
+        "WHERE " + " AND ".join(where) + " "
+        "ORDER BY e.created_at DESC, e.id DESC",
+        params,
+    ).fetchall()
+
+    by_class: dict = {}
+    entries: list = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        cls = payload.get("class")
+        if class_filter is not None and cls not in class_filter:
+            continue
+        by_class[cls] = by_class.get(cls, 0) + 1
+        entries.append({
+            "event_id": r["id"],
+            "task_id": r["task_id"],
+            "run_id": (int(r["run_id"]) if r["run_id"] is not None else None),
+            "created_at": (
+                int(r["created_at"]) if r["created_at"] is not None else None
+            ),
+            "class": cls,
+            "evidence": payload.get("evidence"),
+            "source": payload.get("source"),
+            "blocked": payload.get("blocked"),
+            "task_title": r["task_title"],
+            "task_status": r["task_status"],
+        })
+
+    total = len(entries)
+    if limit is not None and int(limit) >= 0:
+        entries = entries[: int(limit)]
+
+    return {
+        "total": total,
+        "by_class": by_class,
+        "entries": entries,
+    }
 
 
 def kanban_dispatcher_heartbeat_path() -> Path:
