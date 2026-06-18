@@ -4,6 +4,7 @@ import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
+import { SkeletonCard } from "../components/primitives";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
@@ -197,7 +198,7 @@ export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySaved
   );
 }
 
-function ReadingView({ item, neighbors, onNavigate, onBack }: {
+export function ReadingView({ item, neighbors, onNavigate, onBack }: {
   item: LibraryItem;
   neighbors: { prev: LibraryItem | null; next: LibraryItem | null };
   onNavigate: (item: LibraryItem) => void;
@@ -239,7 +240,7 @@ function ReadingView({ item, neighbors, onNavigate, onBack }: {
       </div>
       <h3 className="mb-2 text-base font-semibold text-white">{item.title}</h3>
       {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
-      {detail ? <ProseMarkdown>{detail.body_md}</ProseMarkdown> : error ? null : <p className="text-sm hc-dim">…</p>}
+      {detail ? <ProseMarkdown>{detail.body_md}</ProseMarkdown> : error ? null : <SkeletonCard rows={5} />}
     </FleetPanel>
   );
 }

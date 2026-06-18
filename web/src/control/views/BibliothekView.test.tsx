@@ -5,6 +5,7 @@ import {
   BibliothekView,
   ItemRow,
   LesesaalBody,
+  ReadingView,
   SavedSearchShelf,
   TopicFollowCard,
   TopicFollowSection,
@@ -201,5 +202,19 @@ describe("BibliothekView ARIA Tab/Panel-Verdrahtung (B3)", () => {
     expect(html).toContain('role="tabpanel"');
     // Lesesaal-Panel ist NICHT im DOM (Conditional bleibt erhalten)
     expect(html).not.toContain('id="bibliothek-panel-lesesaal"');
+  });
+});
+
+describe("ReadingView Lade-Platzhalter (B2)", () => {
+  const readingItem = item({ id: "r1", title: "Testausgabe" });
+  const noNeighbors = { prev: null, next: null };
+
+  it("zeigt SkeletonCard (aria-busy) statt plain '…' solange detail noch fehlt und kein error vorliegt", () => {
+    // renderToStaticMarkup führt keinen useEffect aus → detail bleibt null, error bleibt null
+    const html = renderToStaticMarkup(
+      <ReadingView item={readingItem} neighbors={noNeighbors} onNavigate={() => {}} onBack={() => {}} />,
+    );
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain(">…<");
   });
 });
