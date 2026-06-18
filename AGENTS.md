@@ -1300,6 +1300,7 @@ scripts/run_tests.sh tests/gateway/                   # one directory
 scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
 scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
+scripts/run_tests.sh $(scripts/affected-tests.sh)     # only the tests your diff touches (targeted scope)
 ```
 
 ### Subprocess-per-test isolation
@@ -1357,7 +1358,25 @@ If you need to bypass isolation for fast feedback while debugging:
 python -m pytest tests/agent/test_foo.py -q --no-isolate
 ```
 
-Always run the full suite before pushing changes.
+### Test scope: targeted by default, full suite only nightly
+
+Match the test scope to the blast radius — do **not** run the whole suite in the
+interactive path. That double-run (worker *and* verifier each firing all ~31k
+tests) is wasted half-hours, not safety.
+
+- **Building / verifying a task:** run only the tests your diff touches —
+  `scripts/run_tests.sh $(scripts/affected-tests.sh)` (+ `ruff` on changed `.py`,
+  and the frontend gates only when `web/` is in the diff). The verifier re-runs
+  this *same targeted scope* independently — it is a second opinion on the
+  affected slice, not a second full run.
+- **Pre-deploy / pre-push smoke (once):** a collection sweep over the whole repo
+  (`.venv/bin/python -m pytest --co -q tests/` — catches import-level breakage
+  cheaply) **plus** the affected tests above. Still not the full suite.
+- **The full suite runs only nightly** via the `green-gate-heartbeat` systemd
+  timer (05:20, Discord ping on red). That is the safety net for the rare
+  cross-module behavioural regression a targeted run can miss.
+
+Canonical rule: `00-Canon/conventions-gates.md` → *Test-Scope (full vs. targeted)*.
 
 ### Don't write change-detector tests
 
