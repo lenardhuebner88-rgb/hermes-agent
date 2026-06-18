@@ -491,6 +491,18 @@ describe("DecisionQueueResponseSchema", () => {
     expect(parsed.decisions[0].operator_escalation?.attempts_already_made).toBe(2);
     expect(parsed.decisions[0].operator_escalation?.recommended_human_action).toBe("inspect and choose");
   });
+
+  it("R1: accepts the deliverable_posted_not_completed repair kind verbatim", () => {
+    const parsed = parseOrThrow(DecisionQueueResponseSchema, {
+      decisions: [
+        { kind: "deliverable_posted_not_completed", task_id: "t9", title: "Deliverable da", reason: "kanban_complete fehlt", age_seconds: 12, suggested_command: "hermes kanban show t9" },
+      ],
+      count: 1,
+      checked_at: 123,
+    }, "kanban/decision-queue");
+
+    expect(parsed.decisions[0].kind).toBe("deliverable_posted_not_completed");
+  });
 });
 
 

@@ -4229,6 +4229,69 @@ def reclaim_task_endpoint(
         conn.close()
 
 
+class RepairBody(BaseModel):
+    """R1 (P1-repair-action): operator repair of a recoverable deliverable miss.
+
+    The only knob is the actor stamped on the repair event; ``confirm`` gates
+    the mutation exactly like ``WorkerActionBody`` so the dashboard confirm
+    dialog is honoured."""
+
+    confirm: bool = False
+    actor: Optional[ShortText] = None
+
+
+@router.post("/tasks/{task_id}/repair")
+def repair_task_endpoint(
+    task_id: str,
+    payload: RepairBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Close the missing ``kanban_complete`` step for a deliverable that was
+    posted but whose worker exited without terminalizing the task (R1).
+
+    Maps 1:1 onto the proven primitive
+    :func:`kanban_db.repair_deliverable_posted_not_completed` — it reads the
+    latest ``deliverable_posted_not_completed`` event, and only when that
+    carries clear evidence does it transition the task ``blocked → done`` with
+    a synthetic completed run, a ``deliverable_protocol_repaired`` event and a
+    ``recompute_ready``. No review verdict is written.
+
+    Same guard contract as ``POST /workers/{run_id}/action``: the mutation
+    requires ``confirm: true`` and a refusal (missing confirm, or nothing
+    repairable) is ``ok: false`` at HTTP 200 so the UI shows the reason inline
+    instead of throwing.
+    """
+    if not payload.confirm:
+        return {"ok": False, "task_id": task_id, "detail": "confirm required"}
+
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        actor = (payload.actor or "").strip() or "control-dashboard"
+        ok = kanban_db.repair_deliverable_posted_not_completed(
+            conn, task_id, actor=actor,
+        )
+        if not ok:
+            log.info("control repair task=%s board=%s ok=False", task_id, board)
+            return {
+                "ok": False, "task_id": task_id,
+                "detail": (
+                    "Kein reparierbares deliverable_posted_not_completed "
+                    "(Task nicht blocked oder kein Evidenz-Event)."
+                ),
+            }
+        log.info("control repair task=%s board=%s actor=%s ok=True", task_id, board, actor)
+        return {
+            "ok": True, "task_id": task_id,
+            "detail": (
+                "Protokoll-Repair: fehlender kanban_complete nachgeschlossen "
+                "(blocked → done)."
+            ),
+        }
+    finally:
+        conn.close()
+
+
 class SpecifyBody(BaseModel):
     """Optional author override. Nothing else is configurable from the
     dashboard — model + prompt come from ``auxiliary.triage_specifier``

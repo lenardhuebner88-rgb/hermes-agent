@@ -21,6 +21,7 @@ import {
   useBoard,
   useDecisionInbox,
   useFixRedispatch,
+  useRepairDeliverable,
   useHermesRunsDaily,
   useHermesTodayDigest,
   useHermesWorkers,
@@ -64,6 +65,7 @@ export function CommandHome({ density }: { density: Density }) {
   // set-state-in-effect und konnte mit Taps um den Zustand konkurrieren).
   const surfaceFilter = surfaceFromParam(searchParams.get("surface"));
   const fix = useFixRedispatch();
+  const repair = useRepairDeliverable();
   const now = board.data?.now ?? nowSec();
 
   const tasks: BoardTask[] = useMemo(
@@ -121,7 +123,7 @@ export function CommandHome({ density }: { density: Density }) {
           </Text>
 
           {top && !settling ? (
-            <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} />
+            <TopDecision item={top} onOpen={() => navigate(top.target)} fix={fix} repair={repair} />
           ) : calm ? (
             <p className="mt-4 max-w-md text-sm hc-soft">Die Flotte läuft, kein Vorschlag und kein Block wartet auf eine Entscheidung. Erfasse unten einen neuen Auftrag oder lehn dich zurück.</p>
           ) : null}
@@ -176,7 +178,7 @@ export function CommandHome({ density }: { density: Density }) {
           ) : (
             <div className="space-y-2">
               {rest.map((item) => (
-                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} fix={fix} />
+                <DecisionRow key={item.key} item={item} onOpen={() => navigate(item.target)} fix={fix} repair={repair} />
               ))}
             </div>
           )}
@@ -195,7 +197,7 @@ export function CommandHome({ density }: { density: Density }) {
 /** The #1 decision, promoted: surface + title + why + the one next action.
  *  (Wrapper ist ein div, nicht ein button — der K3-Inline-Resolve braucht
  *  einen ECHTEN zweiten Button, und button-in-button ist invalides HTML.) */
-function TopDecision({ item, onOpen, fix }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch> }) {
+function TopDecision({ item, onOpen, fix, repair }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable> }) {
   const surface = SURFACE[item.surface];
   return (
     <div
@@ -214,6 +216,7 @@ function TopDecision({ item, onOpen, fix }: { item: InboxItem; onOpen: () => voi
       </button>
       <span className="flex shrink-0 flex-col items-stretch gap-2 sm:mt-0.5 sm:items-end">
         {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+        {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
         <button
           type="button"
           onClick={onOpen}
@@ -261,6 +264,47 @@ function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<
         )}
       >
         {busy ? "startet…" : arming ? "Sicher? Erneut klicken" : "Fix-Lauf starten"}
+      </button>
+      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
+    </span>
+  );
+}
+
+/** R1: confirm-gated Inline-Repair für ein hängendes Deliverable — erster Klick
+ *  scharfschalten, zweiter Klick ruft POST /tasks/<id>/repair (blocked→done).
+ *  Gleiches Zwei-Schritt-Muster wie der K3-Fix-Lauf und die Worker-Aktionen. */
+function RepairButton({ taskId, repair }: { taskId: string; repair: ReturnType<typeof useRepairDeliverable> }) {
+  const [arming, setArming] = useState(false);
+  const busy = repair.busyId === taskId;
+  const done = !!repair.doneIds[taskId];
+  const err = repair.errorById[taskId];
+  if (done) {
+    return (
+      <span className="inline-flex items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">
+        Repariert
+      </span>
+    );
+  }
+  return (
+    <span className="flex flex-col items-stretch gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!arming) { setArming(true); return; }
+          setArming(false);
+          void repair.run(taskId);
+        }}
+        onBlur={() => setArming(false)}
+        className={cn(
+          "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:opacity-60",
+          arming
+            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+            : "border-[var(--hc-border-strong)] bg-[var(--hc-surface-2,rgba(255,255,255,0.04))] text-[var(--hc-text)] hover:border-[var(--hc-accent-border)]",
+        )}
+      >
+        {busy ? "repariert…" : arming ? "Sicher? Erneut klicken" : "Repair starten"}
       </button>
       {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-red-300">{err}</span> : null}
     </span>
@@ -374,7 +418,7 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
 }
 
 /** A compact decision row — severity spine, surface, why, next action. */
-function DecisionRow({ item, onOpen, fix }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch> }) {
+function DecisionRow({ item, onOpen, fix, repair }: { item: InboxItem; onOpen: () => void; fix: ReturnType<typeof useFixRedispatch>; repair: ReturnType<typeof useRepairDeliverable> }) {
   const surface = SURFACE[item.surface];
   return (
     <div className={cn("hc-decision flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left", severitySpine[item.tone])}>
@@ -386,6 +430,7 @@ function DecisionRow({ item, onOpen, fix }: { item: InboxItem; onOpen: () => voi
         <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
       </button>
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
+      {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
       <button type="button" onClick={onOpen} aria-label={`Öffnen: ${item.title}`} className="shrink-0">
         <ChevronRight className="h-4 w-4 hc-dim" />
       </button>
