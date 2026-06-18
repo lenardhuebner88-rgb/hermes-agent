@@ -1054,7 +1054,9 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
         />
       ) : null}
 
-      <FlowChainInsight task={task} detail={detail} boardTasks={boardTasks} snapshotLabel={snapshotLabel} />
+      <section aria-label="Ketten-Kontext">
+        <FlowChainInsight task={task} detail={detail} boardTasks={boardTasks} snapshotLabel={snapshotLabel} />
+      </section>
 
       {error ? <div className="mt-3"><ToneCallout tone="red">{error}</ToneCallout></div> : null}
       {loading && !detail ? <div className="mt-3"><SkeletonCard rows={3} /></div> : null}

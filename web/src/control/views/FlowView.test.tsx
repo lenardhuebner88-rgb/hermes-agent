@@ -44,6 +44,10 @@ describe("FlowView is live-wired, not mock", () => {
     expect(src).toMatch(/flex-wrap/);
   });
 
+  it("wraps FlowChainInsight in a section landmark for screenreaders", () => {
+    expect(src).toMatch(/section aria-label="Ketten-Kontext"/);
+  });
+
   it("renders a compact dependency-chain explanation from task-detail links", () => {
     expect(src).toMatch(/FlowChainInsight/);
     expect(src).toMatch(/detail\?\.links/);
