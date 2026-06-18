@@ -457,6 +457,8 @@ export const KanbanDecisionKindSchema = z
     "operator_escalation",
     "integration_parked",
     "rate_limited_loop",
+    "release_gate_parked",
+    "tree_root_woke",
   ])
   .catch("sticky_blocked");
 
