@@ -31,7 +31,13 @@ function ChainPanel({ rootId }: { rootId: string }) {
     <>
       <KettenGraph nodes={graph.data.nodes} edges={graph.data.edges} rootId={graph.data.root_id} />
       <p className="text-right text-xs text-[var(--hc-text-dim)]">
-        {de.ketten.checkedAt(fmtAge(graph.data.checked_at, now))}
+        {graph.data.checked_at ? (
+          <time dateTime={new Date(graph.data.checked_at * 1000).toISOString()}>
+            {de.ketten.checkedAt(fmtAge(graph.data.checked_at, now))}
+          </time>
+        ) : (
+          de.ketten.checkedAt(fmtAge(graph.data.checked_at, now))
+        )}
       </p>
     </>
   );

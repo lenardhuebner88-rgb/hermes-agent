@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
 import { buildChains } from "../lib/fleet";
+import { fmtAge } from "../lib/derive";
 import { de } from "../i18n/de";
 import type { BoardTask, ChainGraphEdge, ChainGraphNode } from "../lib/types";
 
@@ -196,5 +197,33 @@ describe("ChainSelector + KettenGraph integration", () => {
       // Source contract: mobile-first flex-col, horizontal split gated behind lg:.
       expect(src).toMatch(/flex-col[^"]*\blg:flex-row\b/);
     });
+  });
+});
+
+// ── K5: checked_at <time> semantic wrapper ──────────────────────────────────
+describe("checked_at <time> semantic element", () => {
+  const EPOCH_SEC = 1_718_700_000; // fixed Unix timestamp (seconds)
+  const EXPECTED_ISO = new Date(EPOCH_SEC * 1000).toISOString();
+
+  it("wraps checked_at in <time dateTime=ISO> when truthy", () => {
+    const now = EPOCH_SEC + 120; // 2 minutes later → fmtAge = "2m"
+    const label = fmtAge(EPOCH_SEC, now);
+    const html = renderToStaticMarkup(
+      <time dateTime={EXPECTED_ISO}>{de.ketten.checkedAt(label)}</time>,
+    );
+    expect(html).toContain("<time");
+    // renderToStaticMarkup preserves React's camelCase prop name in the attribute.
+    expect(html).toContain(`dateTime="${EXPECTED_ISO}"`);
+    expect(html).toContain("aktualisiert vor 2m");
+  });
+
+  it("source contains the <time dateTime> wrapper expression", () => {
+    expect(src).toMatch(/\btime\b.*\bdateTime\b/);
+    expect(src).toMatch(/checked_at \* 1000/);
+  });
+
+  it("source guards the falsy case (no crash when checked_at is 0)", () => {
+    // The view uses `graph.data.checked_at ? <time ...> : fallback`.
+    expect(src).toMatch(/graph\.data\.checked_at\s*\?/);
   });
 });
