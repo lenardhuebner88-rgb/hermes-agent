@@ -320,6 +320,31 @@ def _ac_statement_oneline(text: str) -> str:
     return " ".join(str(text).split())
 
 
+def _ac_items_for_subtask(
+    subtask: "BindingSubtask",
+    plan_ac: "list[str | AcceptanceCriterion]",
+) -> list[str | AcceptanceCriterion]:
+    """Return normalized AC items that apply to *subtask*."""
+    if subtask.acceptance_criteria:
+        findings: list[str] = []
+        normalized = _normalize_acceptance_criteria(subtask.acceptance_criteria, findings)
+        if findings:
+            logger.warning(
+                "PlanSpec subtask %s: %d acceptance_criteria dropped: %s",
+                subtask.id, len(findings), "; ".join(findings),
+            )
+        if normalized:
+            return normalized
+    fallback: list[str | AcceptanceCriterion] = []
+    for item in plan_ac:
+        if isinstance(item, AcceptanceCriterion):
+            if not item.applies_to or subtask.id in item.applies_to:
+                fallback.append(item)
+        else:
+            fallback.append(item)
+    return fallback
+
+
 def _ac_bullets_for_subtask(
     subtask: "BindingSubtask",
     plan_ac: "list[str | AcceptanceCriterion]",
@@ -416,8 +441,9 @@ def taskgraph_hints_to_children(
         body_parts.append(f"Lane: {task.lane}")
         if task.deps:
             body_parts.append("Depends on: " + ", ".join(task.deps))
-        # Thread AC bullets into the body so _parse_acceptance_criteria can
-        # populate tasks.acceptance_criteria for planspec-sourced children.
+        # Thread AC bullets into the body for backwards-readable task bodies,
+        # and pass the structured items separately for the DB store.
+        ac_items = _ac_items_for_subtask(task, effective_plan_ac)
         ac_bullets = _ac_bullets_for_subtask(task, effective_plan_ac)
         if ac_bullets:
             body_parts.append("\n".join(ac_bullets))
@@ -431,6 +457,11 @@ def taskgraph_hints_to_children(
             "planspec_deps": list(task.deps),
             "planspec_subtask_id": task.id,
         }
+        if ac_items:
+            child["acceptance_criteria_struct"] = [
+                item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else {"statement": str(item)}
+                for item in ac_items
+            ]
         if planspec_source is not None:
             child["planspec_source"] = planspec_source
         children.append(child)

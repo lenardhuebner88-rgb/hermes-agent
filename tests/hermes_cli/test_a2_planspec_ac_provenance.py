@@ -549,3 +549,62 @@ def test_ingest_planspec_root_freigabe_in_noac_plan(kanban_home, tmp_path: Path)
         ).fetchone()
     assert row["freigabe"] == "smoke-only"
     assert row["live_test_depth"] == "smoke"
+
+
+def test_phase4_planspec_child_ac_is_structured_dicts(kanban_home, tmp_path: Path):
+    """Phase4 D: PlanSpec children persist structured AC dicts, not lossy strings."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            row = conn.execute(
+                "SELECT acceptance_criteria FROM tasks WHERE id = ?",
+                (result["child_ids"][0],),
+            ).fetchone()
+            parsed = json.loads(row["acceptance_criteria"])
+    finally:
+        monkeypatch.undo()
+    assert isinstance(parsed[0], dict)
+    assert parsed[0]["id"] == "AC-TEST-1"
+    assert parsed[0]["statement"] == "The child body carries this AC statement."
+
+
+def test_phase4_ui_real_planspec_root_stays_scheduled_until_uireal_release(kanban_home, tmp_path: Path):
+    """Phase4 A: ui-real PlanSpec roots stay held until explicit operator release."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root, name="2026-06-18-uireal.md")
+    text = path.read_text(encoding="utf-8").replace("live_test_depth: contract", "live_test_depth: ui-real")
+    path.write_text(text, encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            root_id = result["root_task_id"]
+            root = conn.execute("SELECT status FROM tasks WHERE id = ?", (root_id,)).fetchone()
+            assert root["status"] == "scheduled"
+            assert kb.recompute_ready(conn) == 0
+            assert conn.execute("SELECT status FROM tasks WHERE id = ?", (root_id,)).fetchone()["status"] == "scheduled"
+            assert kb.release_uireal_root(conn, root_id, author="pytest") is True
+            assert conn.execute("SELECT status FROM tasks WHERE id = ?", (root_id,)).fetchone()["status"] == "todo"
+            events = [r["kind"] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ?", (root_id,)).fetchall()]
+    finally:
+        monkeypatch.undo()
+    assert "uireal_released" in events
+
+
+def test_phase4_planspec_source_for_task_reads_child_row_directly(kanban_home, tmp_path: Path):
+    """Phase4 C: card→spec resolves from the child row, no root hop needed."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_planspec_with_ac(plans_root)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+            assert kb.planspec_source_for_task(conn, result["child_ids"][0]) == str(path.resolve())
+    finally:
+        monkeypatch.undo()

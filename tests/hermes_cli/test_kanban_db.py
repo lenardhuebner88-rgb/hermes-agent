@@ -7684,6 +7684,7 @@ def test_c1_tree_root_woke_all_children_done(kanban_home):
                 "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                 (child2, root),
             )
+        kb._append_event(conn, root, "decomposed", {"child_ids": [child1, child2]})
         # Complete both children
         _set_task_status(conn, child1, "done")
         _set_task_status(conn, child2, "done")
@@ -8353,3 +8354,15 @@ def test_dispatch_once_heartbeats_live_claude_cli_and_prevents_false_stale(
         assert t in result.heartbeated
         assert t not in result.stale
         assert kb.get_task(conn, t).status == "running"
+
+
+def test_phase4_tree_root_woke_excludes_plain_dependency_task(kanban_home):
+    """Phase4 F: tree_root_woke only reports real decomposed roots, not any dependent ready task."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="Parent")
+        child = kb.create_task(conn, title="Plain dependent")
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+        kb.link_tasks(conn, parent, child)
+        result = kb.decision_queue(conn)
+    assert "tree_root_woke" not in _kinds_for(child, result)

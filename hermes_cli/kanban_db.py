@@ -7448,6 +7448,71 @@ def promote_task(
     return True, None
 
 
+def _structured_acceptance_criteria_json(value: Any) -> Optional[str]:
+    """Serialize structured PlanSpec AC dicts for tasks.acceptance_criteria.
+
+    Returns NULL for absent/malformed values so ad-hoc decomposes keep the
+    historical body-parse fallback.
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            statement = str(item.get("statement") or "").strip()
+            if not statement:
+                continue
+            clean = {str(k): v for k, v in item.items() if v is not None}
+            clean["statement"] = statement
+            out.append(clean)
+        elif isinstance(item, str) and item.strip():
+            out.append({"statement": item.strip()})
+    if not out:
+        return None
+    return json.dumps(out, ensure_ascii=False)
+
+
+def planspec_source_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Return a task's PlanSpec source from its own row (1-hop)."""
+    row = conn.execute(
+        "SELECT planspec_source FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    source = row["planspec_source"]
+    return source if isinstance(source, str) and source.strip() else None
+
+
+def release_uireal_root(conn: sqlite3.Connection, task_id: str, *, author: str = "operator") -> bool:
+    """Release a ui-real PlanSpec root held in scheduled state into todo.
+
+    The root still waits on its child parents; this only records explicit
+    operator intent and lets child-release paths proceed without recompute_ready
+    auto-releasing ui-real roots.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, live_test_depth FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["live_test_depth"] != "ui-real":
+            return False
+        if row["status"] == "todo":
+            _append_event(conn, task_id, "uireal_released", {"author": author, "idempotent": True})
+            return True
+        if row["status"] != "scheduled":
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "uireal_released", {"author": author})
+        return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
@@ -7776,7 +7841,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id, live_test_depth "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7820,11 +7885,11 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
-            # A1: parse structured acceptance criteria from the child's body.
-            # Fail-soft → NULL; the body is stored verbatim either way.
-            child_ac = _parse_acceptance_criteria(
-                body if isinstance(body, str) else None
-            )
+            # Phase4 D: PlanSpec children can pass structured AC dicts directly.
+            # Ad-hoc decomposes keep the historical body-parse fallback.
+            child_ac = _structured_acceptance_criteria_json(
+                child.get("acceptance_criteria_struct")
+            ) or _parse_acceptance_criteria(body if isinstance(body, str) else None)
             # A2: PlanSpec provenance columns — populated when the child dict
             # carries planspec_subtask_id / planspec_source (set by
             # taskgraph_hints_to_children).  NULL on non-planspec children.
@@ -7891,9 +7956,15 @@ def decompose_triage_task(
                 (cid, task_id),
             )
 
-        # Flip the root: triage -> todo, set assignee to the orchestrator.
-        sets = ["status = 'todo'"]
-        params: list[Any] = []
+        # Flip the root: normally triage/scheduled -> todo.  Phase4 A keeps
+        # ui-real PlanSpec roots held in scheduled until explicit operator release.
+        root_new_status = (
+            "scheduled"
+            if root_row["live_test_depth"] == "ui-real" and initial_child_status == "scheduled"
+            else "todo"
+        )
+        sets = ["status = ?"]
+        params: list[Any] = [root_new_status]
         if root_assignee is not None:
             sets.append("assignee = ?")
             params.append(root_assignee)
@@ -14648,6 +14719,9 @@ def decision_queue(
             "SELECT t.id AS task_id, t.title AS title, t.created_at AS created_at "
             "FROM tasks t "
             "WHERE t.status = 'ready' "
+            "  AND (t.planspec_source IS NOT NULL OR EXISTS ("
+            "    SELECT 1 FROM task_events e0 WHERE e0.task_id = t.id AND e0.kind = 'decomposed'"
+            "  )) "
             # has at least one subtask (the root is the dependent child_id)
             "  AND EXISTS (SELECT 1 FROM task_links WHERE child_id = t.id) "
             # every subtask (parent) is done — same predicate recompute_ready uses
