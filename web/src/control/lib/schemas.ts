@@ -1073,6 +1073,32 @@ export type CostBucket = z.infer<typeof CostBucketSchema>;
 export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
 export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
 
+// ST4 (Statistik-Broadsheet): wiederkehrende Fehler, gruppiert je
+// (Signatur + Profil), gespiegelt aus /runs/issues. Die `outcomes` sind
+// ausschließlich Harness-Lifecycle-Endzustände (crashed/timed_out/spawn_failed/
+// gave_up/iteration_budget_exhausted/blocked) — daher die Fehler-Taxonomie.
+const IssueGroupSchema = z.object({
+  signature: z.string().catch(""),
+  profile: z.string().catch("unbekannt"),
+  count: z.coerce.number().catch(0),
+  first_seen: nullableNumber,
+  last_seen: nullableNumber,
+  outcomes: z.record(z.string(), z.coerce.number()).catch({}),
+  example_run_id: nullableNumber,
+  example_task_id: z.coerce.string().catch(""),
+  example_text: z.string().catch(""),
+});
+export const RunsIssuesResponseSchema = z.object({
+  days: z.coerce.number().catch(30),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  total_failed_runs: z.coerce.number().catch(0),
+  group_count: z.coerce.number().catch(0),
+  truncated: z.boolean().catch(false),
+  issues: z.array(IssueGroupSchema).catch([]),
+});
+export type IssueGroup = z.infer<typeof IssueGroupSchema>;
+export type RunsIssuesResponse = z.infer<typeof RunsIssuesResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {
