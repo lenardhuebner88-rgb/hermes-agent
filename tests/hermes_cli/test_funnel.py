@@ -37,6 +37,54 @@ def test_value_class_funnel_sources_are_nutzer():
         assert kb.value_class(src) == "nutzer"
 
 
+def test_value_class_user_feature_title_patterns_are_nutzer():
+    titles = [
+        "[FO] Familienkalender verbessern",
+        "0001: Küche Startseite",
+        "0123: Mobile Einkaufsliste",
+        "FO Mobil: Offline Sync",
+        "FO NextGen Tagesplan",
+        "Abo-Limits Dashboard-Tile",
+        "/kitchen quick add",
+        "/shopping bevorzugte Liste",
+        "Essensplan Wochenübersicht",
+        "Rezept aus Resten vorschlagen",
+        "Einkauf nach Kategorien sortieren",
+        "[FO] Push Erinnerungen",
+        "0002: Gemeinsame Aufgaben",
+        "0003: Schultermine importieren",
+        "0004: Haushaltsbudget",
+        "FO Mobil Familienprofil",
+        "FO NextGen Kalender Export",
+        "Abo-Limits Warnung",
+        "/kitchen Vorräte scannen",
+        "/shopping Mengen zusammenführen",
+        "Essensplan Allergien berücksichtigen",
+        "Rezept Favoriten teilen",
+        "Einkauf Vorratskammer abgleichen",
+        "[FO] Familiennotizen",
+        "0005: Rezeptsuche mobil",
+    ]
+
+    for title in titles:
+        assert kb.value_class("dashboard", title=title) == "nutzer"
+
+
+def test_value_class_epic_id_is_nutzer():
+    assert kb.value_class("dashboard", title="Technische Teilaufgabe", epic_id="epic_abcd") == "nutzer"
+
+
+def test_value_class_title_patterns_do_not_false_positive():
+    for title in (
+        "Dashboard rebuild",
+        "Shop integration smoke test",
+        "Kubernetes kitchen-sink fixture cleanup",
+        "Verification chain hardening",
+        "Cost limits for provider accounting",
+    ):
+        assert kb.value_class("dashboard", title=title) == "meta"
+
+
 def test_value_class_review_chains_are_haertung():
     assert kb.value_class("kanban-review-chain") == "haertung"
     assert kb.value_class("verifier") == "haertung"
@@ -46,6 +94,32 @@ def test_value_class_review_chains_are_haertung():
 def test_value_class_rest_is_meta():
     for src in ("dashboard", "user", "worker", "coordinator", None, ""):
         assert kb.value_class(src) == "meta"
+
+
+def test_runs_daily_classifies_done_roots_by_title_and_epic(conn):
+    now = int(time.time())
+    title_id = kb.create_task(conn, title="[FO] Essensplan für Kinder", created_by="dashboard")
+    epic_id = kb.create_epic(conn, title="FO Mobil Epic")
+    epic_task_id = kb.create_task(
+        conn,
+        title="Technische Teilaufgabe",
+        created_by="dashboard",
+        epic_id=epic_id,
+    )
+    false_positive_id = kb.create_task(
+        conn,
+        title="Kubernetes kitchen-sink fixture cleanup",
+        created_by="dashboard",
+    )
+    with kb.write_txn(conn):
+        conn.executemany(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            [(now, title_id), (now, epic_task_id), (now, false_positive_id)],
+        )
+
+    series = kb.runs_daily(conn, days=1)["series"]
+
+    assert series[-1]["done_roots_by_class"] == {"nutzer": 2, "haertung": 0, "meta": 1}
 
 
 # --- wish_key ---------------------------------------------------------------

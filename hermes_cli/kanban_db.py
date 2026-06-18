@@ -13748,19 +13748,32 @@ def runs_reliability(
 # Schema: Vorschläge sind normale Kanban-Tasks, nur mit diesen Autoren.
 FUNNEL_CREATED_BY = ("family", "discord-idee", "fo-gap-audit")
 
+_VALUE_TITLE_NUTZER_RE = re.compile(
+    r"\[FO\]|^0\d{3}:|FO Mobil|FO NextGen|Abo-Limits|/kitchen|/shopping|"
+    r"Essensplan|Rezept|Einkauf",
+    re.IGNORECASE,
+)
+
 _VALUE_CLASSES = ("nutzer", "haertung", "meta")
 
 
-def value_class(created_by: Optional[str]) -> str:
-    """Wert-Klasse eines gelieferten Roots, abgeleitet aus ``created_by``.
+def value_class(
+    created_by: Optional[str],
+    *,
+    title: Optional[str] = None,
+    epic_id: Optional[str] = None,
+) -> str:
+    """Wert-Klasse eines gelieferten Roots, abgeleitet aus stabilen Task-Signalen.
 
-    v1 bewusst unscharf (kein Schema-Touch): Funnel-Quellen → ``nutzer``,
-    Review-/Verifier-Ketten → ``haertung``, alles andere → ``meta``.
-    Fehlklassifikationen sind im Digest sichtbar; wenn das nervt, ist eine
-    ``value_class``-Spalte der dokumentierte v2-Schritt.
+    Bewusst unscharf (kein Schema-Touch): FO-/Family-Signale über Titel,
+    Funnel-Quellen oder Epic-Zuordnung → ``nutzer``; Review-/Verifier-Ketten
+    → ``haertung``; alles andere → ``meta``. Fehlklassifikationen sind im
+    Digest sichtbar; wenn das nervt, ist eine ``value_class``-Spalte der
+    dokumentierte v2-Schritt.
     """
     c = (created_by or "").strip().lower()
-    if c in FUNNEL_CREATED_BY:
+    t = (title or "").strip()
+    if epic_id or c in FUNNEL_CREATED_BY or _VALUE_TITLE_NUTZER_RE.search(t):
         return "nutzer"
     if c == "kanban-review-chain" or "review" in c or "verif" in c:
         return "haertung"
@@ -13811,7 +13824,7 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
     }
     for row in conn.execute(
-        "SELECT id, created_at, completed_at, created_by FROM tasks "
+        "SELECT id, title, created_at, completed_at, created_by, epic_id FROM tasks "
         "WHERE completed_at IS NOT NULL AND completed_at >= ?",
         (window_start,),
     ).fetchall():
@@ -13822,7 +13835,9 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
         b["done_tasks"] += 1
         if row["id"] not in interior:
             b["done_roots"] += 1
-            b["done_roots_by_class"][value_class(row["created_by"])] += 1
+            b["done_roots_by_class"][value_class(
+                row["created_by"], title=row["title"], epic_id=row["epic_id"],
+            )] += 1
             if row["created_at"] is not None:
                 delta = int(row["completed_at"]) - int(row["created_at"])
                 if delta >= 0:
