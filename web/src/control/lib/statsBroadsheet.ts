@@ -331,12 +331,15 @@ export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
     .slice(0, limit);
 }
 
-/** Gate-Effektivität = Σ rejected / Σ runs über alle Profile (Reliability-Rows):
- *  Anteil der Läufe, die das Verifier-Gate abgelehnt hat. Fleet-weit (roh, wie
- *  die Akzeptanz-Headline). null, wenn keine Läufe im Fenster. */
+/** Gate-Effektivität = Σ rejected / Σ runs über die Roster-Profile (Reliability-Rows):
+ *  Anteil der Läufe, die das Verifier-Gate abgelehnt hat. Roster-gefiltert wie die
+ *  Akzeptanz-Headline und `laneBurn` — Phantome ("w"/"unbekannt") fließen NICHT in
+ *  den Nenner, sonst verdünnt ein 3025-Läufe-Phantom 12/396 auf 12/3438 → "0 %".
+ *  null, wenn keine Läufe im Fenster. */
 export function gateEffectiveness(profiles: ReliabilityProfile[]): number | null {
-  const runs = profiles.reduce((acc, p) => acc + p.runs, 0);
+  const roster = rosterProfiles(profiles);
+  const runs = roster.reduce((acc, p) => acc + p.runs, 0);
   if (runs <= 0) return null;
-  const rejected = profiles.reduce((acc, p) => acc + p.rejected, 0);
+  const rejected = roster.reduce((acc, p) => acc + p.rejected, 0);
   return rejected / runs;
 }

@@ -368,4 +368,14 @@ describe("gateEffectiveness", () => {
     expect(gateEffectiveness([])).toBeNull();
     expect(gateEffectiveness([profile({ runs: 0, rejected: 0 })])).toBeNull();
   });
+
+  it("drops phantom profiles from the denominator (roster-filtered)", () => {
+    // A 3025-run phantom would dilute 12/396 → 12/3438 ("0 %") if counted.
+    const v = gateEffectiveness([
+      profile({ profile: "coder", runs: 396, rejected: 12 }),
+      profile({ profile: "w", runs: 3025, rejected: 0 }),
+      profile({ profile: "unbekannt", runs: 17, rejected: 1 }),
+    ]);
+    expect(v).toBeCloseTo(12 / 396, 5);
+  });
 });
