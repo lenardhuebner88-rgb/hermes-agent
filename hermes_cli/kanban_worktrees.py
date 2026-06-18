@@ -1404,16 +1404,23 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         return None
 
     ruff_bin = shutil.which("ruff")
-    ruff_cmd = [ruff_bin, "check", "."] if ruff_bin else [
-        sys.executable, "-m", "ruff", "check", "."
-    ]
-    # Other chains' worktrees live under .worktrees/ in the SAME repo —
-    # their in-progress state must never fail THIS chain's gate (observed
-    # in the 2026-06-11 gate probe: ruff also flagged the worktree copy).
-    ruff_cmd += ["--extend-exclude", WORKTREES_DIRNAME]
-    err = _run("ruff", ruff_cmd, repo_root, 300)
-    if err:
-        return False, err
+    # #3-C: run ruff only over the changed .py files, not the whole repo.
+    # Uses the same diff source (changed_files) already computed by the caller
+    # for the affected-pytest-modules logic — no extra git subprocess needed.
+    # Fallback: if changed_files is empty/unavailable we get _changed_py==[]
+    # and no .py files → skip ruff (non-Python diff). If somehow the file
+    # list can't be trusted the caller should pass [] and the integrator can
+    # always force a full gate manually.
+    _changed_py: list[str] = [f for f in changed_files if f.endswith(".py")]
+    if _changed_py:
+        ruff_base = [ruff_bin, "check"] if ruff_bin else [sys.executable, "-m", "ruff", "check"]
+        ruff_cmd = ruff_base + _changed_py + ["--extend-exclude", WORKTREES_DIRNAME]
+        err = _run("ruff", ruff_cmd, repo_root, 300)
+        if err:
+            return False, err
+    else:
+        # No .py files in diff — skip ruff entirely (non-Python-only change).
+        notes.append("ruff skipped (no .py files in diff)")
 
     modules = _affected_pytest_modules(repo_root, changed_files)
     if modules:
