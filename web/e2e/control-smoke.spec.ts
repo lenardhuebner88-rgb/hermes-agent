@@ -156,8 +156,12 @@ test.describe("Control Smoke (live)", () => {
       await page.goto("/control");
 
       await expect(page.getByText("Abo-Limits").filter({ visible: true })).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByRole("meter", { name: /5h: 82% genutzt/ })).toBeVisible();
-      await expect(page.getByText("Limit unbekannt").filter({ visible: true }).first()).toBeVisible();
+      // Bekanntes Fenster: Gauge ist ein role="meter" mit Prozent im Accessible Name.
+      await expect(page.getByRole("meter", { name: /5-Std-Fenster: 82\s*% genutzt/ })).toBeVisible();
+      // Unbekanntes Limit: das Wochen-Fenster ohne Prozentwert meldet "unbekannt".
+      await expect(page.getByRole("meter", { name: /Diese Woche: unbekannt/ })).toBeVisible();
+      // Nebendetails liegen im aufklappbaren Collapse — öffnen, dann ist der Inhalt sichtbar.
+      await page.getByText("Details", { exact: true }).first().click();
       await expect(page.getByText("Details sichtbar").filter({ visible: true })).toBeVisible();
     });
   }

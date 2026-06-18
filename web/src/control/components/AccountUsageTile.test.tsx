@@ -72,6 +72,12 @@ describe("AccountUsageTile", () => {
     expect(html).toContain("62 %");
     expect(html).toContain("Pro");
 
+    // Gauge-Semantik (a11y): jede Fenster-Zeile ist ein role="meter" mit dem
+    // Prozentwert im Accessible Name — sonst kündigt der Screenreader nichts an.
+    expect(html).toContain('role="meter"');
+    expect(html).toContain('aria-label="5-Std-Fenster: 24 % genutzt"');
+    expect(html).toContain('aria-label="Diese Woche: 62 % genutzt"');
+
     // Nebenfenster + Extra-Usage im Details-Collapse
     expect(html).toContain("Details");
     expect(html).toContain("Sonnet-Woche");
@@ -107,5 +113,32 @@ describe("AccountUsageTile", () => {
     const empty: AccountUsageResponse = { cache_ttl_seconds: 60, providers: [] };
     const html = renderToStaticMarkup(<AccountUsageTile usage={empty} loading={false} error={null} />);
     expect(html).toContain("Limit unbekannt");
+  });
+
+  it("kennzeichnet ein Fenster ohne Prozentwert als unbekanntes Limit (Gauge bleibt zugänglich)", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "anthropic",
+          available: true,
+          source: "oauth",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Account limits",
+          plan: "Max",
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "5h", window_key: "session", used_percent: 82, reset_at: null, detail: null },
+            { label: "Weekly", window_key: "weekly", used_percent: null, reset_at: null, detail: null },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
+    expect(html).toContain('aria-label="5-Std-Fenster: 82 % genutzt"');
+    expect(html).toContain('aria-label="Diese Woche: unbekannt"');
+    expect(html).toContain('aria-valuetext="unbekannt"');
   });
 });

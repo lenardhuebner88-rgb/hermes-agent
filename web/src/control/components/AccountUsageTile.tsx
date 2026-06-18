@@ -49,9 +49,22 @@ function AccountWindowRow({ window, nowMs }: { window: AccountUsageWindow; nowMs
       ? Math.max(0, Math.min(100, window.used_percent))
       : null;
   const reset = formatReset(window.reset_at, nowMs);
+  // Accessible-Name + role="meter": der RateBar ist aria-hidden (rein dekorativ),
+  // also trägt die Zeile die Gauge-Semantik — Screenreader (und der control-smoke-
+  // e2e) lesen "<Fenster>: <N> % genutzt" bzw. "<Fenster>: unbekannt".
+  const label = windowLabelDe(window);
+  const meterName = `${label}: ${used == null ? "unbekannt" : `${Math.round(used)} % genutzt`}`;
   return (
-    <div className="grid grid-cols-[7rem_1fr_auto] items-center gap-2 text-xs">
-      <span className="truncate hc-soft">{windowLabelDe(window)}</span>
+    <div
+      className="grid grid-cols-[7rem_1fr_auto] items-center gap-2 text-xs"
+      role="meter"
+      aria-label={meterName}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={used == null ? undefined : Math.round(used)}
+      aria-valuetext={used == null ? "unbekannt" : undefined}
+    >
+      <span className="truncate hc-soft">{label}</span>
       <RateBar rate={used == null ? null : used / 100} color={TONE_HEX[limitTone(used)]} />
       <span className="whitespace-nowrap tabular-nums text-white">
         {used == null ? "?" : `${Math.round(used)} %`}
