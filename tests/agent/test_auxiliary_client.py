@@ -1653,6 +1653,12 @@ class TestAuxiliaryFallbackLayering:
         exc.status_code = 402
         return exc
 
+    def _make_rate_limit_err(self):
+        # 429 overload WITHOUT billing keywords → rate-limit, not payment.
+        exc = Exception("429 model overloaded, please retry")
+        exc.status_code = 429
+        return exc
+
     def test_explicit_provider_uses_configured_chain_first(self, monkeypatch, caplog):
         """When a user has fallback_chain configured, it's tried BEFORE the main agent model."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
@@ -1736,6 +1742,39 @@ class TestAuxiliaryFallbackLayering:
         assert any(
             "all fallbacks exhausted" in r.message for r in caplog.records
         ), f"Expected exhaustion warning, got: {[r.message for r in caplog.records]}"
+
+    def test_explicit_provider_rate_limit_uses_configured_chain(self, monkeypatch):
+        """A 429 overload (non-billing rate-limit) on an EXPLICIT provider must
+        fall back via the configured chain — staying on the same subscription —
+        not stay stuck on the overloaded model. Guards the is_capacity_error
+        rate-limit gate (aux Abo-fallback resilience). Without that gate this
+        explicit-provider call would NOT fall back and would re-raise the 429."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.side_effect = self._make_rate_limit_err()
+
+        chain_client = MagicMock()
+        chain_client.chat.completions.create.return_value = MagicMock(choices=[
+            MagicMock(message=MagicMock(content="from configured chain"))
+        ])
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                   return_value=(primary_client, "glm-4v-flash")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                   return_value=("glm", "glm-4v-flash", None, None, None)), \
+             patch("agent.auxiliary_client._try_configured_fallback_chain",
+                   return_value=(chain_client, "gpt-5.4-mini", "fallback_chain[0](openai-codex)")), \
+             patch("agent.auxiliary_client._try_payment_fallback") as payment_fb:
+            call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert chain_client.chat.completions.create.called
+        # Explicit provider must use the configured chain, NOT the auto-only
+        # payment chain (openrouter/nous).
+        payment_fb.assert_not_called()
 
 
 class TestTryMainAgentModelFallback:
