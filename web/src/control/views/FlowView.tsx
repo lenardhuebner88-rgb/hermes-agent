@@ -2027,7 +2027,7 @@ export function FlowView() {
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
                       {chainBoard.singles.slice(0, MAX_CARDS).map((task) => <div key={task.id}>{renderTaskCard(task)}</div>)}
                     </div>
-                    {chainBoard.singles.length > MAX_CARDS ? <p className="mt-1.5 px-1 hc-type-label hc-dim">+ {chainBoard.singles.length - MAX_CARDS} weitere</p> : null}
+                    {chainBoard.singles.length > MAX_CARDS ? <p className="mt-1.5 px-1 hc-type-label hc-dim">Nur {MAX_CARDS} von {chainBoard.singles.length} angezeigt</p> : null}
                   </section>
                 ) : null}
 

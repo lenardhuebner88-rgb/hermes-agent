@@ -231,6 +231,19 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
   });
 });
 
+describe("FlowView singles truncation hint (F4)", () => {
+  it("shows a truncation hint that states how many singles are shown vs total", () => {
+    // The hint must contain the 'Nur … von … angezeigt' pattern so the operator
+    // knows the list is capped, not that the board only has that many singles.
+    expect(src).toMatch(/Nur \{MAX_CARDS\} von \{chainBoard\.singles\.length\} angezeigt/);
+  });
+
+  it("couples the truncation hint to the MAX_CARDS cap condition", () => {
+    // The hint must only render when chainBoard.singles.length > MAX_CARDS.
+    expect(src).toMatch(/chainBoard\.singles\.length > MAX_CARDS[^?]*\?[^:]*Nur \{MAX_CARDS\} von \{chainBoard\.singles\.length\} angezeigt/s);
+  });
+});
+
 describe("FlowView loading guard", () => {
   it("renders a flow-skeleton container when loadingFirst is true (board.loading && board.data == null)", () => {
     // Source-Contract: the guard branch (loadingFirst ? …) must include a
