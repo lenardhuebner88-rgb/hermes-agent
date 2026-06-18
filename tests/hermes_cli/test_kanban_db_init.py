@@ -149,6 +149,36 @@ def test_rebuilt_schema_matches_fresh_db(tmp_path, monkeypatch):
             assert _table_struct(migrated, table) == _table_struct(fresh, table)
 
 
+def test_task_events_kind_index_present(tmp_path, monkeypatch):
+    """#11: decision_queue scans ``task_events WHERE kind = 'release_gate_parked'``.
+    An index covering ``kind`` must exist so that scan is not full-table on a
+    board with a large event log."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    with kb.connect(db_path) as conn:
+        idx_sql = [
+            (r["sql"] or "")
+            for r in conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='task_events'"
+            )
+        ]
+    assert any("kind" in s.lower() for s in idx_sql), (
+        f"no index covering task_events.kind found: {idx_sql}"
+    )
+
+
+def test_kind_index_survives_legacy_rebuild(tmp_path, monkeypatch):
+    """#11: the kind index is recreated by the additive migration pass even on a
+    legacy DB rebuilt in place (same guarantee idx_events_run has)."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_legacy_db(db_path)
+    with kb.connect(db_path) as conn:
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='task_events'"
+        )}
+    assert "idx_events_kind" in names, names
+
+
 def test_migration_is_idempotent(tmp_path, monkeypatch):
     """Re-opening an already-migrated DB is a no-op and leaves data intact."""
     db_path = _setup_home(tmp_path, monkeypatch)

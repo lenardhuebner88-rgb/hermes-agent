@@ -427,7 +427,6 @@ def taskgraph_hints_to_children(
             "assignee": task.lane,
             "kind": _kind_for_planspec_lane(task.lane),
             "parents": deps,
-            "planspec_id": task.id,
             "planspec_lane": task.lane,
             "planspec_deps": list(task.deps),
             "planspec_subtask_id": task.id,

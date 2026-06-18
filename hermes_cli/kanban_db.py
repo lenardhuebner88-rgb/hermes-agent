@@ -2184,6 +2184,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_events_run "
         "ON task_events(run_id, id)"
     )
+    # #11: decision_queue scans ``task_events WHERE kind = 'release_gate_parked'``
+    # (and similar kind filters).  ``kind`` is not the leading column of any
+    # existing index (those lead with task_id), so the scan was full-table on a
+    # large event log.  (kind, task_id) covers the filter + the join to tasks.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_kind "
+        "ON task_events(kind, task_id)"
+    )
 
     # K5a: task_runs gained per-run token/cost accounting columns for D7 L1
     # cost observability. Additive + nullable — historical runs (and any run
@@ -2343,6 +2351,7 @@ _REBUILD_SPECS = {
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_task_id ON task_events(task_id, id)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
+            "CREATE INDEX idx_events_kind ON task_events(kind, task_id)",
         ),
     ),
     "task_comments": (
@@ -2970,6 +2979,8 @@ def create_task(
     kind: Optional[str] = None,
     board: Optional[str] = None,
     model_override: Optional[str] = None,
+    freigabe: Optional[str] = None,
+    live_test_depth: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3200,8 +3211,8 @@ def create_task(
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        model_override
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        model_override, freigabe, live_test_depth
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3228,6 +3239,8 @@ def create_task(
                         epic_id,
                         kind,
                         (model_override or "").strip() or None,
+                        freigabe,
+                        live_test_depth,
                     ),
                 )
                 for pid in parents:
@@ -7594,6 +7607,16 @@ def _parse_acceptance_criteria(body: Optional[str]) -> Optional[str]:
     Returns the JSON string, or ``None`` when the body is empty, carries no
     recognizable AC bullets, or anything fails — strictly fail-soft so a parse
     miss never aborts a decomposition (the body itself is unchanged regardless).
+
+    #14 — altitude boundary (intentionally lossy, locked by
+    ``test_ac_body_roundtrip_contract_is_locked``): a bullet only carries an
+    ``AC-<id>: <statement>`` prose line, so a planspec criterion's structured
+    fields (``verification``/``done_signal``/``scope_level``/``applies_to``)
+    cannot be recovered here and survive only as a flat ``"AC-…: <stmt>"``
+    string. Those fields live in the source .md and are read structured by the
+    PlanSpec viewer (``GET /planspecs/detail``). Threading the full AC JSON onto
+    the child dict at decompose time (a structured store) is a deliberate
+    follow-up, not a silent behaviour to drift into.
     """
     if not isinstance(body, str) or not body.strip():
         return None
@@ -14644,12 +14667,13 @@ def decision_queue(
 
     # 7) release_gate_parked — tasks carrying a 'release_gate_parked' event
     #    that are NOT in a terminal state (not done/archived).  The
-    #    suggested_command is sourced from _RELEASE_GATE_COMMANDS in
-    #    kanban_worktrees (imported lazily to avoid circular deps).
+    #    suggested_command is the FULL gate sequence: the event payload's own
+    #    ``commands`` list (what the gate actually parked on) joined with
+    #    ``&&``, falling back to the canonical _RELEASE_GATE_COMMANDS.  The old
+    #    ``next(iter(...))`` surfaced only the leading ``cd`` — a no-op alone.
     try:
         from hermes_cli import kanban_worktrees as _kwt  # lazy: avoids import cycle
-        _rgc = _kwt._RELEASE_GATE_COMMANDS
-        suggested = next(iter(_rgc), None) or f"hermes kanban show <id>"
+        _fallback_cmd = " && ".join(_kwt._RELEASE_GATE_COMMANDS) or "hermes kanban show <id>"
         for row in conn.execute(
             "SELECT e.task_id, e.payload, e.created_at AS event_at, "
             "t.title AS title, MAX(e.id) "
@@ -14665,6 +14689,11 @@ def decision_queue(
                 str(payload.get("reason") or "").strip()
                 or "Release gate parked — awaiting GO"
             )
+            cmds = payload.get("commands")
+            if isinstance(cmds, list) and cmds:
+                suggested = " && ".join(str(c) for c in cmds)
+            else:
+                suggested = _fallback_cmd
             _add(
                 "release_gate_parked", row["task_id"], row["title"],
                 reason, _age(row["event_at"]),

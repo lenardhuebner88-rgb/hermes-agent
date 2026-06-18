@@ -98,12 +98,15 @@ def _is_display_only_open_plan(frontmatter: dict[str, Any], status: str) -> bool
 def resolve_planspec_path(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> Path:
     candidate = Path(path).expanduser().resolve(strict=False)
     root = plans_root.expanduser().resolve(strict=False)
+    # #13: error findings are surfaced verbatim to the dashboard / HTTP callers.
+    # Never embed the resolved server-side path (``root`` / ``candidate``) — that
+    # discloses the server's filesystem layout to an attacker-influenced caller.
     if not _is_relative_to(candidate, root):
-        raise PlanSpecBlocked([f"planspec path must be under {root}"])
+        raise PlanSpecBlocked(["planspec path must be under the allowed plans directory"])
     if candidate.suffix.lower() != ".md":
         raise PlanSpecBlocked(["planspec path must point to a markdown file"])
     if not candidate.is_file():
-        raise PlanSpecBlocked([f"planspec file not found: {candidate}"])
+        raise PlanSpecBlocked(["planspec file not found"])
     return candidate
 
 
@@ -492,6 +495,10 @@ def ingest_planspec(
             }
 
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
+        # A2/#8: stamp freigabe + live_test_depth from the PlanSpec frontmatter
+        # as part of the INSERT so the provenance is atomic with row creation —
+        # no separate UPDATE window where a reader sees NULL, and no way for an
+        # exception between INSERT and a follow-up UPDATE to strand the fields.
         root_id = kanban_db.create_task(
             conn,
             title=root_title,
@@ -502,6 +509,8 @@ def ingest_planspec(
             priority=0,
             triage=True,
             idempotency_key=idempotency_key,
+            freigabe=spec.freigabe,
+            live_test_depth=spec.live_test_depth,
         )
         with kanban_db.write_txn(conn):
             cur = conn.execute(
@@ -510,13 +519,6 @@ def ingest_planspec(
             )
             if cur.rowcount != 1:
                 raise PlanSpecBlocked([f"root task {root_id} left triage before scheduling"])
-        # A2: stamp freigabe + live_test_depth from the PlanSpec frontmatter
-        # onto the root row so the fields are queryable without parsing the body.
-        with kanban_db.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET freigabe = ?, live_test_depth = ? WHERE id = ?",
-                (spec.freigabe, spec.live_test_depth, root_id),
-            )
         kanban_db.add_event(conn, root_id, "specified", {"source": "planspec_ingest", "path": str(spec.path)})
         if not kanban_db.schedule_task(conn, root_id, reason="Planspec ingest: held before release"):
             raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])

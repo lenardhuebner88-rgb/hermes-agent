@@ -7759,9 +7759,10 @@ def test_c1_release_gate_parked_surfaces_in_decision_queue(kanban_home):
 
     assert _kinds_for(task, result) == ["release_gate_parked"]
     row = next(d for d in result["decisions"] if d["task_id"] == task)
-    # suggested_command must come from _RELEASE_GATE_COMMANDS, not be empty
+    # suggested_command must carry the FULL gate sequence, not just the bare cd
     assert row["suggested_command"]
-    assert row["suggested_command"] in _RELEASE_GATE_COMMANDS
+    for cmd in _RELEASE_GATE_COMMANDS:
+        assert cmd in row["suggested_command"]
     assert row["reason"] == "awaiting release-gate GO"
     # Same shape as existing kinds
     for key in ("kind", "task_id", "title", "reason", "age_seconds", "suggested_command"):
@@ -7780,6 +7781,58 @@ def test_c1_release_gate_parked_excluded_when_done(kanban_home):
         result = kb.decision_queue(conn)
 
     assert _kinds_for(task, result) == []
+
+
+def test_c1_release_gate_suggested_command_carries_full_sequence(kanban_home):
+    """#7: the suggested_command for a release_gate_parked decision must carry the
+    FULL command sequence from the event payload — not just the first bare ``cd``.
+
+    Regression for the original ``next(iter(_RELEASE_GATE_COMMANDS))`` which
+    surfaced only ``cd .../web`` (a no-op alone) instead of the whole gate."""
+    commands = [
+        "cd /home/piet/.hermes/hermes-agent/web",
+        "npm run build",
+        "test -f /home/piet/.hermes/hermes-agent/hermes_cli/web_dist/index.html",
+        "curl -fsS http://127.0.0.1:9119/control >/dev/null",
+    ]
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="gate task", assignee="verifier")
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, task, "release_gate_parked",
+                {"reason": "awaiting release-gate GO", "commands": commands},
+            )
+
+        result = kb.decision_queue(conn)
+
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    suggested = row["suggested_command"]
+    # Every command from the payload must be present, chained — not just the cd.
+    for cmd in commands:
+        assert cmd in suggested, f"{cmd!r} missing from suggested_command {suggested!r}"
+    assert "npm run build" in suggested
+    assert suggested != commands[0]  # not the bare leading cd
+
+
+def test_c1_release_gate_suggested_command_falls_back_without_payload_commands(kanban_home):
+    """#7: when the event payload has no ``commands`` list, fall back to the
+    canonical _RELEASE_GATE_COMMANDS sequence (still the full gate, not a bare cd)."""
+    from hermes_cli.kanban_worktrees import _RELEASE_GATE_COMMANDS
+
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="gate task no cmds", assignee="verifier")
+        _set_task_status(conn, task, "blocked")
+        with kb.write_txn(conn):
+            kb._append_event(conn, task, "release_gate_parked", {"reason": "GO"})
+
+        result = kb.decision_queue(conn)
+
+    row = next(d for d in result["decisions"] if d["task_id"] == task)
+    suggested = row["suggested_command"]
+    assert suggested
+    for cmd in _RELEASE_GATE_COMMANDS:
+        assert cmd in suggested
 
 
 # ---------------------------------------------------------------------------

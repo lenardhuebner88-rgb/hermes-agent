@@ -4948,3 +4948,55 @@ def test_planspecs_detail_non_md_suffix(client):
         params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/something.txt"},
     )
     assert r.status_code == 400, r.text
+
+
+def test_planspecs_detail_outside_root_does_not_leak_server_path(client):
+    """#13: a path outside the vault root → 400 whose error must NOT disclose the
+    server's configured absolute vault-root path (filesystem layout leak)."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/etc/cron.d/evil.md"},
+    )
+    assert r.status_code == 400, r.text
+    assert "/home/piet" not in r.text, f"server path leaked: {r.text[:300]}"
+    assert "03-Agents" not in r.text, f"server path leaked: {r.text[:300]}"
+
+
+def test_planspecs_detail_missing_file_does_not_leak_resolved_path(client):
+    """#13: a missing file under root → 404 whose finding must not echo the
+    resolved absolute server path."""
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": "/home/piet/vault/03-Agents/Claude-Code/plans/does-not-exist.md"},
+    )
+    assert r.status_code == 404, r.text
+    body = r.json()
+    findings = body.get("detail", {}).get("findings", [])
+    assert findings, body
+    assert not any("/home/piet" in f for f in findings), f"resolved path leaked: {findings}"
+
+
+@pytest.mark.skipif(
+    not Path(_REAL_PLANSPEC).exists(),
+    reason="real planspec file not present on this machine",
+)
+def test_planspecs_detail_resolves_path_exactly_once(client, monkeypatch):
+    """#13 (TOCTOU): the handler must resolve the path EXACTLY ONCE — inside
+    parse_binding_planspec — not validate-then-re-resolve+read in two separate
+    calls, which opens a window for a symlink swap between the two resolutions."""
+    from hermes_cli import planspecs as _ps
+
+    calls = {"n": 0}
+    real = _ps.resolve_planspec_path
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(_ps, "resolve_planspec_path", counting)
+    r = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": _REAL_PLANSPEC},
+    )
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1, f"path resolved {calls['n']}× — TOCTOU window between resolutions"

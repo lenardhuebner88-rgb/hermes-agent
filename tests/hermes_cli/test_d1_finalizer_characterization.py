@@ -14,10 +14,20 @@ when the LAST child completes.  There is no per-child merge; the
 ``integrate_chain`` call happens exactly once, driven by
 ``maybe_integrate_on_complete`` on the last-completing child.
 
-This test pins the ACTUAL current behavior.  It does NOT change production
-code.  If a bug is found it is annotated with ``# FINDING (D1):`` and the
-assertion of the *correct* behavior is marked ``xfail`` so the suite stays
-GREEN.
+D1 verdict (#15 — contract made truthful)
+------------------------------------------
+The characterization was run and found **NO merge-loss bug**: both children's
+commits land on the target, exactly one merge commit is produced, and the
+worktree/branch are cleaned up.  Every assertion below therefore pins
+VERIFIED-CORRECT behaviour — this is a spec contract, not a known-buggy state
+held green by ``xfail``.  There is no ``xfail`` in this file precisely because
+no bug exists to suppress (a ``strict`` xfail over a passing assertion would
+itself fail as XPASS).
+
+These assertions double as regression tripwires: if one ever fails, the
+finalizer's merge behaviour has regressed (e.g. a child commit silently
+dropped) — investigate as a real bug rather than relaxing the assertion.  It
+does NOT change production code.
 """
 
 from __future__ import annotations
@@ -234,12 +244,13 @@ def test_d1_finalizer_merges_both_children_changes(
 
     # (b) child_a's file must be present on main.
     #
-    # FINDING (D1) candidate: if child_a.py is missing here the finalizer
-    # only captured child_b's last rebase state and silently dropped child_a's
-    # commit.  That would be a real merge loss bug.
+    # REGRESSION TRIPWIRE (#15): D1 verified child_a's commit DOES survive the
+    # merge today.  If child_a.py is ever missing here, the finalizer regressed
+    # to capturing only child_b's last rebase state and silently dropping
+    # child_a's commit — a real merge-loss bug to investigate, not to relax.
     assert (repo / "child_a.py").exists(), (
         "child_a.py must be on main after merge — "
-        "FINDING (D1): child_a commit dropped if this assertion fails"
+        "REGRESSION (#15): child_a commit dropped if this assertion fails"
     )
     assert (repo / "child_a.py").read_text() == "CHILD_A = 'alpha'\n", (
         "child_a.py content must survive the merge intact"

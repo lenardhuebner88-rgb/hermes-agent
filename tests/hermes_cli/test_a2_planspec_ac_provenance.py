@@ -427,6 +427,90 @@ def test_ingest_planspec_root_has_freigabe_and_live_test_depth(
     )
 
 
+def test_ac_body_roundtrip_contract_is_locked(kanban_home):
+    """#14 (round-trip altitude — locked characterization): a structured
+    AcceptanceCriterion is threaded into a child BODY as a prose bullet
+    ``- AC-<id>: <statement>`` and re-parsed back out by
+    ``_parse_acceptance_criteria`` into ``tasks.acceptance_criteria``.
+
+    This round-trip is intentionally LOSSY and this test pins the exact contract
+    so any change to it is deliberate, not silent:
+
+      * SURVIVES: the AC id token (normalized to an ``AC-…`` form) and the
+        statement text, recoverable as a single flat string ``"AC-…: <stmt>"``.
+      * LOST: every other structured field — ``verification``, ``done_signal``,
+        ``scope_level``, ``applies_to``, ``owner``. Those live ONLY in the .md
+        and are read structured by the PlanSpec viewer (GET /planspecs/detail
+        parses the frontmatter directly), never recovered from the body.
+
+    The fully-structured store is a Phase-4 follow-up (thread the AC JSON onto
+    the child dict at decompose time instead of re-parsing prose); see receipt.
+    """
+    from hermes_cli.plan_compiler import (
+        AcceptanceCriterion,
+        _ac_bullets_for_subtask,
+    )
+
+    crit = AcceptanceCriterion(
+        id="AC1-persist-child-ac",
+        scope_level="child",
+        statement="The child body carries this AC statement.",
+        verification="pytest assertion.",
+        done_signal="Test green.",
+        owner="coder",
+        applies_to=["S1"],
+    )
+    subtask = BindingSubtask(id="S1", title="t", lane="coder", deps=[])
+
+    bullets = _ac_bullets_for_subtask(subtask, [crit])
+    body = "\n".join(bullets)
+    parsed = kb._parse_acceptance_criteria(body)
+
+    assert parsed is not None, "AC bullet must round-trip into a non-NULL column value"
+    items = json.loads(parsed)
+    assert len(items) == 1
+    item = items[0]
+    # SURVIVES: the round-trip yields a single flat string with id token + stmt.
+    assert isinstance(item, str), f"expected a flat string, got {type(item).__name__}: {item!r}"
+    assert "AC-" in item and "child body carries this AC statement" in item
+    # LOST: structured fields are gone — explicitly asserted so a future change
+    # that recovers them flips this test and forces an intentional update.
+    assert "pytest assertion" not in item  # verification lost
+    assert "Test green" not in item        # done_signal lost
+
+
+def test_create_task_persists_freigabe_and_live_test_depth_atomically(kanban_home):
+    """#8: create_task accepts freigabe/live_test_depth and writes them as part
+    of the INSERT, so root provenance is atomic with row creation — no separate
+    follow-up UPDATE that could leave a window of NULL provenance or strand the
+    fields if an exception fires between INSERT and UPDATE."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="planspec root",
+            tenant="planspec",
+            freigabe="complete",
+            live_test_depth="contract",
+        )
+        row = conn.execute(
+            "SELECT freigabe, live_test_depth FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["freigabe"] == "complete"
+    assert row["live_test_depth"] == "contract"
+
+
+def test_create_task_freigabe_defaults_to_null(kanban_home):
+    """#8: a normal (non-planspec) create_task leaves freigabe/live_test_depth
+    NULL — byte-identical to pre-#8 behaviour for every existing caller."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="ordinary task")
+        row = conn.execute(
+            "SELECT freigabe, live_test_depth FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["freigabe"] is None
+    assert row["live_test_depth"] is None
+
+
 def test_ingest_planspec_without_ac_is_backward_compatible(
     kanban_home, tmp_path: Path
 ):

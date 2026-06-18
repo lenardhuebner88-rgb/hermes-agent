@@ -4818,35 +4818,33 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
     """Return human-readable fields parsed from a PlanSpec .md file.
 
     The ``path`` parameter is attacker-influenced; security is enforced by
-    delegating to ``resolve_planspec_path`` (same validator used by all other
-    planspec endpoints) which:
+    ``parse_binding_planspec`` → ``resolve_planspec_path`` (same validator used
+    by all other planspec endpoints) which:
       - resolves symlinks and ``..`` components via ``Path.resolve(strict=False)``
       - rejects anything whose resolved absolute path is not under
         ``DEFAULT_PLANS_ROOT`` (/home/piet/vault/03-Agents)
       - rejects non-``.md`` suffixes
-      - raises ``PlanSpecBlocked`` (→ 400) for traversal; a separate check
-        maps the "file not found" finding to 404.
+      - raises ``PlanSpecBlocked`` (→ 400) for traversal; the "file not found"
+        finding maps to 404.
+
+    #13: the path is resolved + read EXACTLY ONCE (inside parse_binding_planspec)
+    — we do NOT validate first and then re-resolve+read separately, which would
+    open a TOCTOU window for a symlink swap between the two resolutions.  Error
+    findings never carry the resolved server path (see resolve_planspec_path).
 
     Source = file parse only.  No DB read.
     """
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
-    # Distinguish 404 (file missing but path is valid) from 400 (traversal /
-    # bad path).  resolve_planspec_path raises PlanSpecBlocked with a message
-    # containing "file not found" for the missing-file case; all other
-    # PlanSpecBlocked findings indicate a security or format violation (400).
+    # Single resolution+read: distinguish 404 (file missing) from 400 (traversal /
+    # bad path / malformed spec) off the one exception this raises.
     try:
-        planspecs.resolve_planspec_path(path)
+        spec = planspecs.parse_binding_planspec(path)
     except planspecs.PlanSpecBlocked as exc:
         findings = exc.findings
         if findings and "file not found" in findings[0]:
             raise HTTPException(status_code=404, detail={"findings": findings})
         raise HTTPException(status_code=400, detail={"findings": findings})
-
-    try:
-        spec = planspecs.parse_binding_planspec(path)
-    except planspecs.PlanSpecBlocked as exc:
-        raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
     fm = spec.frontmatter
 
@@ -4883,7 +4881,7 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
     # Map children → subtasks list with {id, title, lane, deps}.
     subtasks = [
         {
-            "id": child.get("planspec_id") or child.get("planspec_subtask_id") or "",
+            "id": child.get("planspec_subtask_id") or "",
             "title": child.get("title") or "",
             "lane": child.get("planspec_lane") or child.get("assignee") or "",
             "deps": child.get("planspec_deps") or [],
