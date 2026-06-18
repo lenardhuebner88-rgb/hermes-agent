@@ -4,7 +4,6 @@ import { useSearchParams } from "react-router-dom";
 import { useBoard, useChainGraph } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
 import { fmtAge, nowSec } from "../lib/derive";
-import { useClientNowSeconds } from "../lib/clock";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
@@ -41,7 +40,6 @@ function ChainPanel({ rootId }: { rootId: string }) {
 export function ChainVizView(_props: { density?: unknown }) {
   const [params, setParams] = useSearchParams();
   const board = useBoard();
-  const clientNow = useClientNowSeconds();
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
 
   const activeChains = useMemo(() => {
@@ -71,8 +69,6 @@ export function ChainVizView(_props: { density?: unknown }) {
     setSelectedRootId(rootId);
     setParams(rootId ? { root: rootId } : {}, { replace: true });
   }
-
-  void clientNow; // clientNow kept for future StaleBadge wiring
 
   return (
     <div className="mx-auto w-full max-w-6xl">
