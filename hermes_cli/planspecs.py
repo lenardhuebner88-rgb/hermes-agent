@@ -38,6 +38,7 @@ VALID_PLANSPEC_LANES = {
     "coder",
     "coder-claude",
     "premium",
+    "scout",
     "reviewer",
     "critic",
     "verifier",

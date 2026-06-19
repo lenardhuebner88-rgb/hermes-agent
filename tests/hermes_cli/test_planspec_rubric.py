@@ -768,3 +768,48 @@ taskgraph_hints:
     result = planspecs.ingest_planspec(path, plans_root=plans_root)
     assert result["ok"] is True
     assert len(result["child_ids"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Scout lane (read-only recon predecessor)
+# ---------------------------------------------------------------------------
+
+# A scout-led chain: read-only recon predecessor, coder dependent.
+SCOUT_CHAIN = """---
+status: freigegeben-komplett
+owner: Hermes
+slice: R2
+topic: "Scout lane"
+freigabe: complete
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: R2-S1
+      title: "Recon: map files and callers for the slice"
+      lane: scout
+      deps: []
+      acceptance_criteria:
+        - "Grounding brief posted as a task comment: files, callers, risks"
+      body: "Read-only recon, no mutations"
+    - id: R2-S2
+      title: "Implement the slice from the scout brief"
+      lane: coder
+      deps: [R2-S1]
+      acceptance_criteria:
+        - "Slice implemented with tests, using the scout brief"
+---
+# R2
+"""
+
+
+def test_scout_lane_passes_rubric(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, SCOUT_CHAIN)
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    assert planspecs.validate_spec_rubric(spec) is None
+
+
+def test_scout_is_a_valid_lane():
+    assert "scout" in planspecs.VALID_PLANSPEC_LANES
