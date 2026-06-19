@@ -301,6 +301,7 @@ from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
 from hermes_cli.subcommands.plan import build_plan_parser
+from hermes_cli.subcommands.vision import build_vision_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -11666,6 +11667,11 @@ def main():
     # plan command — Vault PlanSpec ingest into Kanban
     # =========================================================================
     build_plan_parser(subparsers)
+
+    # =========================================================================
+    # vision command — Vision-Flywheel harness: strategist + metrics + gate ledger
+    # =========================================================================
+    build_vision_parser(subparsers)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

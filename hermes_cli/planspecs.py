@@ -515,18 +515,34 @@ def mark_planspec_not_needed(
 
 def build_root_body(spec: BindingPlanSpec) -> str:
     fm = yaml.safe_dump(spec.frontmatter, sort_keys=False, allow_unicode=True).strip()
-    return "\n".join(
-        [
-            f"PlanSpec source: {spec.path}",
-            f"Freigabe: {spec.freigabe}",
-            f"Live-Test-Depth: {spec.live_test_depth}",
-            "",
-            "Frontmatter:",
-            "```yaml",
-            fm,
-            "```",
-        ]
-    )
+    lines = [
+        f"PlanSpec source: {spec.path}",
+        f"Freigabe: {spec.freigabe}",
+        f"Live-Test-Depth: {spec.live_test_depth}",
+        "",
+        "Frontmatter:",
+        "```yaml",
+        fm,
+        "```",
+    ]
+    # Strategist annotation contract (I1 ↔ G1): when a PlanSpec carries a
+    # ``strategist_meta`` frontmatter block, render it as the machine-readable
+    # annotation the held-proposal surface parses (target/ROI/counter-metric).
+    # Guarded — a spec without the block is byte-for-byte unaffected.
+    meta = spec.frontmatter.get("strategist_meta")
+    if isinstance(meta, dict):
+        from hermes_cli.strategist_surface import format_annotation
+
+        def _meta_str(value: Any) -> str:
+            return str(value).strip() if value not in (None, "") else ""
+
+        annotation = format_annotation(
+            target_metric=_meta_str(meta.get("target_metric")),
+            roi=_meta_str(meta.get("roi")),
+            counter_metric=_meta_str(meta.get("counter_metric")),
+        )
+        lines.extend(["", annotation])
+    return "\n".join(lines)
 
 
 def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
