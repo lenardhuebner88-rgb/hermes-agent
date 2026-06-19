@@ -515,13 +515,15 @@ def test_create_task_freigabe_defaults_to_null(kanban_home):
 def test_ingest_planspec_without_ac_is_backward_compatible(
     kanban_home, tmp_path: Path
 ):
-    """Backward-compat: a PlanSpec with no acceptance_criteria still ingests fine;
-    child acceptance_criteria is NULL; no crash.
+    """Backward-compat: an AC-less PlanSpec still persists fine (child
+    acceptance_criteria is NULL; no crash). The deterministic rubric now blocks
+    AC-less subtasks on the normal path, so this exercises the ``--force``
+    bypass — the persistence layer stays byte-identical to the pre-rubric world.
     """
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec_no_ac(plans_root)
 
-    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root, force=True)
 
     assert result["ok"] is True
     assert len(result["child_ids"]) == 1
@@ -537,11 +539,12 @@ def test_ingest_planspec_without_ac_is_backward_compatible(
 
 
 def test_ingest_planspec_root_freigabe_in_noac_plan(kanban_home, tmp_path: Path):
-    """Root freigabe/live_test_depth are populated even when no AC is present."""
+    """Root freigabe/live_test_depth are populated even when no AC is present
+    (AC-less ingest now goes through the ``--force`` rubric bypass)."""
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec_no_ac(plans_root)
 
-    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root, force=True)
 
     with kb.connect_closing() as conn:
         row = conn.execute(

@@ -23,6 +23,11 @@ def build_plan_parser(subparsers) -> None:
     ingest.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
     ingest.add_argument("--author", default="planspec-ingest", help="Audit author for created tasks")
     ingest.add_argument("--json", action="store_true", help="Emit JSON output")
+    ingest.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the deterministic spec rubric (logs a WARNING with the skipped reasons)",
+    )
 
     prompt = sub.add_parser("sprint-prompt", help="Generate a copy-paste sprint prompt from a PlanSpec")
     prompt.add_argument("path", help="Path to a Vault PlanSpec markdown file")
@@ -52,7 +57,12 @@ def plan_command(args: argparse.Namespace) -> int:
                     print(f"{marker} {item['path']} · {item['freigabe'] or '-'} · {item['subtask_count']} subtasks{suffix}")
             return 0
         if action == "ingest":
-            result = planspecs.ingest_planspec(args.path, board=args.board, author=args.author)
+            result = planspecs.ingest_planspec(
+                args.path,
+                board=args.board,
+                author=args.author,
+                force=getattr(args, "force", False),
+            )
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
             elif result.get("already_ingested"):

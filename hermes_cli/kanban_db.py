@@ -905,6 +905,7 @@ class Task:
     # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
     kind: Optional[str] = None
     auto_retry_count: int = 0
+    integration_retry_count: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1004,6 +1005,10 @@ class Task:
             ),
             auto_retry_count=(
                 row["auto_retry_count"] if "auto_retry_count" in keys else 0
+            ),
+            integration_retry_count=(
+                row["integration_retry_count"]
+                if "integration_retry_count" in keys else 0
             ),
         )
 
@@ -1216,7 +1221,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- NULL = unknown/unspecified.
     kind                 TEXT,
     -- Bounded, opt-in automatic retry count for worker-blocked runs.
-    auto_retry_count     INTEGER NOT NULL DEFAULT 0
+    auto_retry_count     INTEGER NOT NULL DEFAULT 0,
+    -- Bounded transient re-integration retry count (Heiler lane). Kept
+    -- SEPARATE from auto_retry_count so a re-integration round never trips
+    -- the premium/opus escalation ladder that auto_retry_count drives; gates
+    -- the no-silent-stall integration-retry path.
+    integration_retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2136,6 +2146,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "auto_retry_count",
             "auto_retry_count INTEGER NOT NULL DEFAULT 0",
         )
+    if "integration_retry_count" not in cols:
+        # Heiler lane: bounded transient re-integration retry counter, kept
+        # separate from auto_retry_count (which escalates to premium/opus).
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "integration_retry_count",
+            "integration_retry_count INTEGER NOT NULL DEFAULT 0",
+        )
 
     # A1 (kanban-chain-haertung): PlanSpec provenance columns. All four are
     # plain nullable TEXT — no default needed; NULL on every pre-A1 row
@@ -2625,9 +2644,43 @@ OPERATOR_ONLY_ACTIONS = (
     "secrets/credentials",
 )
 NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
+# S4 Heiler: structured failure-classification ledger (Phase 1).
+# Every block/failure on the no_silent_stall_sweep park path and in
+# ``_record_task_failure`` is classified into one stable class and written as a
+# ``heiler_classification`` task_event (payload = class + evidence). The read
+# side ``read_escalation_ledger`` aggregates them; the Stratege (Phase 1.5)
+# derives root-cause Specs from that rollup. This phase does NOT spawn a fix
+# worker and does NOT change escalation-after-N — that keeps using the existing
+# ``operator_escalation`` event next to the classification.
+HEILER_CLASSIFICATION_EVENT = "heiler_classification"
+HEILER_CLASS_TRANSIENT = "transient"
+HEILER_CLASS_FLAKY = "flaky"
+HEILER_CLASS_REAL_BUG = "real-bug"
+HEILER_CLASS_BAD_SPEC = "bad-spec"
+HEILER_CLASS_CONFLICT = "conflict"
+HEILER_CLASSES = (
+    HEILER_CLASS_TRANSIENT,
+    HEILER_CLASS_FLAKY,
+    HEILER_CLASS_REAL_BUG,
+    HEILER_CLASS_BAD_SPEC,
+    HEILER_CLASS_CONFLICT,
+)
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
 NO_SILENT_STALL_RATE_LIMIT_ATTEMPT_LIMIT = 3
+# Heiler: transient re-integration retry lane (no_silent_stall_sweep §5).
+# An integration-parked task whose park reason is classified ``transient`` by
+# ``kanban_worktrees._integration_park_class`` (dirty overlap / in-progress git
+# op / wrong branch) is re-run through the integration path instead of sitting
+# in blocked-limbo. Bounded by its OWN counter (``integration_retry_count``,
+# never the shared ``auto_retry_count``) so it cannot trip the premium/opus
+# escalation ladder; after the limit it escalates to the operator.
+INTEGRATION_RETRY_EVENT = "integration_retry"
+INTEGRATION_RETRY_SUCCEEDED_EVENT = "integration_retry_succeeded"
+INTEGRATION_RETRY_LIMIT = 2
+INTEGRATION_RETRY_BACKOFF_SECONDS = 60
+INTEGRATION_RETRY_EXHAUSTED_CLASS = "integration_retry_exhausted"
+INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
@@ -9407,6 +9460,172 @@ def repair_deliverable_posted_not_completed(
     return True
 
 
+# S4 Heiler: substring signals for ``_classify_failure``, checked in this
+# precedence order against a lower-cased haystack (error + reason + outcome +
+# stall_class). Merge-conflict markers are unambiguous and win first; the broad
+# git/dirty/branch signals come LAST so a red gate or reviewer finding that
+# happens to mention a branch is not mis-read as transient.
+_HEILER_CONFLICT_SIGNALS = (
+    "merge conflict",
+    "merge-konflikt",
+    "conflict (content",
+    "conflict (add/add",
+    "automatic merge failed",
+    "<<<<<<<",
+    "fix conflicts and then commit",
+    "unmerged path",
+)
+_HEILER_TEXT_SIGNALS = (
+    (HEILER_CLASS_BAD_SPEC, (
+        "unerfüllbar",
+        "unfulfillable",
+        "unsatisfiable",
+        "impossible acceptance",
+        "acceptance criteria cannot",
+        "bad spec",
+        "bad-spec",
+        "cannot be decomposed",
+        "no runnable verifier",
+        "no runnable reviewer",
+    )),
+    (HEILER_CLASS_FLAKY, (
+        "flake",
+        "flaky",
+        "passed on retry",
+        "intermittent",
+        "non-deterministic",
+        "nondeterministic",
+    )),
+    (HEILER_CLASS_REAL_BUG, (
+        "request_changes",
+        "requested changes",
+        "request changes",
+        "reviewer finding",
+        "red gate",
+        "gate failed",
+        "gates failed",
+        "gate red",
+        "test failed",
+        "tests failed",
+        "assertionerror",
+        "assertion failed",
+        "lint error",
+        "tsc error",
+        "type error",
+        "build failed",
+    )),
+    (HEILER_CLASS_TRANSIENT, (
+        "dirty",
+        "overlap",
+        "wrong branch",
+        "falscher branch",
+        "git lock",
+        "git-lock",
+        "index.lock",
+        "worktree",
+        "could not provision",
+        "provisioning",
+        "checkout",
+        "rate limit",
+        "rate_limited",
+        "git",
+        "branch",
+    )),
+)
+# Strong structural mappings, independent of free-text error wording.
+_HEILER_OUTCOME_CLASS = {
+    "spawn_retry": HEILER_CLASS_TRANSIENT,
+    "spawn_failed": HEILER_CLASS_TRANSIENT,
+    "rate_limited": HEILER_CLASS_TRANSIENT,
+}
+_HEILER_STALL_CLASS = {
+    "scheduled_overdue": HEILER_CLASS_TRANSIENT,
+    "rate_limited_loop": HEILER_CLASS_TRANSIENT,
+    "review_without_verifier": HEILER_CLASS_BAD_SPEC,
+    "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
+}
+
+
+def _classify_failure(
+    *,
+    error: str = "",
+    outcome: Optional[str] = None,
+    stall_class: Optional[str] = None,
+    reason: str = "",
+) -> tuple[str, dict]:
+    """Classify a block/failure into one stable Heiler class + evidence.
+
+    Pure, deterministic and side-effect-free, so it is trivially unit-testable
+    and safe to call from inside an already-open ``write_txn``. The returned
+    ``evidence`` dict records which signal fired and where, so the Stratege
+    (Phase 1.5) — and a human reading the ledger — can see *why* a class was
+    assigned, not just the label.
+
+    Precedence (first match wins):
+      1. unambiguous merge-conflict markers -> conflict
+      2. structural ``stall_class`` mapping (config/spec/transient by
+         construction)
+      3. structural ``outcome`` mapping (provisioning / quota = transient)
+      4. free-text signals: bad-spec, flaky, real-bug, transient
+      5. default -> real-bug (a failure that reached this path with no
+         transient / spec / flaky signal is most likely a genuine defect:
+         a red gate or reviewer findings)
+    """
+    haystack = " ".join(
+        part for part in (error, reason, outcome or "", stall_class or "")
+        if part
+    ).lower()
+
+    def _ev(matched: str, source: str) -> dict:
+        ev = {"matched": matched, "signal_source": source}
+        if outcome:
+            ev["outcome"] = outcome
+        if stall_class:
+            ev["stall_class"] = stall_class
+        excerpt = (reason or error or "").strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return ev
+
+    for sub in _HEILER_CONFLICT_SIGNALS:
+        if sub in haystack:
+            return HEILER_CLASS_CONFLICT, _ev(sub, "text")
+
+    if stall_class and stall_class in _HEILER_STALL_CLASS:
+        return _HEILER_STALL_CLASS[stall_class], _ev(stall_class, "stall_class")
+
+    if outcome and outcome in _HEILER_OUTCOME_CLASS:
+        return _HEILER_OUTCOME_CLASS[outcome], _ev(outcome, "outcome")
+
+    for cls, subs in _HEILER_TEXT_SIGNALS:
+        for sub in subs:
+            if sub in haystack:
+                return cls, _ev(sub, "text")
+
+    return HEILER_CLASS_REAL_BUG, _ev("default", "default")
+
+
+def _heiler_classification_payload(
+    *,
+    heiler_class: str,
+    evidence: dict,
+    source: str,
+    blocked: bool,
+) -> dict:
+    """Stable payload shape for a ``heiler_classification`` event.
+
+    ``source`` is the originating path (``record_task_failure`` / ``stall_park``)
+    and ``blocked`` whether this failure actually parked/blocked the task — both
+    let the Stratege weight a one-off transient differently from a terminal park.
+    """
+    return {
+        "class": heiler_class,
+        "evidence": evidence,
+        "source": source,
+        "blocked": bool(blocked),
+    }
+
+
 def _operator_escalation_payload(
     *,
     task_id: str,
@@ -9530,6 +9749,9 @@ def _record_task_failure(
             effective_limit = int(failure_limit)
             limit_source = "dispatcher"
 
+        # run_id stays None unless a branch closes an open run; the S4 Heiler
+        # classification event at the end of the txn links to it when present.
+        run_id = None
         if count_failure and failures >= effective_limit:
             # Trip the breaker.
             if release_claim:
@@ -9627,6 +9849,20 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+
+        # S4 Heiler: classify every recorded failure into the structured
+        # ledger (one heiler_classification event per failure) so the Stratege
+        # (Phase 1.5) can aggregate causes. Pure read of error+outcome; emitted
+        # inside this txn so it commits atomically with the status change.
+        h_class, h_ev = _classify_failure(error=error, outcome=outcome)
+        _append_event(
+            conn, task_id, HEILER_CLASSIFICATION_EVENT,
+            _heiler_classification_payload(
+                heiler_class=h_class, evidence=h_ev,
+                source="record_task_failure", blocked=blocked,
+            ),
+            run_id=run_id,
+        )
     return blocked
 
 
@@ -9905,6 +10141,19 @@ def _park_stall_once(
                 evidence=evidence,
             ),
         )
+        # S4 Heiler: classify the parked stall into the structured ledger next
+        # to the operator_escalation (which is unchanged). Idempotent because
+        # _park_stall_once only reaches here on a fresh park.
+        h_class, h_ev = _classify_failure(stall_class=stall_class, reason=reason)
+        _append_event(
+            conn,
+            task_id,
+            HEILER_CLASSIFICATION_EVENT,
+            _heiler_classification_payload(
+                heiler_class=h_class, evidence=h_ev,
+                source="stall_park", blocked=True,
+            ),
+        )
         _append_stall_marker(
             conn,
             task_id,
@@ -10041,6 +10290,64 @@ def _park_budget_runaway(
         return True
 
 
+def _finalize_integration_retry(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: dict,
+    *,
+    now: int,
+) -> bool:
+    """Drive a successfully re-integrated parked task ``blocked -> done``.
+
+    Heiler lane: when a transient re-integration round merges (or finds the
+    branch already integrated), the task must finish on the *done* path — NOT
+    ``blocked -> ready`` (that would re-spawn a worker against an already-merged
+    branch, the exact limbo the old auto_retry_blocked lane caused). We do not
+    call :func:`complete_task` here because the integration already happened
+    (branch + worktree are gone); re-running its hook would re-park on a missing
+    branch. The closing run was already ended when the task first parked.
+    """
+    action = outcome.get("action")
+    merge_commit = outcome.get("merge_commit")
+    summary_line = (
+        f"integration retry {action}: merged "
+        f"{outcome.get('branch')} into {outcome.get('target')}"
+        + (f" as {str(merge_commit)[:12]}" if merge_commit else "")
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'done',
+                   result       = ?,
+                   completed_at = ?,
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ? AND status = 'blocked'
+            """,
+            (summary_line, int(now), task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, INTEGRATION_RETRY_SUCCEEDED_EVENT,
+            {
+                "action": action,
+                "branch": outcome.get("branch"),
+                "target": outcome.get("target"),
+                "merge_commit": merge_commit,
+            },
+        )
+        # Mirror the normal done-path completion signal so dashboards/notifiers
+        # render the finish without a second SQL round-trip.
+        _append_event(
+            conn, task_id, "completed",
+            {"summary": summary_line[:400], "result_len": len(summary_line)},
+        )
+    return True
+
+
 def no_silent_stall_sweep(
     conn: sqlite3.Connection,
     *,
@@ -10062,6 +10369,7 @@ def no_silent_stall_sweep(
         "self_healed": [],
         "parked": [],
         "skipped_funnel": [],
+        "integration_retried": [],
     }
 
     def _old_enough(task_id: str, kind: str, fallback_at: Optional[int]) -> bool:
@@ -10177,30 +10485,154 @@ def no_silent_stall_sweep(
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
-    # 5) integration_parked: already blocked, but add the human escalation.
+    # 5) integration_parked (Heiler lane): a TRANSIENT park (dirty overlap /
+    #    in-progress git op / wrong branch) is re-run through the integration
+    #    path up to INTEGRATION_RETRY_LIMIT times before escalating. A
+    #    non-transient park (merge conflict / red post-merge gate / unknown) is
+    #    NEVER retried — it is classified and escalated to the operator. We
+    #    never move a parked task to ``ready`` (that re-spawned a worker against
+    #    an already-merged branch — the old auto_retry_blocked failure mode).
+    from hermes_cli import kanban_worktrees as _kwt
     for row in conn.execute(
         "SELECT * FROM tasks WHERE status = 'blocked'"
     ).fetchall():
+        task_id = row["id"]
         if _is_funnel_root_task(conn, row):
-            summary["skipped_funnel"].append(row["id"])
+            summary["skipped_funnel"].append(task_id)
+            continue
+        # Once escalated, the operator owns it — never retry again.
+        if (
+            _has_stall_marker(conn, task_id, INTEGRATION_PARKED_STALL_CLASS)
+            or _has_stall_marker(conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS)
+        ):
             continue
         blocked_event = conn.execute(
             "SELECT payload FROM task_events "
             "WHERE task_id = ? AND kind = 'blocked' "
             "ORDER BY id DESC LIMIT 1",
-            (row["id"],),
+            (task_id,),
         ).fetchone()
         reason = _decision_event_reason(
             blocked_event["payload"] if blocked_event else None
         ) or ""
         if not reason.startswith("integration parked:"):
             continue
-        stall_class = "integration_parked"
-        if _park_stall_once(
-            conn, row, stall_class=stall_class, reason=reason,
-            evidence={"attempts": 1}, now=ts,
+
+        park_class = _kwt._integration_park_class(reason)
+        try:
+            retry_count = int(row["integration_retry_count"] or 0)
+        except (IndexError, KeyError, TypeError):
+            retry_count = 0
+
+        # Non-transient (merge conflict / red gate / unknown): classify and
+        # escalate once. Dovetails with the operator/S4-ledger lane.
+        if park_class != "transient":
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=reason, evidence={"attempts": retry_count or 1}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+            continue
+
+        # Transient but exhausted: bounded — escalate to the operator.
+        if retry_count >= INTEGRATION_RETRY_LIMIT:
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_RETRY_EXHAUSTED_CLASS,
+                reason=reason, evidence={"attempts": retry_count}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_RETRY_EXHAUSTED_CLASS}
+                )
+            continue
+
+        # Transient backoff: don't burn the bounded retries faster than the
+        # blocker (git lock / dirty tree) can plausibly clear.
+        last_at = (
+            _latest_event_at(conn, task_id, INTEGRATION_RETRY_EVENT)
+            or _latest_event_at(conn, task_id, "blocked")
+            or row["created_at"]
+        )
+        if last_at is not None and (
+            int(last_at) + INTEGRATION_RETRY_BACKOFF_SECONDS > ts
         ):
-            summary["parked"].append({"task_id": row["id"], "class": stall_class})
+            continue
+
+        # Claim this retry round: bump the OWN counter atomically (CAS on the
+        # observed value) so concurrent sweeps cannot double-attempt.
+        attempt = retry_count + 1
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET integration_retry_count = ? "
+                "WHERE id = ? AND status = 'blocked' "
+                "AND integration_retry_count = ?",
+                (attempt, task_id, retry_count),
+            )
+            claimed = cur.rowcount == 1
+            if claimed:
+                _append_event(
+                    conn, task_id, INTEGRATION_RETRY_EVENT,
+                    {
+                        "attempt": attempt,
+                        "limit": INTEGRATION_RETRY_LIMIT,
+                        "reason": reason[:500],
+                    },
+                )
+        if not claimed:
+            continue
+
+        # Re-run the integration path. Opens its own txn internally, so it must
+        # run OUTSIDE the counter txn above. Fail-soft: a crash here just leaves
+        # the task blocked for the next sweep (counter already advanced).
+        try:
+            outcome = _kwt.maybe_integrate_on_complete(conn, task_id) or {}
+        except Exception:
+            _log.warning(
+                "integration-retry hook failed for %s", task_id, exc_info=True,
+            )
+            outcome = {}
+        action = outcome.get("action")
+
+        if action in ("merged", "clean"):
+            if _finalize_integration_retry(conn, task_id, outcome, now=ts):
+                summary["self_healed"].append(
+                    {
+                        "task_id": task_id,
+                        "class": "integration_retry",
+                        "action": "reintegrated",
+                    }
+                )
+        elif action == "parked":
+            new_reason = str(outcome.get("reason") or "")
+            if _kwt._integration_park_class(new_reason) == "transient":
+                # Still transient — leave blocked; retry again next sweep (until
+                # the bounded limit). The counter already advanced.
+                summary["integration_retried"].append(
+                    {"task_id": task_id, "attempt": attempt}
+                )
+            elif _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=f"integration parked: {new_reason}",
+                evidence={"attempts": attempt}, now=ts,
+            ):
+                # Re-park reclassified to non-transient → stop retrying.
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+        elif action == "rebase_conflict":
+            if _park_stall_once(
+                conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+                reason=reason, evidence={"attempts": attempt}, now=ts,
+            ):
+                summary["parked"].append(
+                    {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+                )
+        else:
+            # deferred / None (e.g. open siblings re-appeared) — leave blocked.
+            summary["integration_retried"].append(
+                {"task_id": task_id, "attempt": attempt}
+            )
 
     # 6) legacy gave_up without a 3B escalation: backfill exactly once.
     for row in conn.execute(
@@ -10233,6 +10665,93 @@ def no_silent_stall_sweep(
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
     return summary
+
+
+def read_escalation_ledger(
+    conn: sqlite3.Connection,
+    *,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    task_id: Optional[str] = None,
+    classes: Optional[Iterable[str]] = None,
+    limit: Optional[int] = None,
+) -> dict:
+    """Read side of the S4 Heiler classification ledger (Phase 1.5 input).
+
+    Aggregates ``heiler_classification`` task_events into a per-class rollup
+    plus the raw entries (newest first), each joined to its task title/status so
+    the Stratege can derive root-cause Specs without a second query. Pure read:
+    no writes, no schema change, no worker spawn — safe to call from a report
+    cron or the dashboard.
+
+    Filters (all optional):
+      * ``since`` / ``until`` — inclusive ``created_at`` window (unix seconds)
+      * ``task_id`` — restrict to a single task
+      * ``classes`` — restrict to a subset of :data:`HEILER_CLASSES`
+      * ``limit`` — cap the number of returned *entries*. The ``by_class``
+        rollup and ``total`` are always computed over the full filtered window,
+        so the counts stay accurate even when the entry list is truncated.
+    """
+    where = ["e.kind = ?"]
+    params: list = [HEILER_CLASSIFICATION_EVENT]
+    if since is not None:
+        where.append("e.created_at >= ?")
+        params.append(int(since))
+    if until is not None:
+        where.append("e.created_at <= ?")
+        params.append(int(until))
+    if task_id is not None:
+        where.append("e.task_id = ?")
+        params.append(task_id)
+
+    class_filter = {str(c) for c in classes} if classes is not None else None
+
+    rows = conn.execute(
+        "SELECT e.id, e.task_id, e.run_id, e.payload, e.created_at, "
+        "t.title AS task_title, t.status AS task_status "
+        "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
+        "WHERE " + " AND ".join(where) + " "
+        "ORDER BY e.created_at DESC, e.id DESC",
+        params,
+    ).fetchall()
+
+    by_class: dict = {}
+    entries: list = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        cls = payload.get("class")
+        if class_filter is not None and cls not in class_filter:
+            continue
+        by_class[cls] = by_class.get(cls, 0) + 1
+        entries.append({
+            "event_id": r["id"],
+            "task_id": r["task_id"],
+            "run_id": (int(r["run_id"]) if r["run_id"] is not None else None),
+            "created_at": (
+                int(r["created_at"]) if r["created_at"] is not None else None
+            ),
+            "class": cls,
+            "evidence": payload.get("evidence"),
+            "source": payload.get("source"),
+            "blocked": payload.get("blocked"),
+            "task_title": r["task_title"],
+            "task_status": r["task_status"],
+        })
+
+    total = len(entries)
+    if limit is not None and int(limit) >= 0:
+        entries = entries[: int(limit)]
+
+    return {
+        "total": total,
+        "by_class": by_class,
+        "entries": entries,
+    }
 
 
 def kanban_dispatcher_heartbeat_path() -> Path:

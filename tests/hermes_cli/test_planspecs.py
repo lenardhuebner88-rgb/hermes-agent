@@ -30,6 +30,8 @@ slice: B1
 topic: "Planspec Hub"
 freigabe: complete
 live_test_depth: contract
+acceptance_criteria:
+  - "Slice ships its deliverable with the targeted gates green"
 taskgraph_hints:
   binding: true
   subtasks:
