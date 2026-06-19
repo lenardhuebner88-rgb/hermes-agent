@@ -13442,11 +13442,29 @@ def _spawn_claude_worker(
             )
     except Exception:
         git_contract = ""
+    # Comment thread (chirurgischer Fix, AC-A): a claude-CLI worker has NO
+    # kanban tools and never sees task comments — unlike the Hermes worker
+    # path, which gets them via build_worker_context. Bake the most-recent
+    # _CTX_MAX_COMMENTS into the prompt using the SAME renderer so operator
+    # follow-ups / prior-attempt notes reach the worker. Fail-soft: a DB
+    # hiccup must never block the spawn — fall back to no block. Zero comments
+    # → no block, so the prompt stays byte-identical to the pre-change status
+    # quo. Board-scoped (not os.environ) so the fetch matches the board the
+    # dispatcher claimed the task from.
+    comment_block = ""
+    try:
+        with connect_closing(board=board) as _cconn:
+            _comment_lines = _render_comment_thread(list_comments(_cconn, task.id))
+        if _comment_lines:
+            comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
+    except Exception:
+        comment_block = ""
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
+        f"{comment_block}"
         "Work in the current directory.\n\n"
         f"{git_contract}"
         "MANDATORY: your turn is not over until you report back, via the "
@@ -14078,6 +14096,62 @@ def _render_review_verifier_section(
     return lines
 
 
+def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
+    """Truncate a string to ``limit`` chars with a visible ellipsis.
+
+    Module-level so both the Hermes-worker context (:func:`build_worker_context`)
+    and the comment-thread renderer (:func:`_render_comment_thread`) cap text
+    identically.
+    """
+    if not s:
+        return ""
+    s = s.strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+
+
+def _render_comment_thread(comments: list[Comment]) -> list[str]:
+    """Render a task's comment thread as worker-context lines.
+
+    Single source of truth for the comment-thread block shared by the Hermes
+    worker path (:func:`build_worker_context`) and the claude-CLI worker path
+    (:func:`_spawn_claude_worker`): both show the most-recent
+    ``_CTX_MAX_COMMENTS`` comments in full (older ones collapsed into a
+    one-line marker), each capped at ``_CTX_MAX_COMMENT_BYTES``, framed with an
+    explicit ``comment from worker `<author>` at <ts>:`` line so an
+    operator-/attacker-controlled author can't be misread as a system directive
+    (#22452). Returns ``[]`` for an empty thread so callers emit no block.
+    """
+    if not comments:
+        return []
+    if len(comments) > _CTX_MAX_COMMENTS:
+        omitted_c = len(comments) - _CTX_MAX_COMMENTS
+        shown_c = comments[-_CTX_MAX_COMMENTS:]
+    else:
+        omitted_c = 0
+        shown_c = comments
+    lines: list[str] = ["## Comment thread"]
+    if omitted_c:
+        lines.append(
+            f"_({omitted_c} earlier comment{'s' if omitted_c != 1 else ''} "
+            f"omitted; showing most recent {len(shown_c)})_"
+        )
+    for c in shown_c:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
+        # Render author with explicit "comment from worker" framing so
+        # operator-controlled HERMES_PROFILE values like "hermes-system"
+        # or "operator" can't be misread by the next worker as a system
+        # directive above the (attacker-influenceable) comment body.
+        # Defense-in-depth — the LLM-controlled author-forgery surface
+        # was already closed in #22435. See #22452.
+        safe_author = (c.author or "").replace("`", "")
+        lines.append(f"comment from worker `{safe_author}` at {ts}:")
+        lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+        lines.append("")
+    return lines
+
+
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Return the full text a worker should read to understand its task.
 
@@ -14104,15 +14178,6 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
-
-    def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
-        """Truncate a string to `limit` chars with a visible ellipsis."""
-        if not s:
-            return ""
-        s = s.strip()
-        if len(s) <= limit:
-            return s
-        return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
 
     lines: list[str] = []
     lines.append(f"# Kanban task {task.id}: {task.title}")
@@ -14281,35 +14346,12 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
                 lines.append(f"- {row['id']} — {row['title']} ({ts}): {first}")
             lines.append("")
 
-    # Comments: cap at the most-recent _CTX_MAX_COMMENTS so
-    # comment-storm tasks don't blow out the worker's prompt. Older
-    # comments summarised in a one-line marker like prior attempts.
-    all_comments = list_comments(conn, task_id)
-    if len(all_comments) > _CTX_MAX_COMMENTS:
-        omitted_c = len(all_comments) - _CTX_MAX_COMMENTS
-        shown_c = all_comments[-_CTX_MAX_COMMENTS:]
-    else:
-        omitted_c = 0
-        shown_c = all_comments
-    if shown_c:
-        lines.append("## Comment thread")
-        if omitted_c:
-            lines.append(
-                f"_({omitted_c} earlier comment{'s' if omitted_c != 1 else ''} "
-                f"omitted; showing most recent {len(shown_c)})_"
-            )
-        for c in shown_c:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
-            # Render author with explicit "comment from worker" framing so
-            # operator-controlled HERMES_PROFILE values like "hermes-system"
-            # or "operator" can't be misread by the next worker as a system
-            # directive above the (attacker-influenceable) comment body.
-            # Defense-in-depth — the LLM-controlled author-forgery surface
-            # was already closed in #22435. See #22452.
-            safe_author = (c.author or "").replace("`", "")
-            lines.append(f"comment from worker `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
-            lines.append("")
+    # Comments: cap at the most-recent _CTX_MAX_COMMENTS so comment-storm
+    # tasks don't blow out the worker's prompt. Older comments collapse into a
+    # one-line marker like prior attempts. Rendering is shared with the
+    # claude-CLI worker path (see _render_comment_thread) so both runtimes show
+    # the identical view.
+    lines.extend(_render_comment_thread(list_comments(conn, task_id)))
 
     return "\n".join(lines).rstrip() + "\n"
 
