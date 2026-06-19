@@ -6544,6 +6544,45 @@ def test_escalation_coalesce_decision_queue_counter(kanban_home):
     assert row["coalesced_repeats"] == 1
 
 
+def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home):
+    """Mixed writer + gave_up regression: when a NON-gave_up escalation writer
+    (here budget-runaway) already escalated a class, a later breaker-trip cycle
+    of the SAME class is coalesced — and that suppressed cycle must STILL be
+    explicit in decision_queue. The raw event from the non-gave_up writer shares
+    no event with the coalesced gave_up, so a max(raw, gave_up) counter would
+    silently lose the second cycle (escalation_count=1, coalesced_repeats=0)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        # NON-gave_up writer: a budget-runaway park writes a raw real-bug
+        # operator_escalation without going through the gave_up branch.
+        fresh = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        assert kb._park_budget_runaway(conn, fresh, token_sum=999, cap=10, runs=3)
+        # re-dispatch, then trip the breaker with the SAME (real-bug) class
+        _redispatch(conn, tid)
+        assert kb._record_task_failure(
+            conn, tid, "tests failed: assertion", outcome="crashed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        events = kb.list_events(conn, tid)
+        result = kb.decision_queue(conn)
+
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    gave_ups = [e for e in events if e.kind == "gave_up"]
+    # one RAW event (the non-gave_up writer); the same-class gave_up is coalesced
+    assert len(escalations) == 1
+    assert len(gave_ups) == 1
+    # the coalesced gave_up cycle carries the explicit flag so the counter sees it
+    assert gave_ups[0].payload.get("escalation_coalesced") is True
+
+    row = next(d for d in result["decisions"] if d["task_id"] == tid)
+    assert row["kind"] == "operator_escalation"
+    # 2 escalation cycles total: the budget-runaway park + the coalesced gave_up
+    assert row["escalation_count"] == 2
+    assert row["escalation_classes"] == ["real-bug"]
+    # exactly one suppressed repeat, made explicit (was invisibly dropped before)
+    assert row["coalesced_repeats"] == 1
+
+
 def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
     now = 1_900_000_000
     with kb.connect() as conn:

@@ -10787,13 +10787,6 @@ def _record_task_failure(
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
-            # The gave_up event records EVERY breaker-trip cycle and is NEVER
-            # coalesced — it is the per-cycle ground truth the decision-queue
-            # counter reads, so a coalesced escalation still leaves a visible
-            # trace (nothing is silently dropped).
-            _append_event(
-                conn, task_id, "gave_up", payload, run_id=run_id,
-            )
             # ESCALATION-IDEMPOTENT-COALESCE-S1: keep the inline escalation
             # write idempotent per Heiler class. Historically a re-dispatched
             # root that exhausted its ladder again appended a fresh raw
@@ -10803,10 +10796,21 @@ def _record_task_failure(
             # escalation's OWN evidence (the same _classify_escalation_payload
             # the sweep uses) and skip the append when that class already
             # escalated. A genuinely NEW class is NOT suppressed (it stays
-            # visible); a suppressed repeat stays explicit via the gave_up count
-            # surfaced as the decision_queue counter. esc_event_id stays None on
-            # a coalesce, so the end-of-txn classification carries no escalation
-            # reference (the original escalation already has its paired one).
+            # visible).
+            #
+            # The coalesce decision is taken BEFORE the gave_up event so that
+            # gave_up — which records EVERY breaker-trip cycle and is itself
+            # never coalesced — carries an explicit ``escalation_coalesced``
+            # flag. That flag is the per-cycle ground truth the decision-queue
+            # counter reads to make each suppressed repeat visible. It is
+            # required (not just a max(raw, gave_up) heuristic) for the mixed
+            # case where a prior NON-gave_up writer (budget-runaway / stall /
+            # release-gate) already escalated this class: there the suppressed
+            # gave_up shares no raw event with that prior writer, so counting
+            # raw events alone — or max() against them — would silently lose the
+            # coalesced cycle. esc_event_id stays None on a coalesce, so the
+            # end-of-txn classification carries no escalation reference (the
+            # original escalation already has its paired one).
             esc_payload = _operator_escalation_payload(
                 task_id=task_id,
                 row=row,
@@ -10818,7 +10822,14 @@ def _record_task_failure(
                 event_payload_extra=event_payload_extra,
             )
             new_class, _ = _classify_escalation_payload(esc_payload)
-            if new_class not in _escalated_classes_for_task(conn, task_id):
+            escalation_coalesced = (
+                new_class in _escalated_classes_for_task(conn, task_id)
+            )
+            payload["escalation_coalesced"] = escalation_coalesced
+            _append_event(
+                conn, task_id, "gave_up", payload, run_id=run_id,
+            )
+            if not escalation_coalesced:
                 esc_event_id = _append_event(
                     conn,
                     task_id,
@@ -17422,27 +17433,47 @@ def decision_queue(
             cls, _ = _classify_escalation_payload(payload)
             cc = esc_class_counts.setdefault(tid, {})
             cc[cls] = cc.get(cls, 0) + 1
-        gave_up_counts: dict[str, int] = {}
+        # gave_up records every breaker-trip cycle; the cycles whose raw
+        # escalation was coalesced carry escalation_coalesced=True. Fold both the
+        # total cycle count and the coalesced count in ONE query (payloads
+        # folded in Python — no N+1) so each suppressed repeat stays explicit,
+        # including the mixed case where a prior non-gave_up writer already
+        # escalated the same class.
+        gave_up_total: dict[str, int] = {}
+        gave_up_coalesced: dict[str, int] = {}
         if esc_newest:
             ids = list(esc_newest)
             ph = ",".join("?" for _ in ids)
             try:
                 for gr in conn.execute(
-                    "SELECT task_id, COUNT(*) AS n FROM task_events "
-                    f"WHERE kind = 'gave_up' AND task_id IN ({ph}) "
-                    "GROUP BY task_id",
+                    "SELECT task_id, payload FROM task_events "
+                    f"WHERE kind = 'gave_up' AND task_id IN ({ph})",
                     ids,
                 ).fetchall():
-                    gave_up_counts[gr["task_id"]] = int(gr["n"] or 0)
+                    gtid = gr["task_id"]
+                    gave_up_total[gtid] = gave_up_total.get(gtid, 0) + 1
+                    if _payload_dict(gr["payload"]).get("escalation_coalesced"):
+                        gave_up_coalesced[gtid] = (
+                            gave_up_coalesced.get(gtid, 0) + 1
+                        )
             except Exception:
-                gave_up_counts = {}
+                gave_up_total = {}
+                gave_up_coalesced = {}
         for tid, (payload, created_at, title) in esc_newest.items():
             class_counts = esc_class_counts.get(tid, {})
             raw_escalations = sum(class_counts.values())
-            # gave_up events count every inline breaker-trip cycle even when its
-            # raw escalation was coalesced; max() keeps non-gave_up escalation
-            # writers (budget-runaway / stall / release-gate) honest too.
-            escalation_count = max(raw_escalations, gave_up_counts.get(tid, 0))
+            # Every escalation cycle = raw events kept (≤ 1 per class, incl. the
+            # non-gave_up budget-runaway / stall / release-gate writers) PLUS the
+            # gave_up cycles whose raw escalation was coalesced (counted by their
+            # explicit flag, disjoint from the raw events). That sum — not
+            # max(raw, gave_up) — is what makes the mixed "prior non-gave_up
+            # writer + later coalesced same-class gave_up" case visible. Floor at
+            # the total gave_up cycle count so pre-flag transitional events are
+            # never undercounted.
+            coalesced = gave_up_coalesced.get(tid, 0)
+            escalation_count = max(
+                raw_escalations + coalesced, gave_up_total.get(tid, 0)
+            )
             reason = (
                 str(payload.get("why_now") or "").strip()
                 or "Operator escalation pending"
