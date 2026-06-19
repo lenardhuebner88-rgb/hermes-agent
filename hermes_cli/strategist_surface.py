@@ -152,16 +152,22 @@ def parse_annotation(body: Optional[str]) -> dict[str, Optional[str]]:
 def vision_metrics_path() -> Path:
     """Resolve the distilled metrics file H1 writes.
 
-    ``HERMES_VISION_METRICS_PATH`` overrides for tests / non-default layouts;
-    otherwise ``<hermes-home>/state/vision-metrics.json``. H1 must write to the
-    same resolved path.
+    ``HERMES_VISION_METRICS_PATH`` is the explicit override; otherwise delegate to
+    the writer (``vision_metrics.metrics_snapshot_path``) so the reader and the H1
+    writer resolve the SAME path — including under ``HERMES_VISION_STATE_DIR``,
+    which both now honour (tests/sandboxes set one var, not two).
     """
     import os
 
     override = os.environ.get("HERMES_VISION_METRICS_PATH", "").strip()
     if override:
         return Path(override)
-    return get_hermes_home() / "state" / "vision-metrics.json"
+    try:
+        from hermes_cli import vision_metrics as _vm
+
+        return _vm.metrics_snapshot_path()
+    except Exception:
+        return get_hermes_home() / "state" / "vision-metrics.json"
 
 
 def read_vision_metrics() -> Optional[dict[str, Any]]:

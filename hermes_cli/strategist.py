@@ -458,20 +458,28 @@ def check_budget(
 
     if snapshot is None:
         return {"skip": False, "used_percent": None, "reason": "no usage snapshot"}
-    weekly = next(
-        (w for w in getattr(snapshot, "windows", ()) if getattr(w, "window_key", None) == "weekly"),
-        None,
-    )
-    if weekly is None or weekly.used_percent is None:
-        return {"skip": False, "used_percent": None, "reason": "no weekly window"}
-    used = float(weekly.used_percent)
+    # The strategist runs on the Opus subscription lane, so the BINDING window is
+    # whichever of {opus_week, weekly} is closest to its limit — opus_week can hit
+    # 100% while the overall weekly is still low (the key-burn failure mode). Skip
+    # on the most-consumed of the two.
+    candidates = [
+        w
+        for w in getattr(snapshot, "windows", ())
+        if getattr(w, "window_key", None) in ("opus_week", "weekly")
+        and getattr(w, "used_percent", None) is not None
+    ]
+    if not candidates:
+        return {"skip": False, "used_percent": None, "reason": "no weekly/opus_week window"}
+    binding = max(candidates, key=lambda w: float(w.used_percent))
+    used = float(binding.used_percent)
+    label = getattr(binding, "window_key", "weekly")
     if used > threshold:
         return {
             "skip": True,
             "used_percent": used,
-            "reason": f"weekly usage {used:.1f}% > {threshold:.0f}% threshold",
+            "reason": f"{label} usage {used:.1f}% > {threshold:.0f}% threshold",
         }
-    return {"skip": False, "used_percent": used, "reason": f"weekly usage {used:.1f}% within budget"}
+    return {"skip": False, "used_percent": used, "reason": f"{label} usage {used:.1f}% within budget"}
 
 
 # --------------------------------------------------------------------------- #

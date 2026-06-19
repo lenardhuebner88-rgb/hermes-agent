@@ -11667,6 +11667,10 @@ def main():
     # plan command — Vault PlanSpec ingest into Kanban
     # =========================================================================
     build_plan_parser(subparsers)
+
+    # =========================================================================
+    # vision command — Vision-Flywheel harness: strategist + metrics + gate ledger
+    # =========================================================================
     build_vision_parser(subparsers)
 
     # =========================================================================
