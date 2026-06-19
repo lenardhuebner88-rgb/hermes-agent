@@ -7648,6 +7648,70 @@ def release_freigabe_hold(
     return True
 
 
+def dismiss_freigabe_hold(
+    conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
+) -> bool:
+    """Veto a held ``freigabe: operator`` PlanSpec chain (G1 — the veto sibling
+    of :func:`release_freigabe_hold`).
+
+    Where ``release_freigabe_hold`` promotes the held chain, this archives it so
+    nothing builds: the held root (``scheduled``) AND every still-held child
+    (the subtasks linked as the root's parents, see ``decompose_triage_task``)
+    move to ``archived``. The operator vetoed the strategist's proposal.
+
+    Root-guard (Funnel-Selbstfraß-Lehre): only a ``freigabe: operator`` root is
+    actionable. Children of a decomposed chain never carry ``freigabe`` (only
+    the root row does), so this check alone hard-excludes the build-children —
+    they can never be vetoed as if they were proposals.
+
+    Returns ``True`` when ``task_id`` is a held (``scheduled``) operator root and
+    was archived. Returns ``False`` (touching nothing) for a non-operator root,
+    an unknown id, or a root that is no longer held (already released/building/
+    done) — an already-released chain must not be silently torn down.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+            return False
+        if row["status"] != "scheduled":
+            return False
+        # The chain's children are linked as the root's parents (mirror of the
+        # decompose link direction). Archive the ones still held; a child that
+        # somehow already advanced is left untouched by the status-guarded UPDATE.
+        child_rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (task_id,),
+        ).fetchall()
+        archived_children: list[str] = []
+        for child_row in child_rows:
+            child_id = child_row["parent_id"]
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status = 'scheduled'",
+                (child_id,),
+            )
+            if cur.rowcount == 1:
+                archived_children.append(child_id)
+                _append_event(conn, child_id, "archived", {"by": author, "via": "freigabe_vetoed"})
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "freigabe_vetoed",
+            {"author": author, "archived_children": archived_children},
+        )
+    return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
