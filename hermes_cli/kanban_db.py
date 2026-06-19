@@ -12024,6 +12024,42 @@ def no_silent_stall_sweep(
     return summary
 
 
+def _resolve_chain_root(
+    task_id: Optional[str],
+    children: dict[str, list[str]],
+    cache: dict[Optional[str], Optional[str]],
+) -> Optional[str]:
+    """Collapse a task onto its chain ROOT (the tree sink).
+
+    The K2/F1 link convention (see :func:`_root_tree_member_ids`): a child waits
+    for its parent and the orchestration sink/root is the *child* of every leaf,
+    so the root is reached by walking ``child`` edges *downward* from a work task
+    until a task that is itself never a parent — a sink. ``children`` maps
+    ``parent_id -> [child_id, …]``; a task absent from it has no children and is
+    therefore a sink. Cycle-safe (visited set). A task with no links is its own
+    root. When a DAG fans out to several sinks the lexicographically smallest is
+    chosen, so a given task always collapses onto the same deterministic root
+    key. Memoised via ``cache`` across the caller's events."""
+    if task_id in cache:
+        return cache[task_id]
+    seen = {task_id}
+    stack = [task_id]
+    sinks: set[Optional[str]] = set()
+    while stack:
+        node = stack.pop()
+        kids = children.get(node) if node is not None else None
+        if not kids:
+            sinks.add(node)  # never a parent → sink/root
+            continue
+        for kid in kids:
+            if kid not in seen:
+                seen.add(kid)
+                stack.append(kid)
+    root = min(sinks) if sinks else task_id
+    cache[task_id] = root
+    return root
+
+
 def read_escalation_ledger(
     conn: sqlite3.Connection,
     *,
@@ -12041,13 +12077,25 @@ def read_escalation_ledger(
     no writes, no schema change, no worker spawn — safe to call from a report
     cron or the dashboard.
 
+    Two complementary per-class rollups are returned (LEDGER-BYCLASS-DISTINCT-
+    ROOTS-S1):
+
+      * ``by_class`` / ``total`` — raw *event* counts (the record of what the
+        pipeline saw; recurrence of one root stays visible here).
+      * ``roots_by_class`` / ``root_total`` — counts of *distinct chain roots*
+        per class (each event's task collapsed onto its tree-sink root). This is
+        the honest cause signal the Stratege reads: a single root that escalates
+        repeatedly is counted once, so it can no longer over-inflate its class
+        even if some other write-path produces duplicate events. Defense in
+        depth on the read side, complementary to write-path idempotence.
+
     Filters (all optional):
       * ``since`` / ``until`` — inclusive ``created_at`` window (unix seconds)
       * ``task_id`` — restrict to a single task
       * ``classes`` — restrict to a subset of :data:`HEILER_CLASSES`
-      * ``limit`` — cap the number of returned *entries*. The ``by_class``
-        rollup and ``total`` are always computed over the full filtered window,
-        so the counts stay accurate even when the entry list is truncated.
+      * ``limit`` — cap the number of returned *entries*. Both rollups and the
+        totals are always computed over the full filtered window, so the counts
+        stay accurate even when the entry list is truncated.
     """
     where = ["e.kind = ?"]
     params: list = [HEILER_CLASSIFICATION_EVENT]
@@ -12073,7 +12121,14 @@ def read_escalation_ledger(
     ).fetchall()
 
     by_class: dict = {}
+    roots_by_class: dict[Any, set] = {}
     entries: list = []
+    # Child adjacency (parent_id -> [child_id]) + memo, built once and only when
+    # there is at least one classified event to resolve, so an empty ledger
+    # window never scans task_links. Used to collapse each event onto its chain
+    # root (tree sink) for the distinct-root rollup.
+    children: Optional[dict[str, list[str]]] = None
+    root_cache: dict[Optional[str], Optional[str]] = {}
     for r in rows:
         try:
             payload = json.loads(r["payload"] or "{}")
@@ -12085,6 +12140,14 @@ def read_escalation_ledger(
         if class_filter is not None and cls not in class_filter:
             continue
         by_class[cls] = by_class.get(cls, 0) + 1
+        if children is None:
+            children = {}
+            for lr in conn.execute(
+                "SELECT parent_id, child_id FROM task_links"
+            ):
+                children.setdefault(lr["parent_id"], []).append(lr["child_id"])
+        root = _resolve_chain_root(r["task_id"], children, root_cache)
+        roots_by_class.setdefault(cls, set()).add(root)
         entries.append({
             "event_id": r["id"],
             "task_id": r["task_id"],
@@ -12101,12 +12164,16 @@ def read_escalation_ledger(
         })
 
     total = len(entries)
+    roots_by_class_counts = {cls: len(roots) for cls, roots in roots_by_class.items()}
+    root_total = len({root for roots in roots_by_class.values() for root in roots})
     if limit is not None and int(limit) >= 0:
         entries = entries[: int(limit)]
 
     return {
         "total": total,
         "by_class": by_class,
+        "roots_by_class": roots_by_class_counts,
+        "root_total": root_total,
         "entries": entries,
     }
 

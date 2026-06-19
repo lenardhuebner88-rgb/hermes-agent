@@ -139,8 +139,9 @@ class _LedgerTemplate:
     counter_risk: float
 
 
-# Heiler-class → lever template. The escalation ledger's ``by_class`` counts are
-# the live signal; a class only drives a lever when it actually escalated.
+# Heiler-class → lever template. The escalation ledger's per-class distinct-root
+# count (``roots_by_class``) is the live signal; a class only drives a lever when
+# at least one distinct root actually escalated into it.
 _LEDGER_TEMPLATES: dict[str, _LedgerTemplate] = {
     kanban_db.HEILER_CLASS_TRANSIENT: _LedgerTemplate(
         key="HEILER-TRANSIENT",
@@ -390,15 +391,24 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
     """Map the gathered context to candidate levers (pre self-gate).
 
     Deterministic baseline across the broad Vision corridor: Heiler root-causes
-    (ledger by_class) + autonomy/gate metric gaps. Suppressed (recently vetoed)
-    keys are skipped. Empty signal → empty list (idle is correct).
+    (ledger ``roots_by_class`` — distinct escalating roots, falling back to the
+    raw ``by_class`` event count for legacy contexts) + autonomy/gate metric
+    gaps. Suppressed (recently vetoed) keys are skipped. Empty signal → empty
+    list (idle is correct).
     """
     suppressed = set(context.get("suppressed") or ())
     levers: list[Lever] = []
 
-    by_class = (context.get("ledger") or {}).get("by_class") or {}
+    ledger = context.get("ledger") or {}
+    # LEDGER-BYCLASS-DISTINCT-ROOTS-S1: drive the lever off the count of DISTINCT
+    # escalating roots per class, so one root that escalates repeatedly cannot
+    # over-state its cluster. The raw event count (``by_class``) stays the
+    # recurrence record; we only fall back to it when an injected/legacy ledger
+    # predates ``roots_by_class`` (graceful degradation, never a silenced signal).
+    roots_by_class = ledger.get("roots_by_class")
+    counts = roots_by_class if isinstance(roots_by_class, dict) else (ledger.get("by_class") or {})
     for cls, template in _LEDGER_TEMPLATES.items():
-        count = int(by_class.get(cls, 0) or 0)
+        count = int(counts.get(cls, 0) or 0)
         if count < LEDGER_MIN_COUNT:
             continue
         if template.key in suppressed:
