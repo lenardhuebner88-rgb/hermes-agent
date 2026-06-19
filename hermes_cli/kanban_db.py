@@ -2743,6 +2743,20 @@ INTEGRATION_RETRY_LIMIT = 2
 INTEGRATION_RETRY_BACKOFF_SECONDS = 60
 INTEGRATION_RETRY_EXHAUSTED_CLASS = "integration_retry_exhausted"
 INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
+# Conflict-park fixer routing (no_silent_stall_sweep §5, NON-transient branch).
+# A ``needs_orchestrator`` park (real merge conflict / red post-merge gate, per
+# ``kanban_worktrees._integration_park_class``) is routed to a BOUNDED
+# coder-claude fixer subtask that resolves the conflict in the chain's OWN
+# worktree, instead of escalating straight to the operator like an unknown
+# (``needs_operator``) park. Bounded by its OWN dispatched-event count (NEVER
+# the transient ``integration_retry_count``) plus a per-attempt backoff and a
+# wait-while-the-last-fixer-is-still-open gate; once the attempt budget is spent
+# — or there is no provisioned worktree to fix in — the chain escalates to the
+# operator exactly as before. The transient §5 path is untouched.
+CONFLICT_FIXER_DISPATCHED_EVENT = "conflict_fixer_dispatched"
+CONFLICT_FIXER_MAX_ATTEMPTS = 2
+CONFLICT_FIXER_BACKOFF_SECONDS = 300
+CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
@@ -11116,6 +11130,201 @@ def _finalize_integration_retry(
     return True
 
 
+def _conflict_fixer_body(
+    *,
+    parent_id: str,
+    parent_title: str,
+    root_id: str,
+    branch: str,
+    reason: str,
+    attempt: int,
+) -> str:
+    """Instruction body for a conflict-park fixer subtask. The fixer is caged
+    (``HERMES_KANBAN_TASK``) and runs in the chain's own worktree on
+    ``branch``; its job is to resolve the recorded conflict/red-gate so the
+    chain can re-integrate, then commit on the branch — never push/merge."""
+    return (
+        "You are a BOUNDED Hermes conflict-park fixer on the coder-claude lane "
+        f"(attempt {attempt}/{CONFLICT_FIXER_MAX_ATTEMPTS}). The serialized "
+        f"integrator parked chain `{root_id}` because integrating its branch "
+        f"`{branch}` failed.\n\n"
+        f"Stalled finalizer task: {parent_id} ({parent_title})\n"
+        f"Chain root: {root_id}\n"
+        f"Chain branch: {branch}\n\n"
+        "Konflikt-Kontext (the integrator's park reason — this IS the conflict "
+        "diff / red-gate signal):\n"
+        f"{(reason or '')[:1500]}\n\n"
+        "Your job: you are already cd'd into this chain's worktree on its "
+        "branch. Inspect the conflict (`git status`, `git diff`, and for a "
+        "merge-conflict park rebase the branch onto the live target and resolve "
+        "the conflicting hunks; for a red post-merge gate fix the build/test "
+        "failure named above). Make the MINIMAL change that lets the chain "
+        "integrate cleanly, then run the gates (`scripts/run-affected.sh`) and "
+        "commit your fix on this branch.\n\n"
+        "HARD RULES: work ONLY in this worktree/branch. NEVER push, merge, "
+        "switch, or reset another branch — re-integration happens outside your "
+        "run after review. If the conflict is not something a focused fix can "
+        "resolve, stop and explain why so it escalates to the operator."
+    )
+
+
+def _create_conflict_park_fixer_subtask(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    reason: str,
+    root_id: str,
+    wt,
+    attempt: int,
+) -> Optional[str]:
+    """Create ONE bounded coder-claude fixer subtask for a needs_orchestrator
+    integration park and link it to the stalled chain via a
+    ``conflict_fixer_dispatched`` event (parent) + ``conflict_fixer_for``
+    back-reference (child). The fixer is a ``dir`` task pinned to the chain's
+    existing provisioned worktree, so it resolves the conflict on the chain
+    branch in place (``provision_for_task`` treats an already-provisioned path
+    as a no-op). Returns the new task id, or ``None`` on failure (fail-soft:
+    the sweep retries next round)."""
+    from hermes_cli import kanban_worktrees as _kwt
+
+    parent_id = row["id"]
+    parent_title = (
+        (row["title"] if "title" in row.keys() else None) or parent_id
+    )
+    branch = _kwt.chain_branch(root_id)
+    title = (
+        f"Konflikt-Fixer Kette {root_id} "
+        f"(Versuch {attempt}/{CONFLICT_FIXER_MAX_ATTEMPTS})"
+    )
+    body = _conflict_fixer_body(
+        parent_id=parent_id, parent_title=parent_title, root_id=root_id,
+        branch=branch, reason=reason, attempt=attempt,
+    )
+    try:
+        child_id = create_task(
+            conn,
+            title=title,
+            body=body,
+            assignee="coder-claude",
+            created_by="orchestrator",
+            workspace_kind="dir",
+            workspace_path=str(wt),
+            kind="code",
+            idempotency_key=f"conflict-fixer:{parent_id}:{attempt}",
+            max_runtime_seconds=CONFLICT_FIXER_MAX_RUNTIME_SECONDS,
+            max_retries=1,
+        )
+    except Exception:
+        _log.warning(
+            "conflict-park fixer creation failed for %s", parent_id,
+            exc_info=True,
+        )
+        return None
+    with write_txn(conn):
+        _append_event(
+            conn, parent_id, CONFLICT_FIXER_DISPATCHED_EVENT,
+            {
+                "child_id": child_id,
+                "root_id": root_id,
+                "branch": branch,
+                "attempt": attempt,
+                "limit": CONFLICT_FIXER_MAX_ATTEMPTS,
+                "reason": (reason or "")[:500],
+            },
+        )
+        _append_event(
+            conn, child_id, "conflict_fixer_for",
+            {"parent_id": parent_id, "root_id": root_id, "attempt": attempt},
+        )
+    return child_id
+
+
+def _maybe_route_conflict_park_fixer(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    reason: str,
+    retry_count: int,
+    now: int,
+    summary: dict,
+) -> None:
+    """Route a ``needs_orchestrator`` integration park to a BOUNDED coder-claude
+    fixer instead of escalating it straight to the operator.
+
+    Bounded by its OWN ``conflict_fixer_dispatched`` event count (NEVER the
+    transient ``integration_retry_count``) plus a per-attempt backoff and a
+    wait-while-the-last-fixer-is-still-open gate. Once the attempt budget is
+    spent — or the parked task carries no provisioned worktree to fix in — it
+    escalates to the operator exactly like the ``needs_operator`` path
+    (``_park_stall_once`` with ``INTEGRATION_PARKED_STALL_CLASS`` and the same
+    ``{"attempts": retry_count or 1}`` evidence), so an unresolvable chain is
+    never silently lost. Mutates *summary* in place."""
+    from hermes_cli import kanban_worktrees as _kwt
+
+    task_id = row["id"]
+
+    def _escalate(evidence: dict) -> None:
+        if _park_stall_once(
+            conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
+            reason=reason, evidence=evidence, now=now,
+        ):
+            summary["parked"].append(
+                {"task_id": task_id, "class": INTEGRATION_PARKED_STALL_CLASS}
+            )
+
+    # A real integration park always carries a provisioned worktree
+    # (maybe_integrate_on_complete bails before parking otherwise). Without one
+    # we have no tree to hand a fixer — escalate byte-identically to the
+    # needs_operator path.
+    provisioned = _kwt.split_provisioned_path(
+        row["workspace_path"] if "workspace_path" in row.keys() else None
+    )
+    if provisioned is None:
+        _escalate({"attempts": retry_count or 1})
+        return
+    _repo_root, root_id, wt = provisioned
+
+    prior = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
+        "ORDER BY id",
+        (task_id, CONFLICT_FIXER_DISPATCHED_EVENT),
+    ).fetchall()
+    attempts = len(prior)
+
+    # Budget spent → escalate to the operator (the unresolvable-chain guard).
+    if attempts >= CONFLICT_FIXER_MAX_ATTEMPTS:
+        _escalate({"attempts": attempts, "fixer_exhausted": True})
+        return
+
+    # Never stack a second fixer on one that is still working.
+    if prior:
+        try:
+            last_child = json.loads(prior[-1]["payload"] or "{}").get("child_id")
+        except Exception:
+            last_child = None
+        if last_child and conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? "
+            "AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+            "LIMIT 1",
+            (last_child,),
+        ).fetchone():
+            return
+
+    # Backoff floor so a tight sweep cadence can't redispatch the instant a
+    # fixer finishes.
+    last_at = _latest_event_at(conn, task_id, CONFLICT_FIXER_DISPATCHED_EVENT)
+    if last_at is not None and int(last_at) + CONFLICT_FIXER_BACKOFF_SECONDS > now:
+        return
+
+    child_id = _create_conflict_park_fixer_subtask(
+        conn, row, reason=reason, root_id=root_id, wt=wt, attempt=attempts + 1,
+    )
+    if child_id:
+        summary["conflict_fixer_dispatched"].append(
+            {"task_id": task_id, "child_id": child_id, "attempt": attempts + 1}
+        )
+
+
 def no_silent_stall_sweep(
     conn: sqlite3.Connection,
     *,
@@ -11139,6 +11348,7 @@ def no_silent_stall_sweep(
         "skipped_funnel": [],
         "skipped_held": [],
         "integration_retried": [],
+        "conflict_fixer_dispatched": [],
     }
 
     def _old_enough(task_id: str, kind: str, fallback_at: Optional[int]) -> bool:
@@ -11305,8 +11515,22 @@ def no_silent_stall_sweep(
         except (IndexError, KeyError, TypeError):
             retry_count = 0
 
-        # Non-transient (merge conflict / red gate / unknown): classify and
-        # escalate once. Dovetails with the operator/S4-ledger lane.
+        # Non-transient, needs_orchestrator (real merge conflict / red
+        # post-merge gate): route to a BOUNDED coder-claude fixer in the
+        # chain's own worktree instead of escalating straight to the operator.
+        # Bounded by its own dispatched-event count + backoff; once that budget
+        # is spent (or there is no worktree to fix in) it escalates exactly like
+        # the needs_operator path below. The transient §5 path above is
+        # untouched.
+        if park_class == "needs_orchestrator":
+            _maybe_route_conflict_park_fixer(
+                conn, row, reason=reason, retry_count=retry_count,
+                now=ts, summary=summary,
+            )
+            continue
+
+        # Non-transient, unknown (needs_operator): classify and escalate once.
+        # Dovetails with the operator/S4-ledger lane. UNCHANGED.
         if park_class != "transient":
             if _park_stall_once(
                 conn, row, stall_class=INTEGRATION_PARKED_STALL_CLASS,
