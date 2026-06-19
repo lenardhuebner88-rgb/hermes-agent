@@ -706,3 +706,33 @@ def test_respec_cli_updates_acceptance_criteria(kanban_home):
         ).fetchone()
     parsed = json.loads(row["acceptance_criteria"])
     assert any("do the thing" in str(i) for i in parsed)
+
+
+def test_respec_cli_blank_ac_exits_one_with_speaking_error(kanban_home, capsys):
+    """hermes kanban respec <id> --ac "" must exit 1 with a speaking message.
+
+    Regression for the DATA-LOSS BLOCKER (cross-family review): a blank --ac
+    previously silently cleared the acceptance_criteria column. The guard in
+    respec_task now raises ValueError before any DB write, which the dispatch
+    wrapper surfaces as "kanban: …" on stderr and exits 1.
+    """
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="b")
+        conn.execute(
+            "UPDATE tasks SET acceptance_criteria = ? WHERE id = ?",
+            (json.dumps(["AC-1: do not clear me"]), tid),
+        )
+        conn.commit()
+    parser = _respec_parser()
+    args = parser.parse_args(["kanban", "respec", tid, "--ac", ""])
+    rc = kc.kanban_command(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "blank" in err.lower()
+    # AC column must be untouched.
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["acceptance_criteria"] is not None
+    assert "do not clear me" in row["acceptance_criteria"]

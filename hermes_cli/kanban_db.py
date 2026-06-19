@@ -7980,6 +7980,11 @@ def respec_task(
             params.append(body)
             changed_fields.append("body")
         if acceptance_criteria is not None:
+            if not acceptance_criteria.strip():
+                raise ValueError(
+                    "acceptance_criteria is blank; refusing to clear existing AC"
+                    " — pass at least one 'AC-…:' bullet"
+                )
             ac_json = _parse_acceptance_criteria(acceptance_criteria)
             if ac_json is None and acceptance_criteria.strip():
                 raise ValueError(

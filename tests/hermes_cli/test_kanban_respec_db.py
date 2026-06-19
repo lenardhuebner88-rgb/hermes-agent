@@ -209,3 +209,50 @@ def test_respec_noop_when_nothing_changed(kanban_home):
         assert kb.list_comments(conn, tid) == []
         kinds = [e.kind for e in kb.list_events(conn, tid)]
     assert "respecified" not in kinds
+
+
+# --- DATA-LOSS BLOCKER: blank/whitespace-only AC must be rejected -----------
+# Regression for the cross-family review finding: acceptance_criteria=""
+# previously silently cleared the existing AC column because the blank-strip
+# guard fired AFTER _parse_acceptance_criteria returned None, which set
+# ac_json=None and wrote NULL to the DB with no error.
+
+
+def _seed_ac(conn, tid, ac_text: str) -> None:
+    """Seed a known acceptance_criteria JSON string directly into the row."""
+    conn.execute(
+        "UPDATE tasks SET acceptance_criteria = ? WHERE id = ?",
+        (json.dumps([ac_text]), tid),
+    )
+
+
+def test_respec_blank_ac_empty_string_raises_and_ac_unchanged(kanban_home):
+    """acceptance_criteria="" must raise ValueError; existing AC untouched."""
+    with kb.connect() as conn:
+        tid = _create_with_status(conn, "todo", body="b0")
+        _seed_ac(conn, tid, "AC-1: must survive")
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="blank"):
+            kb.respec_task(conn, tid, acceptance_criteria="")
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["acceptance_criteria"] is not None
+    assert "must survive" in row["acceptance_criteria"]
+
+
+def test_respec_blank_ac_whitespace_raises_and_ac_unchanged(kanban_home):
+    """acceptance_criteria="   " (whitespace) must raise; existing AC untouched."""
+    with kb.connect() as conn:
+        tid = _create_with_status(conn, "todo", body="b0")
+        _seed_ac(conn, tid, "AC-1: must survive")
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="blank"):
+            kb.respec_task(conn, tid, acceptance_criteria="   ")
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["acceptance_criteria"] is not None
+    assert "must survive" in row["acceptance_criteria"]
