@@ -3442,6 +3442,7 @@ def list_tasks(
     conn: sqlite3.Connection,
     *,
     assignee: Optional[str] = None,
+    created_by: Optional[str] = None,
     status: Optional[str] = None,
     tenant: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -3456,6 +3457,11 @@ def list_tasks(
     if assignee is not None:
         query += " AND assignee = ?"
         params.append(_canonical_assignee(assignee))
+    if created_by is not None:
+        # Exact match: ``created_by`` is a free-form author string (not a
+        # canonicalised profile name), so we filter on the literal argument.
+        query += " AND created_by = ?"
+        params.append(created_by)
     if status is not None:
         if status not in VALID_STATUSES:
             raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")

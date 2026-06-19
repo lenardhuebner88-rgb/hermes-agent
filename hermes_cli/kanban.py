@@ -427,7 +427,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_list = sub.add_parser("list", aliases=["ls"], help="List tasks")
     p_list.add_argument("--mine", action="store_true",
                         help="Filter by $HERMES_PROFILE as assignee")
-    p_list.add_argument("--assignee", default=None)
+    p_list.add_argument("--assignee", default=None,
+                        help="Filter by assignee/lane (exact match)")
+    p_list.add_argument("--created-by", default=None, dest="created_by",
+                        metavar="AUTHOR",
+                        help="Filter by the task's created_by author (exact match)")
     p_list.add_argument("--status", default=None,
                         choices=sorted(kb.VALID_STATUSES))
     p_list.add_argument("--tenant", default=None)
@@ -1939,6 +1943,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
         tasks = kb.list_tasks(
             conn,
             assignee=assignee,
+            created_by=args.created_by,
             status=args.status,
             tenant=args.tenant,
             session_id=args.session,
