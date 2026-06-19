@@ -6377,24 +6377,28 @@ def test_integration_retry_transient_park_reintegrates_and_completes(
     "merge conflict/failure (aborted): foo.py",
     "post-merge gate failed: vitest 3 failing",
 ])
-def test_integration_retry_non_transient_not_retried_escalates(
+def test_integration_retry_non_transient_no_worktree_escalates(
     kanban_home, monkeypatch, reason_suffix,
 ):
+    # needs_orchestrator park WITHOUT a provisioned worktree to fix in (the
+    # park reason here is on a scratch finalizer): no transient retry AND no
+    # fixer to route to → escalate byte-identically to the needs_operator path.
     now = 1_900_000_000
     with kb.connect() as conn:
         tid = _make_integration_parked(conn, reason_suffix)
         calls = _patch_integrate(monkeypatch, [])  # any call would be a bug
         summary = kb.no_silent_stall_sweep(conn, now=now)
         task = kb.get_task(conn, tid)
-        escalations = [
-            e for e in kb.list_events(conn, tid)
-            if e.kind == kb.OPERATOR_ESCALATION_EVENT
-        ]
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        escalations = [k for k in kinds if k == kb.OPERATOR_ESCALATION_EVENT]
 
     assert calls == []                          # merge conflict/red gate: NO retry
     assert task.status == "blocked"
     assert task.integration_retry_count == 0
     assert len(escalations) == 1               # classified + escalated
+    # No worktree → no fixer dispatched (byte-equal to the old escalate path).
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+    assert summary["conflict_fixer_dispatched"] == []
     assert {"task_id": tid, "class": "integration_parked"} in summary["parked"]
 
 
@@ -6477,6 +6481,157 @@ def test_integration_retry_repark_turned_non_transient_escalates(
     assert task.status == "blocked"
     assert len(escalations) == 1                 # reclassified → escalate, stop
     assert {"task_id": tid, "class": "integration_parked"} in s1["parked"]
+
+
+# ---------------------------------------------------------------------------
+# CONFLICT-PARK-FIXER-ROUTING: needs_orchestrator parks (real merge conflict /
+# red post-merge gate) WITH a provisioned worktree route to a BOUNDED
+# coder-claude fixer instead of escalating straight to the operator.
+# ---------------------------------------------------------------------------
+
+def _make_integration_parked_in_worktree(
+    conn, reason_suffix, *, repo="/srv/repo", root="t_chainroot",
+):
+    """A parked finalizer whose workspace_path is a provisioned chain worktree,
+    so the non-transient branch can route a fixer into it."""
+    tid = kb.create_task(conn, title="parked finalizer", assignee="coder")
+    kb.claim_task(conn, tid)
+    kb.block_task(conn, tid, reason=f"integration parked: {reason_suffix}")
+    wt = f"{repo}/.worktrees/kanban/{root}"
+    kb.set_workspace_path(conn, tid, wt)
+    return tid, wt, root
+
+
+def _close_task(conn, task_id, status="failed"):
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = ? WHERE id = ?", (status, task_id),
+        )
+
+
+@pytest.mark.parametrize("reason_suffix", [
+    "merge conflict/failure (aborted): foo.py",
+    "post-merge gate failed: vitest 3 failing",
+])
+def test_conflict_park_routes_bounded_fixer_not_escalation(
+    kanban_home, monkeypatch, reason_suffix,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid, wt, root = _make_integration_parked_in_worktree(conn, reason_suffix)
+        calls = _patch_integrate(monkeypatch, [])  # transient retry would be a bug
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        dispatched = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        # The fixer subtask itself (payload is already a parsed dict).
+        child_id = dispatched[0].payload["child_id"]
+        child = kb.get_task(conn, child_id)
+
+    assert calls == []                                 # no transient retry
+    assert task.status == "blocked"                    # parked chain stays blocked
+    assert task.integration_retry_count == 0           # transient counter untouched
+    # Routed to a fixer, NOT escalated.
+    assert kb.OPERATOR_ESCALATION_EVENT not in kinds
+    assert {"task_id": tid, "class": "integration_parked"} not in summary["parked"]
+    assert len(dispatched) == 1
+    assert summary["conflict_fixer_dispatched"] == [
+        {"task_id": tid, "child_id": child_id, "attempt": 1}
+    ]
+    # The fixer is a dispatchable coder-claude task pinned to the chain worktree.
+    assert child.assignee == "coder-claude"
+    assert child.status == "ready"
+    assert child.workspace_kind == "dir"
+    assert child.workspace_path == wt
+    assert root in child.title
+    # Linked back to the stalled chain on both ends.
+    assert f"kanban/{root}" in (child.body or "")   # chain branch in context
+    child_kinds = [e.kind for e in kb.list_events(conn, child_id)]
+    assert "conflict_fixer_for" in child_kinds
+
+
+def test_conflict_park_fixer_not_stacked_while_in_flight(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "merge conflict/failure (aborted): foo.py",
+        )
+        _patch_integrate(monkeypatch, [])
+        s1 = kb.no_silent_stall_sweep(conn, now=1_900_000_000)
+        # The fixer from round 1 is still open (ready) → round 2 must NOT
+        # dispatch a second one.
+        s2 = kb.no_silent_stall_sweep(conn, now=1_900_000_500)
+        dispatched = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert len(s1["conflict_fixer_dispatched"]) == 1
+    assert s2["conflict_fixer_dispatched"] == []        # waited on the in-flight fixer
+    assert s2["parked"] == []                            # not escalated yet
+    assert len(dispatched) == 1                          # exactly one fixer exists
+
+
+def test_conflict_park_fixer_bounded_then_escalates(kanban_home, monkeypatch):
+    monkeypatch.setattr(kb, "CONFLICT_FIXER_MAX_ATTEMPTS", 2)
+    with kb.connect() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "merge conflict/failure (aborted): foo.py",
+        )
+        _patch_integrate(monkeypatch, [])
+
+        def _sweep_and_close(ts):
+            s = kb.no_silent_stall_sweep(conn, now=ts)
+            for entry in s["conflict_fixer_dispatched"]:
+                _close_task(conn, entry["child_id"])  # fixer ran, didn't resolve
+            return s
+
+        s1 = _sweep_and_close(1_900_000_000)            # attempt 1
+        s2 = _sweep_and_close(1_900_000_500)            # attempt 2
+        s3 = kb.no_silent_stall_sweep(conn, now=1_900_001_000)  # budget spent
+        s4 = kb.no_silent_stall_sweep(conn, now=1_900_001_500)  # idempotent
+        task = kb.get_task(conn, tid)
+        dispatched = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert len(s1["conflict_fixer_dispatched"]) == 1     # attempt 1
+    assert len(s2["conflict_fixer_dispatched"]) == 1     # attempt 2
+    assert len(dispatched) == 2                          # bounded at MAX attempts
+    assert s3["conflict_fixer_dispatched"] == []         # no 3rd fixer
+    assert {"task_id": tid, "class": "integration_parked"} in s3["parked"]
+    assert len(escalations) == 1                         # unresolvable → escalate once
+    assert task.status == "blocked"
+    assert s4["parked"] == []                            # idempotent: no 2nd escalation
+
+
+def test_conflict_park_needs_operator_unchanged(kanban_home, monkeypatch):
+    # An unknown (needs_operator) park is byte-unchanged: it escalates with NO
+    # fixer routed, even when a worktree is present.
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "some entirely unrecognized park reason",
+        )
+        calls = _patch_integrate(monkeypatch, [])
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        escalations = [k for k in kinds if k == kb.OPERATOR_ESCALATION_EVENT]
+
+    assert calls == []
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+    assert summary["conflict_fixer_dispatched"] == []
+    assert {"task_id": tid, "class": "integration_parked"} in summary["parked"]
 
 
 def test_4a_funnel_root_skipped_but_funnel_build_child_dispatches(
