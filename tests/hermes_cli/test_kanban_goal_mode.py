@@ -298,3 +298,116 @@ def test_loop_stops_if_task_reclaimed(monkeypatch):
         first_response="x",
     )
     assert res["outcome"] == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# Goal loop: live re-read of the card (AC-F3-goal-live)
+# ---------------------------------------------------------------------------
+
+def _patch_judge_capture(monkeypatch, seen_goals, verdict="continue"):
+    """Judge that records every goal string it is handed, then returns a
+    fixed verdict — lets a test assert WHICH goal each iteration judged."""
+
+    def _fake_judge(goal, response, subgoals=None):
+        seen_goals.append(goal)
+        return verdict, f"scripted:{verdict}", False
+
+    monkeypatch.setattr(goals, "judge_goal", _fake_judge)
+
+
+def test_loop_rereads_goal_text_each_iteration(monkeypatch):
+    """goal_text_fn is consulted before each judge call, so a mid-run
+    body/title edit (operator respec) is judged against the CURRENT card,
+    not the session-start snapshot."""
+    seen_goals = []
+    _patch_judge_capture(monkeypatch, seen_goals)
+
+    # The card's title+body mutates between iterations.
+    goal_versions = iter(["goal v1", "goal v2"])
+    statuses = iter(["running", "running", "done"])
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t7",
+        goal_text="goal v0 (session-start snapshot — must NOT be reused)",
+        goal_text_fn=lambda: next(goal_versions),
+        run_turn=lambda p: "turn",
+        task_status_fn=lambda: next(statuses),
+        block_fn=lambda r: pytest.fail("should not block"),
+        max_turns=10,
+        first_response="started",
+    )
+    assert res["outcome"] == "completed_by_worker"
+    # Every judge call saw the FRESH goal; the stale snapshot is never judged.
+    assert seen_goals == ["goal v1", "goal v2"]
+
+
+def test_loop_falls_back_to_last_goal_when_reread_returns_nothing(monkeypatch):
+    """If goal_text_fn returns nothing (task vanished from the DB), keep the
+    last known goal_text rather than judging against an empty criterion."""
+    seen_goals = []
+    _patch_judge_capture(monkeypatch, seen_goals)
+
+    reads = iter(["fresh goal", None, ""])
+    statuses = iter(["running", "running", "running", "done"])
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t8",
+        goal_text="initial goal",
+        goal_text_fn=lambda: next(reads),
+        run_turn=lambda p: "turn",
+        task_status_fn=lambda: next(statuses),
+        block_fn=lambda r: pytest.fail("should not block"),
+        max_turns=10,
+        first_response="started",
+    )
+    assert res["outcome"] == "completed_by_worker"
+    # iter1 reads "fresh goal"; iter2 reads None → keep "fresh goal";
+    # iter3 reads "" → keep "fresh goal". Never an empty criterion.
+    assert seen_goals == ["fresh goal", "fresh goal", "fresh goal"]
+
+
+def test_loop_falls_back_to_last_goal_when_reread_raises(monkeypatch):
+    """A transient DB error in goal_text_fn must not wedge the loop: it
+    keeps the last known goal_text and carries on."""
+    seen_goals = []
+    _patch_judge_capture(monkeypatch, seen_goals)
+
+    def _goal_fn():
+        raise RuntimeError("db gone")
+
+    statuses = iter(["running", "running", "done"])
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t9",
+        goal_text="initial goal",
+        goal_text_fn=_goal_fn,
+        run_turn=lambda p: "turn",
+        task_status_fn=lambda: next(statuses),
+        block_fn=lambda r: pytest.fail("should not block"),
+        max_turns=10,
+        first_response="started",
+    )
+    assert res["outcome"] == "completed_by_worker"
+    # Re-read raised both times → the static goal_text is used throughout.
+    assert seen_goals == ["initial goal", "initial goal"]
+
+
+def test_loop_without_goal_text_fn_uses_static_goal(monkeypatch):
+    """Backward compatibility: no goal_text_fn → the static goal_text is
+    judged every iteration, exactly as before."""
+    seen_goals = []
+    _patch_judge_capture(monkeypatch, seen_goals)
+
+    statuses = iter(["running", "running", "done"])
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t10",
+        goal_text="static goal",
+        run_turn=lambda p: "turn",
+        task_status_fn=lambda: next(statuses),
+        block_fn=lambda r: pytest.fail("should not block"),
+        max_turns=10,
+        first_response="started",
+    )
+    assert res["outcome"] == "completed_by_worker"
+    assert seen_goals == ["static goal", "static goal"]

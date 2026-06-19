@@ -35,7 +35,7 @@ import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -785,6 +785,7 @@ def run_kanban_goal_loop(
     block_fn,
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
+    goal_text_fn: Optional[Callable[[], Optional[str]]] = None,
     log=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
@@ -796,19 +797,28 @@ def run_kanban_goal_loop(
 
     1. Check whether the worker already terminated the task (called
        ``kanban_complete`` / ``kanban_block``). If so, stop — nothing to do.
-    2. Otherwise judge the latest response against ``goal_text`` (the card's
-       title + body). ``continue`` → feed a continuation prompt and run
+    2. Otherwise judge the latest response against the card's goal text
+       (title + body). ``continue`` → feed a continuation prompt and run
        another turn IN THE SAME SESSION via ``run_turn``. ``done`` but the
        task is still open → one explicit "call kanban_complete" nudge.
     3. When the turn budget is exhausted and the worker still hasn't
        terminated the task, ``block_fn`` is invoked so the card lands in a
        sticky ``blocked`` state for human review (NOT a silent exit).
 
+    ``goal_text`` is the session-start snapshot of the card's title + body and
+    is the criterion the judge uses. When ``goal_text_fn`` is supplied it is
+    called fresh BEFORE each judge iteration to re-derive that criterion from
+    the live DB, so an operator who edits the card's body/AC mid-run sees the
+    change reflected in the very next judge verdict instead of the loop judging
+    a stale snapshot. The re-read is graceful: if ``goal_text_fn`` returns
+    nothing (task vanished / empty card) or raises (transient DB error), the
+    last known ``goal_text`` is kept — a broken re-read never wedges the loop.
+
     This function performs NO SessionDB persistence — a worker process is
     ephemeral, so the turn budget lives in a local counter. It is fully
     decoupled from the CLI for testability: callers inject ``run_turn``
-    (str -> str), ``task_status_fn`` (() -> str|None), and ``block_fn``
-    (reason: str -> None).
+    (str -> str), ``task_status_fn`` (() -> str|None), ``block_fn``
+    (reason: str -> None), and optionally ``goal_text_fn`` (() -> str|None).
 
     Returns a decision dict: ``{"outcome", "turns_used", "reason"}`` where
     outcome is one of ``"completed_by_worker"``, ``"blocked_budget"``,
@@ -849,6 +859,21 @@ def run_kanban_goal_loop(
             # Reclaimed / archived / unexpected — let the dispatcher own it.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return {"outcome": "stopped", "turns_used": turns_used, "reason": f"status={status}"}
+
+        # Re-derive the goal text fresh from the live card each iteration so a
+        # mid-run body/AC edit (operator respec) is judged against the CURRENT
+        # criterion, not the session-start snapshot. Graceful fallback: if the
+        # re-read yields nothing (task vanished) or raises (transient DB
+        # error), keep the last known goal_text — never judge an empty goal.
+        if goal_text_fn is not None:
+            try:
+                fresh_goal = goal_text_fn()
+            except Exception as exc:
+                _log(f"kanban goal loop: goal_text re-read failed ({exc}); keeping previous goal")
+                fresh_goal = None
+            if fresh_goal and fresh_goal != goal_text:
+                _log(f"kanban goal loop: task {task_id} goal_text changed mid-run; judging against the updated card")
+                goal_text = fresh_goal
 
         # Still open — judge whether the latest response satisfies the card.
         verdict, reason, _parse_failed = judge_goal(goal_text, last_response)
