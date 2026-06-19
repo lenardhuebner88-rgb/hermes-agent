@@ -466,6 +466,89 @@ def test_ac_f6_identity_tracks_slice_across_a_moved_file(kanban_home, tmp_path: 
     assert [r["id"] for r in roots] == [second["root_task_id"]]
 
 
+def test_ac_f6_dep_change_detected_in_diff(kanban_home, tmp_path: Path):
+    """Gap fix: a re-ingest where only a subtask's deps changed must abort with
+    a diff that names the dependency change — NOT the generic 'no structural
+    field diff' fallback message."""
+    plans_root = tmp_path / "03-Agents"
+    path = plans_root / "Hermes" / "plans" / "2026-06-19-dep-change.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # v1: B1-S2 depends on B1-S1
+    path.write_text(
+        """---
+status: freigegeben-komplett
+owner: Hermes
+slice: B1-deptest
+topic: "Dep change test"
+freigabe: complete
+live_test_depth: contract
+acceptance_criteria:
+  - "Gates green"
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: B1-S1
+      title: "Step one"
+      lane: coder
+      deps: []
+    - id: B1-S2
+      title: "Step two"
+      lane: coder-claude
+      deps: [B1-S1]
+---
+# Dep change test
+""",
+        encoding="utf-8",
+    )
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    # v2: only B1-S2's deps removed (nothing else changed structurally)
+    path.write_text(
+        """---
+status: freigegeben-komplett
+owner: Hermes
+slice: B1-deptest
+topic: "Dep change test"
+freigabe: complete
+live_test_depth: contract
+acceptance_criteria:
+  - "Gates green"
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: B1-S1
+      title: "Step one"
+      lane: coder
+      deps: []
+    - id: B1-S2
+      title: "Step two"
+      lane: coder-claude
+      deps: []
+---
+# Dep change test
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    findings = "\n".join(exc.value.findings)
+    # must abort (no duplicate chain)
+    assert "--supersede" in findings
+    # diff must name the subtask and the dep change
+    assert "B1-S2" in findings
+    assert "B1-S1" in findings
+    # must NOT produce the misleading no-structural-diff fallback
+    assert "no structural field diff" not in findings
+
+    # board must still have only the original chain
+    with kb.connect_closing() as conn:
+        roots = _active_planspec_roots(conn)
+    assert [r["id"] for r in roots] == [first["root_task_id"]]
+
+
 def test_sprint_prompt_preserves_binding_subtasks(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)

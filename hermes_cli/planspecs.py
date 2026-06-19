@@ -1082,12 +1082,32 @@ def _find_superseding_conflicts(
     return conflicts
 
 
+def _parse_deps_from_body(body: str) -> frozenset[str]:
+    """Extract symbolic dependency ids from a persisted subtask body.
+
+    The plan compiler writes ``"Depends on: B1-S1, B1-S2"`` as a dedicated body
+    line; parse that line and return the ids as a frozenset so comparison is
+    order-insensitive (a pure reorder is not a change).  Returns an empty
+    frozenset when no such line is present (i.e. the subtask has no deps).
+    """
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Depends on:"):
+            raw = stripped[len("Depends on:"):].strip()
+            if not raw:
+                return frozenset()
+            return frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return frozenset()
+
+
 def _describe_chain_diff(conn, spec: BindingPlanSpec, root_id: str) -> list[str]:
     """Human-readable summary of how *spec* differs from the live chain *root_id*.
 
     Compares the durable provenance the chain persisted (root ``freigabe`` /
     ``live_test_depth`` columns and per-subtask ``planspec_subtask_id`` / title /
-    lane) against the new spec, so the abort message says *what* changed.
+    lane / deps) against the new spec, so the abort message says *what* changed.
+    Deps are compared order-insensitively (as sets) so a pure reorder is not
+    reported as a change.
     """
     lines: list[str] = []
     root_row = conn.execute(
@@ -1101,20 +1121,23 @@ def _describe_chain_diff(conn, spec: BindingPlanSpec, root_id: str) -> list[str]
     if old_depth != spec.live_test_depth:
         lines.append(f"live_test_depth: {old_depth or '∅'} → {spec.live_test_depth or '∅'}")
 
-    old_subtasks: dict[str, tuple[str, str]] = {}
+    # tuple: (title, lane/assignee, deps_frozenset)
+    old_subtasks: dict[str, tuple[str, str, frozenset[str]]] = {}
     for sid in kanban_db.parent_ids(conn, root_id):
         srow = conn.execute(
-            "SELECT title, assignee, planspec_subtask_id FROM tasks WHERE id = ?",
+            "SELECT title, assignee, planspec_subtask_id, body FROM tasks WHERE id = ?",
             (sid,),
         ).fetchone()
         if srow is None:
             continue
         key = str(srow["planspec_subtask_id"] or "").strip() or f"#{sid}"
-        old_subtasks[key] = (str(srow["title"] or ""), str(srow["assignee"] or ""))
-    new_subtasks: dict[str, tuple[str, str]] = {}
+        old_deps = _parse_deps_from_body(str(srow["body"] or ""))
+        old_subtasks[key] = (str(srow["title"] or ""), str(srow["assignee"] or ""), old_deps)
+    new_subtasks: dict[str, tuple[str, str, frozenset[str]]] = {}
     for child in spec.children:
         key = str(child.get("planspec_subtask_id") or "").strip() or str(child.get("title") or "")
-        new_subtasks[key] = (str(child.get("title") or ""), str(child.get("assignee") or ""))
+        new_deps = frozenset(child.get("planspec_deps") or [])
+        new_subtasks[key] = (str(child.get("title") or ""), str(child.get("assignee") or ""), new_deps)
 
     added = sorted(k for k in new_subtasks if k not in old_subtasks)
     removed = sorted(k for k in old_subtasks if k not in new_subtasks)
@@ -1123,13 +1146,17 @@ def _describe_chain_diff(conn, spec: BindingPlanSpec, root_id: str) -> list[str]
     if removed:
         lines.append(f"subtasks removed: {', '.join(removed)}")
     for key in sorted(k for k in new_subtasks if k in old_subtasks):
-        old_title, old_lane = old_subtasks[key]
-        new_title, new_lane = new_subtasks[key]
+        old_title, old_lane, old_deps = old_subtasks[key]
+        new_title, new_lane, new_deps = new_subtasks[key]
         parts: list[str] = []
         if old_title != new_title:
             parts.append(f"title {old_title!r} → {new_title!r}")
         if old_lane != new_lane:
             parts.append(f"lane {old_lane} → {new_lane}")
+        if old_deps != new_deps:
+            old_str = "[" + ", ".join(sorted(old_deps)) + "]"
+            new_str = "[" + ", ".join(sorted(new_deps)) + "]"
+            parts.append(f"deps {old_str} → {new_str}")
         if parts:
             lines.append(f"subtask {key}: " + "; ".join(parts))
     if not lines:
