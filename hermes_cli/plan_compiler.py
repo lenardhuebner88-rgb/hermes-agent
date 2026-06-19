@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 DEFAULT_TEMPLATES_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/templates")
 DEFAULT_COMPILED_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/compiled")
@@ -43,6 +50,11 @@ class BindingSubtask(BaseModel):
     deps: list[str] = Field(default_factory=list)
     body: str = ""
     acceptance_criteria: list[Any] = Field(default_factory=list)
+    # A1-classaware: opt-in marker for a read-only analysis subtask. Default ""
+    # ⇒ the child's kind is lane-derived (the long-standing strict behaviour).
+    # Only the explicit value ``analysis`` is honoured as an override; any other
+    # value falls back to lane-derivation, so this is strictly additive.
+    kind: str = ""
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -57,6 +69,19 @@ class BindingSubtask(BaseModel):
         if not isinstance(value, list):
             raise ValueError("must be a list")
         return [str(item).strip() for item in value if str(item).strip()]
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        """A1-classaware: keep serialized subtasks byte-identical to pre-classaware
+        PlanSpecs. The opt-in ``kind`` field is emitted ONLY when a value is set;
+        an unset/empty ``kind`` is dropped so unmarked subtasks never gain a new
+        ``kind: ''`` key in ``taskgraph.draft.yaml`` / ``contract.yaml`` (and stay
+        byte-identical to main). ``kind`` is declared last, so popping it preserves
+        the original field order of the remaining keys."""
+        data = handler(self)
+        if not str(data.get("kind") or "").strip():
+            data.pop("kind", None)
+        return data
 
 
 class TaskgraphHints(BaseModel):
@@ -284,6 +309,12 @@ def _role_hint(roles: list[str], index: int) -> str | None:
     return roles[0]
 
 
+# A1-classaware: the explicit read-only task class. Kept as a local literal
+# (not imported from kanban_db) to avoid a circular import — kanban_db imports
+# taskgraph_hints_to_children from here. Must match kanban_db._VERIFIER_ANALYSIS_CLASS.
+_VERIFIER_ANALYSIS_CLASS = "analysis"
+
+
 def _kind_for_planspec_lane(lane: str) -> str:
     normalized = (lane or "").strip().lower()
     if normalized in {"reviewer", "critic"}:
@@ -447,11 +478,20 @@ def taskgraph_hints_to_children(
         ac_bullets = _ac_bullets_for_subtask(task, effective_plan_ac)
         if ac_bullets:
             body_parts.append("\n".join(ac_bullets))
+        # A1-classaware: a subtask may opt into the read-only analysis class via
+        # ``kind: analysis``; that threads into tasks.kind so the verifier emits
+        # its read-only class header. Any other/absent value stays lane-derived
+        # (default-strict), so non-analysis plans render byte-identically.
+        child_kind = (
+            _VERIFIER_ANALYSIS_CLASS
+            if (task.kind or "").strip().lower() == _VERIFIER_ANALYSIS_CLASS
+            else _kind_for_planspec_lane(task.lane)
+        )
         child: dict[str, Any] = {
             "title": task.title,
             "body": "\n\n".join(body_parts),
             "assignee": task.lane,
-            "kind": _kind_for_planspec_lane(task.lane),
+            "kind": child_kind,
             "parents": deps,
             "planspec_lane": task.lane,
             "planspec_deps": list(task.deps),

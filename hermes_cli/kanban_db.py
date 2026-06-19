@@ -15009,6 +15009,22 @@ def run_daemon(
 _CTX_REVIEW_MAX_CHANGED_FILES = 50
 _CTX_REVIEW_MAX_DIFF_STAT = 2000
 
+# A1-classaware: a task EXPLICITLY marked ``kind='analysis'`` is read-only,
+# conclusion-from-pasted-evidence work (e.g. a latency probe that reports a
+# bound type + lever). Such a task gets a class header in the verifier's
+# acceptance-checklist block; the verifier SOUL matches on the literal
+# ``Task-Klasse: analysis`` prefix to switch to read-only verdict rules
+# (run-evidence + conclusion-follows-from-pasted-lines, with pure number-
+# precision drift demoted to an observation rather than REQUEST_CHANGES).
+# Default-strict: any other (or absent) kind emits NO header, so an ordinary
+# build task's context is byte-identical to the pre-classaware rendering.
+_VERIFIER_ANALYSIS_CLASS = "analysis"
+_VERIFIER_ANALYSIS_CLASS_HEADER = (
+    "**Task-Klasse: analysis (read-only)** — bewerte Lauf-Belege + ob die "
+    "Konklusion aus den vom Worker GEPASTETEN Roh-Zeilen folgt; "
+    "Zahlen-Präzisions-Abweichungen sind BEOBACHTUNGEN, KEINE Blocker."
+)
+
 
 def _latest_review_diff_snapshot(
     conn: sqlite3.Connection, task_id: str
@@ -15058,16 +15074,25 @@ def _render_review_verifier_section(
         return []
 
     lines: list = ["## Acceptance checklist (verifier — judge each item)"]
-    # (a) acceptance criteria (A1 column)
+    # (a) acceptance criteria (A1 column) + task class (A1-classaware).
+    # Widen the read to carry kind/live_test_depth alongside the criteria so an
+    # EXPLICIT analysis task gets the read-only class header. Absent/other kind
+    # ⇒ no header ⇒ byte-identical to the pre-classaware rendering (strict).
     acc_json = None
+    task_kind = None
     try:
         row = conn.execute(
-            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (task_id,)
+            "SELECT acceptance_criteria, kind, live_test_depth "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
         ).fetchone()
         if row:
             acc_json = row["acceptance_criteria"]
+            task_kind = row["kind"]
     except sqlite3.Error:
         acc_json = None
+    if str(task_kind or "").strip().lower() == _VERIFIER_ANALYSIS_CLASS:
+        lines.append(_VERIFIER_ANALYSIS_CLASS_HEADER)
     criteria: list = []
     if acc_json:
         try:
