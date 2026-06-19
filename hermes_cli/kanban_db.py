@@ -7594,6 +7594,124 @@ def release_uireal_root(conn: sqlite3.Connection, task_id: str, *, author: str =
         return True
 
 
+def release_freigabe_hold(
+    conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
+) -> bool:
+    """Release a ``freigabe: operator`` PlanSpec chain held in scheduled.
+
+    F1 — the additive sibling of :func:`release_uireal_root`. A chain ingested
+    with ``freigabe: operator`` lands with its root parked in ``scheduled`` and
+    its children held in ``scheduled`` (see ``decompose_triage_task``). This
+    records an explicit operator GO: it flips the root ``scheduled`` -> ``todo``
+    and promotes the held children ``scheduled`` -> ``ready``/``todo`` (via
+    :func:`unblock_task` + :func:`recompute_ready`) so the chain dispatches.
+
+    Returns ``True`` when ``task_id`` is a ``freigabe: operator`` root and was
+    released — idempotent: an already-released root (``todo``) re-stamps the
+    event and still returns ``True``, re-releasing any child that is still held.
+    Returns ``False`` (touching nothing) for a non-operator root, an unknown id,
+    or a root that is neither ``scheduled`` nor ``todo``.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+            return False
+        if row["status"] == "todo":
+            _append_event(
+                conn, task_id, "freigabe_released",
+                {"author": author, "idempotent": True},
+            )
+        elif row["status"] != "scheduled":
+            return False
+        else:
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
+                (task_id,),
+            )
+            if cur.rowcount != 1:
+                return False
+            _append_event(conn, task_id, "freigabe_released", {"author": author})
+    # Release the held children OUTSIDE the root write_txn — unblock_task and
+    # recompute_ready open their own write_txns (nested write_txn is a
+    # documented pitfall). Mirrors plugin_api._release_flow_gate's child loop:
+    # the chain's children are linked as the root's parents.
+    for child_id in parent_ids(conn, task_id):
+        child = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (child_id,)
+        ).fetchone()
+        if child is not None and child["status"] == "scheduled":
+            unblock_task(conn, child_id)
+    recompute_ready(conn)
+    return True
+
+
+def dismiss_freigabe_hold(
+    conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
+) -> bool:
+    """Veto a held ``freigabe: operator`` PlanSpec chain (G1 — the veto sibling
+    of :func:`release_freigabe_hold`).
+
+    Where ``release_freigabe_hold`` promotes the held chain, this archives it so
+    nothing builds: the held root (``scheduled``) AND every still-held child
+    (the subtasks linked as the root's parents, see ``decompose_triage_task``)
+    move to ``archived``. The operator vetoed the strategist's proposal.
+
+    Root-guard (Funnel-Selbstfraß-Lehre): only a ``freigabe: operator`` root is
+    actionable. Children of a decomposed chain never carry ``freigabe`` (only
+    the root row does), so this check alone hard-excludes the build-children —
+    they can never be vetoed as if they were proposals.
+
+    Returns ``True`` when ``task_id`` is a held (``scheduled``) operator root and
+    was archived. Returns ``False`` (touching nothing) for a non-operator root,
+    an unknown id, or a root that is no longer held (already released/building/
+    done) — an already-released chain must not be silently torn down.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+            return False
+        if row["status"] != "scheduled":
+            return False
+        # The chain's children are linked as the root's parents (mirror of the
+        # decompose link direction). Archive the ones still held; a child that
+        # somehow already advanced is left untouched by the status-guarded UPDATE.
+        child_rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (task_id,),
+        ).fetchall()
+        archived_children: list[str] = []
+        for child_row in child_rows:
+            child_id = child_row["parent_id"]
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status = 'scheduled'",
+                (child_id,),
+            )
+            if cur.rowcount == 1:
+                archived_children.append(child_id)
+                _append_event(conn, child_id, "archived", {"by": author, "via": "freigabe_vetoed"})
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'scheduled'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "freigabe_vetoed",
+            {"author": author, "archived_children": archived_children},
+        )
+    return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
@@ -7922,7 +8040,8 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id, live_test_depth "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id, "
+            "live_test_depth, freigabe "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -8037,11 +8156,23 @@ def decompose_triage_task(
                 (cid, task_id),
             )
 
-        # Flip the root: normally triage/scheduled -> todo.  Phase4 A keeps
-        # ui-real PlanSpec roots held in scheduled until explicit operator release.
+        # Flip the root: normally triage/scheduled -> todo.  Two ADDITIVE
+        # operator holds keep the root parked in scheduled (children, created in
+        # initial_child_status='scheduled', stay held too):
+        #   * Phase4 A: ui-real PlanSpec roots wait for release_uireal_root().
+        #   * F1: freigabe:operator PlanSpec roots wait for release_freigabe_hold().
+        # Every other case — any other freigabe value (complete/auto/empty/…),
+        # any non-ui-real depth, or todo children — is unchanged: root -> todo
+        # and the chain builds exactly like today.
+        _operator_freigabe = (
+            str(root_row["freigabe"] or "").strip().lower() == "operator"
+        )
+        _held_for_operator = (
+            root_row["live_test_depth"] == "ui-real" or _operator_freigabe
+        )
         root_new_status = (
             "scheduled"
-            if root_row["live_test_depth"] == "ui-real" and initial_child_status == "scheduled"
+            if _held_for_operator and initial_child_status == "scheduled"
             else "todo"
         )
         sets = ["status = ?"]

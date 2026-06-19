@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field
 from hermes_cli import funnel as kanban_funnel
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import strategist_surface
 
 log = logging.getLogger(__name__)
 
@@ -3664,6 +3665,98 @@ def dismiss_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return {"ok": True, "task_id": task_id}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Strategist surface (G1) — the dedicated Vision-Flywheel proposal tray.
+#
+# Distinct from the Demand-Funnel queue above: those are user *wishes* awaiting
+# a build; these are the *strategist-cron's* self-gated, ROI-annotated PlanSpecs
+# ingested with ``freigabe: operator`` so they land held (root parked in
+# ``scheduled``, F1) for fast operator triage — approve releases the chain,
+# veto archives it. Only roots carry ``freigabe`` so the list is root-guarded.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/strategist/proposals")
+def get_strategist_proposals(request: Request, board: Optional[str] = Query(None)):
+    """List held ``freigabe: operator`` proposals + the current metric snapshot.
+
+    Each proposal carries its Ziel-Kennzahl / ROI / Counter-Metrik (parsed from
+    the strategist-stamped root body, ``None`` when absent) and the number of
+    held subtasks it would dispatch on approval. ``metrics`` is the distilled
+    Vision snapshot (H1, ``vision-metrics.json``) as triage context, or ``None``
+    when no snapshot has been written yet. A weak ETag lets the SPA's poll
+    revalidate to a 304 while nothing changed — consistent with the board tab.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        proposals = strategist_surface.held_operator_proposals(conn)
+    finally:
+        conn.close()
+    metrics = strategist_surface.read_vision_metrics()
+    payload: dict[str, Any] = {
+        "proposals": proposals,
+        "count": len(proposals),
+        "metrics": metrics,
+    }
+    etag = 'W/"' + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()[:32] + '"'
+    payload["checked_at"] = int(time.time())
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=http_status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+        )
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+    )
+
+
+@router.post("/strategist/proposals/{task_id}/approve")
+def approve_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
+    """Approve a held proposal → release the chain (held → ready/todo).
+
+    Wraps :func:`kanban_db.release_freigabe_hold` (F1). Returns 409 when
+    ``task_id`` is not a held ``freigabe: operator`` root (root-guard: a build
+    child or an already-built/unknown task), so the veto/approve buttons only
+    ever act on real proposals."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        released = kanban_db.release_freigabe_hold(conn, task_id, author="operator")
+        if not released:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{task_id} ist kein freigebbarer freigabe:operator-Root",
+            )
+        return {"ok": True, "task_id": task_id, "released": True}
+    finally:
+        conn.close()
+
+
+@router.post("/strategist/proposals/{task_id}/veto")
+def veto_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
+    """Veto a held proposal → archive the chain (nothing builds).
+
+    Wraps :func:`kanban_db.dismiss_freigabe_hold` (G1). Same root-guard as
+    approve: 409 unless ``task_id`` is a held ``freigabe: operator`` root."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        vetoed = kanban_db.dismiss_freigabe_hold(conn, task_id, author="operator")
+        if not vetoed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{task_id} ist kein verwerfbarer freigabe:operator-Root",
+            )
+        return {"ok": True, "task_id": task_id, "vetoed": True}
     finally:
         conn.close()
 

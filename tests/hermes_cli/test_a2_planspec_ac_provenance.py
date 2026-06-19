@@ -693,3 +693,168 @@ def test_cli_release_uireal_noop_on_non_uireal_root(kanban_home, tmp_path: Path)
         assert after == before
     finally:
         monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# F1: additive freigabe:operator dispatch-hold (mirrors the ui-real hold above)
+# ---------------------------------------------------------------------------
+
+
+def _ingest_freigabe_root(plans_root: Path, *, operator: bool, name: str) -> tuple[str, list[str]]:
+    """Ingest a PlanSpec with freigabe:operator (or the default complete) and
+    return (root_id, child_ids). live_test_depth stays 'contract' (NOT ui-real)
+    so the only thing that could arm a hold is the freigabe value itself."""
+    path = _write_planspec_with_ac(plans_root, name=name)
+    if operator:
+        text = path.read_text(encoding="utf-8").replace(
+            "freigabe: complete", "freigabe: operator"
+        )
+        path.write_text(text, encoding="utf-8")
+    result = planspecs.ingest_planspec(str(path), author="pytest", plans_root=plans_root)
+    return result["root_task_id"], result["child_ids"]
+
+
+def test_freigabe_operator_root_held_scheduled_and_children_not_dispatched(
+    kanban_home, tmp_path: Path
+):
+    """F1: a freigabe:operator chain is a REAL dispatch-hold — root parked in
+    'scheduled' and children held in 'scheduled' (NOT dispatched) — until an
+    explicit operator release. live_test_depth is 'contract' (not ui-real), so
+    only freigabe:operator arms the hold. recompute_ready must NOT spring it."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id, child_ids = _ingest_freigabe_root(
+                plans_root, operator=True, name="2026-06-19-freigabe-operator.md"
+            )
+
+            def _status(tid: str) -> str:
+                return conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (tid,)
+                ).fetchone()["status"]
+
+            # Root held; children held; the dispatcher's promotion pass is inert.
+            assert _status(root_id) == "scheduled"
+            for cid in child_ids:
+                assert _status(cid) == "scheduled"
+            assert kb.recompute_ready(conn) == 0
+            assert _status(root_id) == "scheduled"
+            for cid in child_ids:
+                assert _status(cid) == "scheduled"
+
+            # Operator GO: release flips root scheduled->todo and promotes the
+            # held children (scheduled -> ready/todo) so the chain dispatches.
+            assert kb.release_freigabe_hold(conn, root_id, author="pytest") is True
+            assert _status(root_id) == "todo"
+            child_states = {cid: _status(cid) for cid in child_ids}
+            events = [
+                r["kind"]
+                for r in conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ?", (root_id,)
+                ).fetchall()
+            ]
+    finally:
+        monkeypatch.undo()
+    # No child is left held; the dep-free subtask is now ready to dispatch.
+    assert all(s != "scheduled" for s in child_states.values())
+    assert "ready" in child_states.values()
+    assert "freigabe_released" in events
+
+
+def test_freigabe_complete_root_builds_unchanged(kanban_home, tmp_path: Path):
+    """F1 backwards-compat: freigabe:complete (the fixture default) is NOT an
+    operator hold — the root flips to 'todo' on ingest exactly as before the
+    feature, and release_freigabe_hold refuses to act on a non-operator root."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id, _ = _ingest_freigabe_root(
+                plans_root, operator=False, name="2026-06-19-freigabe-complete.md"
+            )
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "todo"
+            # A complete root is not a freigabe-release target -> no-op, no change.
+            assert kb.release_freigabe_hold(conn, root_id, author="pytest") is False
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "todo"
+    finally:
+        monkeypatch.undo()
+
+
+def _freigabe_cli_args(task_id: str, **extra) -> "object":
+    """Build a parsed ``hermes kanban release-freigabe <id>`` namespace."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    argv = ["kanban", "release-freigabe", task_id]
+    for key, value in extra.items():
+        argv += [f"--{key.replace('_', '-')}", str(value)]
+    return parser.parse_args(argv)
+
+
+def test_cli_release_freigabe_flips_held_root_and_is_idempotent(
+    kanban_home, tmp_path: Path
+):
+    """F1: the operator CLI releases a held freigabe:operator root (scheduled->todo),
+    stamps a freigabe_released event, and a second call stays green (idempotent)."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id, _ = _ingest_freigabe_root(
+                plans_root, operator=True, name="2026-06-19-freigabe-cli.md"
+            )
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "scheduled"
+
+        assert kc.kanban_command(_freigabe_cli_args(root_id, author="operator-test")) == 0
+
+        with kb.connect() as conn:
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"] == "todo"
+            kinds = [
+                r["kind"]
+                for r in conn.execute(
+                    "SELECT kind FROM task_events WHERE task_id = ?", (root_id,)
+                ).fetchall()
+            ]
+        assert "freigabe_released" in kinds
+        # Idempotent: re-releasing an already-released root still exits 0.
+        assert kc.kanban_command(_freigabe_cli_args(root_id)) == 0
+    finally:
+        monkeypatch.undo()
+
+
+def test_cli_release_freigabe_noop_on_non_operator_root(kanban_home, tmp_path: Path):
+    """A complete/non-operator root is not a freigabe release target -> exit 1,
+    no change."""
+    plans_root = tmp_path / "vault" / "03-Agents"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", plans_root)
+    try:
+        with kb.connect() as conn:
+            root_id, _ = _ingest_freigabe_root(
+                plans_root, operator=False, name="2026-06-19-freigabe-noop-cli.md"
+            )
+            before = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"]
+        assert kc.kanban_command(_freigabe_cli_args(root_id)) == 1
+        with kb.connect() as conn:
+            after = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()["status"]
+        assert after == before
+    finally:
+        monkeypatch.undo()
