@@ -335,23 +335,135 @@ def test_ingest_planspec_is_idempotent_on_reingest(kanban_home, tmp_path: Path):
     assert root is not None and root.idempotency_key == first["idempotency_key"]
 
 
-def test_ingest_planspec_reingest_after_edit_creates_new_chain(kanban_home, tmp_path: Path):
+def _active_planspec_roots(conn) -> list:
+    # PlanSpec roots are the only tasks carrying a ``planspec-ingest:`` key;
+    # their subtasks share ``tenant='planspec'`` but have no idempotency_key.
+    return conn.execute(
+        "SELECT id, status, idempotency_key FROM tasks "
+        "WHERE tenant = 'planspec' AND status != 'archived' "
+        "AND idempotency_key LIKE 'planspec-ingest:%' "
+        "ORDER BY created_at"
+    ).fetchall()
+
+
+# --- AC-F6: changed spec must not silently duplicate its chain --------------
+
+
+def test_ac_f6_unchanged_reingest_stays_noop(kanban_home, tmp_path: Path):
+    """Case 1/4: a byte-identical re-ingest links back, mints nothing."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    second = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert second["already_ingested"] is True
+    assert second["root_task_id"] == first["root_task_id"]
+    with kb.connect_closing() as conn:
+        roots = _active_planspec_roots(conn)
+    assert [r["id"] for r in roots] == [first["root_task_id"]]
+
+
+def test_ac_f6_changed_spec_without_supersede_aborts_with_diff(kanban_home, tmp_path: Path):
+    """Case 2/4: an edited spec aborts (no duplicate) and the block names the diff."""
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
 
     first = planspecs.ingest_planspec(path, plans_root=plans_root)
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace("Document schema", "Document schema v2"), encoding="utf-8")
-    second = planspecs.ingest_planspec(path, plans_root=plans_root)
 
-    # Edited content -> new content-hash -> new key -> a fresh chain.
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    findings = "\n".join(exc.value.findings)
+    assert "--supersede" in findings
+    # the diff must name what changed (the B1-S1 subtask title)
+    assert "B1-S1" in findings
+    with kb.connect_closing() as conn:
+        roots = _active_planspec_roots(conn)
+    # the abort created nothing: only the original chain remains
+    assert [r["id"] for r in roots] == [first["root_task_id"]]
+    assert roots[0]["idempotency_key"] == first["idempotency_key"]
+
+
+def test_ac_f6_supersede_archives_old_chain_and_creates_new(kanban_home, tmp_path: Path):
+    """Case 3/4: --supersede archives the prior chain, then ingests the new one."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("Document schema", "Document schema v2"), encoding="utf-8")
+
+    second = planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)
+
     assert second["already_ingested"] is False
     assert second["root_task_id"] != first["root_task_id"]
     assert second["idempotency_key"] != first["idempotency_key"]
+    assert second.get("superseded") == [first["root_task_id"]]
     with kb.connect_closing() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
-    # Two independent chains: 2 * (root + 2 subtasks).
-    assert total == 6
+        old_root = kb.get_task(conn, first["root_task_id"])
+        old_children = [kb.get_task(conn, cid) for cid in first["child_ids"]]
+        roots = _active_planspec_roots(conn)
+    # old chain fully archived, new chain is the only live one
+    assert old_root is not None and old_root.status == "archived"
+    assert all(c is not None and c.status == "archived" for c in old_children)
+    assert [r["id"] for r in roots] == [second["root_task_id"]]
+    # re-ingesting the new content is now a plain no-op
+    third = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert third["already_ingested"] is True
+    assert third["root_task_id"] == second["root_task_id"]
+
+
+def test_ac_f6_supersede_refused_when_old_chain_has_running_children(kanban_home, tmp_path: Path):
+    """Case 4/4: --supersede refuses while a prior subtask is still running."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running' WHERE id = ?",
+                (first["child_ids"][0],),
+            )
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("Document schema", "Document schema v2"), encoding="utf-8")
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)
+
+    findings = "\n".join(exc.value.findings).lower()
+    assert "running" in findings and "operator" in findings
+    with kb.connect_closing() as conn:
+        old_root = kb.get_task(conn, first["root_task_id"])
+        roots = _active_planspec_roots(conn)
+    # refusal left the prior chain untouched and minted nothing
+    assert old_root is not None and old_root.status != "archived"
+    assert [r["id"] for r in roots] == [first["root_task_id"]]
+
+
+def test_ac_f6_identity_tracks_slice_across_a_moved_file(kanban_home, tmp_path: Path):
+    """Robustness: same frontmatter ``slice`` at a new path is the same identity."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root, "2026-06-19-orig.md")
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    # Move the spec (new path) but keep slice B1 and change a subtask.
+    moved = _write_planspec(plans_root, "2026-06-19-moved.md")
+    text = moved.read_text(encoding="utf-8")
+    moved.write_text(text.replace("Ingest deterministically", "Ingest deterministically v2"), encoding="utf-8")
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(moved, plans_root=plans_root)
+    assert "--supersede" in "\n".join(exc.value.findings)
+
+    second = planspecs.ingest_planspec(moved, plans_root=plans_root, supersede=True)
+    assert second.get("superseded") == [first["root_task_id"]]
+    with kb.connect_closing() as conn:
+        roots = _active_planspec_roots(conn)
+    assert [r["id"] for r in roots] == [second["root_task_id"]]
 
 
 def test_sprint_prompt_preserves_binding_subtasks(tmp_path: Path):

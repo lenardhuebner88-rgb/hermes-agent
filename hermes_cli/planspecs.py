@@ -1021,6 +1021,133 @@ def run_spec_quality_judge(spec: BindingPlanSpec) -> None:
     logger.info("spec quality judge (%s): pass", judge_model)
 
 
+def _planspec_identity(spec: BindingPlanSpec) -> tuple[str, str]:
+    """Return the (slice, source-path) identity pair for *spec*.
+
+    ``slice`` is the primary identity (a moved file keeps it); the resolved
+    source path is the fallback (an in-place edit keeps it). Either matching a
+    prior chain marks the same logical PlanSpec — see :func:`_find_superseding_conflicts`.
+    """
+    slice_id = str(spec.frontmatter.get("slice") or "").strip()
+    return slice_id, str(spec.path)
+
+
+def _find_superseding_conflicts(
+    conn, spec: BindingPlanSpec, current_key: str
+) -> list[str]:
+    """Find non-archived PlanSpec chains that share *spec*'s identity but were
+    ingested from *different* content (a changed ``.md`` → would duplicate).
+
+    Identity is matched on the frontmatter ``slice`` (primary) OR the resolved
+    source path (fallback), recovered from the durable ``specified`` ingest
+    event. Returns the conflicting root ids, most-recent first. The byte-identical
+    re-ingest is handled earlier by the exact idempotency-key no-op, so any hit
+    here necessarily carries a different content hash.
+    """
+    slice_id, spec_path = _planspec_identity(spec)
+    rows = conn.execute(
+        "SELECT task_id, payload FROM task_events "
+        "WHERE kind = 'specified' AND payload LIKE ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 500",
+        ("%planspec_ingest%",),
+    ).fetchall()
+    conflicts: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        root_id = str(row["task_id"])
+        if root_id in seen:
+            continue
+        seen.add(root_id)
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("source") != "planspec_ingest":
+            continue
+        event_path = str(payload.get("path") or "")
+        event_slice = str(payload.get("slice") or "").strip()
+        same_identity = (
+            (bool(event_path) and event_path == spec_path)
+            or (bool(slice_id) and bool(event_slice) and slice_id == event_slice)
+        )
+        if not same_identity:
+            continue
+        root = kanban_db.get_task(conn, root_id)
+        if root is None or root.status == "archived":
+            continue
+        # The exact-content chain is the idempotent no-op, never its own conflict.
+        if root.idempotency_key == current_key:
+            continue
+        conflicts.append(root_id)
+    return conflicts
+
+
+def _describe_chain_diff(conn, spec: BindingPlanSpec, root_id: str) -> list[str]:
+    """Human-readable summary of how *spec* differs from the live chain *root_id*.
+
+    Compares the durable provenance the chain persisted (root ``freigabe`` /
+    ``live_test_depth`` columns and per-subtask ``planspec_subtask_id`` / title /
+    lane) against the new spec, so the abort message says *what* changed.
+    """
+    lines: list[str] = []
+    root_row = conn.execute(
+        "SELECT freigabe, live_test_depth FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    old_freigabe = str((root_row["freigabe"] if root_row else "") or "").strip()
+    old_depth = str((root_row["live_test_depth"] if root_row else "") or "").strip()
+    if old_freigabe != spec.freigabe:
+        lines.append(f"freigabe: {old_freigabe or '∅'} → {spec.freigabe or '∅'}")
+    if old_depth != spec.live_test_depth:
+        lines.append(f"live_test_depth: {old_depth or '∅'} → {spec.live_test_depth or '∅'}")
+
+    old_subtasks: dict[str, tuple[str, str]] = {}
+    for sid in kanban_db.parent_ids(conn, root_id):
+        srow = conn.execute(
+            "SELECT title, assignee, planspec_subtask_id FROM tasks WHERE id = ?",
+            (sid,),
+        ).fetchone()
+        if srow is None:
+            continue
+        key = str(srow["planspec_subtask_id"] or "").strip() or f"#{sid}"
+        old_subtasks[key] = (str(srow["title"] or ""), str(srow["assignee"] or ""))
+    new_subtasks: dict[str, tuple[str, str]] = {}
+    for child in spec.children:
+        key = str(child.get("planspec_subtask_id") or "").strip() or str(child.get("title") or "")
+        new_subtasks[key] = (str(child.get("title") or ""), str(child.get("assignee") or ""))
+
+    added = sorted(k for k in new_subtasks if k not in old_subtasks)
+    removed = sorted(k for k in old_subtasks if k not in new_subtasks)
+    if added:
+        lines.append(f"subtasks added: {', '.join(added)}")
+    if removed:
+        lines.append(f"subtasks removed: {', '.join(removed)}")
+    for key in sorted(k for k in new_subtasks if k in old_subtasks):
+        old_title, old_lane = old_subtasks[key]
+        new_title, new_lane = new_subtasks[key]
+        parts: list[str] = []
+        if old_title != new_title:
+            parts.append(f"title {old_title!r} → {new_title!r}")
+        if old_lane != new_lane:
+            parts.append(f"lane {old_lane} → {new_lane}")
+        if parts:
+            lines.append(f"subtask {key}: " + "; ".join(parts))
+    if not lines:
+        lines.append("content hash changed (body/whitespace) with no structural field diff")
+    return lines
+
+
+def _archive_planspec_chain(conn, root_id: str) -> None:
+    """Archive a whole PlanSpec chain (every subtask, then the root sink).
+
+    Reuses :func:`kanban_db.archive_task` so the existing archive bookkeeping
+    (run reclaim, ``archived`` event, ``recompute_ready``) runs per task.
+    """
+    for sid in kanban_db.parent_ids(conn, root_id):
+        kanban_db.archive_task(conn, sid)
+    kanban_db.archive_task(conn, root_id)
+
+
 def ingest_planspec(
     path: str | Path,
     *,
@@ -1028,6 +1155,7 @@ def ingest_planspec(
     author: str = "planspec-ingest",
     plans_root: Path = DEFAULT_PLANS_ROOT,
     force: bool = False,
+    supersede: bool = False,
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
     # Deterministic rubric gate — layered ON TOP of parse_binding_planspec's
@@ -1082,6 +1210,45 @@ def ingest_planspec(
                 "idempotency_key": idempotency_key,
             }
 
+        # F6: the exact-content chain didn't match, but a chain with the SAME
+        # identity (frontmatter ``slice`` or source path) and a DIFFERENT content
+        # hash means the PlanSpec was edited. Refuse to silently mint a duplicate
+        # chain; require an explicit ``--supersede`` to archive the stale one.
+        conflicts = _find_superseding_conflicts(conn, spec, idempotency_key)
+        superseded: list[str] = []
+        if conflicts:
+            if not supersede:
+                detail = _describe_chain_diff(conn, spec, conflicts[0])
+                findings = [
+                    "PlanSpec changed since it was last ingested — a live (non-archived) "
+                    f"chain already exists for this identity (root {conflicts[0]}"
+                    + (f", +{len(conflicts) - 1} more" if len(conflicts) > 1 else "")
+                    + "). Re-run with --supersede to archive the stale chain and ingest "
+                    "the new version. Changed:",
+                    *detail,
+                ]
+                raise PlanSpecBlocked(findings)
+            # --supersede requested: refuse while any stale chain has a worker
+            # mid-flight (status='running') — that is an operator call, not ours.
+            running_blockers: list[str] = []
+            for stale_root in conflicts:
+                running = kanban_db.planspec_chain_running_subtasks(conn, stale_root)
+                if running:
+                    running_blockers.append(
+                        f"root {stale_root}: running subtask(s) {', '.join(running)}"
+                    )
+            if running_blockers:
+                raise PlanSpecBlocked(
+                    [
+                        "--supersede refused: the prior chain has running children — "
+                        "an operator must let them finish or stop them before superseding.",
+                        *running_blockers,
+                    ]
+                )
+            for stale_root in conflicts:
+                _archive_planspec_chain(conn, stale_root)
+                superseded.append(stale_root)
+
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
         # A2/#8: stamp freigabe + live_test_depth from the PlanSpec frontmatter
         # as part of the INSERT so the provenance is atomic with row creation —
@@ -1107,7 +1274,19 @@ def ingest_planspec(
             )
             if cur.rowcount != 1:
                 raise PlanSpecBlocked([f"root task {root_id} left triage before scheduling"])
-        kanban_db.add_event(conn, root_id, "specified", {"source": "planspec_ingest", "path": str(spec.path)})
+        kanban_db.add_event(
+            conn,
+            root_id,
+            "specified",
+            {
+                "source": "planspec_ingest",
+                "path": str(spec.path),
+                # F6: persist the frontmatter slice so a moved-but-same-slice
+                # re-ingest is recognised as the same identity. Additive — the
+                # existing readers only consult ``source``/``path``.
+                "slice": str(spec.frontmatter.get("slice") or "").strip(),
+            },
+        )
         if not kanban_db.schedule_task(conn, root_id, reason="Planspec ingest: held before release"):
             raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])
         try:
@@ -1136,6 +1315,7 @@ def ingest_planspec(
             "live_test_depth": spec.live_test_depth,
             "subtask_count": len(child_ids),
             "idempotency_key": idempotency_key,
+            "superseded": superseded,
         }
     finally:
         conn.close()

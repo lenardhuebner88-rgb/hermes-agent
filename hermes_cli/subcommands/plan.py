@@ -28,6 +28,15 @@ def build_plan_parser(subparsers) -> None:
         action="store_true",
         help="Bypass the deterministic spec rubric (logs a WARNING with the skipped reasons)",
     )
+    ingest.add_argument(
+        "--supersede",
+        action="store_true",
+        help=(
+            "When the PlanSpec changed since its last ingest, archive the stale "
+            "chain and ingest the new version (refused if the stale chain still "
+            "has running children)"
+        ),
+    )
 
     prompt = sub.add_parser("sprint-prompt", help="Generate a copy-paste sprint prompt from a PlanSpec")
     prompt.add_argument("path", help="Path to a Vault PlanSpec markdown file")
@@ -62,6 +71,7 @@ def plan_command(args: argparse.Namespace) -> int:
                 board=args.board,
                 author=args.author,
                 force=getattr(args, "force", False),
+                supersede=getattr(args, "supersede", False),
             )
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
@@ -72,9 +82,15 @@ def plan_command(args: argparse.Namespace) -> int:
                     f"(no new chain created)"
                 )
             else:
+                superseded = result.get("superseded") or []
+                supersede_note = (
+                    f" (superseded {len(superseded)} stale chain: {', '.join(superseded)})"
+                    if superseded
+                    else ""
+                )
                 print(
                     f"Ingested {result['path']} → root {result['root_task_id']} "
-                    f"with {len(result['child_ids'])} scheduled children"
+                    f"with {len(result['child_ids'])} scheduled children{supersede_note}"
                 )
             return 0
         if action == "sprint-prompt":
