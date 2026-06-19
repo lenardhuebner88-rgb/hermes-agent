@@ -393,6 +393,45 @@ def test_taskgraph_hints_to_children_preserves_titles_lanes_and_deps():
     ]
 
 
+def test_subtask_kind_analysis_threads_into_child_kind():
+    """A1-classaware: a PlanSpec subtask may opt into the read-only analysis
+    class via ``kind: analysis``; it threads into the child's ``kind`` so plan
+    ingest persists it in ``tasks.kind`` (the verifier class marker)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {
+                    "id": "S1",
+                    "title": "Probe latency",
+                    "lane": "coder-claude",
+                    "kind": "analysis",
+                    "deps": [],
+                },
+            ],
+        }
+    )
+    assert children[0]["kind"] == "analysis"
+
+
+def test_subtask_kind_absent_is_lane_derived_default_strict():
+    """Default-strict: a subtask WITHOUT an explicit analysis kind falls back to
+    lane-derivation (byte-identical to pre-classaware behaviour)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+                {"id": "S2", "title": "Review", "lane": "reviewer", "deps": []},
+                # a non-analysis explicit kind is NOT honoured as an override —
+                # opt-in is analysis-only, so this stays lane-derived too.
+                {"id": "S3", "title": "Probe", "lane": "coder", "kind": "code", "deps": []},
+            ],
+        }
+    )
+    assert [c["kind"] for c in children] == ["code", "review", "code"]
+
+
 def test_children_carry_only_planspec_subtask_id_not_redundant_planspec_id():
     """#10: each child dict carries the subtask id under ``planspec_subtask_id``
     (the A1 migration column name) only — not also under the legacy

@@ -8233,6 +8233,73 @@ def test_a2_non_review_context_has_no_review_section(kanban_home):
     assert "Changed files at submit" not in ctx
 
 
+# ---------------------------------------------------------------------------
+# A1-classaware: task-class-aware verifier context header
+# (EXPLICIT kind='analysis' = read-only; everything else stays default-strict)
+# ---------------------------------------------------------------------------
+
+def _claimed_review_section(conn, *, kind=None, acceptance=None):
+    """Create a task (optionally kind-marked), drive it into the review lane,
+    claim it as the verifier, and return its rendered review-section as text."""
+    t = kb.create_task(conn, title="probe", assignee="coder-claude", kind=kind)
+    if acceptance is not None:
+        conn.execute(
+            "UPDATE tasks SET acceptance_criteria = ? WHERE id = ?",
+            (json.dumps(acceptance), t),
+        )
+    _set_task_status(conn, t, "review")
+    assert kb.claim_review_task(conn, t) is not None
+    return t, "\n".join(kb._render_review_verifier_section(conn, t))
+
+
+def test_verifier_section_analysis_kind_emits_class_header(kanban_home):
+    """kind='analysis' surfaces the read-only task-class header in the verifier
+    Acceptance checklist block; AC items still render. End-to-end through
+    build_worker_context so the header actually reaches the verifier."""
+    with kb.connect() as conn:
+        t, section = _claimed_review_section(
+            conn, kind="analysis",
+            acceptance=["AC-1: report the bound type + lever"],
+        )
+        ctx = kb.build_worker_context(conn, t)
+    assert "Task-Klasse: analysis" in section
+    assert "BEOBACHTUNGEN, KEINE Blocker" in section
+    # header lives inside the acceptance-checklist block, AC items still render
+    assert "Acceptance checklist" in section
+    assert "AC-1: report the bound type + lever" in section
+    # and it survives into the full worker context the verifier actually sees
+    assert "Task-Klasse: analysis" in ctx
+
+
+def test_verifier_section_code_kind_has_no_class_header(kanban_home):
+    """kind='code' (a build task) must NOT emit the analysis header —
+    default-strict is preserved for everything that is not explicit analysis."""
+    with kb.connect() as conn:
+        _t, section = _claimed_review_section(
+            conn, kind="code",
+            acceptance=["AC-1: endpoint returns 200"],
+        )
+    assert "Task-Klasse: analysis" not in section
+    assert "Acceptance checklist" in section
+    assert "AC-1: endpoint returns 200" in section
+
+
+def test_verifier_section_unmarked_identical_to_code_default_strict(kanban_home):
+    """Default-strict invariant: an UNMARKED task renders byte-identically to a
+    kind='code' task. The marker only ever ADDS the analysis header; it never
+    changes the strict default rendering."""
+    acceptance = ["AC-1: endpoint returns 200", "AC-2: row persisted"]
+    with kb.connect() as conn:
+        _tu, section_unmarked = _claimed_review_section(
+            conn, kind=None, acceptance=acceptance,
+        )
+        _tc, section_code = _claimed_review_section(
+            conn, kind="code", acceptance=acceptance,
+        )
+    assert "Task-Klasse: analysis" not in section_unmarked
+    assert section_unmarked == section_code
+
+
 def test_a2_acceptance_roles_default_empty_is_noop(kanban_home):
     cfg = kb._review_gate_config()
     assert cfg["acceptance_roles"] == frozenset()
