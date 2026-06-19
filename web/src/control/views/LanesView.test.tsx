@@ -214,6 +214,22 @@ describe("LanesEditor (routing cards)", () => {
     expect(html).toContain("Profil-Default");
   });
 
+  it("markiert OpenRouter-Rollen sichtbar als metered (Provider sonst unsichtbar)", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    // coder läuft in lane_1 über openrouter → metered-Markierung sichtbar
+    expect(html).toContain("OpenRouter (metered)");
+  });
+
+  it("zeigt keine metered-Markierung, wenn keine Rolle über OpenRouter läuft", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[1]} busy={false} actions={noopActions} />,
+    );
+    // lane_2 (max-abo): coder fällt auf openai-codex-Default, premium auf claude-cli
+    expect(html).not.toContain("OpenRouter (metered)");
+  });
+
   it("zeigt Fallback-Kette, Claude-CLI-Lock und Preview-only Config", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,

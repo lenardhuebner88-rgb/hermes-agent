@@ -107,6 +107,8 @@ const t = {
   permanentModel: (model: string) => `Dauerhaft: ${model}`,
   savePermanently: "Dauerhaft speichern",
   divergenceHint: (model: string) => `läuft aktuell auf ${model}`,
+  meteredBadge: "OpenRouter (metered)",
+  meteredHint: "Diese Rolle läuft über OpenRouter — kostet echte Credits (kein Abo-Kontingent).",
 };
 
 // Kurze, nicht-technische Rollen-Hinweise. Fallback: kein Hinweis.
@@ -134,6 +136,25 @@ function groupedModelOptions(models: LaneModelOption[]) {
     groups.get(key)!.push(model);
   }
   return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+}
+
+/** Effektiver Provider einer Zeile: Lane-Override gewinnt über Profil-Default. */
+function rowUsesOpenRouter(row: EditorRow): boolean {
+  return (row.provider ?? row.defaultProvider) === "openrouter";
+}
+
+/** Sichtbare Markierung, dass eine Rolle über OpenRouter (metered) läuft. In der
+ *  Standardansicht ist der Provider sonst nicht erkennbar — diese Lane kostet echte
+ *  Credits statt Abo-Kontingent, das soll auf einen Blick auffallen. */
+function MeteredBadge() {
+  return (
+    <span
+      title={t.meteredHint}
+      className="inline-flex max-w-full items-center truncate rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-amber-200"
+    >
+      {t.meteredBadge}
+    </span>
+  );
 }
 
 function SimpleModelSelect({
@@ -656,6 +677,7 @@ export function LanesEditor({
                             {t.profileDefault}
                           </span>
                         )}
+                        {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
                       </div>
                       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
                         {ROLE_HINTS[row.profile] ? <span>{ROLE_HINTS[row.profile]}</span> : null}
@@ -827,6 +849,7 @@ export function LanesEditor({
                             {t.profileDefault}
                           </span>
                         )}
+                        {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
                         {!rowChecks[row.profile] ? <StatusPill tone="zinc" label={t.smokePending} size="sm" /> : null}
                       </div>
                       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
