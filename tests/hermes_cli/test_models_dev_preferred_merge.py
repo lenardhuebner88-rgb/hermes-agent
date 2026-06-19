@@ -98,25 +98,46 @@ class TestProviderModelIdsPreferred:
         assert "claude-opus-4-7" in out
         assert "kimi-k2.6" in out
 
-    def test_kimi_coding_curated_floor_includes_kimi_k27(self):
-        """Kimi K2.7 is in the offline curated floor used by pickers."""
-        assert _PROVIDER_MODELS["kimi-coding"][0] == "kimi-k2.7"
-        assert "kimi-k2.7" in provider_model_ids("kimi-coding")
+    def test_kimi_coding_offline_catalog_includes_k2_7_code(self):
+        """Native Kimi users must see the newest Code model without live catalog help."""
+        assert "kimi-coding" not in _MODELS_DEV_PREFERRED
+        with patch("agent.models_dev.list_agentic_models", return_value=[]):
+            out = provider_model_ids("kimi-coding")
+        assert "kimi-k2.7-code" in out
 
-    def test_authenticated_kimi_picker_merges_curated_floor_into_cached_models(self, monkeypatch):
-        """Gateway/Lanes picker rows must surface newly curated Kimi models even with an old cache."""
-        monkeypatch.setenv("KIMI_API_KEY", "test-kimi-key")
-        mdev = {"kimi-for-coding": {"env": ["KIMI_API_KEY"], "models": {}}}
+    def test_kimi_coding_live_catalog_does_not_hide_curated_k2_7_code(self):
+        """Kimi /models can lag inference; live results must not replace curated."""
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={"api_key": "sk-test", "base_url": "https://api.moonshot.ai/v1"},
+            ),
+            patch("providers.base.ProviderProfile.fetch_models", return_value=["kimi-k2.6"]),
+        ):
+            out = provider_model_ids("kimi-coding")
+        # Curated-first order; curated newest (k2.7-code) stays ahead of live.
+        assert out[:2] == ["kimi-k2.7-code", "kimi-k2.6"]
+
+    def test_kimi_setup_flow_uses_same_coding_plan_catalog(self):
+        """The setup wizard must not carry a stale duplicate Kimi model list."""
+        from hermes_cli.model_setup_flows import _model_flow_kimi
+
+        captured = {}
+
+        def fake_select(model_list, **_kwargs):
+            captured["models"] = model_list
+            return None
 
         with (
-            patch("agent.models_dev.fetch_models_dev", return_value=mdev),
-            patch("hermes_cli.models.cached_provider_model_ids", return_value=["kimi-k2.6"]),
+            patch("hermes_cli.main._prompt_api_key", return_value=("sk-kimi-test", False)),
+            patch("hermes_cli.auth._prompt_model_selection", side_effect=fake_select),
+            patch("hermes_cli.config.get_env_value", return_value=""),
+            patch("hermes_cli.config.save_env_value"),
         ):
-            rows = list_authenticated_providers(max_models=10)
+            _model_flow_kimi({}, current_model="")
 
-        kimi = next(row for row in rows if row["slug"] == "kimi-coding")
-        assert kimi["models"][:2] == ["kimi-k2.6", "kimi-k2.7"]
-        assert "kimi-k2.7" in kimi["models"]
+        assert captured["models"] == _PROVIDER_MODELS["kimi-coding"]
+        assert captured["models"][0] == "kimi-k2.7-code"
 
 
 class TestOpenRouterAndNousUnchanged:

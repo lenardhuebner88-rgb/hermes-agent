@@ -4,6 +4,7 @@
 /_pycache/
 *.pyc*
 __pycache__/
+.venv/
 .venv
 .vscode/
 .env
