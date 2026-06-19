@@ -31,6 +31,7 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
+from agent.tool_result_eliding import elide_stale_tool_results, tool_eliding_config
 from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
@@ -800,6 +801,35 @@ def run_conversation(
         # gated on context_compressor — so orphans from session loading or
         # manual message manipulation are always caught.
         api_messages = agent._sanitize_api_messages(api_messages)
+
+        # Deterministic context diet: trim large, stale read-type tool results
+        # (old read_file / skill_view bodies) outside the protected recent-turn
+        # tail down to a one-line pointer summary. Runs on the api-copy only —
+        # the stored `messages` transcript is never touched, so a worker never
+        # loses a result it still needs; only the bytes sent to the model on
+        # this turn shrink, and the model keeps a precise re-read pointer.
+        #
+        # Skipped when Anthropic prompt caching is active (Claude lanes): there
+        # the stable-prefix cache already delivers larger input savings, and
+        # eliding would move the cache-divergence point earlier. The
+        # token-heaviest lane this targets (Codex / `coder`) does not use that
+        # caching path and gets the full benefit. Kill-switch + tunables live
+        # in `tool_eliding_config` (HERMES_TOOL_ELIDE_* env).
+        _elide_cfg = tool_eliding_config()
+        if _elide_cfg.enabled and not agent._use_prompt_caching:
+            api_messages, _elided_n, _elided_chars = elide_stale_tool_results(
+                api_messages,
+                protect_last_n=_elide_cfg.protect_last_n,
+                min_elide_chars=_elide_cfg.min_elide_chars,
+                elidable_tools=_elide_cfg.elidable_tools,
+            )
+            if _elided_n:
+                request_logger.info(
+                    "Elided %s stale tool result(s) (~%s chars) from API copy (session=%s)",
+                    _elided_n,
+                    f"{_elided_chars:,}",
+                    agent.session_id or "-",
+                )
 
         # Drop thinking-only assistant turns (reasoning but no visible
         # output and no tool_calls) and merge any adjacent user messages
