@@ -193,6 +193,43 @@ def test_self_gate_accepts_bounded_positive_lever():
     assert verdict.passed is True
 
 
+def test_derive_levers_signal_is_distinct_roots_not_raw_events():
+    """LEDGER-BYCLASS-DISTINCT-ROOTS-S1: the lever signal_strength must come
+    from the per-class *distinct root* count, not the raw event count, so one
+    root that escalates repeatedly cannot over-state its cluster. The raw event
+    count stays available in the ledger (recurrence still visible) but does not
+    drive the ROI signal."""
+    context = {
+        "metrics": None,
+        "ledger": {
+            "by_class": {kb.HEILER_CLASS_TRANSIENT: 9},      # 9 raw events …
+            "roots_by_class": {kb.HEILER_CLASS_TRANSIENT: 1},  # … but ONE root
+            "total": 9,
+            "root_total": 1,
+            "entries": [],
+        },
+        "suppressed": set(),
+    }
+    levers = strategist.derive_levers(context)
+    assert len(levers) == 1
+    # signal reflects distinct roots (1.0), not the inflated event count (9.0).
+    assert levers[0].signal_strength == 1.0
+
+
+def test_derive_levers_falls_back_to_event_count_when_roots_absent():
+    """Defense-in-depth fallback: a legacy/injected context that predates
+    ``roots_by_class`` still derives a lever off the raw ``by_class`` count, so
+    the read-path hardening degrades gracefully and never silences the signal."""
+    context = {
+        "metrics": None,
+        "ledger": {"by_class": {kb.HEILER_CLASS_TRANSIENT: 4}, "total": 4, "entries": []},
+        "suppressed": set(),
+    }
+    levers = strategist.derive_levers(context)
+    assert len(levers) == 1
+    assert levers[0].signal_strength == 4.0
+
+
 def test_self_gate_rejects_missing_counter_metric():
     lever = strategist.Lever(
         key="X",

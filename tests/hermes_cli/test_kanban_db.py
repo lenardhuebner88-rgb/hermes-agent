@@ -10713,6 +10713,65 @@ def test_s4_read_escalation_ledger_returns_entries_and_rollup(kanban_home):
     }
 
 
+def test_s4_ledger_by_class_counts_distinct_roots_not_raw_events(kanban_home):
+    """LEDGER-BYCLASS-DISTINCT-ROOTS-S1: the read/aggregation path must expose,
+    next to the raw event count, a per-class count of *distinct chain roots* so
+    one root that escalates repeatedly cannot over-inflate its class. Defense in
+    depth complementary to the write-path idempotence: even if some other writer
+    duplicates events, the Stratege's input signal stays honest. The raw event
+    count is preserved alongside (both values exposed) so recurrence stays
+    visible and the class ranking remains explainable."""
+    with kb.connect() as conn:
+        # Chain A: leaf_a -> mid_a -> root_a. The K2/F1 convention links a leaf
+        # (parent) to the orchestration sink/root (child), so root_a is the sink
+        # reached by walking child edges downward.
+        root_a = kb.create_task(conn, title="root A", assignee="coder")
+        mid_a = kb.create_task(conn, title="mid A", assignee="coder")
+        leaf_a = kb.create_task(conn, title="leaf A", assignee="coder")
+        kb.link_tasks(conn, mid_a, root_a)
+        kb.link_tasks(conn, leaf_a, mid_a)
+        # The same chain A escalates transient FOUR times across its tasks.
+        for _ in range(3):
+            kb.add_event(conn, leaf_a, kb.HEILER_CLASSIFICATION_EVENT,
+                         {"class": kb.HEILER_CLASS_TRANSIENT})
+        kb.add_event(conn, mid_a, kb.HEILER_CLASSIFICATION_EVENT,
+                     {"class": kb.HEILER_CLASS_TRANSIENT})
+
+        # Chain B: a second, distinct root that also hits transient once.
+        root_b = kb.create_task(conn, title="root B", assignee="coder")
+        leaf_b = kb.create_task(conn, title="leaf B", assignee="coder")
+        kb.link_tasks(conn, leaf_b, root_b)
+        kb.add_event(conn, leaf_b, kb.HEILER_CLASSIFICATION_EVENT,
+                     {"class": kb.HEILER_CLASS_TRANSIENT})
+
+        # A standalone (un-linked) task escalates real-bug once → its own root.
+        solo = kb.create_task(conn, title="solo", assignee="coder")
+        kb.add_event(conn, solo, kb.HEILER_CLASSIFICATION_EVENT,
+                     {"class": kb.HEILER_CLASS_REAL_BUG})
+
+        ledger = kb.read_escalation_ledger(conn)
+        only_transient = kb.read_escalation_ledger(
+            conn, classes=[kb.HEILER_CLASS_TRANSIENT]
+        )
+
+    # Raw event count is preserved (guardrail: recurrence stays visible).
+    assert ledger["by_class"][kb.HEILER_CLASS_TRANSIENT] == 5
+    assert ledger["by_class"][kb.HEILER_CLASS_REAL_BUG] == 1
+    assert ledger["total"] == 6
+
+    # Distinct roots: only TWO roots escalated transient (chain A + chain B);
+    # the four chain-A events collapse onto root_a. real-bug has one root (solo).
+    assert ledger["roots_by_class"][kb.HEILER_CLASS_TRANSIENT] == 2
+    assert ledger["roots_by_class"][kb.HEILER_CLASS_REAL_BUG] == 1
+    # root_total = distinct roots across all classes (root_a, root_b, solo).
+    assert ledger["root_total"] == 3
+
+    # Class filter applies to the distinct-root rollup too.
+    assert only_transient["roots_by_class"] == {kb.HEILER_CLASS_TRANSIENT: 2}
+    assert only_transient["by_class"] == {kb.HEILER_CLASS_TRANSIENT: 5}
+    assert only_transient["root_total"] == 2
+
+
 # ---------------------------------------------------------------------------
 # HEILER-CLASSIFY-COVERAGE-S1: every operator_escalation must end up with a
 # paired heiler_classification (the Stratege's by_class input). The inline
