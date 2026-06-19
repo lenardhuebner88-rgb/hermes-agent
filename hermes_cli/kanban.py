@@ -1110,6 +1110,27 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--json", action="store_true", help="Emit JSON result"
     )
 
+    p_release_freigabe = sub.add_parser(
+        "release-freigabe",
+        help="Explicit operator GO: release a freigabe:operator PlanSpec chain "
+             "root held in 'scheduled' (records a freigabe_released event with "
+             "operator identity, flips the root scheduled->todo and promotes its "
+             "held children so they dispatch). Idempotent; non-operator chains "
+             "never need this.",
+    )
+    p_release_freigabe.add_argument(
+        "task_id", help="freigabe:operator PlanSpec root task id"
+    )
+    p_release_freigabe.add_argument(
+        "--author",
+        default=None,
+        help="Operator identity recorded on the release event "
+             "(default: active profile name)",
+    )
+    p_release_freigabe.add_argument(
+        "--json", action="store_true", help="Emit JSON result"
+    )
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1233,6 +1254,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "epic":     _dispatch_epic,
             "release-gate": _cmd_release_gate,
             "release-uireal": _cmd_release_uireal,
+            "release-freigabe": _cmd_release_freigabe,
         }
         handler = handlers.get(action)
         if not handler:
@@ -1611,6 +1633,37 @@ def _cmd_release_uireal(args: argparse.Namespace) -> int:
         print(
             f"release-uireal: {args.task_id} is not a held ui-real root "
             "(not ui-real, not held in scheduled, or unknown) — nothing released.",
+            file=sys.stderr,
+        )
+    return 0 if released else 1
+
+
+def _cmd_release_freigabe(args: argparse.Namespace) -> int:
+    """Release a freigabe:operator PlanSpec chain root held in 'scheduled' for an
+    explicit operator GO. Records a ``freigabe_released`` event with operator
+    identity, flips the root scheduled->todo and promotes its held children so
+    the chain dispatches. Idempotent (a root already released stays released,
+    re-stamping the event and re-releasing any still-held child).
+
+    Exit codes: 0 released (incl. idempotent re-release); 1 the task is not a
+    releasable freigabe:operator root (not operator, not held in scheduled/todo,
+    or unknown)."""
+    author = getattr(args, "author", None) or _profile_author()
+    with kb.connect_closing() as conn:
+        released = kb.release_freigabe_hold(conn, args.task_id, author=author)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "task_id": args.task_id, "released": released, "author": author,
+        }))
+    elif released:
+        print(
+            f"freigabe:operator root {args.task_id} released by {author} "
+            "(children now dispatchable)."
+        )
+    else:
+        print(
+            f"release-freigabe: {args.task_id} is not a held freigabe:operator root "
+            "(not operator, not held in scheduled, or unknown) — nothing released.",
             file=sys.stderr,
         )
     return 0 if released else 1
