@@ -95,6 +95,12 @@ class Lever:
     cost: float
     counter_risk: float
     signal_strength: float = 1.0
+    # Grounding evidence (STRATEGIST-SELF-GROUNDING-S1): the Opus propose-prompt
+    # greps code + git log per lever (does the target already exist / was it
+    # shipped) and emits this non-empty evidence string. The code does NOT judge
+    # it — :func:`grounding_gate` only enforces PRESENCE on the draft path. Empty
+    # for the deterministic baseline levers (which never traverse that gate).
+    grounding: str = ""
     source: str = "baseline"
 
     @property
@@ -343,6 +349,30 @@ def self_gate(lever: Lever, *, counter_budget: float = COUNTER_BUDGET) -> GateRe
     return GateResult(True, "ROI positiv und Counter-Metrik beschraenkt")
 
 
+def grounding_gate(lever: Lever) -> GateResult:
+    """Deterministic PRESENCE-gate for the strategist-DRAFT path ONLY.
+
+    The Opus propose-prompt is what *judges* grounding — it greps code + git log
+    per lever (does the target already exist, was it shipped) and emits a
+    non-empty ``grounding`` evidence field. This gate does not re-judge that
+    evidence; it only enforces, analogous to the hardener's field-checks, that a
+    non-empty grounding field is PRESENT. An ungrounded draft can therefore never
+    reach ingest.
+
+    SCOPE-CRITICAL (AC-2): this gate is applied solely on the ``--drafts-file`` /
+    :func:`_levers_from_drafts` path in :func:`propose`. It is deliberately NOT
+    part of :func:`self_gate` (which both paths share) nor of the general
+    ``planspecs.ingest_planspec`` — so the deterministic baseline levers, Vault
+    specs and operator specs (which carry no grounding field) are unaffected.
+    """
+    if not (lever.grounding or "").strip():
+        return GateResult(
+            False,
+            "kein nicht-leeres grounding-Evidenzfeld (Code-/git-log-Beleg fehlt)",
+        )
+    return GateResult(True, "grounding-Evidenz vorhanden")
+
+
 # --------------------------------------------------------------------------- #
 # PlanSpec rendering + ingest
 # --------------------------------------------------------------------------- #
@@ -365,6 +395,16 @@ def lever_to_markdown(lever: Lever) -> str:
 
     build_id = f"{lever.key}-S1"
     review_id = f"{lever.key}-S2"
+    strategist_meta = {
+        "target_metric": lever.target_metric,
+        "roi": lever.roi,
+        "counter_metric": lever.counter_metric,
+    }
+    # Grounding evidence is carried only when present (draft path). A baseline
+    # lever has none, so its rendered spec stays byte-for-byte as before.
+    grounding = (lever.grounding or "").strip()
+    if grounding:
+        strategist_meta["grounding"] = grounding
     frontmatter = {
         "status": "vorgeschlagen",
         "owner": "Strategist",
@@ -372,11 +412,7 @@ def lever_to_markdown(lever: Lever) -> str:
         "topic": lever.title,
         "freigabe": "operator",
         "live_test_depth": "smoke",
-        "strategist_meta": {
-            "target_metric": lever.target_metric,
-            "roi": lever.roi,
-            "counter_metric": lever.counter_metric,
-        },
+        "strategist_meta": strategist_meta,
         "taskgraph_hints": {
             "binding": True,
             "subtasks": [
@@ -405,19 +441,19 @@ def lever_to_markdown(lever: Lever) -> str:
         },
     }
     fm = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
-    body = "\n".join(
-        [
-            f"# {lever.key}",
-            "",
-            f"Strategist-Hebel: {lever.title}",
-            "",
-            f"Ziel-Kennzahl: {lever.target_metric}",
-            f"ROI: {lever.roi}",
-            f"Counter-Metrik: {lever.counter_metric}",
-            "",
-            lever.rationale,
-        ]
-    )
+    body_lines = [
+        f"# {lever.key}",
+        "",
+        f"Strategist-Hebel: {lever.title}",
+        "",
+        f"Ziel-Kennzahl: {lever.target_metric}",
+        f"ROI: {lever.roi}",
+        f"Counter-Metrik: {lever.counter_metric}",
+    ]
+    if grounding:
+        body_lines.append(f"Grounding-Evidenz: {grounding}")
+    body_lines += ["", lever.rationale]
+    body = "\n".join(body_lines)
     return f"---\n{fm}\n---\n\n{body}\n"
 
 
@@ -508,6 +544,7 @@ def _levers_from_drafts(drafts: Iterable[dict[str, Any]]) -> list[Lever]:
                 cost=float(raw.get("cost", 0.5)),
                 counter_risk=float(raw.get("counter_risk", 0.3)),
                 signal_strength=float(raw.get("signal_strength", 1.0)),
+                grounding=str(raw.get("grounding") or "").strip(),
                 source="drafts",
             )
         )
@@ -545,6 +582,7 @@ def propose(
             "idle": False,
             "candidates": 0,
             "gated_out": [],
+            "grounding_blocked": [],
             "ingested": [],
         }
 
@@ -559,9 +597,24 @@ def propose(
         if owns_conn:
             conn.close()
 
+    # Grounding presence-gate lives ONLY on the strategist-draft path (AC-2): an
+    # Opus-supplied draft without a non-empty grounding field is hard-blocked
+    # from ingest. The derive (baseline) path and the general ingest_planspec are
+    # untouched. The existing vetoed_levers.json dedup runs alongside it.
+    grounding_blocked: list[dict[str, Any]] = []
     if drafts is not None:
         suppressed = set(context.get("suppressed") or ())
-        candidates = [lv for lv in _levers_from_drafts(drafts) if lv.key not in suppressed]
+        candidates = []
+        for lever in _levers_from_drafts(drafts):
+            if lever.key in suppressed:
+                continue
+            verdict = grounding_gate(lever)
+            if not verdict.passed:
+                grounding_blocked.append(
+                    {"key": lever.key, "title": lever.title, "reason": verdict.reason}
+                )
+                continue
+            candidates.append(lever)
     else:
         candidates = derive_levers(context)
 
@@ -623,12 +676,15 @@ def propose(
         "skipped": False,
         "reason": budget["reason"],
         "used_percent": budget["used_percent"],
-        "idle": len(ingested) == 0 and not ingest_errors,
+        # idle = genuinely nothing to propose. A run whose drafts were all
+        # grounding-blocked is NOT idle — it had candidates that failed the gate.
+        "idle": len(ingested) == 0 and not ingest_errors and not grounding_blocked,
         "candidates": len(candidates),
         "survivors": len(survivors),
         "capped": len(capped),
         "cap": cap,
         "gated_out": gated_out,
+        "grounding_blocked": grounding_blocked,
         "ingest_errors": ingest_errors,
         "ingested": ingested,
     }
