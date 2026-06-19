@@ -35,7 +35,9 @@ from typing import Optional
 from hermes_cli import kanban_db as kb
 
 DAY_SECONDS = 86_400
-SCHEMA_VERSION = 1
+# v2: cost_per_task averages metered (>0) tasks only + explicit `coverage`
+# breakdown (subscription-$0 no longer pollutes the average or the counter).
+SCHEMA_VERSION = 2
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 
@@ -431,36 +433,61 @@ def _cost_per_task_metric(
     """Kosten/Task-Trend ↔ counter 'tasks_without_cost_data'.
 
     Cost per task = SUM(task_runs.cost_usd) grouped by task. The trend
-    compares the average cost-per-task of tasks completed in the recent
-    window against the prior window of the same length. The paired counter
-    is done tasks whose runs carry no cost data at all (the trend's blind
-    spot).
+    averages ONLY tasks that carry a real *metered* cost (summed cost > 0).
+
+    Subscription-included runs are stamped ``$0`` (the COST-VISIBILITY-WORKERS
+    backfill: quota burn rides the subscription, not a metered card). Folding
+    those zeros into the average drags it toward 0 and manufactures a phantom
+    "‑100 % savings" the instant a recent window fills with subscription work —
+    the artifact this metric must not produce. A ``$0`` stamp is *no metered
+    cost*, not a saving, so subscription-only tasks are excluded from the
+    average and surfaced as explicit ``coverage`` instead.
+
+    The paired counter (``tasks_without_cost_data``) is every done task without
+    a real metered cost — subscription-``$0`` PLUS NULL. It shrinks ONLY when a
+    task gains real metered cost, never merely because a NULL run was stamped
+    ``$0``; that keeps the coverage number from dropping by hiding tasks.
     """
     window = window_days * DAY_SECONDS
 
-    # SUM(cost_usd) per task across all runs (NULL costs ignored by SUM).
+    # SUM(cost_usd) + COUNT(non-NULL cost_usd) per task across all runs. NULL
+    # costs are ignored by SUM/COUNT; a task whose runs are *all* stamped $0
+    # (subscription-included) has n_cost > 0 but total == 0.0. Real metered
+    # cost is always strictly positive (no API call bills $0), so total > 0
+    # cleanly separates metered tasks from subscription-$0 ones.
     cost_rows = conn.execute(
         "SELECT task_id, SUM(cost_usd) AS total, "
         "COUNT(cost_usd) AS n_cost "
         "FROM task_runs GROUP BY task_id"
     ).fetchall()
-    cost_by_task: dict[str, float] = {}
+    metered_by_task: dict[str, float] = {}  # real metered cost (> 0)
+    subscription_tasks: set[str] = set()  # stamped, but summed exactly $0
     for r in cost_rows:
-        if (r["n_cost"] or 0) > 0 and r["total"] is not None:
-            cost_by_task[r["task_id"]] = float(r["total"])
-    cost_total = round(sum(cost_by_task.values()), 6)
+        n_cost = r["n_cost"] or 0
+        total = r["total"]
+        if n_cost <= 0 or total is None:
+            continue  # no non-NULL cost rows -> no cost data
+        total = float(total)
+        if total > 0:
+            metered_by_task[r["task_id"]] = total
+        else:
+            subscription_tasks.add(r["task_id"])
+    cost_total = round(sum(metered_by_task.values()), 6)
 
     done_rows = conn.execute(
         "SELECT id, completed_at FROM tasks WHERE status = 'done'"
     ).fetchall()
 
     def _avg_in_window(lo: int, hi: int) -> Optional[float]:
+        # average over metered (cost > 0) tasks only -> never includes a $0
+        # subscription stamp, so the result is always strictly positive when
+        # non-None and pct_change can never be the misleading -100%.
         costs = [
-            cost_by_task[r["id"]]
+            metered_by_task[r["id"]]
             for r in done_rows
             if r["completed_at"] is not None
             and lo <= r["completed_at"] < hi
-            and r["id"] in cost_by_task
+            and r["id"] in metered_by_task
         ]
         if not costs:
             return None
@@ -482,20 +509,41 @@ def _cost_per_task_metric(
         trend = "flat"
         pct_change = 0.0
 
-    without_cost = sum(1 for r in done_rows if r["id"] not in cost_by_task)
+    total_done = len(done_rows)
+    with_metered = sum(1 for r in done_rows if r["id"] in metered_by_task)
+    subscription_only = sum(
+        1 for r in done_rows if r["id"] in subscription_tasks
+    )
+    # Every done task without real metered cost: subscription-$0 OR NULL.
+    without_cost = total_done - with_metered
+    no_cost_data = without_cost - subscription_only
+    coverage_pct = (
+        round(100.0 * with_metered / total_done, 1) if total_done else None
+    )
     return {
         "cost_usd_total": cost_total,
-        "tasks_with_cost": len(cost_by_task),
+        "tasks_with_cost": with_metered,
         "recent_avg_cost_per_task": recent,
         "prior_avg_cost_per_task": prior,
         "trend": trend,
         "pct_change": pct_change,
+        # Explicit coverage so a $0 subscription stamp can never masquerade as
+        # either a saving (in the average) or improved coverage (in the count).
+        "coverage": {
+            "total_done": total_done,
+            "with_metered_cost": with_metered,
+            "subscription_only": subscription_only,
+            "no_cost_data": no_cost_data,
+            "coverage_pct": coverage_pct,
+        },
         "counter": {
             "name": "tasks_without_cost_data",
             "value": without_cost,
             "description": (
-                "done tasks whose runs carry no cost_usd — the cost trend's "
-                "blind spot"
+                "done tasks with no real metered cost — subscription-stamped "
+                "$0 runs PLUS NULL-cost runs; the cost trend's blind spot. "
+                "Shrinks only when a task gains real metered cost, never when "
+                "a subscription run is stamped $0"
             ),
         },
     }

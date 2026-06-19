@@ -4579,10 +4579,14 @@ def backfill_run_costs_from_sessions(
     once — within this call AND across calls (each stamped run records the
     sessions it consumed in ``metadata.cost_session_ids``; those are pre-loaded
     and excluded). Only real recorded session cost is summed, so
-    ``cost_usd_total`` rises solely by once-counted real consumption and
-    ``tasks_without_cost_data`` decreases monotonically. API-billed lanes with
-    no recoverable session are LEFT NULL — never invented to $0. Fully
-    fail-soft: one bad row / db never aborts the batch.
+    ``cost_usd_total`` rises solely by once-counted real consumption. The
+    subscription-zero path stamps a *belegt* $0 (no metered cost), which is why
+    ``vision_metrics`` keeps such tasks inside the ``tasks_without_cost_data``
+    coverage counter and out of the cost average: that counter shrinks only
+    when a task gains a real metered cost, never merely because a NULL run was
+    stamped $0. API-billed lanes with no recoverable session are LEFT NULL —
+    never invented to $0. Fully fail-soft: one bad row / db never aborts the
+    batch.
 
     ``since_seconds`` bounds the scan to runs that ended within the last N
     seconds (the dispatcher heartbeat passes it so it never re-grinds the large
