@@ -4161,6 +4161,106 @@ class TestClaudeCliWorkerSpawn:
         )
         assert "--model" not in cmd
 
+    # --- comment thread baked into the -p prompt (AC-A) -------------------
+
+    def _capture_claude_prompt(self, monkeypatch, task):
+        """Route ``task`` through the claude-CLI branch and return its -p prompt.
+
+        Mirrors the existing claude-spawn tests' Popen capture, but returns the
+        prompt string so the comment-thread assertions read cleanly.
+        """
+        monkeypatch.setenv("HERMES_CLAUDE_BIN", "/usr/local/bin/claude-test")
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", task.assignee)
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                self.pid = 4242
+
+        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        kb._default_spawn(task, str(Path(task.workspace_path or ".")))
+        cmd = captured["cmd"]
+        return cmd[cmd.index("-p") + 1]
+
+    def test_claude_worker_appends_comment_thread(self, kanban_home, monkeypatch):
+        """A claude-CLI worker has no kanban tools and never sees comments, so
+        the most-recent _CTX_MAX_COMMENTS must be baked into the -p prompt with
+        the SAME framing as build_worker_context — AC-A."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="ship the widget",
+                body="implement the widget", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            kb.add_comment(conn, tid, "operator", "please update the changelog")
+            kb.add_comment(conn, tid, "coder", "first attempt failed on lint")
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        # Same section header + per-comment framing as build_worker_context.
+        assert "## Comment thread" in prompt
+        assert "comment from worker `operator` at" in prompt
+        assert "please update the changelog" in prompt
+        assert "comment from worker `coder` at" in prompt
+        assert "first attempt failed on lint" in prompt
+        # The block sits AFTER the body and BEFORE the work instruction.
+        assert prompt.index("implement the widget") < prompt.index("## Comment thread")
+        assert prompt.index("## Comment thread") < prompt.index(
+            "Work in the current directory."
+        )
+        # Preamble + report-back + PROVIDER RULE stay verbatim.
+        assert prompt.startswith(
+            "You are an autonomous Hermes kanban worker running headless."
+        )
+        assert "PROVIDER RULE: Never call anthropic/*" in prompt
+
+    def test_claude_worker_no_comment_block_when_no_comments(self, kanban_home, monkeypatch):
+        """Zero comments → no block at all; the prompt is byte-identical to the
+        pre-change status quo (body flows straight into the work instruction)."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="no comments",
+                body="do the thing", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "## Comment thread" not in prompt
+        assert "comment from worker" not in prompt
+        # Status quo: the (stored) body flows straight into the work
+        # instruction with no comment block wedged in between.
+        assert f"{task.body}\n\nWork in the current directory." in prompt
+
+    def test_claude_worker_comment_thread_caps_at_ctx_max(self, kanban_home, monkeypatch):
+        """More than _CTX_MAX_COMMENTS comments → only the most-recent N are
+        shown in full, with the same 'earlier comment(s) omitted' marker the
+        Hermes-worker path emits (token cap parity)."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        total = kb._CTX_MAX_COMMENTS + 3
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="comment storm",
+                body="x", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            for i in range(total):
+                kb.add_comment(conn, tid, "operator", f"comment-number-{i}")
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert f"showing most recent {kb._CTX_MAX_COMMENTS}" in prompt
+        # Oldest 3 dropped; newest retained.
+        assert "comment-number-0\n" not in prompt
+        assert f"comment-number-{total - 1}" in prompt
+
     # --- default (hermes) path stays byte-identical -----------------------
 
     def test_default_spawn_no_flag_uses_hermes_path(self, tmp_path, monkeypatch):
