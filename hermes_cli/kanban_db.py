@@ -18663,3 +18663,77 @@ def latest_summaries(
         ids,
     ).fetchall()
     return {r["task_id"]: r["summary"] for r in rows}
+
+
+def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
+    """Return token/cost aggregates for a Kanban chain, grouped by lane/profile.
+
+    Walks the full member set of the chain rooted at ``root_id`` via
+    :func:`_root_tree_member_ids`, then aggregates ``task_runs`` by ``profile``.
+
+    Return shape (schema ``kanban-chain-costs-v1``)::
+
+        {
+            "schema":  "kanban-chain-costs-v1",
+            "root_id": str,
+            "totals":  {"input_tokens": int, "output_tokens": int,
+                        "cost_usd": float, "run_count": int},
+            "by_lane": [
+                {"profile": str, "input_tokens": int, "output_tokens": int,
+                 "cost_usd": float, "run_count": int},
+                ...   # descending by cost_usd
+            ],
+        }
+
+    NULL ``cost_usd`` rows are treated as 0 in sums (COALESCE in SQL).
+    NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
+    """
+    member_ids = _root_tree_member_ids(conn, root_id)
+    if not member_ids:
+        member_ids = [root_id]
+
+    placeholders = ",".join("?" for _ in member_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                profile,
+                CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
+                CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
+                COUNT(*)                                          AS run_count
+            FROM task_runs
+            WHERE task_id IN ({placeholders})
+            GROUP BY profile
+            ORDER BY cost_usd DESC
+            """,
+            member_ids,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Pre-K5a DB without cost_usd / token columns — return empty breakdown.
+        rows = []
+
+    by_lane = [
+        {
+            "profile": row["profile"],
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "cost_usd": float(row["cost_usd"]),
+            "run_count": int(row["run_count"]),
+        }
+        for row in rows
+    ]
+
+    totals: dict[str, Any] = {
+        "input_tokens": sum(l["input_tokens"] for l in by_lane),
+        "output_tokens": sum(l["output_tokens"] for l in by_lane),
+        "cost_usd": sum(l["cost_usd"] for l in by_lane),
+        "run_count": sum(l["run_count"] for l in by_lane),
+    }
+
+    return {
+        "schema": "kanban-chain-costs-v1",
+        "root_id": root_id,
+        "totals": totals,
+        "by_lane": by_lane,
+    }

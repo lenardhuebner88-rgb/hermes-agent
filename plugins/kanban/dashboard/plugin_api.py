@@ -5579,6 +5579,36 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
         return value
 
     now = int(time.time())
+
+    # Per-node cost aggregates — a single query over all chain nodes so the
+    # loop below doesn't issue one query per node.  Fail-soft on pre-K5a DBs.
+    node_costs: dict[str, dict[str, Any]] = {}
+    if nodes:
+        placeholders = ",".join("?" for _ in nodes)
+        try:
+            for row in conn.execute(
+                f"""
+                SELECT
+                    task_id,
+                    CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
+                    CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
+                    COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd
+                FROM task_runs
+                WHERE task_id IN ({placeholders})
+                GROUP BY task_id
+                """,
+                tuple(nodes),
+            ).fetchall():
+                node_costs[row["task_id"]] = {
+                    "input_tokens": int(row["input_tokens"]),
+                    "output_tokens": int(row["output_tokens"]),
+                    "cost_usd": float(row["cost_usd"]),
+                }
+        except sqlite3.OperationalError:
+            pass  # pre-K5a: cost/token columns absent — leave node_costs empty
+
+    _zero_costs: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+
     out_nodes: list[dict[str, Any]] = []
     for node_id in sorted(nodes, key=lambda item: (depth(item), item)):
         task = kanban_db.get_task(conn, node_id)
@@ -5607,6 +5637,7 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
                     if heartbeat is not None else None
                 ),
             }
+        costs = node_costs.get(node_id, _zero_costs)
         out_nodes.append({
             "id": task.id,
             "title": task.title,
@@ -5625,6 +5656,9 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
             ),
             "progress": progress.get(task.id),
             "latest_run": run_payload,
+            "cost_usd": costs["cost_usd"],
+            "input_tokens": costs["input_tokens"],
+            "output_tokens": costs["output_tokens"],
         })
     return {
         "schema": "kanban-chain-graph-v1",
@@ -6057,6 +6091,60 @@ def get_chain_graph(task_id: str, board: Optional[str] = Query(None)):
     conn = _conn(board=board)
     try:
         return _chain_graph(conn, task_id)
+    finally:
+        conn.close()
+
+
+def _resolve_chain_root(conn: sqlite3.Connection, task_id: str) -> str:
+    """Walk child_ids downward from ``task_id`` to find the chain sink/root.
+
+    In the Kanban link convention ``task_links(parent_id=work_node,
+    child_id=sink)`` the orchestration root is the node that has no children
+    (never appears as a ``parent_id`` in the links it is part of). When
+    ``task_id`` is already the root this returns it unchanged. Cycle-safe.
+    """
+    seen: set[str] = set()
+    current = task_id
+    while True:
+        seen.add(current)
+        children = kanban_db.child_ids(conn, current)
+        if not children:
+            return current  # sink — no further children
+        # Pick the first unseen child; if all seen (cycle), stop here.
+        nxt = next((c for c in children if c not in seen), None)
+        if nxt is None:
+            return current
+        current = nxt
+
+
+@router.get("/tasks/{task_id}/chain-costs")
+def get_chain_costs(task_id: str, board: Optional[str] = Query(None)):
+    """Return token/$ aggregates for the chain that contains ``task_id``.
+
+    Resolves to the chain root (sink) even when called on an interior work
+    node, then delegates to ``kanban_db.chain_cost_breakdown``.
+
+    Response schema ``kanban-chain-costs-v1``::
+
+        {
+            "schema":  "kanban-chain-costs-v1",
+            "root_id": str,
+            "totals":  {"input_tokens": int, "output_tokens": int,
+                        "cost_usd": float, "run_count": int},
+            "by_lane": [
+                {"profile": str, "input_tokens": int, "output_tokens": int,
+                 "cost_usd": float, "run_count": int},
+                ...  # descending by cost_usd
+            ],
+        }
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if kanban_db.get_task(conn, task_id) is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        root_id = _resolve_chain_root(conn, task_id)
+        return kanban_db.chain_cost_breakdown(conn, root_id)
     finally:
         conn.close()
 

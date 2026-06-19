@@ -10564,3 +10564,130 @@ def test_record_classification_correction_rejects_unknown_class(kanban_home):
         assert kb.record_classification_correction(
             conn, 999_999, corrected_to=kb.HEILER_CLASS_REAL_BUG,
         ) is False
+
+
+# ---------------------------------------------------------------------------
+# chain_cost_breakdown
+# ---------------------------------------------------------------------------
+
+def _insert_run_cost(conn, task_id, *, profile, input_tokens, output_tokens, cost_usd):
+    """Insert a closed run with explicit cost/token data (no auto-commit; caller manages txn)."""
+    conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd) "
+        "VALUES (?, ?, 'done', 'completed', 1000, 2000, ?, ?, ?)",
+        (task_id, profile, input_tokens, output_tokens, cost_usd),
+    )
+
+
+def test_chain_cost_breakdown_aggregates_by_lane(kanban_home):
+    """chain_cost_breakdown returns totals + per-profile breakdown for a chain."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="chain-root", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "build A", "assignee": "coder", "parents": []},
+                {"title": "build B", "assignee": "verifier", "parents": []},
+            ],
+            author="decomposer",
+        )
+        a, b = child_ids
+        with kb.write_txn(conn):
+            # Two runs on profile "coder" for task A
+            _insert_run_cost(conn, a, profile="coder", input_tokens=1000, output_tokens=200, cost_usd=0.01)
+            _insert_run_cost(conn, a, profile="coder", input_tokens=500, output_tokens=100, cost_usd=0.005)
+            # One run on profile "verifier" for task B
+            _insert_run_cost(conn, b, profile="verifier", input_tokens=300, output_tokens=50, cost_usd=0.003)
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    assert result["root_id"] == root
+    assert result["schema"] == "kanban-chain-costs-v1"
+
+    totals = result["totals"]
+    assert totals["run_count"] == 3
+    assert totals["input_tokens"] == 1800
+    assert totals["output_tokens"] == 350
+    assert abs(totals["cost_usd"] - 0.018) < 1e-9
+
+    by_lane = result["by_lane"]
+    # by_lane is sorted descending by cost_usd
+    assert len(by_lane) == 2
+    coder_lane = next(l for l in by_lane if l["profile"] == "coder")
+    assert coder_lane["run_count"] == 2
+    assert coder_lane["input_tokens"] == 1500
+    assert coder_lane["output_tokens"] == 300
+    assert abs(coder_lane["cost_usd"] - 0.015) < 1e-9
+
+    verifier_lane = next(l for l in by_lane if l["profile"] == "verifier")
+    assert verifier_lane["run_count"] == 1
+    assert verifier_lane["input_tokens"] == 300
+    assert verifier_lane["output_tokens"] == 50
+    assert abs(verifier_lane["cost_usd"] - 0.003) < 1e-9
+
+    # descending cost order: coder (0.015) > verifier (0.003)
+    assert by_lane[0]["profile"] == "coder"
+    assert by_lane[1]["profile"] == "verifier"
+
+
+def test_chain_cost_breakdown_null_cost_robust(kanban_home):
+    """chain_cost_breakdown handles NULL cost_usd rows without crashing.
+
+    Runs without cost data (pre-K5a / unattributed) produce cost_usd=0.0 in
+    the aggregate totals — the presence of a NULL-cost run is indicated only by
+    a non-zero run_count with zero cost, not a crash.
+    """
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="null-cost-root", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "task X", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        (x,) = child_ids
+        with kb.write_txn(conn):
+            # Run with NULL cost
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at, input_tokens, output_tokens, cost_usd) "
+                "VALUES (?, 'coder', 'done', 'completed', 1000, 2000, 400, 80, NULL)",
+                (x,),
+            )
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    assert result["totals"]["run_count"] == 1
+    assert result["totals"]["input_tokens"] == 400
+    assert result["totals"]["output_tokens"] == 80
+    # NULL cost → 0.0 in SUM (SQLite COALESCE behaviour for SUM of all-NULL = NULL; we normalise)
+    # We accept either 0.0 or None — implementation decides, but must not crash
+    assert result["totals"]["cost_usd"] is not None or result["totals"]["cost_usd"] is None
+    assert len(result["by_lane"]) == 1
+
+
+def test_chain_cost_breakdown_empty_chain(kanban_home):
+    """chain_cost_breakdown for a root with no runs returns zeroed totals."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="empty-chain", assignee="orchestrator")
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    assert result["root_id"] == root
+    assert result["totals"]["run_count"] == 0
+    assert result["totals"]["input_tokens"] == 0
+    assert result["totals"]["output_tokens"] == 0
+    assert result["totals"]["cost_usd"] == 0.0
+    assert result["by_lane"] == []

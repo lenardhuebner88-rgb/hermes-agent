@@ -4396,6 +4396,122 @@ def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
     assert latest["heartbeat_age_seconds"] >= 0
 
 
+def _insert_cost_run(conn, task_id, *, profile, input_tokens, output_tokens, cost_usd):
+    """Insert a run row with cost data; does NOT commit (caller manages txn)."""
+    conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd) "
+        "VALUES (?, ?, 'done', 'completed', 1000, 2000, ?, ?, ?)",
+        (task_id, profile, input_tokens, output_tokens, cost_usd),
+    )
+
+
+def test_chain_costs_endpoint_returns_breakdown(client, kanban_home):
+    """GET /tasks/{id}/chain-costs returns schema kanban-chain-costs-v1 with
+    correct totals and by_lane breakdown aggregated from task_runs."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="costed-chain", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "worker A", "assignee": "coder", "parents": []},
+                {"title": "worker B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        a, b = child_ids
+        with kb.write_txn(conn):
+            _insert_cost_run(conn, a, profile="coder", input_tokens=1000, output_tokens=200, cost_usd=0.01)
+            _insert_cost_run(conn, b, profile="coder", input_tokens=600, output_tokens=100, cost_usd=0.006)
+            _insert_cost_run(conn, b, profile="verifier", input_tokens=200, output_tokens=30, cost_usd=0.002)
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-costs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["schema"] == "kanban-chain-costs-v1"
+    assert body["root_id"] == root
+
+    totals = body["totals"]
+    assert totals["run_count"] == 3
+    assert totals["input_tokens"] == 1800
+    assert totals["output_tokens"] == 330
+    assert abs(totals["cost_usd"] - 0.018) < 1e-9
+
+    by_lane = body["by_lane"]
+    profiles = [l["profile"] for l in by_lane]
+    assert "coder" in profiles
+    assert "verifier" in profiles
+    coder = next(l for l in by_lane if l["profile"] == "coder")
+    assert coder["run_count"] == 2
+    # most expensive lane first
+    assert by_lane[0]["profile"] == "coder"
+
+
+def test_chain_costs_endpoint_404_for_unknown_task(client):
+    r = client.get("/api/plugins/kanban/tasks/t_no_such_task/chain-costs")
+    assert r.status_code == 404
+
+
+def test_chain_costs_endpoint_resolves_non_root_to_root(client, kanban_home):
+    """Endpoint resolves a non-root member task to its chain root."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="chain-root-resolve", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "leaf", "assignee": "coder", "parents": []}],
+            author="decomposer",
+        )
+        (leaf,) = child_ids
+        with kb.write_txn(conn):
+            _insert_cost_run(conn, leaf, profile="coder", input_tokens=500, output_tokens=80, cost_usd=0.005)
+
+    # Querying via the leaf should resolve to the root chain
+    r = client.get(f"/api/plugins/kanban/tasks/{leaf}/chain-costs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["root_id"] == root
+    assert body["totals"]["run_count"] == 1
+
+
+def test_chain_graph_nodes_include_cost_fields(client, kanban_home):
+    """chain-graph nodes now carry cost_usd, input_tokens, output_tokens
+    per-task aggregated from task_runs — existing schema contract unchanged."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            _insert_cost_run(conn, child_ids[0], profile="coder",
+                             input_tokens=800, output_tokens=150, cost_usd=0.008)
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-graph")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Schema unchanged
+    assert body["schema"] == "kanban-chain-graph-v1"
+    by_id = {n["id"]: n for n in body["nodes"]}
+
+    # Node with a run carries cost fields
+    n0 = by_id[child_ids[0]]
+    assert n0["cost_usd"] == pytest.approx(0.008)
+    assert n0["input_tokens"] == 800
+    assert n0["output_tokens"] == 150
+
+    # Nodes without runs have cost fields present and zeroed (not missing)
+    n1 = by_id[child_ids[1]]
+    assert "cost_usd" in n1
+    assert "input_tokens" in n1
+    assert "output_tokens" in n1
+    assert n1["cost_usd"] == 0.0
+    assert n1["input_tokens"] == 0
+    assert n1["output_tokens"] == 0
+
+
 def test_flow_release_unknown_task_404(client):
     r = client.post("/api/plugins/kanban/tasks/t_nope/flow-release")
     assert r.status_code == 404
