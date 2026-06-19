@@ -288,6 +288,30 @@ def test_classification_coverage_null_when_no_escalations(conn):
     assert c["counter"]["value"] == 0.0
 
 
+def test_classification_coverage_full_from_inline_park_without_sweep(conn):
+    """ESCALATION-INLINE-CLASSIFY-S1 (AC-1): the budget-runaway park now classifies
+    INLINE, so the coverage metric reads 100% the instant the escalation is
+    written — no classify_escalations_sweep poll in between. This is the atomic,
+    immediately-complete cause-evidence the Stratege gets instead of a
+    poll-dependent approximation."""
+    import time
+
+    tid = kb.create_task(conn, title="runaway loop", assignee="coder")
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+    kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+    # Deliberately do NOT run any sweep.
+
+    snap = vm.compute_metrics_snapshot(
+        conn, now=int(time.time()) + 1, window_days=7,
+    )
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["escalations"] == 1
+    assert c["classified_within_24h"] == 1
+    assert c["coverage_pct"] == 100.0
+    assert c["counter"]["value"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Cost-per-task metric + paired counter
 # ---------------------------------------------------------------------------

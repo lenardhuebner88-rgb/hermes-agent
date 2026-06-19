@@ -974,7 +974,25 @@ def _escalate_release_gate(
     }
     try:
         with kb.write_txn(conn):
-            kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
+            esc_event_id = kb._append_event(
+                conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload,
+            )
+            # ESCALATION-INLINE-CLASSIFY-S1: pair a heiler_classification to the
+            # escalation atomically, in the same txn, rather than leaving it for
+            # the poll-driven classify_escalations_sweep. The class is derived
+            # from the escalation's own persisted evidence via the exact same
+            # deterministic function the sweep uses, so the inline classification
+            # is byte-identical to a swept one — defense-in-depth, not a
+            # duplicate, no guess (AC-2 documented ledger reference).
+            h_class, h_ev = kb._classify_escalation_payload(payload)
+            kb._append_event(
+                conn, task_id, kb.HEILER_CLASSIFICATION_EVENT,
+                kb._heiler_classification_payload(
+                    heiler_class=h_class, evidence=h_ev,
+                    source=kb.HEILER_SOURCE_RELEASE_GATE, blocked=True,
+                    escalation_event_id=esc_event_id,
+                ),
+            )
     except Exception:
         _log.warning("could not record operator_escalation for %s",
                      task_id, exc_info=True)

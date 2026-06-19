@@ -1495,6 +1495,42 @@ def test_release_gate_executor_persistent_red_escalates(kanban_home):
     assert child.status == "blocked"
 
 
+def test_release_gate_escalation_writes_inline_heiler_classification(kanban_home):
+    """ESCALATION-INLINE-CLASSIFY-S1 (defense-in-depth): persistent-red release
+    gate classifies atomically AT the escalation site. Exactly one
+    heiler_classification, referencing the escalation event, tagged with the
+    inline release-gate source, with a belegter (signal-source) evidence
+    reference (AC-2). No classify_escalations_sweep poll required, and the sweep
+    then adds nothing because the escalation is already paired."""
+    with kb.connect() as conn:
+        _, child_id, root = _make_release_gate_child(conn)
+        result = kwt.execute_release_gate(
+            conn, child_id,
+            gate_runner=lambda: (False, "tests failed: AssertionError"),
+            fixer_runner=lambda **kw: None,
+            max_retries=0,
+        )
+        events = kb.list_events(conn, child_id)
+        escalations = [
+            e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        heilers = [
+            e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+        # pre-existing safety net must be a no-op now that we classify inline
+        summary = kb.classify_escalations_sweep(conn)
+
+    assert result["status"] == "escalated"
+    assert len(escalations) == 1
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == escalations[0].id
+    assert heilers[0].payload["source"] == kb.HEILER_SOURCE_RELEASE_GATE
+    assert heilers[0].payload["class"] in kb.HEILER_CLASSES
+    assert heilers[0].payload["blocked"] is True
+    assert heilers[0].payload["evidence"].get("signal_source")
+    assert summary["classified"] == []
+
+
 def test_release_gate_executor_max_retries_zero_immediate_escalation(kanban_home):
     """max_retries=0 -> red gate escalates immediately, no fixer."""
     fixer_calls = []

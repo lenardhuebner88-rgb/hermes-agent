@@ -2697,6 +2697,14 @@ HEILER_CLASSIFICATION_CORRECTED_EVENT = "heiler_classification_corrected"
 # sites use their function name ("record_task_failure" / "stall_park"); the
 # safety-net sweep tags itself so the ledger shows backfilled vs atomic.
 HEILER_SOURCE_ESCALATION_SWEEP = "escalation_sweep"
+# Inline source tags for the two escalation write paths that historically left
+# classification to the safety-net sweep (ESCALATION-INLINE-CLASSIFY-S1). They
+# now classify atomically at the write site (defense-in-depth, not a duplicate
+# of the sweep), so the Stratege gets immediately-complete cause evidence
+# instead of a poll-dependent approximation. The release-gate writer lives in
+# ``kanban_worktrees`` but tags itself here so all source vocabulary is colocated.
+HEILER_SOURCE_BUDGET_RUNAWAY = "budget_runaway_park"
+HEILER_SOURCE_RELEASE_GATE = "release_gate_escalation"
 # Source tag on an ``operator_escalation`` payload emitted by the silent-block
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
@@ -11014,12 +11022,31 @@ def _park_budget_runaway(
             conn, task_id, BUDGET_RUNAWAY_PARKED_EVENT,
             {"input_token_sum": token_sum, "cap": cap, "runs": runs},
         )
-        _append_event(
+        esc_payload = _budget_runaway_escalation_payload(
+            row=fresh, token_sum=token_sum, cap=cap, runs=runs,
+        )
+        esc_event_id = _append_event(
             conn,
             task_id,
             OPERATOR_ESCALATION_EVENT,
-            _budget_runaway_escalation_payload(
-                row=fresh, token_sum=token_sum, cap=cap, runs=runs,
+            esc_payload,
+        )
+        # ESCALATION-INLINE-CLASSIFY-S1: classify the runaway into the structured
+        # ledger atomically, in this same txn, instead of leaving it for the
+        # poll-driven classify_escalations_sweep. Derive the class from the
+        # escalation's own persisted evidence via the exact same deterministic
+        # function the sweep uses (_classify_escalation_payload), so an inline
+        # classification is byte-identical to a swept one — defense-in-depth, no
+        # divergence, no second vocabulary, no guess (AC-2 ledger reference).
+        h_class, h_ev = _classify_escalation_payload(esc_payload)
+        _append_event(
+            conn,
+            task_id,
+            HEILER_CLASSIFICATION_EVENT,
+            _heiler_classification_payload(
+                heiler_class=h_class, evidence=h_ev,
+                source=HEILER_SOURCE_BUDGET_RUNAWAY, blocked=True,
+                escalation_event_id=esc_event_id,
             ),
         )
         return True
@@ -11535,14 +11562,19 @@ def classify_escalations_sweep(
     """Safety net guaranteeing every operator_escalation gets a paired
     heiler_classification — the Stratege's ``by_class`` input.
 
-    The inline failure/park paths classify atomically at the escalation site,
-    but not every escalation writer does (the release-gate and budget-runaway
-    paths do not), and a future path could forget. That fragility is exactly
-    why the live ledger starved: 9 escalations in a week, 0 classifications.
-    This deterministic, idempotent sweep closes the gap regardless of call
-    site: it scans operator_escalation events not yet referenced by any
-    heiler_classification and emits one, deriving the class from the
-    escalation's own evidence (:func:`_classify_escalation_payload`).
+    Every *known* escalation writer now classifies atomically at the escalation
+    site — the failure breaker, the stall park, the budget-runaway park
+    (:func:`_park_budget_runaway`) and the release-gate
+    (``kanban_worktrees._escalate_release_gate``), the last two closed by
+    ESCALATION-INLINE-CLASSIFY-S1. This sweep remains the deterministic,
+    idempotent safety net for a forgotten/legacy/future writer (the fragility
+    that once starved the live ledger to 0 classifications across 9 weekly
+    escalations) and for the silent-block sweep, which emits escalations a tick
+    earlier. It closes the gap regardless of call site: it scans
+    operator_escalation events not yet referenced by any heiler_classification
+    and emits one, deriving the class from the escalation's own evidence
+    (:func:`_classify_escalation_payload`) — the same derivation the inline
+    writers use, so a backfilled class is byte-identical to an inline one.
 
     Idempotent: the emitted classification carries ``escalation_event_id``, so
     a re-run skips every escalation already classified (inline or swept). Each
