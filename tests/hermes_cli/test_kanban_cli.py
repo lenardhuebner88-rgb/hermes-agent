@@ -288,6 +288,53 @@ def test_kanban_list_json_includes_session_id(kanban_home):
     )
 
 
+def test_run_slash_assignee_filter(kanban_home):
+    """`hermes kanban list --assignee <name>` keeps only tasks whose
+    assignee/lane matches, dropping the other lanes."""
+    kc.run_slash("create 'alice lane' --assignee alice")
+    kc.run_slash("create 'bob lane' --assignee bob")
+    out = kc.run_slash("list --assignee alice")
+    assert "alice lane" in out
+    assert "bob lane" not in out
+
+
+def test_run_slash_created_by_filter(kanban_home):
+    """`hermes kanban list --created-by <author>` keeps only tasks whose
+    `created_by` exactly matches the argument (different lanes, same author)."""
+    kc.run_slash("create 'authored by alice' --created-by alice --assignee worker")
+    kc.run_slash("create 'authored by bob' --created-by bob --assignee worker")
+    out = kc.run_slash("list --created-by alice")
+    assert "authored by alice" in out
+    assert "authored by bob" not in out
+
+
+def test_run_slash_created_by_empty_result_is_clean(kanban_home):
+    """An unmatched `--created-by` yields an empty list (and `[]` for
+    `--json`), never an error."""
+    kc.run_slash("create 'present task' --created-by alice")
+    out = kc.run_slash("list --created-by nobody")
+    assert "present task" not in out
+    assert "no matching tasks" in out.lower()
+    raw = kc.run_slash("list --created-by nobody --json")
+    assert json.loads(raw) == []
+
+
+def test_run_slash_created_by_combines_with_status(kanban_home):
+    """`--created-by` composes with `--status`: a task must satisfy BOTH
+    predicates to be listed."""
+    import re
+    kc.run_slash("create 'alice ready task' --created-by alice")
+    out = kc.run_slash("create 'alice blocked task' --created-by alice")
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    kc.run_slash(f"claim {tid}")
+    kc.run_slash(f"block {tid} 'hold'")
+    kc.run_slash("create 'bob ready task' --created-by bob")
+    filtered = kc.run_slash("list --created-by alice --status ready")
+    assert "alice ready task" in filtered
+    assert "alice blocked task" not in filtered  # excluded by --status
+    assert "bob ready task" not in filtered       # excluded by --created-by
+
+
 def test_run_slash_usage_error_returns_message(kanban_home):
     # Missing required argument for create
     out = kc.run_slash("create")
