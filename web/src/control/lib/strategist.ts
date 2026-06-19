@@ -18,6 +18,9 @@ export interface StrategistProposal {
   roi: string | null;
   /** Gepaarte Counter-Metrik (Guardrail) — null when unannotated. */
   counter_metric: string | null;
+  /** Grounding-Evidenz (Code-/git-log-Beleg, STRATEGIST-SELF-GROUNDING) — null
+   *  when the strategist left it unannotated (operator-authored specs carry none). */
+  grounding: string | null;
 }
 
 export interface StrategistProposalsResponse {

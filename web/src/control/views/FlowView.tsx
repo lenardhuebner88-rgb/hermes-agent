@@ -10,7 +10,8 @@
  * exist for a stage.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, Copy, FileText, Lock, Play, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, FileText, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -1007,6 +1008,90 @@ function DeliverableOpenButton({ url, label = "öffnen" }: { url: string; label?
   );
 }
 
+// Operator-Direktive an einen Task: schreibt einen Kommentar via
+// POST /tasks/{id}/comments (Backend seit 2026-06-19). Bisher nur per CLI
+// erreichbar — diese Fläche bringt die Kurskorrektur an einen laufenden/geblockten
+// Worker ans Handy. Nach dem Posten refrescht onPosted (onGateChanged) Board +
+// Detail, der Kommentar erscheint im Live-Flow. Strings lokal (kein Edit an der
+// shared i18n/de.ts paralleler Sessions).
+const COMMENT_STRINGS = {
+  add: "Direktive / Kommentar",
+  title: "Direktive an den Worker",
+  placeholder: "z.B. Fokussiere AC-2 zuerst und ignoriere den Lint-Nit — landet als Kommentar am Task.",
+  send: "Senden",
+  sending: "sendet…",
+  sent: "gesendet",
+  cancel: "Abbrechen",
+  hint: "claude-cli-Worker lesen neue Kommentare beim nächsten Kontext-Render, Hermes-Worker sofort.",
+};
+
+function TaskCommentComposer({ taskId, onPosted }: { taskId: string; onPosted?: () => void | Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    const text = body.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await fetchJSON(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: text }),
+      });
+      setBody("");
+      setDone(true);
+      window.setTimeout(() => setDone(false), 2000);
+      await onPosted?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-3 inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--hc-border)] px-3 text-sm hc-soft transition hover:border-[var(--hc-border-strong)]"
+      >
+        <MessageSquarePlus className="h-4 w-4" />{COMMENT_STRINGS.add}
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--hc-border)] p-2.5">
+      <p className="hc-eyebrow">{COMMENT_STRINGS.title}</p>
+      <textarea
+        value={body}
+        onChange={(e) => { setBody(e.target.value); if (error) setError(null); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit(); }}
+        rows={3}
+        placeholder={COMMENT_STRINGS.placeholder}
+        className="mt-2 w-full resize-y rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2 text-sm text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+      />
+      {error ? <p className="mt-1.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
+      <div className="mt-2 flex items-center justify-end gap-2">
+        <button type="button" onClick={() => { setOpen(false); setBody(""); setError(null); }} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 text-sm hc-soft">{COMMENT_STRINGS.cancel}</button>
+        <button
+          type="button"
+          disabled={busy || !body.trim()}
+          onClick={() => void submit()}
+          className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm font-medium text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : done ? <Check className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+          {busy ? COMMENT_STRINGS.sending : done ? COMMENT_STRINGS.sent : COMMENT_STRINGS.send}
+        </button>
+      </div>
+      <p className="mt-1.5 text-[0.72rem] hc-dim">{COMMENT_STRINGS.hint}</p>
+    </div>
+  );
+}
+
 export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHED, loading, error, now, boardTasks, snapshotLabel, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
   taskId: string | null; task?: BoardTask; detail?: TaskDetailResponse; enriched?: Enriched; loading: boolean; error?: string; now: number;
   boardTasks: BoardTask[]; snapshotLabel: string; onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
@@ -1030,7 +1115,9 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
       <Eyebrow>{de.flow.selectedChain}</Eyebrow>
       <div className="mt-2">
         <p className="hc-mono hc-type-label hc-dim">{taskId}</p>
-        <p className="mt-1 text-sm font-semibold text-white">{detail?.task?.title ?? task?.title ?? ""}</p>
+        {/* Root-Titel sind oft ganze PlanSpec-Sätze — auf 3 Zeilen clampen statt
+            17-Zeilen-Wand (Sicht-Audit 2026-06-19 G); Volltext via title-Attribut. */}
+        <p title={detail?.task?.title ?? task?.title ?? ""} className="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-white">{detail?.task?.title ?? task?.title ?? ""}</p>
         {task ? (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <RoleChip role={roleChip(task.assignee, task.status === "review" ? "verification" : null)} />
@@ -1038,6 +1125,8 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
           </div>
         ) : null}
       </div>
+
+      <TaskCommentComposer taskId={taskId} onPosted={onGateChanged} />
 
       {taskId ? (
         <FlowPlanPanel
@@ -1426,7 +1515,11 @@ function FlowDetailSheet({ taskId, onClose, children }: { taskId: string; onClos
       document.body.style.overflow = prevOverflow;
     };
   }, [onClose]);
-  return (
+  return createPortal(
+    // Portal an document.body: inline säße das Sheet im Stacking-Context der View
+    // (RouteTransition/.hc-hero) — sein z-50 zählte nur dort und der body-Level
+    // Capture-FAB (z-40) malte darüber (Screenshot-Audit 2026-06-19).
+    <div data-control className="contents">
     <div className="fixed inset-0 z-50 xl:hidden">
       <button type="button" aria-label={de.flow.detailClose} onClick={onClose} className="absolute inset-0 bg-black/60" />
       <div
@@ -1449,6 +1542,8 @@ function FlowDetailSheet({ taskId, onClose, children }: { taskId: string; onClos
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{children}</div>
       </div>
     </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1916,7 +2011,7 @@ export function FlowView() {
             {projects.length > 1 ? (
               // Mobil eine wischbare Zeile statt vieler Wrap-Zeilen (das
               // Chip-Feld wuchs auf ~8 Zeilen); ab sm wie gehabt umbrechend.
-              <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0 sm:pb-0">
+              <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [mask-image:linear-gradient(to_right,#000_88%,transparent)] sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0 sm:pb-0 sm:[mask-image:none]">
                 <span className="hc-eyebrow mr-1 shrink-0">{de.flow.projects}</span>
                 {[{ key: "all", label: de.flow.projectAll, count: allTasks.filter((t) => t.status !== "archived").length }, ...projects].map((p) => (
                   <button

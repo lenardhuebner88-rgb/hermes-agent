@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { FileText, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
@@ -13,14 +15,27 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
   error: string | null;
   onClose: () => void;
 }) {
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="PlanSpec Details">
-      <div className="flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--hc-border)] bg-[var(--hc-surface)] shadow-2xl">
+  // Portal an document.body + Escape/Scroll-Lock: inline gerendert säße der Drawer
+  // im Stacking-Context von FlowView/RouteTransition — sein z-50 zählte nur dort,
+  // und der body-Level Capture-FAB (z-40) malte darüber (Screenshot-Audit
+  // 2026-06-19). Am body steht z-50 wieder über allem Chrome.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  const content = (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/50 p-3 backdrop-blur-sm" role="presentation" onClick={onClose}>
+      <div className="flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--hc-border)] bg-[var(--hc-surface)] shadow-2xl" role="dialog" aria-modal="true" aria-label="PlanSpec Details" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
           <FileText className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" />
           <div className="min-w-0 flex-1">
             <Eyebrow>PlanSpec</Eyebrow>
-            <h2 className="mt-1 break-words text-lg font-semibold text-white">{item.topic}</h2>
+            {/* Topics sind oft ganze Sätze — als Titel auf 3 Zeilen clampen
+                (der Volltext steht ungekürzt in der „Ziel"-Sektion unten). */}
+            <h2 title={item.topic} className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-white">{item.topic}</h2>
             <p className="mt-1 break-all hc-mono text-[0.72rem] hc-dim">{item.path}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5" aria-label="PlanSpec schließen">
@@ -80,4 +95,11 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
       </div>
     </div>
   );
+  // SSR-/Static-Render-sicher: ohne DOM (renderToStaticMarkup im Test) inline
+  // rendern; im Browser an document.body portalen, damit das z-50 über FAB/Glocke
+  // und allem View-Chrome liegt (sonst im Stacking-Context von FlowView gefangen).
+  if (typeof document === "undefined") return content;
+  // data-control (display:contents): außerhalb des [data-control]-Scopes wären
+  // die --hc-*-Tokens unaufgelöst — gleiche Technik wie Overlay/FlowCapture.
+  return createPortal(<div data-control className="contents">{content}</div>, document.body);
 }

@@ -4,7 +4,9 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
+import type { DecisionInboxData } from "../hooks/useControlData";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
+import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
@@ -59,6 +61,8 @@ const secondaryNav = [
 interface Props {
   active: ControlTab;
   density: Density;
+  /** Decision-Inbox-Stand für die Glocke (Browser-Notifications) im Header. */
+  inbox: DecisionInboxData;
   openProposals: number;
   /** Total deduped decision-inbox count — badged on the Postfach tab from anywhere. */
   inboxTotal: number;
@@ -104,7 +108,7 @@ export function ControlShell(props: Props) {
   return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
 }
 
-function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   // "Mehr" lebt auf Mobile als 5. Bottom-Tab + Bottom-Sheet (Audit 2026-06-11,
   // M3 Variante A) — das Header-Dropdown ist dort zu hoch und schloss sich beim
   // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
@@ -114,7 +118,7 @@ function ShellAiry({ active, children, openProposals, inboxTotal, inboxTone, lib
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
-        <div className="flex flex-wrap justify-end gap-2"><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
+        <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
         <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} onNavigate={onNavigate} onPrefetch={onPrefetch} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
@@ -149,7 +153,7 @@ function MoreSheet({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0">
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
@@ -164,7 +168,7 @@ function ShellCompact({ active, children, openProposals, inboxTotal, inboxTone, 
       <div className="min-w-0 px-6 py-5">
         <header className="mb-5 flex items-center justify-between gap-3">
           <div><p className="hc-eyebrow">Hermes Control</p><h1 className="mt-1 text-xl font-semibold text-white">{tabs.find((t) => t.id === active)?.label}</h1></div>
-          <div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div>
+          <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><StatusDots health={health} /></div>
         </header>
         <main>{children}</main>
       </div>

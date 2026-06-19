@@ -15,6 +15,7 @@ const proposal = (over: Partial<StrategistProposal> = {}): StrategistProposal =>
   target_metric: "Autonomie-% 62 → 75",
   roi: "hoch",
   counter_metric: "Fehl-Eskalations-Rate < 5%",
+  grounding: null,
   ...over,
 });
 
@@ -31,6 +32,20 @@ describe("ProposalList", () => {
     // Action buttons present (idle state).
     expect(html).toContain("Freigeben");
     expect(html).toContain("Verwerfen");
+  });
+
+  it("renders the grounding evidence when the strategist annotated it", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[proposal({ grounding: "git log + grep belegen: kein vorhandenes Ziel" })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html).toContain("Grounding-Beleg");
+    expect(html).toContain("git log + grep belegen");
   });
 
   it("shows the unannotated note and em-dashes when annotations are absent", () => {

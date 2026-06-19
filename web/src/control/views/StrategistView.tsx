@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Gauge, Lightbulb, Rocket, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
+import { Gauge, Lightbulb, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
@@ -36,6 +36,7 @@ const t = {
   targetLabel: "Ziel",
   roiLabel: "ROI",
   counterLabel: "Gegen-Metrik",
+  groundingLabel: "Grounding-Beleg",
   unannotated: "ohne Annotation",
   subtasks: (n: number) => `${n} ${n === 1 ? "Teilaufgabe" : "Teilaufgaben"}`,
   approve: "Freigeben → bauen",
@@ -176,7 +177,7 @@ export function ProposalList({
     <ul className="space-y-1.5">
       {proposals.map((p) => {
         const isPending = pending?.id === p.id ? pending : null;
-        const annotated = p.target_metric || p.roi || p.counter_metric;
+        const annotated = p.target_metric || p.roi || p.counter_metric || p.grounding;
         return (
           <li key={p.id} className="rounded-md border border-[var(--hc-accent-border)] px-3 py-2.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -196,6 +197,12 @@ export function ProposalList({
               <AnnotationCell icon={<TrendingUp className="h-3 w-3" />} label={t.roiLabel} value={p.roi} />
               <AnnotationCell icon={<ShieldAlert className="h-3 w-3" />} label={t.counterLabel} value={p.counter_metric} />
             </div>
+            {p.grounding ? (
+              <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5 text-[0.74rem] hc-soft">
+                <ScrollText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                <span><span className="hc-eyebrow mr-1.5">{t.groundingLabel}</span>{p.grounding}</span>
+              </p>
+            ) : null}
             {!annotated ? <p className="mt-1 text-[0.72rem] hc-dim">{t.unannotated}</p> : null}
 
             <div className="mt-2 flex flex-wrap items-center gap-2">

@@ -73,16 +73,18 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
   };
 
   return (
+    // Inline-Button im Shell-Header (nicht mehr schwebend): der frühere
+    // `fixed`-FAB überlagerte auf Mobil Karten/Sheets und kollidierte mit dem
+    // Capture-FAB (der 9.5rem-Stack-Hack). Im Header rechts ist auf Mobil ohnehin
+    // Platz (CommandButton/MoreNav/StatusDots sind dort versteckt).
     <button
       type="button"
       onClick={() => void toggle()}
       title={enabled ? "Browser-Benachrichtigungen aus" : "Browser-Benachrichtigungen an"}
       aria-pressed={enabled}
       className={cn(
-        // 9.5rem: über dem mobilen Capture-FAB (5rem–8.5rem) — vorher lag die
-        // Glocke AUF dem FAB und fing dessen Taps ab (Audit 2026-06-11, F3).
-        "fixed bottom-[calc(9.5rem+env(safe-area-inset-bottom,0px))] right-3 z-40 grid h-10 w-10 place-items-center rounded-full border text-xs shadow-xl backdrop-blur lg:bottom-4",
-        enabled ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 bg-black/30 hc-soft hover:bg-white/5",
+        "grid h-9 w-9 shrink-0 place-items-center rounded-lg border text-xs transition",
+        enabled ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:bg-white/5",
       )}
     >
       {enabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}

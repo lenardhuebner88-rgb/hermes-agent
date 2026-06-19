@@ -8,7 +8,6 @@ import { useLiveEvents } from "./hooks/useLiveEvents";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { NotificationBridge } from "./components/NotificationBridge";
 import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
 import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
@@ -207,10 +206,10 @@ export default function ControlPage() {
   return (
     <div data-control>
       <OfflineStaleBanner health={health} />
-      <NotificationBridge inbox={inbox} />
       <ControlShell
         active={active}
         density={density.density}
+        inbox={inbox}
         openProposals={proposals.openSkillProposals.length}
         inboxTotal={inbox.summary.total}
         inboxTone={inbox.worstTone}
