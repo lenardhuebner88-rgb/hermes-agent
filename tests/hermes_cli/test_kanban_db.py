@@ -10671,10 +10671,12 @@ def test_chain_cost_breakdown_null_cost_robust(kanban_home):
     assert result["totals"]["run_count"] == 1
     assert result["totals"]["input_tokens"] == 400
     assert result["totals"]["output_tokens"] == 80
-    # NULL cost → 0.0 in SUM (SQLite COALESCE behaviour for SUM of all-NULL = NULL; we normalise)
-    # We accept either 0.0 or None — implementation decides, but must not crash
-    assert result["totals"]["cost_usd"] is not None or result["totals"]["cost_usd"] is None
+    # A NULL-only cost SUM is normalised to 0.0 via COALESCE — the NULL-cost run
+    # shows up as a non-zero run_count with zero cost, never None and never a crash.
+    assert result["totals"]["cost_usd"] == 0.0
     assert len(result["by_lane"]) == 1
+    assert result["by_lane"][0]["cost_usd"] == 0.0
+    assert result["by_lane"][0]["run_count"] == 1
 
 
 def test_chain_cost_breakdown_empty_chain(kanban_home):
