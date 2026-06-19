@@ -1272,6 +1272,12 @@ def ingest_planspec(
                         *running_blockers,
                     ]
                 )
+            # NOTE: archive-then-create is not one atomic transaction (each
+            # archive_task + the new-chain INSERT carry their own write_txn). If
+            # the process dies between archiving here and creating the new root,
+            # the stale chain is archived and no new chain exists — this is
+            # RECOVERABLE: re-run ``hermes plan ingest --supersede`` (the conflict
+            # scan skips archived roots, so the new version then ingests cleanly).
             for stale_root in conflicts:
                 _archive_planspec_chain(conn, stale_root)
                 superseded.append(stale_root)

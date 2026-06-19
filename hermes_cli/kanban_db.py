@@ -3801,6 +3801,12 @@ def add_comment(
     conn: sqlite3.Connection, task_id: str, author: str, body: str,
     kind: str = "comment",
 ) -> int:
+    """Insert a comment. ``kind`` is validated against COMMENT_KINDS but is NOT
+    policy-gated here: ``kind="directive"`` carries operator-override weight and
+    MUST be cage-gated by the caller (the CLI rejects ``--directive`` when
+    HERMES_KANBAN_TASK is set). Never pass kind="directive" from a spawned-worker
+    code path — the env cage lives at the CLI layer, not in this DB function.
+    """
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
