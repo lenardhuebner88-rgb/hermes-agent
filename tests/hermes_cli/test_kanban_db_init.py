@@ -219,6 +219,58 @@ def test_kind_index_backfilled_for_pre_index_stamped_board(tmp_path, monkeypatch
     assert "idx_events_kind" in names, names
 
 
+def test_task_comments_kind_column_present(tmp_path, monkeypatch):
+    """F4: fresh DBs carry the additive ``kind`` column on task_comments,
+    defaulting to 'comment' for plain inserts."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    with kb.connect(db_path) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_comments)")}
+        assert "kind" in cols
+        # A bare INSERT (the inline-comment paths) defaults to 'comment'.
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, created_at) "
+            "VALUES ('t1', 'T', 'ready', 1)"
+        )
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES ('t1', 'a', 'b', 2)"
+        )
+        kind = conn.execute("SELECT kind FROM task_comments").fetchone()["kind"]
+    assert kind == "comment"
+
+
+def test_task_comments_kind_backfilled_for_pre_f4_stamped_board(tmp_path, monkeypatch):
+    """A board stamped by the pre-F4 schema generation (no ``kind`` column on
+    task_comments) must gain it on the next connect — otherwise connect()'s
+    fast path skips the migration and the column never lands on prod boards.
+
+    Guards the _SCHEMA_GENERATION bump that ships the kind migration."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    # Build a board, then simulate the older live shape: drop the kind column
+    # (SQLite has no DROP COLUMN pre-3.35, so rebuild the table without it) and
+    # stamp the header with a non-matching user_version.
+    with kb.connect(db_path) as conn:
+        conn.executescript(
+            """
+            ALTER TABLE task_comments RENAME TO task_comments_old;
+            CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL,
+                created_at INTEGER NOT NULL);
+            INSERT INTO task_comments (id, task_id, author, body, created_at)
+                SELECT id, task_id, author, body, created_at FROM task_comments_old;
+            DROP TABLE task_comments_old;
+            """
+        )
+        conn.execute("PRAGMA user_version = 1")  # any stamp != current
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_comments)")}
+        assert "kind" not in cols  # precondition: simulated old board
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    with kb.connect(db_path) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_comments)")}
+    assert "kind" in cols, cols
+
+
 def test_migration_is_idempotent(tmp_path, monkeypatch):
     """Re-opening an already-migrated DB is a no-op and leaves data intact."""
     db_path = _setup_home(tmp_path, monkeypatch)

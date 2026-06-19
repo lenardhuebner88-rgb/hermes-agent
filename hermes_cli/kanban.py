@@ -555,6 +555,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                            help="Author name (default: $HERMES_PROFILE or 'user')")
     p_comment.add_argument("--max-len", type=int, default=None,
                            help="Trim the stored comment body to this many characters")
+    p_comment.add_argument("--directive", action="store_true",
+                           help="Mark as an OPERATOR DIRECTIVE (kind=directive) that "
+                                "supersedes the task body in worker context. Operator-"
+                                "only: rejected inside a spawned worker (HERMES_KANBAN_TASK set).")
 
     p_complete = sub.add_parser("complete", help="Mark one or more tasks done")
     p_complete.add_argument("task_ids", nargs="+",
@@ -2381,6 +2385,20 @@ def _cmd_claim(args: argparse.Namespace) -> int:
 
 
 def _cmd_comment(args: argparse.Namespace) -> int:
+    kind = "comment"
+    if getattr(args, "directive", False):
+        # Cage model: a spawned worker (HERMES_KANBAN_TASK set in its env) must
+        # not be able to grant itself an operator directive that overrides its
+        # own task body. Only an interactive operator (no task env) may land
+        # one. See build_worker_context / _render_comment_thread.
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            print(
+                "kanban: --directive is operator-only and cannot be set from "
+                "inside a spawned worker (HERMES_KANBAN_TASK is set)",
+                file=sys.stderr,
+            )
+            return 2
+        kind = "directive"
     body = " ".join(args.text).strip()
     if args.max_len is not None:
         if args.max_len < 1:
@@ -2391,8 +2409,9 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
     with kb.connect_closing() as conn:
-        kb.add_comment(conn, args.task_id, author, body)
-    print(f"Comment added to {args.task_id}")
+        kb.add_comment(conn, args.task_id, author, body, kind=kind)
+    label = "Directive" if kind == "directive" else "Comment"
+    print(f"{label} added to {args.task_id}")
     return 0
 
 
