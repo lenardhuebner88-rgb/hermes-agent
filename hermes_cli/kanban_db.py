@@ -16242,17 +16242,33 @@ def runs_summary(
     roots: list[dict[str, Any]] = []
     cycle_times: list[int] = []
     total_cost: Optional[float] = None
+    total_cost_effective: Optional[float] = None
     for row in completed:
         if row["id"] in interior:
             continue  # rolled into its own root
         member_ids = _root_tree_member_ids(conn, row["id"])
         cost: Optional[float] = None
+        equiv: Optional[float] = None
         for mid in member_ids:
             c = task_runs_cost_usd_sum(conn, task_id=mid)
             if c is not None:
                 cost = (cost or 0.0) + c
+            # Subscription lanes stamp cost_usd=0; the API-$ estimate lives in
+            # metadata.cost_usd_equivalent (K17). Mirror runs_costs._burn.
+            e = conn.execute(
+                "SELECT SUM(json_extract(metadata, '$.cost_usd_equivalent')) "
+                "FROM task_runs WHERE task_id = ?",
+                (mid,),
+            ).fetchone()[0]
+            if e is not None:
+                equiv = (equiv or 0.0) + float(e)
         if cost is not None:
             total_cost = (total_cost or 0.0) + cost
+        # Effective = real + estimated; None only when neither was recorded.
+        cost_effective: Optional[float] = None
+        if cost is not None or equiv is not None:
+            cost_effective = (cost or 0.0) + (equiv or 0.0)
+            total_cost_effective = (total_cost_effective or 0.0) + cost_effective
         cycle_time = None
         if row["created_at"] is not None:
             delta = int(row["completed_at"]) - int(row["created_at"])
@@ -16266,6 +16282,7 @@ def runs_summary(
             "assignee": row["assignee"],
             "completed_at": int(row["completed_at"]),
             "cost_usd": cost,
+            "cost_effective_usd": cost_effective,
             "cycle_time_seconds": cycle_time,
             "subtask_count": max(0, len(member_ids) - 1),
         })
@@ -16276,6 +16293,7 @@ def runs_summary(
         "now": now,
         "completed_roots": len(roots),
         "total_cost_usd": total_cost,
+        "total_cost_effective_usd": total_cost_effective,
         "cycle_time_p50_seconds": _nearest_rank_percentile(cycle_times, 50),
         "cycle_time_p90_seconds": _nearest_rank_percentile(cycle_times, 90),
         "roots": roots[: max(0, int(max_roots))],

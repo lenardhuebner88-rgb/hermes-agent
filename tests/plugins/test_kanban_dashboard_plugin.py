@@ -837,6 +837,34 @@ def test_runs_summary_groups_completed_tree_by_root(client, kanban_home):
     assert "total_cost_usd" in data
 
 
+def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_home):
+    """K7: runs_summary surfaces cost_effective_usd (real cost_usd +
+    metadata.cost_usd_equivalent) so subscription chains (cost_usd=0) do not
+    read as free."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="subscription ship", triage=True)
+        (child,) = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "sub-build", "assignee": "claude-cli", "parents": []}],
+            author="decomposer",
+        )
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn, child, profile="claude-cli",
+                input_tokens=900, output_tokens=180,
+                cost_usd=0.0, metadata={"cost_usd_equivalent": 0.42},
+            )
+        kb.complete_task(conn, child, summary="built")
+        kb.complete_task(conn, root, summary="merged")
+
+    data = client.get("/api/plugins/kanban/runs/summary?since_hours=24").json()
+    assert "total_cost_effective_usd" in data
+    assert data["total_cost_effective_usd"] == pytest.approx(0.42)
+    only = next(r for r in data["roots"] if r["id"] == root)
+    assert only["cost_usd"] == pytest.approx(0.0)
+    assert only["cost_effective_usd"] == pytest.approx(0.42)
+
+
 def test_runs_summary_empty_window(client):
     """K7: with nothing completed, the summary is well-formed and empty."""
     data = client.get("/api/plugins/kanban/runs/summary?since_hours=1").json()
