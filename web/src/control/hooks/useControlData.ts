@@ -21,6 +21,7 @@ import {
   RunsDailyResponseSchema,
   RunsCostsResponseSchema,
   ChainCompletionResponseSchema,
+  ChainCostsResponseSchema,
   BoardStatsResponseSchema,
   RunsIssuesResponseSchema,
   DecisionQueueResponseSchema,
@@ -42,7 +43,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1440,6 +1441,57 @@ export function useBoardStats() {
     ),
     60000,
   );
+}
+
+// Kosten-Rollup pro Kette: GET /tasks/{id}/chain-costs.
+// Nullable taskId → kein Fetch (kein Selektor aktiv). Interval 30 s — Aggregate
+// ändern sich seltener als Heartbeats, häufiger als Tages-Statistiken.
+export function useHermesChainCosts(taskId: string | null) {
+  const [data, setData] = useState<ChainCostsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const aliveRef = useRef(true);
+  const inFlightRef = useRef(false);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const reload = useCallback(async (): Promise<ChainCostsResponse | null> => {
+    if (!taskId) {
+      if (aliveRef.current) setData(null);
+      return null;
+    }
+    inFlightRef.current = true;
+    if (aliveRef.current) setLoading(true);
+    try {
+      const parsed = parseOrThrow(
+        ChainCostsResponseSchema,
+        await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/chain-costs`),
+        "chain-costs",
+      );
+      if (aliveRef.current) {
+        setData(parsed);
+        setError("");
+      }
+      return parsed;
+    } catch (e) {
+      const detail = extractDetail(e);
+      if (aliveRef.current) setError(detail);
+      return null;
+    } finally {
+      inFlightRef.current = false;
+      if (aliveRef.current) setLoading(false);
+    }
+  }, [taskId]);
+  useEffect(() => {
+    const initial = window.setTimeout(() => { void reload(); }, 0);
+    if (!taskId) return () => window.clearTimeout(initial);
+    const interval = window.setInterval(() => {
+      if (!document.hidden && !inFlightRef.current) void reload();
+    }, 30000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [taskId, reload]);
+  return { data, loading, error, reload };
 }
 
 // ST4 (Statistik-Broadsheet): wiederkehrende Fehler für die Fehler-Taxonomie —

@@ -23,6 +23,9 @@ function makeNode(
     runtime_seconds: null,
     progress: null,
     latest_run: null,
+    cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
     ...extra,
   };
 }

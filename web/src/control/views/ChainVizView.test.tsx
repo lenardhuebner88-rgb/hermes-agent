@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
+import { ChainNodeCard } from "./ketten/ChainNodeCard";
 import { buildChains } from "../lib/fleet";
 import { fmtAge } from "../lib/derive";
 import { de } from "../i18n/de";
@@ -56,6 +57,9 @@ function makeNode(
     runtime_seconds: null,
     progress: null,
     latest_run: null,
+    cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
     ...extra,
   };
 }
@@ -197,6 +201,67 @@ describe("ChainSelector + KettenGraph integration", () => {
       // Source contract: mobile-first flex-col, horizontal split gated behind lg:.
       expect(src).toMatch(/flex-col[^"]*\blg:flex-row\b/);
     });
+  });
+});
+
+// ── Cost badge on ChainNodeCard ─────────────────────────────────────────────
+describe("ChainNodeCard cost badge", () => {
+  it("renders '—' when cost_usd===0 and tokens===0 (no data)", () => {
+    const node = makeNode("n1", "done");
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
+    // The badge shows "—" when there are no cost data.
+    expect(html).toContain("—");
+  });
+
+  it("renders dollar amount when cost_usd > 0", () => {
+    const node = makeNode("n2", "done", { cost_usd: 0.42, input_tokens: 1000, output_tokens: 500 });
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
+    expect(html).toContain("$0.42");
+    // total 1500 tokens → "2 k tok"
+    expect(html).toMatch(/\bk\b/);
+  });
+
+  it("renders token count even when cost_usd===0 (subscription lane)", () => {
+    const node = makeNode("n3", "running", { cost_usd: 0, input_tokens: 50000, output_tokens: 10000 });
+    const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
+    // 60000 tokens → "60 k tok"
+    expect(html).toContain("60 k tok");
+  });
+
+  it("ChainGraphNode type has cost_usd, input_tokens, output_tokens fields", () => {
+    const n = makeNode("nx", "todo", { cost_usd: 1.23, input_tokens: 999, output_tokens: 1 });
+    expect(n.cost_usd).toBe(1.23);
+    expect(n.input_tokens).toBe(999);
+    expect(n.output_tokens).toBe(1);
+  });
+});
+
+// ── Statistik-Tab: ChainCostsSection source-contract ────────────────────────
+describe("ChainCostsSection source contract", () => {
+  const statsSrc = readFileSync(
+    fileURLToPath(new URL("./StatistikView.tsx", import.meta.url)),
+    "utf8",
+  );
+  const hooksSrc = readFileSync(
+    fileURLToPath(new URL("../hooks/useControlData.ts", import.meta.url)),
+    "utf8",
+  );
+
+  it("StatistikView uses useHermesChainCosts hook", () => {
+    expect(statsSrc).toMatch(/useHermesChainCosts/);
+  });
+
+  it("StatistikView renders ChainCostsSection", () => {
+    expect(statsSrc).toMatch(/ChainCostsSection/);
+  });
+
+  it("hook fetches chain-costs endpoint", () => {
+    expect(hooksSrc).toMatch(/chain-costs/);
+  });
+
+  it("StatistikView uses summaryRoots from useHermesRunSummary", () => {
+    expect(statsSrc).toMatch(/summaryRoots/);
+    expect(statsSrc).toMatch(/summary\.data/);
   });
 });
 

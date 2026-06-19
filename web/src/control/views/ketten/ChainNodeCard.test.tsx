@@ -18,6 +18,9 @@ const node: ChainGraphNode = {
   runtime_seconds: 125,
   progress: null,
   latest_run: null,
+  cost_usd: 0,
+  input_tokens: 0,
+  output_tokens: 0,
 };
 
 describe("ChainNodeCard", () => {

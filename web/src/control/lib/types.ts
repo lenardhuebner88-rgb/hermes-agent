@@ -252,6 +252,30 @@ export interface ChainGraphNode {
    *  or the backend does not (yet) emit it — the card degrades gracefully. */
   progress: { done: number; total: number } | null;
   latest_run: ChainGraphRun | null;
+  /** Kosten-Felder — additiv (K7); ältere Payloads liefern 0 via zod-catch. */
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface ChainCostsLane {
+  profile: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  run_count: number;
+}
+
+export interface ChainCostsResponse {
+  schema: string;
+  root_id: string;
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    run_count: number;
+  };
+  by_lane: ChainCostsLane[];
 }
 
 export interface ChainGraphEdge {

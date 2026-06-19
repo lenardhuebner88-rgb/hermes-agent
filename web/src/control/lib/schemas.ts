@@ -258,6 +258,10 @@ const ChainGraphNodeSchema = z.object({
   runtime_seconds: z.coerce.number().nullable().catch(null),
   progress: z.object({ done: z.coerce.number().catch(0), total: z.coerce.number().catch(0) }).nullable().catch(null),
   latest_run: ChainGraphRunSchema.nullable().catch(null),
+  // K7 cost fields — additiv; ältere Payloads ohne diese Felder liefern 0.
+  cost_usd: z.coerce.number().catch(0),
+  input_tokens: z.coerce.number().catch(0),
+  output_tokens: z.coerce.number().catch(0),
 });
 
 export const ChainGraphResponseSchema = z.object({
@@ -267,6 +271,30 @@ export const ChainGraphResponseSchema = z.object({
   nodes: z.array(ChainGraphNodeSchema).catch([]),
   edges: z.array(z.object({ from: z.string().catch(""), to: z.string().catch("") })).catch([]),
 });
+
+// GET /tasks/{task_id}/chain-costs — Kosten-Rollup je Kette + by_lane-Aufschlüsselung.
+const ChainCostsLaneSchema = z.object({
+  profile: z.string().catch("unbekannt"),
+  input_tokens: z.coerce.number().catch(0),
+  output_tokens: z.coerce.number().catch(0),
+  cost_usd: z.coerce.number().catch(0),
+  run_count: z.coerce.number().catch(0),
+});
+
+export const ChainCostsResponseSchema = z.object({
+  schema: z.string().catch("kanban-chain-costs-v1"),
+  root_id: z.string().catch(""),
+  totals: z.object({
+    input_tokens: z.coerce.number().catch(0),
+    output_tokens: z.coerce.number().catch(0),
+    cost_usd: z.coerce.number().catch(0),
+    run_count: z.coerce.number().catch(0),
+  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, run_count: 0 }),
+  // absteigend nach cost_usd (Backend-Garantie)
+  by_lane: z.array(ChainCostsLaneSchema).catch([]),
+});
+export type ChainCostsLane = z.infer<typeof ChainCostsLaneSchema>;
+export type ChainCostsResponse = z.infer<typeof ChainCostsResponseSchema>;
 
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),

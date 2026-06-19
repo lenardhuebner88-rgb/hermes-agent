@@ -779,5 +779,16 @@ export const de = {
     progressOf: (done: number, total: number) => `${done} von ${total} Subtasks`,
     waitingOnPredecessor: "Wartet auf Vorgänger",
     checkedAt: (label: string) => `aktualisiert vor ${label}`,
+    costNone: "keine Kostendaten",
+    // Statistik-Tab: Kosten pro Kette
+    chainCostsTitle: "Kosten pro Kette",
+    chainCostsMeta: "abgeschlossene Roots · Gesamt$ + Token-Aufschlüsselung je Lane",
+    chainCostsEmpty: "Noch keine abgeschlossenen Ketten mit Kostenstempel.",
+    chainCostsColChain: "Kette",
+    chainCostsColCost: "Gesamt $",
+    chainCostsColTokens: "Tokens",
+    chainCostsColRuns: "Runs",
+    chainCostsLaneTitle: "Kosten je Lane",
+    chainCostsLoadError: "Kosten konnten nicht geladen werden.",
   },
 } as const;

@@ -15,13 +15,14 @@
  *
  * Mobil-first: the column is capped at 27rem and reads top-to-bottom at 390px.
  */
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import {
   useAccountUsage,
   useBoardStats,
   useChainCompletion,
+  useHermesChainCosts,
   useHermesReliability,
   useHermesRunsCosts,
   useHermesRunsDaily,
@@ -30,10 +31,12 @@ import {
 } from "../hooks/useControlData";
 import type {
   AccountUsageProvider,
+  ChainCostsResponse,
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
+  RunSummaryRoot,
 } from "../lib/schemas";
 import {
   BroadsheetShell,
@@ -310,6 +313,147 @@ export function EffizienzSection({
   );
 }
 
+// ── Kosten pro Kette ─────────────────────────────────────────────────────────
+// Tabelle der abgeschlossenen Ketten (aus RunSummary.roots). Bei Auswahl einer
+// Zeile wird die by_lane-Aufschlüsselung via useHermesChainCosts geladen.
+
+function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
+  const { by_lane, totals } = costs;
+  if (by_lane.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      <p className="text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
+        {de.ketten.chainCostsLaneTitle}
+      </p>
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b border-[var(--hc-border)] text-left text-[10px] text-[var(--hc-text-dim)]">
+            <th className="py-1 pr-2 font-normal">Lane</th>
+            <th className="py-1 pr-2 text-right font-normal">{de.ketten.chainCostsColTokens}</th>
+            <th className="py-1 pr-2 text-right font-normal">{de.ketten.chainCostsColCost}</th>
+            <th className="py-1 text-right font-normal">{de.ketten.chainCostsColRuns}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {by_lane.map((l) => (
+            <tr key={l.profile} className="border-b border-[var(--hc-border)] last:border-0">
+              <td className="hc-mono py-1 pr-2 text-[var(--hc-text)]">{l.profile}</td>
+              <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
+                {fmtTokens(l.input_tokens + l.output_tokens)}
+              </td>
+              <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
+                ${l.cost_usd.toFixed(2)}
+              </td>
+              <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{l.run_count}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t-2 border-[var(--hc-border-strong)] text-xs font-semibold">
+            <td className="py-1 pr-2 text-[var(--hc-text-dim)]">Gesamt</td>
+            <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
+              {fmtTokens(totals.input_tokens + totals.output_tokens)}
+            </td>
+            <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
+              ${totals.cost_usd.toFixed(2)}
+            </td>
+            <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{totals.run_count}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
+function ChainCostsRow({
+  root,
+  selected,
+  onSelect,
+}: {
+  root: RunSummaryRoot;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const chainCosts = useHermesChainCosts(selected ? root.id : null);
+  const totalTokens = chainCosts.data
+    ? chainCosts.data.totals.input_tokens + chainCosts.data.totals.output_tokens
+    : null;
+
+  return (
+    <div className="border-b border-[var(--hc-border)] last:border-0">
+      <button
+        type="button"
+        className="flex w-full min-w-0 items-start justify-between gap-2 py-2 text-left text-xs hover:bg-[var(--hc-hover)] active:bg-[var(--hc-hover)]"
+        onClick={() => onSelect(root.id)}
+        aria-expanded={selected}
+      >
+        <span className="min-w-0 flex-1 truncate text-[var(--hc-text)]">
+          {root.title ?? root.id}
+        </span>
+        <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text-soft)]">
+          {totalTokens != null ? fmtTokens(totalTokens) : "—"}
+        </span>
+        <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text)]">
+          {root.cost_usd != null ? `$${root.cost_usd.toFixed(2)}` : "—"}
+        </span>
+        <span
+          aria-hidden="true"
+          className="shrink-0 text-[var(--hc-text-dim)] transition-transform"
+          style={{ transform: selected ? "rotate(90deg)" : "rotate(0deg)" }}
+        >
+          ›
+        </span>
+      </button>
+      {selected ? (
+        <div className="pb-2">
+          {chainCosts.loading && !chainCosts.data ? (
+            <p className="text-[11px] text-[var(--hc-text-dim)]">lädt …</p>
+          ) : chainCosts.error ? (
+            <p className="text-[11px] text-red-600">{de.ketten.chainCostsLoadError}</p>
+          ) : chainCosts.data ? (
+            <ChainCostsLaneTable costs={chainCosts.data} />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ChainCostsSection({ roots }: { roots: RunSummaryRoot[] }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  function handleSelect(id: string) {
+    setSelectedId((prev) => (prev === id ? null : id));
+  }
+
+  return (
+    <>
+      <SectionRule title={de.ketten.chainCostsTitle} meta={de.ketten.chainCostsMeta} />
+      {roots.length === 0 ? (
+        <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
+      ) : (
+        <div className="hc-surface-card overflow-hidden rounded-lg border border-[var(--hc-border)] px-3">
+          {/* Kopfzeile */}
+          <div className="flex min-w-0 items-center gap-2 border-b border-[var(--hc-border)] py-1.5 text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
+            <span className="flex-1">{de.ketten.chainCostsColChain}</span>
+            <span className="hc-mono w-16 text-right">{de.ketten.chainCostsColTokens}</span>
+            <span className="hc-mono w-16 text-right">{de.ketten.chainCostsColCost}</span>
+            <span className="w-4" />
+          </div>
+          {roots.map((r) => (
+            <ChainCostsRow
+              key={r.id}
+              root={r}
+              selected={selectedId === r.id}
+              onSelect={handleSelect}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function StatistikView() {
   const reliability = useHermesReliability();
   const summary = useHermesRunSummary();
@@ -327,6 +471,7 @@ export function StatistikView() {
   const issueGroups = useMemo(() => issues.data?.issues ?? [], [issues.data]);
   const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
+  const summaryRoots = useMemo(() => summary.data?.roots ?? [], [summary.data]);
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
@@ -359,6 +504,9 @@ export function StatistikView() {
         chainRate={chain.data?.chain_completion_rate ?? null}
         queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
       />
+
+      {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
+      <ChainCostsSection roots={summaryRoots} />
 
       <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
     </BroadsheetShell>
