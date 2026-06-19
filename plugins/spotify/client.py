@@ -386,19 +386,20 @@ def normalize_spotify_id(value: str, expected_type: Optional[str] = None) -> str
     cleaned = (value or "").strip()
     if not cleaned:
         raise SpotifyError("Spotify id/uri/url is required.")
-    if cleaned.startswith("spotify:"):
+    expected_type_normalized = expected_type.lower() if expected_type else None
+    if cleaned.lower().startswith("spotify:"):
         parts = cleaned.split(":")
         if len(parts) >= 3:
-            item_type = parts[1]
-            if expected_type and item_type != expected_type:
+            item_type = parts[1].lower()
+            if expected_type_normalized and item_type != expected_type_normalized:
                 raise SpotifyError(f"Expected a Spotify {expected_type}, got {item_type}.")
             return parts[2]
-    if "open.spotify.com" in cleaned:
-        parsed = urlparse(cleaned)
+    parsed = urlparse(cleaned)
+    if parsed.netloc.lower() == "open.spotify.com":
         path_parts = [part for part in parsed.path.split("/") if part]
         if len(path_parts) >= 2:
-            item_type, item_id = path_parts[0], path_parts[1]
-            if expected_type and item_type != expected_type:
+            item_type, item_id = path_parts[0].lower(), path_parts[1]
+            if expected_type_normalized and item_type != expected_type_normalized:
                 raise SpotifyError(f"Expected a Spotify {expected_type}, got {item_type}.")
             return item_id
     return cleaned
@@ -408,15 +409,18 @@ def normalize_spotify_uri(value: str, expected_type: Optional[str] = None) -> st
     cleaned = (value or "").strip()
     if not cleaned:
         raise SpotifyError("Spotify URI/url/id is required.")
-    if cleaned.startswith("spotify:"):
-        if expected_type:
-            parts = cleaned.split(":")
-            if len(parts) >= 3 and parts[1] != expected_type:
-                raise SpotifyError(f"Expected a Spotify {expected_type}, got {parts[1]}.")
+    expected_type_normalized = expected_type.lower() if expected_type else None
+    if cleaned.lower().startswith("spotify:"):
+        parts = cleaned.split(":")
+        if len(parts) >= 3:
+            item_type = parts[1].lower()
+            if expected_type_normalized and item_type != expected_type_normalized:
+                raise SpotifyError(f"Expected a Spotify {expected_type}, got {item_type}.")
+            return f"spotify:{item_type}:{parts[2]}"
         return cleaned
     item_id = normalize_spotify_id(cleaned, expected_type)
     if expected_type:
-        return f"spotify:{expected_type}:{item_id}"
+        return f"spotify:{expected_type_normalized}:{item_id}"
     return cleaned
 
 

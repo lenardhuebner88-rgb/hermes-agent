@@ -73,6 +73,19 @@ def test_normalize_spotify_uri_accepts_urls() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        "Spotify:Track:7ouMYWpwJ422jRcDASZB7P",
+        "https://open.spotify.com/Track/7ouMYWpwJ422jRcDASZB7P",
+    ],
+)
+def test_normalize_spotify_uri_accepts_mixed_case_types(value: str) -> None:
+    uri = spotify_mod.normalize_spotify_uri(value, "track")
+
+    assert uri == "spotify:track:7ouMYWpwJ422jRcDASZB7P"
+
+
+@pytest.mark.parametrize(
     ("status_code", "path", "payload", "expected"),
     [
         (
