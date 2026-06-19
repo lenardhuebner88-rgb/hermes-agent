@@ -632,3 +632,77 @@ def test_cli_release_gate_precondition_error_exit_one(kanban_home, monkeypatch, 
     rc = kc.kanban_command(_release_gate_args("t_gate"))
     assert rc == 1
     assert "not a release-gate child" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# respec CLI smoke tests (kanban respec <id> --body/--ac)
+# ---------------------------------------------------------------------------
+
+def _respec_parser():
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    return parser
+
+
+def test_respec_cli_updates_body(kanban_home, capsys):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="old")
+    parser = _respec_parser()
+    args = parser.parse_args(["kanban", "respec", tid, "--body", "new body"])
+    rc = kc.kanban_command(args)
+    assert rc == 0
+    assert "Respecified" in capsys.readouterr().out
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).body == "new body"
+
+
+def test_respec_cli_rejects_running_task(kanban_home, capsys):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="old")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        conn.commit()
+    parser = _respec_parser()
+    args = parser.parse_args(["kanban", "respec", tid, "--body", "nope"])
+    rc = kc.kanban_command(args)
+    assert rc == 1
+    assert "cannot respec" in capsys.readouterr().err
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).body == "old"
+
+
+def test_respec_cli_requires_a_field(kanban_home, capsys):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="old")
+    parser = _respec_parser()
+    args = parser.parse_args(["kanban", "respec", tid])
+    rc = kc.kanban_command(args)
+    assert rc == 2
+    assert "--body and/or --ac" in capsys.readouterr().err
+
+
+def test_respec_cli_bad_ac_reports_error(kanban_home, capsys):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="old")
+    parser = _respec_parser()
+    args = parser.parse_args(["kanban", "respec", tid, "--ac", "just prose"])
+    rc = kc.kanban_command(args)
+    assert rc == 1
+    # The ValueError message surfaces via the dispatch wrapper.
+    assert "AC-" in capsys.readouterr().err
+
+
+def test_respec_cli_updates_acceptance_criteria(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="old")
+    parser = _respec_parser()
+    args = parser.parse_args(
+        ["kanban", "respec", tid, "--ac", "- AC-1: do the thing"]
+    )
+    assert kc.kanban_command(args) == 0
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT acceptance_criteria FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+    parsed = json.loads(row["acceptance_criteria"])
+    assert any("do the thing" in str(i) for i in parsed)

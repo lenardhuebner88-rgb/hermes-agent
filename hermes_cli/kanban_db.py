@@ -7919,6 +7919,112 @@ def _parse_acceptance_criteria(body: Optional[str]) -> Optional[str]:
         return None
 
 
+# Statuses whose ``body`` / ``acceptance_criteria`` may be re-specified in
+# place by :func:`respec_task`. This is an ALLOWLIST (not a denylist) so a
+# future status defaults to rejected: ``running``/``review`` are excluded
+# because a worker or the verifier is actively executing against the current
+# spec, and ``done``/``archived`` are terminal.
+RESPEC_ALLOWED_STATUSES = {"triage", "todo", "scheduled", "ready", "blocked"}
+
+
+def respec_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    body: Optional[str] = None,
+    acceptance_criteria: Optional[str] = None,
+    author: Optional[str] = None,
+) -> bool:
+    """Re-specify the ``body`` / ``acceptance_criteria`` of a non-running task.
+
+    The editable sibling of :func:`specify_triage_task`: where ``specify``
+    only touches a ``triage`` row (and promotes it to ``todo``), ``respec``
+    rewrites an already-specified task's ``body`` and/or structured
+    ``acceptance_criteria`` *in place* WITHOUT changing its column. This is the
+    supported way to re-fass a task whose spec turned out wrong — previously
+    the only recourse was completing the stale task and re-creating it from
+    scratch (the "Kanban-Task neu fassen" lesson).
+
+    Status guard (:data:`RESPEC_ALLOWED_STATUSES`, an allowlist): only a task
+    in ``triage``/``todo``/``scheduled``/``ready``/``blocked`` may be edited.
+    ``running``/``review`` are excluded (a worker / the verifier is mid-flight
+    against the current spec), ``done``/``archived`` are terminal, and any
+    other status defaults to rejected. Returns ``False`` (touching nothing)
+    for an unknown id or a guarded status — the caller should surface that as
+    "cannot respec" rather than raising.
+
+    ``acceptance_criteria`` is passed as free-form ``AC-<id>: …`` bullet text
+    and normalized through the same parser ``decompose`` uses, so the stored
+    value stays the structured JSON the verifier checklist reads. Non-blank AC
+    text that yields no recognizable bullet raises ``ValueError`` rather than
+    silently clearing the column.
+
+    Mirroring ``specify``: ``author`` is recorded on an audit comment and the
+    ``respecified`` event payload only when at least one field actually
+    changed — passing identical values is a successful no-op with no spam.
+    """
+    with write_txn(conn):
+        existing = conn.execute(
+            "SELECT status, body, acceptance_criteria FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if existing is None:
+            return False
+        if existing["status"] not in RESPEC_ALLOWED_STATUSES:
+            return False
+        sets: list[str] = []
+        params: list[Any] = []
+        changed_fields: list[str] = []
+        if body is not None and (body or "") != (existing["body"] or ""):
+            sets.append("body = ?")
+            params.append(body)
+            changed_fields.append("body")
+        if acceptance_criteria is not None:
+            ac_json = _parse_acceptance_criteria(acceptance_criteria)
+            if ac_json is None and acceptance_criteria.strip():
+                raise ValueError(
+                    "acceptance_criteria has no recognizable 'AC-<id>: …' "
+                    "bullet — refusing to clear the criteria silently"
+                )
+            if (ac_json or None) != (existing["acceptance_criteria"] or None):
+                sets.append("acceptance_criteria = ?")
+                params.append(ac_json)
+                changed_fields.append("acceptance_criteria")
+        if not sets:
+            # Editable status, but nothing to change (no fields given, or all
+            # identical). A successful no-op — no UPDATE, comment, or event.
+            return True
+        params.append(task_id)
+        cur = conn.execute(
+            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+        if cur.rowcount != 1:
+            return False
+        if changed_fields and author and author.strip():
+            # Inline INSERT (rather than ``add_comment``) because we're already
+            # inside this write_txn — a nested BEGIN IMMEDIATE would raise. We
+            # also skip the 'commented' event add_comment emits, since the
+            # 'respecified' event below already records the change.
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    author.strip(),
+                    "Respecified — updated " + ", ".join(changed_fields) + ".",
+                    int(time.time()),
+                ),
+            )
+        _append_event(
+            conn,
+            task_id,
+            "respecified",
+            {"changed_fields": changed_fields} if changed_fields else None,
+        )
+    return True
+
+
 def decompose_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
