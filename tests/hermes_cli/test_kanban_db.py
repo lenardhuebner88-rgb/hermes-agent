@@ -5730,6 +5730,87 @@ def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
     assert markers[0].payload["action"] == "nudged"
 
 
+def test_4a_scheduled_overdue_skips_operator_held_chain(kanban_home):
+    # A freigabe:operator PlanSpec chain is held in 'scheduled' for explicit
+    # operator release (propose-and-wait). The no-silent-stall sweep must NOT
+    # mistake that intentional hold for a stall and nudge it live — neither the
+    # held root NOR its held build children (a dep-free build child would
+    # dispatch behind the operator's back if nudged to ready). Built via the
+    # REAL decompose topology (links: parent_id=child, child_id=root), not a
+    # hand-rolled link, so the child->root walk is exercised in production shape.
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="held root", assignee="orchestrator", triage=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET freigabe = 'operator' WHERE id = ?", (root,)
+            )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "build child"}],
+            initial_child_status="scheduled",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+        build_child = child_ids[0]
+
+        # Real F1 hold: both root and build child land held in 'scheduled'.
+        assert kb.get_task(conn, root).status == "scheduled"
+        assert kb.get_task(conn, build_child).status == "scheduled"
+
+        # Age past the no-silent-stall window — both the 'scheduled' event and the
+        # created_at fallback the sweep reads, so age is never the reason to skip.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id IN (?, ?) AND kind = 'scheduled'",
+                (now - 7200, root, build_child),
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id IN (?, ?)",
+                (now - 7200, root, build_child),
+            )
+
+        summary = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        root_task = kb.get_task(conn, root)
+        child_task = kb.get_task(conn, build_child)
+
+    # The intentional hold survived: neither root nor child was nudged.
+    assert root_task.status == "scheduled"
+    assert child_task.status == "scheduled"
+    # Recorded as a deliberate skip, not a self-heal.
+    assert root in summary.get("skipped_held", [])
+    assert build_child in summary.get("skipped_held", [])
+    assert summary["self_healed"] == []
+
+
+def test_4a_scheduled_overdue_skips_ui_real_held_root(kanban_home):
+    # The ui-real operator hold (Phase 4 A) shares the scheduled-park mechanism
+    # and must be exempt from the stall nudge for the same reason.
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="ui-real held root", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET live_test_depth = 'ui-real' WHERE id = ?",
+                (root,),
+            )
+        assert kb.schedule_task(conn, root, reason="ui-real hold") is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = 'scheduled'",
+                (now - 7200, root),
+            )
+        summary = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        root_task = kb.get_task(conn, root)
+
+    assert root_task.status == "scheduled"
+    assert root in summary.get("skipped_held", [])
+    assert summary["self_healed"] == []
+
+
 def test_4a_decompose_failure_parks_once_and_skips_funnel_root(kanban_home):
     now = 1_900_000_000
     with kb.connect() as conn:

@@ -10675,6 +10675,54 @@ def _is_funnel_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
     )
 
 
+def _is_operator_held(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    """True when this ``scheduled`` task belongs to a chain still held for an
+    explicit operator release — a ``freigabe: operator`` or ``ui-real`` PlanSpec
+    root, or a child held under such a still-scheduled root.
+
+    The no-silent-stall sweep must never mistake that intentional hold
+    (propose-and-wait / ui-real) for a stall and nudge it live — that would
+    dispatch a held proposal behind the operator's back. Mirrors the
+    dispatcher's decompose-time hold gate (``_held_for_operator``). A released
+    chain leaves ``scheduled`` (root -> todo), so any member still in
+    ``scheduled`` is by definition still held.
+    """
+
+    def _held(r: sqlite3.Row) -> bool:
+        keys = r.keys()
+        freigabe = str(
+            (r["freigabe"] if "freigabe" in keys else "") or ""
+        ).strip().lower()
+        depth = str(
+            (r["live_test_depth"] if "live_test_depth" in keys else "") or ""
+        ).strip().lower()
+        return freigabe == "operator" or depth == "ui-real"
+
+    if _held(row):
+        return True
+    # Held build children carry no freigabe of their own. In the decompose
+    # topology the link is (parent_id=build_child, child_id=root) — the root
+    # *waits on* its children — so the root is reached via child_ids(child),
+    # NOT parent_ids (mirrors release_freigabe_hold's parent_ids(root) for the
+    # inverse lookup). Exempt the child only while its held root is itself still
+    # scheduled (a released root has left 'scheduled').
+    seen = set()
+    frontier = [row["id"]]
+    while frontier:
+        cur = frontier.pop()
+        for rid in child_ids(conn, cur):
+            if rid in seen:
+                continue
+            seen.add(rid)
+            rrow = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (rid,)
+            ).fetchone()
+            if rrow is not None and rrow["status"] == "scheduled" and _held(rrow):
+                return True
+            frontier.append(rid)
+    return False
+
+
 def _latest_event_at(
     conn: sqlite3.Connection,
     task_id: str,
@@ -11035,6 +11083,7 @@ def no_silent_stall_sweep(
         "self_healed": [],
         "parked": [],
         "skipped_funnel": [],
+        "skipped_held": [],
         "integration_retried": [],
     }
 
@@ -11050,6 +11099,10 @@ def no_silent_stall_sweep(
     ).fetchall():
         if _is_funnel_root_task(conn, row):
             summary["skipped_funnel"].append(row["id"])
+            continue
+        if _is_operator_held(conn, row):
+            # Intentional propose-and-wait / ui-real hold — not a stall.
+            summary["skipped_held"].append(row["id"])
             continue
         stall_class = "scheduled_overdue"
         reason = "scheduled task exceeded no-silent-stall age window"
