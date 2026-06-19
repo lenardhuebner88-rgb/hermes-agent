@@ -4196,6 +4196,61 @@ def test_flow_release_applies_lane_override_and_records_release_level(client):
     assert release_events[-1].payload["released_ids"] == child_ids
 
 
+def test_flow_release_clears_freigabe_operator_hold_at_root(client):
+    """A freigabe:operator root released via the flow gate must leave the held
+    state exactly like release_freigabe_hold does. Otherwise it stays
+    scheduled+freigabe=operator and keeps masquerading as a pending proposal in
+    held_operator_proposals — and stays veto/approve-able, which would archive
+    or double-release an already-building chain. Regression for the two-release-
+    paths invariant gap (freigabe path vs flow-gate path diverged on the root)."""
+    from hermes_cli import strategist_surface
+
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn:
+        # Model a real held freigabe:operator proposal: root parked in scheduled.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='scheduled', freigabe='operator' WHERE id=?",
+                (root,),
+            )
+        # Pre: it surfaces as a held operator proposal (scheduled + freigabe).
+        assert any(p["id"] == root for p in strategist_surface.held_operator_proposals(conn))
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200, r.text
+    assert r.json()["released"] == 3
+
+    with kb.connect() as conn:
+        # Root flipped scheduled -> todo (mirrors release_freigabe_hold) ...
+        assert kb.get_task(conn, root).status == "todo", kb.get_task(conn, root).status
+        # ... so it is no longer a held proposal ...
+        assert not any(p["id"] == root for p in strategist_surface.held_operator_proposals(conn))
+        # ... and the release is recorded as a freigabe release.
+        kinds = [e.kind for e in kb.list_events(conn, root)]
+        assert "freigabe_released" in kinds
+
+
+def test_flow_release_leaves_non_freigabe_root_scheduled(client):
+    """A plain flow-capture root (no freigabe:operator) is NOT promoted by the
+    flow gate — release_freigabe_hold is a no-op for it. Only its children are
+    released; the root keeps waking on child completion. Guards the fix's blast
+    radius so it touches operator-held roots only."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (root,))
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200 and r.json()["released"] == 3
+
+    with kb.connect() as conn:
+        # No freigabe:operator hold -> release_freigabe_hold is a no-op: the root
+        # stays scheduled and no freigabe release is recorded.
+        assert kb.get_task(conn, root).status == "scheduled"
+        kinds = [e.kind for e in kb.list_events(conn, root)]
+        assert "freigabe_released" not in kinds
+
+
 def test_flow_gate_sizing_merge_and_split_before_release(client):
     root, child_ids = _setup_gated_root()
 

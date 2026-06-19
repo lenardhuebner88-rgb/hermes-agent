@@ -5808,6 +5808,16 @@ def _release_flow_gate(
             "reason": reason,
         },
     )
+    # If this flow-capture root is ALSO a freigabe:operator hold, releasing its
+    # children via the flow gate must clear the operator hold at the root too —
+    # otherwise the root stays scheduled+freigabe=operator and keeps masquerading
+    # as a pending proposal in held_operator_proposals (and stays approve/veto-
+    # able, which would archive or double-release this already-building chain).
+    # release_freigabe_hold flips the root scheduled->todo + records
+    # freigabe_released exactly as the F1 strategist-approve path does; it is a
+    # no-op for a non-operator root, and the children are already unblocked above
+    # so its own child loop finds nothing scheduled (no double-release).
+    kanban_db.release_freigabe_hold(conn, root_id, author="flow-gate")
     return {
         "ok": True,
         "task_id": root_id,
