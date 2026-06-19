@@ -285,8 +285,14 @@ def _escalation_rate_metric(
     """Eskalations-Rate (per week) ↔ counter 'silent_blocks'.
 
     Headline = count of ``operator_escalation`` events inside the window.
-    Counter = currently-blocked tasks that have NO escalation event — blocks
-    that never surfaced to the operator (the escalation rate's dark figure).
+    Counter = *settled* blocked tasks (the self-healing retry lane is done with
+    them) that have NO escalation event — blocks that bypass the operator while
+    looking like progress from outside (SILENT-BLOCK-GUARD-S1). Transient blocks
+    the auto-retry lane is still working are excluded: they are being handled, so
+    they are not "silent", and escalating them would flood the operator (AC-2).
+    Computed via :func:`kb.silent_block_task_ids`, the same predicate
+    :func:`kb.escalate_silent_blocks_sweep` uses to fix the gap, so the metric
+    converges to 0 within one dispatcher tick and the two cannot drift.
     """
     window = window_days * DAY_SECONDS
     row = conn.execute(
@@ -296,11 +302,13 @@ def _escalation_rate_metric(
     ).fetchone()
     escalations = int(row["n"] or 0) if row else 0
 
-    escalated = _tasks_with_operator_escalation(conn)
-    blocked_rows = conn.execute(
-        "SELECT id FROM tasks WHERE status = 'blocked'"
-    ).fetchall()
-    silent = sum(1 for r in blocked_rows if r["id"] not in escalated)
+    # Uses the auto-retry defaults (== live config: failure_limit/backoff/
+    # retry_limit), so the settled set matches what the dispatcher sweep
+    # computes. If those config values ever diverge from the defaults, this
+    # headline could mis-count boundary cases briefly (it is a measurement that
+    # converges within a tick, not a gate) — feed the config in here if exactness
+    # matters then.
+    silent = len(kb.silent_block_task_ids(conn, now=now))
     return {
         "escalations_per_week": escalations,
         "window_days": window_days,
@@ -308,8 +316,9 @@ def _escalation_rate_metric(
             "name": "silent_blocks",
             "value": silent,
             "description": (
-                "blocked tasks with no operator_escalation event — "
-                "escalations that did not happen"
+                "settled blocked tasks (self-healer done) with no "
+                "operator_escalation event — blocks that bypass the operator; "
+                "transient self-healing retries are excluded"
             ),
         },
     }

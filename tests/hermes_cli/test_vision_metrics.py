@@ -74,6 +74,16 @@ def _add_run(conn, tid, *, cost_usd=None, started_at=1_000, ended_at=1_000,
     conn.commit()
 
 
+def _add_blocked_run(conn, tid, *, summary="boom", ended_at):
+    """A finished blocked run the auto-retry lane keys off of."""
+    conn.execute(
+        "INSERT INTO task_runs (task_id, status, outcome, started_at, "
+        "ended_at, summary) VALUES (?, 'blocked', 'blocked', ?, ?, ?)",
+        (tid, ended_at - 10, ended_at, summary),
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Autonomy metric + paired counter
 # ---------------------------------------------------------------------------
@@ -138,7 +148,38 @@ def test_escalation_rate_window_and_silent_blocks_counter(conn):
     assert e["escalations_per_week"] == 3
     assert e["window_days"] == 7
     assert e["counter"]["name"] == "silent_blocks"
-    assert e["counter"]["value"] == 1  # B1
+    assert e["counter"]["value"] == 1  # B1 (settled: no blocked run to retry)
+
+
+def test_silent_blocks_settled_counts_then_zeroed_by_guard_sweep(conn):
+    """A settled block is silent until the guard sweep surfaces it; afterwards
+    the metric reads 0 — the guard drives silent_blocks to 0 (AC-1)."""
+    now = 100 * DAY
+    _add_task(conn, "S1", status="blocked", completed_at=None)  # no blocked run
+
+    before = vm.compute_metrics_snapshot(conn, now=now)
+    assert before["metrics"]["escalation_rate"]["counter"]["value"] == 1
+
+    kb.escalate_silent_blocks_sweep(conn, now=now)
+
+    after = vm.compute_metrics_snapshot(conn, now=now)
+    assert after["metrics"]["escalation_rate"]["counter"]["value"] == 0
+
+
+def test_silent_blocks_excludes_transient_self_healing_retry(conn):
+    """A retryable block the auto-retry lane is still working is NOT silent and
+    is NOT escalated by the guard — transient retries must not flood the
+    operator (AC-2)."""
+    now = 100 * DAY
+    _add_task(conn, "TR", status="blocked", completed_at=None)
+    _add_blocked_run(conn, "TR", summary="transient MCP unavailable",
+                     ended_at=now - 60)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now)
+    assert snap["metrics"]["escalation_rate"]["counter"]["value"] == 0
+
+    res = kb.escalate_silent_blocks_sweep(conn, now=now)
+    assert res["escalated"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -2697,6 +2697,10 @@ HEILER_CLASSIFICATION_CORRECTED_EVENT = "heiler_classification_corrected"
 # sites use their function name ("record_task_failure" / "stall_park"); the
 # safety-net sweep tags itself so the ledger shows backfilled vs atomic.
 HEILER_SOURCE_ESCALATION_SWEEP = "escalation_sweep"
+# Source tag on an ``operator_escalation`` payload emitted by the silent-block
+# safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
+# is done with but that never raised an escalation on its own block path.
+SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
 HEILER_CLASS_TRANSIENT = "transient"
 HEILER_CLASS_FLAKY = "flaky"
 HEILER_CLASS_REAL_BUG = "real-bug"
@@ -11585,6 +11589,221 @@ def classify_escalations_sweep(
                 "escalation_event_id": esc_id,
                 "class": h_class,
             })
+    return summary
+
+
+def _self_heal_grace_seconds(backoff_seconds: int, retry_limit: int) -> int:
+    """Upper bound on how long the auto-retry lane could plausibly take to work
+    a block through its whole budget (backoff × every attempt, with slack).
+
+    Past this, a task that is *still* blocked is no longer being self-healed —
+    the lane is disabled (``auto_retry_blocked: false``), stuck, or skipping it —
+    so it must surface even if it still looks retry-eligible on paper. This keeps
+    the silent-block guarantee independent of the dispatcher config.
+    """
+    return max(0, int(backoff_seconds)) * (max(0, int(retry_limit)) + 2)
+
+
+def _block_is_settled(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    now: int,
+    retry_limit: int,
+    failure_limit: int,
+    backoff_seconds: int,
+) -> bool:
+    """True when the self-healing retry lane will not (further) move a blocked
+    task, so it genuinely needs the operator (SILENT-BLOCK-GUARD-S1).
+
+    The inverse — a retryable block still inside its retry budget and recent
+    enough that :func:`auto_retry_blocked_tasks` is plausibly still working it —
+    is a *transient* block, deliberately NOT escalated (AC-2: "transiente
+    Selbstheilungs-Retries lösen keine Eskalation aus"). The settled cases mirror
+    exactly the conditions under which the auto-retry lane gives up or never
+    acts, so the guard and the lane cannot disagree about a task.
+    """
+    # Funnel roots are draft containers the auto-retry lane explicitly skips;
+    # a blocked one is stuck and needs a human.
+    if _is_funnel_root_task(conn, row):
+        return True
+    blocked_run = _latest_blocked_run_for_auto_retry(conn, row["id"])
+    if blocked_run is None:
+        # No blocked run for the lane to act on (contract/integration park,
+        # never-claimed block, raw status flip): self-healing cannot move it.
+        return True
+    reason = (
+        (blocked_run["summary"] or "").strip()
+        or (blocked_run["error"] or "").strip()
+    )
+    if _blocked_kind_for_auto_retry(reason) != "retryable":
+        # operator_question: the lane skips it → it needs a human answer now.
+        return True
+    failures = int(row["consecutive_failures"] or 0)
+    task_limit = row["max_retries"] if "max_retries" in row.keys() else None
+    effective_failure_limit = (
+        int(task_limit) if task_limit is not None else int(failure_limit)
+    )
+    if failures >= effective_failure_limit:
+        return True  # circuit breaker tripped → lane skips it
+    auto_retry_count = (
+        int(row["auto_retry_count"] or 0)
+        if "auto_retry_count" in row.keys() else 0
+    )
+    if auto_retry_count >= int(retry_limit):
+        return True  # retry budget exhausted → lane gives up
+    ended_at = int(blocked_run["ended_at"] or 0)
+    grace = _self_heal_grace_seconds(backoff_seconds, retry_limit)
+    if ended_at and int(now) - ended_at > grace:
+        return True  # lane had ample time and didn't move it (off/stuck)
+    return False
+
+
+def silent_block_task_ids(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    retry_limit: int = DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
+    backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+) -> list[str]:
+    """The 'silent block' set: *settled* blocked tasks (see
+    :func:`_block_is_settled`) that carry no ``operator_escalation`` event.
+
+    Single source of truth shared by :func:`escalate_silent_blocks_sweep` (which
+    fixes the gap by emitting the missing escalation) and the vision
+    ``silent_blocks`` metric (which measures it), so the guard and the metric can
+    never drift: every id the metric counts is one the sweep will escalate, so
+    the metric converges to 0 within one dispatcher tick.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    escalated = {
+        r["task_id"]
+        for r in conn.execute(
+            "SELECT DISTINCT task_id FROM task_events WHERE kind = ?",
+            (OPERATOR_ESCALATION_EVENT,),
+        ).fetchall()
+    }
+    rows = conn.execute(
+        "SELECT id, created_by, consecutive_failures, max_retries, "
+        "auto_retry_count FROM tasks WHERE status = 'blocked'"
+    ).fetchall()
+    out: list[str] = []
+    for row in rows:
+        if row["id"] in escalated:
+            continue
+        if _block_is_settled(
+            conn, row, now=ts, retry_limit=retry_limit,
+            failure_limit=failure_limit, backoff_seconds=backoff_seconds,
+        ):
+            out.append(row["id"])
+    return out
+
+
+def _silent_block_escalation_payload(
+    *, row: sqlite3.Row, reason: str, blocked_kind: str,
+) -> dict:
+    """``operator_escalation`` payload for a settled silent block.
+
+    Shaped like :func:`_operator_escalation_payload` so the alert rule and the
+    classification sweep read it uniformly: ``evidence`` carries the block
+    reason as ``last_error`` + ``trigger_outcome='blocked'`` so
+    :func:`_classify_escalation_payload` lands it in the same Heiler vocabulary.
+    """
+    auto_retry_count = (
+        int(row["auto_retry_count"] or 0)
+        if "auto_retry_count" in row.keys() else 0
+    )
+    return {
+        "task": {
+            "id": row["id"],
+            "title": row["title"] if "title" in row.keys() else None,
+            "status": row["status"] if "status" in row.keys() else None,
+            "assignee": row["assignee"] if "assignee" in row.keys() else None,
+        },
+        "why_now": (
+            "settled block with no operator_escalation — the self-healing "
+            "retry lane will not (further) act on it"
+        ),
+        "attempts_already_made": auto_retry_count,
+        "evidence": {
+            "trigger_outcome": "blocked",
+            "last_error": (reason or "")[:500],
+            "blocked_kind": blocked_kind,
+            "source": SILENT_BLOCK_ESCALATION_SOURCE,
+        },
+        "recommended_human_action": (
+            "inspect the task, answer any operator question, and decide whether "
+            "to unblock/reassign/close — the worker loop cannot proceed alone"
+        ),
+        "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+    }
+
+
+def escalate_silent_blocks_sweep(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    retry_limit: int = DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
+    backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+) -> dict:
+    """Safety net guaranteeing no *settled* block stays silent (AC-1).
+
+    Most block-writing paths (``block_task``, integration/contract parks, the
+    iteration-budget cap, the recoverable crash flip) transition a task to
+    ``blocked`` without emitting ``operator_escalation`` — only the failure
+    circuit-breaker, the stall park and the budget-runaway park do. A block that
+    never escalates "looks like progress from the outside" while nobody is
+    pulled in. This deterministic, idempotent sweep closes the gap regardless of
+    call site: every blocked task the self-healing lane is done with gets an
+    ``operator_escalation`` event, so the ``silent_blocks`` metric → 0.
+
+    It deliberately leaves transient blocks alone (see :func:`_block_is_settled`)
+    so self-healing retries do not flood the operator (AC-2), and is idempotent
+    (a task that already escalated is never re-escalated). Mirrors
+    :func:`classify_escalations_sweep`: wired into the dispatcher tick just
+    *before* it, so each newly-surfaced escalation is also classified the same
+    tick. Safe to call from a cron or by hand — a pure DB sweep.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    summary: dict = {"checked_at": ts, "escalated": []}
+    ids = silent_block_task_ids(
+        conn, now=ts, retry_limit=retry_limit,
+        failure_limit=failure_limit, backoff_seconds=backoff_seconds,
+    )
+    if not ids:
+        return summary
+    with write_txn(conn):
+        for tid in ids:
+            row = conn.execute(
+                "SELECT id, title, status, assignee, auto_retry_count "
+                "FROM tasks WHERE id = ?",
+                (tid,),
+            ).fetchone()
+            if row is None or row["status"] != "blocked":
+                continue  # unblocked between the scan and this txn
+            blocked_run = _latest_blocked_run_for_auto_retry(conn, tid)
+            run_id = (
+                int(blocked_run["id"]) if blocked_run is not None else None
+            )
+            reason = ""
+            if blocked_run is not None:
+                reason = (
+                    (blocked_run["summary"] or "").strip()
+                    or (blocked_run["error"] or "").strip()
+                )
+            blocked_kind = _blocked_kind_for_auto_retry(reason)
+            _append_event(
+                conn, tid, OPERATOR_ESCALATION_EVENT,
+                _silent_block_escalation_payload(
+                    row=row, reason=reason, blocked_kind=blocked_kind,
+                ),
+                run_id=run_id,
+            )
+            summary["escalated"].append(
+                {"task_id": tid, "blocked_kind": blocked_kind}
+            )
     return summary
 
 

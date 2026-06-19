@@ -3085,6 +3085,153 @@ def test_dispatch_auto_retry_result_comment_does_not_wait_for_backoff(
 
 
 
+# ---------------------------------------------------------------------------
+# Silent-block guard (SILENT-BLOCK-GUARD-S1): escalate_silent_blocks_sweep +
+# silent_block_task_ids — every *settled* block surfaces an operator_escalation
+# (AC-1) while transient self-healing retries stay silent (AC-2).
+# ---------------------------------------------------------------------------
+
+def _operator_escalations(conn, task_id):
+    return [
+        e for e in kb.list_events(conn, task_id)
+        if e.kind == kb.OPERATOR_ESCALATION_EVENT
+    ]
+
+
+def test_silent_block_sweep_escalates_operator_question_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs op", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential should I use?")
+        # operator_question → settled, no escalation yet → silent
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        assert _operator_escalations(conn, t) == []
+
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+
+        assert [e["task_id"] for e in res["escalated"]] == [t]
+        assert len(_operator_escalations(conn, t)) == 1
+        # silent set drained + idempotent re-run adds nothing
+        assert kb.silent_block_task_ids(conn, now=base) == []
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert len(_operator_escalations(conn, t)) == 1
+
+
+def test_silent_block_sweep_skips_transient_retryable_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="transient", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="transient MCP unavailable")
+        # within retry budget + recent → the auto-retry lane is still on it
+        assert kb.silent_block_task_ids(conn, now=base) == []
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert _operator_escalations(conn, t) == []
+
+
+def test_silent_block_sweep_escalates_when_retry_budget_exhausted(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="exhausted", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="still broken")
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert len(_operator_escalations(conn, t)) == 1
+
+
+def test_silent_block_sweep_escalates_block_without_run(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="parked", assignee="alice")
+        # raw flip to blocked, no blocked run (mirrors contract/integration park)
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert len(_operator_escalations(conn, t)) == 1
+
+
+def test_silent_block_sweep_escalates_transient_past_grace(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A retryable block inside budget but blocked far longer than self-heal
+    could take (lane disabled/stuck) must still surface — the guarantee holds
+    independent of the auto_retry_blocked config flag."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stale", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="transient MCP unavailable")
+        grace = kb._self_heal_grace_seconds(
+            kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+            kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+        )
+        # still inside grace → transient, not surfaced
+        assert kb.silent_block_task_ids(conn, now=base + grace) == []
+        # past grace → settled, surfaced
+        assert kb.silent_block_task_ids(conn, now=base + grace + 1) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base + grace + 1)
+        assert len(_operator_escalations(conn, t)) == 1
+
+
+def test_silent_block_sweep_does_not_re_escalate_existing(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="already", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which path?")
+        kb._append_event(conn, t, kb.OPERATOR_ESCALATION_EVENT, {"why_now": "x"})
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == []
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert len(_operator_escalations(conn, t)) == 1
+
+
+def test_silent_block_sweep_escalation_gets_classified(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A swept escalation is picked up by classify_escalations_sweep the same
+    tick (the dispatcher wires the silent-block sweep just before it)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="classify", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential?")
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        kb.classify_escalations_sweep(conn, now=base)
+        classes = [
+            e for e in kb.list_events(conn, t)
+            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+        ]
+        assert len(classes) == 1
+        assert classes[0].payload.get("escalation_event_id") is not None
+
+
 def test_dispatch_max_spawn_counts_existing_running_tasks(
     kanban_home, all_assignees_spawnable
 ):

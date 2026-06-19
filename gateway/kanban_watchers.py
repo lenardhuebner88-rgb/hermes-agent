@@ -1859,6 +1859,24 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: no-silent-stall sweep failed on board %s",
                         slug, exc_info=True,
                     )
+                # Safety net: guarantee no *settled* block stays silent — every
+                # block the self-healing lane is done with gets an
+                # operator_escalation so it reaches the operator (silent_blocks
+                # metric → 0). Runs BEFORE the classification sweep so each newly
+                # surfaced escalation is also classified this same tick.
+                # Independently guarded so a sweep failure never breaks dispatch.
+                try:
+                    _kb.escalate_silent_blocks_sweep(
+                        conn,
+                        retry_limit=_kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+                        failure_limit=failure_limit,
+                        backoff_seconds=auto_retry_blocked_backoff_seconds,
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: silent-block escalation sweep "
+                        "failed on board %s", slug, exc_info=True,
+                    )
                 # Safety net: guarantee every operator_escalation gets a paired
                 # heiler_classification within one tick (the Stratege's by_class
                 # input). Independently guarded so a sweep failure never breaks
