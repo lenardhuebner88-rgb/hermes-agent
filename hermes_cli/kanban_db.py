@@ -10787,25 +10787,45 @@ def _record_task_failure(
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
+            # The gave_up event records EVERY breaker-trip cycle and is NEVER
+            # coalesced — it is the per-cycle ground truth the decision-queue
+            # counter reads, so a coalesced escalation still leaves a visible
+            # trace (nothing is silently dropped).
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
-            esc_event_id = _append_event(
-                conn,
-                task_id,
-                OPERATOR_ESCALATION_EVENT,
-                _operator_escalation_payload(
-                    task_id=task_id,
-                    row=row,
-                    failures=failures,
-                    effective_limit=effective_limit,
-                    limit_source=limit_source,
-                    error=error,
-                    outcome=outcome,
-                    event_payload_extra=event_payload_extra,
-                ),
-                run_id=run_id,
+            # ESCALATION-IDEMPOTENT-COALESCE-S1: keep the inline escalation
+            # write idempotent per Heiler class. Historically a re-dispatched
+            # root that exhausted its ladder again appended a fresh raw
+            # operator_escalation every cycle, and decision_queue's seen-set
+            # silently dropped all but the newest. Now at most ONE raw event is
+            # written per class per root: derive this failure's class from the
+            # escalation's OWN evidence (the same _classify_escalation_payload
+            # the sweep uses) and skip the append when that class already
+            # escalated. A genuinely NEW class is NOT suppressed (it stays
+            # visible); a suppressed repeat stays explicit via the gave_up count
+            # surfaced as the decision_queue counter. esc_event_id stays None on
+            # a coalesce, so the end-of-txn classification carries no escalation
+            # reference (the original escalation already has its paired one).
+            esc_payload = _operator_escalation_payload(
+                task_id=task_id,
+                row=row,
+                failures=failures,
+                effective_limit=effective_limit,
+                limit_source=limit_source,
+                error=error,
+                outcome=outcome,
+                event_payload_extra=event_payload_extra,
             )
+            new_class, _ = _classify_escalation_payload(esc_payload)
+            if new_class not in _escalated_classes_for_task(conn, task_id):
+                esc_event_id = _append_event(
+                    conn,
+                    task_id,
+                    OPERATOR_ESCALATION_EVENT,
+                    esc_payload,
+                    run_id=run_id,
+                )
             blocked = True
         else:
             # Below threshold.
@@ -12066,6 +12086,38 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
         stall_class=str(stall_class) if stall_class else None,
         reason=why_now,
     )
+
+
+def _escalated_classes_for_task(
+    conn: sqlite3.Connection, task_id: str,
+) -> dict[str, int]:
+    """Per-Heiler-class count of the raw ``operator_escalation`` events already
+    written for a task.
+
+    Each escalation's class is derived from its OWN persisted evidence via the
+    deterministic :func:`_classify_escalation_payload` — the same derivation the
+    safety-net sweep and the inline classifiers use — so the write-side
+    idempotency guard (``ESCALATION-IDEMPOTENT-COALESCE-S1``) and the read-side
+    decision-queue counter agree on what "the same class" means.
+
+    Used to keep the inline ``gave_up`` escalation write idempotent: a
+    re-dispatched root that exhausts its ladder again with a class that has
+    ALREADY escalated must not append a duplicate raw event (≤ 1 raw event per
+    class per root), while a genuinely NEW class still writes — and stays
+    visible. Pure read; safe to call inside an open ``write_txn``.
+    """
+    counts: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchall():
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except Exception:
+            payload = {}
+        cls, _ = _classify_escalation_payload(payload)
+        counts[cls] = counts.get(cls, 0) + 1
+    return counts
 
 
 def classify_escalations_sweep(
@@ -17190,6 +17242,7 @@ def decision_queue(
         age_seconds,
         suggested_command,
         operator_escalation: Optional[dict] = None,
+        extra: Optional[dict] = None,
     ):
         if task_id in seen:
             return
@@ -17204,6 +17257,8 @@ def decision_queue(
         }
         if operator_escalation is not None:
             row["operator_escalation"] = operator_escalation
+        if extra:
+            row.update(extra)
         rows.append(row)
 
     def _payload_dict(raw_payload) -> dict:
@@ -17331,7 +17386,22 @@ def decision_queue(
     except Exception:
         pass
 
+    # operator_escalation — coalesced counter view (ESCALATION-IDEMPOTENT-
+    # COALESCE-S1). Each task still surfaces its NEWEST escalation payload, but
+    # the seen-set no longer silently hides repeats: the inline write path keeps
+    # at most one raw event per Heiler class, and this read path makes the full
+    # history explicit via three additive fields —
+    #   * escalation_count   — every breaker-trip cycle of this root (incl. the
+    #                          coalesced ones); the "N escalations" signal
+    #   * escalation_classes  — the distinct classes seen, so a genuinely NEW
+    #                          class stays visible next to the newest reason
+    #   * coalesced_repeats   — how many duplicate raw events were coalesced
+    # One DESC pass folds the per-task class counts (and the newest payload),
+    # then one grouped query folds the gave_up cycle counts — no N+1.
     try:
+        esc_newest: dict[str, tuple] = {}  # task_id -> (payload, created_at, title)
+        esc_class_counts: dict[str, dict[str, int]] = {}
+        esc_funnel_skip: set[str] = set()
         for row in conn.execute(
             "SELECT e.task_id, e.payload, e.created_at, t.id, t.title, "
             "t.assignee, t.status, t.created_by "
@@ -17340,18 +17410,53 @@ def decision_queue(
             "ORDER BY e.id DESC",
             (OPERATOR_ESCALATION_EVENT,),
         ).fetchall():
-            if row["task_id"] in seen or _is_funnel_root_task(conn, row):
+            tid = row["task_id"]
+            if tid in seen or tid in esc_funnel_skip:
+                continue
+            if tid not in esc_class_counts and _is_funnel_root_task(conn, row):
+                esc_funnel_skip.add(tid)
                 continue
             payload = _payload_dict(row["payload"])
+            if tid not in esc_newest:
+                esc_newest[tid] = (payload, row["created_at"], row["title"])
+            cls, _ = _classify_escalation_payload(payload)
+            cc = esc_class_counts.setdefault(tid, {})
+            cc[cls] = cc.get(cls, 0) + 1
+        gave_up_counts: dict[str, int] = {}
+        if esc_newest:
+            ids = list(esc_newest)
+            ph = ",".join("?" for _ in ids)
+            try:
+                for gr in conn.execute(
+                    "SELECT task_id, COUNT(*) AS n FROM task_events "
+                    f"WHERE kind = 'gave_up' AND task_id IN ({ph}) "
+                    "GROUP BY task_id",
+                    ids,
+                ).fetchall():
+                    gave_up_counts[gr["task_id"]] = int(gr["n"] or 0)
+            except Exception:
+                gave_up_counts = {}
+        for tid, (payload, created_at, title) in esc_newest.items():
+            class_counts = esc_class_counts.get(tid, {})
+            raw_escalations = sum(class_counts.values())
+            # gave_up events count every inline breaker-trip cycle even when its
+            # raw escalation was coalesced; max() keeps non-gave_up escalation
+            # writers (budget-runaway / stall / release-gate) honest too.
+            escalation_count = max(raw_escalations, gave_up_counts.get(tid, 0))
             reason = (
                 str(payload.get("why_now") or "").strip()
                 or "Operator escalation pending"
             )
             _add(
-                "operator_escalation", row["task_id"], row["title"],
-                reason, _age(row["created_at"]),
-                f"hermes kanban show {row['task_id']}",
+                "operator_escalation", tid, title,
+                reason, _age(created_at),
+                f"hermes kanban show {tid}",
                 operator_escalation=payload,
+                extra={
+                    "escalation_count": escalation_count,
+                    "escalation_classes": sorted(class_counts),
+                    "coalesced_repeats": max(0, escalation_count - raw_escalations),
+                },
             )
     except Exception:
         pass

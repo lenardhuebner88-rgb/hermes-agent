@@ -6434,6 +6434,116 @@ def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
     assert "restart" not in boundary
 
 
+# ---------------------------------------------------------------------------
+# ESCALATION-IDEMPOTENT-COALESCE-S1: the inline gave_up escalation write path
+# is idempotent per Heiler class (≤ 1 raw operator_escalation event per class
+# per root), while every breaker-trip cycle still leaves a gave_up event and a
+# heiler_classification so nothing is silently dropped.
+# ---------------------------------------------------------------------------
+
+def _redispatch(conn, task_id):
+    """Simulate an operator unblock + re-dispatch: counter reset, re-claimed."""
+    assert kb.unblock_task(conn, task_id)
+    assert kb.claim_task(conn, task_id) is not None
+
+
+def test_escalation_coalesce_same_class_writes_one_raw_event(kanban_home):
+    """A re-dispatched root that exhausts its ladder again with the SAME class
+    must NOT append a duplicate raw operator_escalation event — at most one raw
+    event per class — yet every cycle still records a gave_up + classification
+    so the repetition is never invisibly dropped."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        kb.claim_task(conn, tid)
+        # cycle 1: spawn_failed -> transient class -> first escalation written
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        _redispatch(conn, tid)
+        # cycle 2: spawn_failed again -> SAME transient class -> coalesced
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom 2", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        events = kb.list_events(conn, tid)
+
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    gave_ups = [e for e in events if e.kind == "gave_up"]
+    heiler = [e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
+    # one RAW event for the (single) class — the repeat is coalesced away
+    assert len(escalations) == 1
+    # but BOTH cycles left a gave_up (the counter source) ...
+    assert len(gave_ups) == 2
+    # ... and BOTH cycles were classified into the by-class ledger (the count
+    # of reported real problems must NOT shrink because of the coalesce)
+    assert len(heiler) == 2
+
+
+def test_escalation_coalesce_new_class_stays_visible(kanban_home):
+    """A genuinely NEW failure class on the same root is NOT suppressed: it
+    writes its own raw escalation event and stays visible, while same-class
+    repeats are still coalesced to one raw event per class."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb._record_task_failure(
+            conn, tid, "spawn boom", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        _redispatch(conn, tid)
+        kb._record_task_failure(  # same transient class -> coalesced
+            conn, tid, "spawn boom 2", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        _redispatch(conn, tid)
+        kb._record_task_failure(  # NEW real-bug class -> fresh raw event
+            conn, tid, "tests failed: assertion", outcome="crashed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        events = kb.list_events(conn, tid)
+
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    gave_ups = [e for e in events if e.kind == "gave_up"]
+    classes = sorted(
+        {kb._classify_escalation_payload(e.payload or {})[0] for e in escalations}
+    )
+    assert len(gave_ups) == 3              # every cycle recorded
+    assert len(escalations) == 2           # one per class (transient + real-bug)
+    assert classes == ["real-bug", "transient"]
+
+
+def test_escalation_coalesce_decision_queue_counter(kanban_home):
+    """decision_queue surfaces the full escalation count (every cycle, incl. the
+    coalesced ones) plus the distinct classes and how many repeats were
+    coalesced — so the operator sees N escalations, nothing silently dropped."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        cycles = [
+            ("spawn boom", "spawn_failed"),       # transient
+            ("spawn boom 2", "spawn_failed"),     # same class -> coalesced
+            ("tests failed: assertion", "crashed"),  # new real-bug class
+        ]
+        for i, (err, oc) in enumerate(cycles):
+            kb.claim_task(conn, tid)
+            assert kb._record_task_failure(
+                conn, tid, err, outcome=oc, failure_limit=1,
+                release_claim=True, end_run=True,
+            )
+            if i < len(cycles) - 1:
+                assert kb.unblock_task(conn, tid)
+        result = kb.decision_queue(conn)
+
+    row = next(d for d in result["decisions"] if d["task_id"] == tid)
+    assert row["kind"] == "operator_escalation"
+    # N escalations of this root = every breaker-trip cycle, not just the raw
+    # events left in the ledger after coalescing
+    assert row["escalation_count"] == 3
+    assert sorted(row["escalation_classes"]) == ["real-bug", "transient"]
+    # one same-class duplicate was coalesced (3 cycles -> 2 raw events)
+    assert row["coalesced_repeats"] == 1
+
+
 def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):
     now = 1_900_000_000
     with kb.connect() as conn:
