@@ -3363,11 +3363,42 @@ def test_silent_block_sweep_does_not_re_escalate_existing(
         assert len(_operator_escalations(conn, t)) == 1
 
 
-def test_silent_block_sweep_escalation_gets_classified(
+def test_silent_block_sweep_writes_inline_heiler_classification(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """A swept escalation is picked up by classify_escalations_sweep the same
-    tick (the dispatcher wires the silent-block sweep just before it)."""
+    """ESCALATION-INLINE-CLASSIFY-S1 (defense-in-depth): the silent-block sweep
+    pairs a heiler_classification AT the escalation site, in the same write_txn,
+    so coverage is complete the instant the escalation is written — no separate
+    classify_escalations_sweep poll required. Exactly one classification,
+    referencing the escalation event, tagged with the inline silent-block
+    source, with a belegter (signal-source) evidence reference, not a guess
+    (AC-2)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="classify", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential?")
+        # Only the silent-block sweep runs — deliberately NOT the classify sweep.
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        esc = _escalation_event(conn, t)
+        heilers = _heiler_events(conn, t)
+
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == esc.id
+    assert heilers[0].payload["source"] == kb.HEILER_SOURCE_SILENT_BLOCK
+    assert heilers[0].payload["class"] in kb.HEILER_CLASSES
+    assert heilers[0].payload["blocked"] is True
+    assert heilers[0].payload["evidence"].get("signal_source")
+
+
+def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """The inline class is byte-identical to what the backfill sweep would
+    derive from the same persisted escalation payload (defense-in-depth, NOT
+    divergence), and classify_escalations_sweep then adds nothing because the
+    escalation is already paired."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     with kb.connect() as conn:
@@ -3375,13 +3406,16 @@ def test_silent_block_sweep_escalation_gets_classified(
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential?")
         kb.escalate_silent_blocks_sweep(conn, now=base)
-        kb.classify_escalations_sweep(conn, now=base)
-        classes = [
-            e for e in kb.list_events(conn, t)
-            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
-        ]
-        assert len(classes) == 1
-        assert classes[0].payload.get("escalation_event_id") is not None
+        esc = _escalation_event(conn, t)
+        inline = _heiler_events(conn, t)[0]
+        expected_class, _ = kb._classify_escalation_payload(esc.payload)
+
+        summary = kb.classify_escalations_sweep(conn, now=base)
+        heilers = _heiler_events(conn, t)
+
+    assert inline.payload["class"] == expected_class
+    assert summary["classified"] == []
+    assert len(heilers) == 1
 
 
 def test_dispatch_max_spawn_counts_existing_running_tasks(
@@ -9954,6 +9988,26 @@ def _heiler_events(conn, task_id):
     ]
 
 
+def _raw_escalation(conn, task_id, *, why_now="legacy escalation", evidence=None):
+    """Emit a bare ``operator_escalation`` with NO inline classification.
+
+    Stands in for a legacy/forgotten/future escalation writer the safety-net
+    ``classify_escalations_sweep`` must still cover. Every *known* inline writer
+    (failure breaker, stall park, budget-runaway park, release-gate) now
+    classifies atomically — see ESCALATION-INLINE-CLASSIFY-S1 — so the sweep's
+    own derivation can no longer be exercised through one of them.
+    """
+    payload = {
+        "task": {"id": task_id},
+        "why_now": why_now,
+        "evidence": evidence or {},
+    }
+    with kb.write_txn(conn):
+        return kb._append_event(
+            conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload,
+        )
+
+
 def test_record_task_failure_escalation_carries_escalation_event_id(kanban_home):
     """When the breaker trips, the inline heiler_classification references the
     escalation event it pairs with (the AC-2 documented ledger reference)."""
@@ -9973,16 +10027,61 @@ def test_record_task_failure_escalation_carries_escalation_event_id(kanban_home)
     assert heilers[0].payload["class"] == kb.HEILER_CLASS_REAL_BUG
 
 
-def test_classify_escalations_sweep_classifies_unpaired_escalation(kanban_home):
-    """A budget-runaway park emits operator_escalation but no inline
-    classification; the sweep backfills exactly one, referencing the
-    escalation event and deriving the class from its evidence."""
+def test_park_budget_runaway_writes_inline_heiler_classification(kanban_home):
+    """ESCALATION-INLINE-CLASSIFY-S1 (defense-in-depth): the budget-runaway park
+    classifies atomically AT the escalation site — exactly one
+    heiler_classification, referencing the escalation event, tagged with the
+    inline budget-runaway source, with a belegter (signal-source) evidence
+    reference rather than a guess (AC-2). No sweep poll required."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="runaway loop", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        parked = kb._park_budget_runaway(
+            conn, row, token_sum=5000, cap=1000, runs=3,
+        )
+        esc = _escalation_event(conn, tid)
+        heilers = _heiler_events(conn, tid)
+
+    assert parked is True
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == esc.id
+    assert heilers[0].payload["source"] == kb.HEILER_SOURCE_BUDGET_RUNAWAY
+    assert heilers[0].payload["class"] in kb.HEILER_CLASSES
+    assert heilers[0].payload["blocked"] is True
+    assert heilers[0].payload["evidence"].get("signal_source")
+
+
+def test_park_budget_runaway_inline_matches_sweep_and_sweep_skips(kanban_home):
+    """The inline class is byte-identical to what the backfill sweep would
+    derive from the same persisted payload (defense-in-depth, NOT divergence),
+    and the sweep then adds nothing because the escalation is already paired."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="runaway loop", assignee="coder")
         row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (tid,)
         ).fetchone()
         kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        esc = _escalation_event(conn, tid)
+        inline = _heiler_events(conn, tid)[0]
+        expected_class, _ = kb._classify_escalation_payload(esc.payload)
+
+        summary = kb.classify_escalations_sweep(conn)
+        heilers = _heiler_events(conn, tid)
+
+    assert inline.payload["class"] == expected_class
+    assert summary["classified"] == []
+    assert len(heilers) == 1
+
+
+def test_classify_escalations_sweep_classifies_unpaired_escalation(kanban_home):
+    """A bare escalation from a writer that did NOT classify inline gets exactly
+    one backfilled classification from the sweep, referencing the escalation
+    event and deriving the class from its evidence."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="legacy escalation", assignee="coder")
+        _raw_escalation(conn, tid, why_now="gate failed: tests failed")
         # Pre-sweep: escalation present, no classification.
         assert _heiler_events(conn, tid) == []
         esc = _escalation_event(conn, tid)
@@ -10002,11 +10101,8 @@ def test_classify_escalations_sweep_is_idempotent(kanban_home):
     """Re-running the sweep adds no second classification for the same
     escalation."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="runaway loop", assignee="coder")
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (tid,)
-        ).fetchone()
-        kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        tid = kb.create_task(conn, title="legacy escalation", assignee="coder")
+        _raw_escalation(conn, tid, why_now="merge conflict in api.ts")
         first = kb.classify_escalations_sweep(conn)
         second = kb.classify_escalations_sweep(conn)
         heilers = _heiler_events(conn, tid)
