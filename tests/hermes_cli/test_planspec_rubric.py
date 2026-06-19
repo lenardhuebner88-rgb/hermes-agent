@@ -395,6 +395,27 @@ def test_cc_instrument_in_ac_blocks(kanban_home, tmp_path: Path):
     assert _task_count() == 0
 
 
+def test_cc_instrument_cross_family_in_ac_blocks(kanban_home, tmp_path: Path):
+    # Real 2026-06-19 leak: a Claude-Code session baked "Codex-Cross-Family-Review"
+    # into a Hermes worker AC. cross-family is a CC orchestration review-ladder
+    # instrument (Claude builds → Codex reviews), NOT a Hermes lane — a headless
+    # worker can never satisfy it, so the hardener must reject it at ingest.
+    body = CLEAN.replace(
+        '        - "Verbatim AC statement that must hold for this subtask"',
+        '        - "Nach gruenen Gates: Codex-Cross-Family-Review auf den Diffs"',
+    )
+    path = _write(plans_root := tmp_path / "03-Agents", body)
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert any(
+        "CC-instrument in AC of R1-S1" in f and "cross-family" in f
+        for f in exc.value.findings
+    )
+    assert _task_count() == 0
+
+
 # ---------------------------------------------------------------------------
 # --force bypass
 # ---------------------------------------------------------------------------

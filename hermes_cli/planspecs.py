@@ -81,6 +81,12 @@ _CC_INSTRUMENT_AC_TOKENS = {
     "ui-verifier",
     "dep-scout",
     "log-analyst",
+    # cross-family review = a CC orchestration review-ladder concept (Claude
+    # builds → Codex reviews); NOT a Hermes lane. Baked into a worker AC (e.g.
+    # "Codex-Cross-Family-Review on the diffs") it is unfulfillable by a headless
+    # worker. Real leak 2026-06-19 (verifier-acceptance spec). Matches inside
+    # "codex-cross-family-review" via the \b…\b scan.
+    "cross-family",
 }
 
 # Template-residue patterns: a literal ``<…>`` angle placeholder, a TODO/FIXME/TBD
