@@ -314,6 +314,100 @@ def test_cost_per_task_sum_trend_and_counter(conn):
     assert c["trend"] == "up"
     assert c["counter"]["name"] == "tasks_without_cost_data"
     assert c["counter"]["value"] == 1  # N1
+    # coverage breakdown: 3 done, 2 metered, 0 subscription, 1 NULL
+    cov = c["coverage"]
+    assert cov["total_done"] == 3
+    assert cov["with_metered_cost"] == 2
+    assert cov["subscription_only"] == 0
+    assert cov["no_cost_data"] == 1
+    assert cov["coverage_pct"] == pytest.approx(66.7)
+
+
+def test_cost_metric_excludes_subscription_zero_from_average(conn):
+    """AC-1: subscription-stamped $0 runs are NOT averaged in (no phantom
+    drop). They are surfaced as explicit coverage, not as a $0 saving."""
+    now = 100 * DAY
+    # prior window: a real metered task @ 0.20
+    _add_task(conn, "P", status="done", completed_at=now - 9 * DAY)
+    _add_run(conn, "P", cost_usd=0.20)
+    # recent window: a real metered task @ 0.30 ...
+    _add_task(conn, "M", status="done", completed_at=now - DAY)
+    _add_run(conn, "M", cost_usd=0.30)
+    # ... plus a subscription-stamped task (two runs, both $0 -> rides quota)
+    _add_task(conn, "S", status="done", completed_at=now - DAY)
+    _add_run(conn, "S", cost_usd=0.0)
+    _add_run(conn, "S", cost_usd=0.0)
+
+    c = vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+        "metrics"]["cost_per_task"]
+
+    # average over metered (>0) tasks ONLY -> 0.30, NOT (0.30 + 0.0)/2 = 0.15
+    assert c["recent_avg_cost_per_task"] == pytest.approx(0.30)
+    assert c["prior_avg_cost_per_task"] == pytest.approx(0.20)
+    assert c["trend"] == "up"
+    assert c["pct_change"] == pytest.approx(50.0)
+    # S is subscription coverage, not a metered task
+    assert c["tasks_with_cost"] == 2  # P, M
+    assert c["coverage"]["subscription_only"] == 1
+    assert c["coverage"]["with_metered_cost"] == 2
+    # cost_usd_total unchanged by the $0 stamp (AC-2 guardrail)
+    assert c["cost_usd_total"] == pytest.approx(0.50)
+
+
+def test_cost_metric_all_subscription_recent_is_na_not_minus_100(conn):
+    """AC-1: a recent window that is *only* subscription-$0 work reports n/a,
+    never the misleading -100% 'savings' the old average manufactured."""
+    now = 100 * DAY
+    # prior window: real metered 0.20
+    _add_task(conn, "P", status="done", completed_at=now - 9 * DAY)
+    _add_run(conn, "P", cost_usd=0.20)
+    # recent window: ONLY a subscription-stamped task ($0)
+    _add_task(conn, "S1", status="done", completed_at=now - DAY)
+    _add_run(conn, "S1", cost_usd=0.0)
+
+    c = vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+        "metrics"]["cost_per_task"]
+
+    # the old code averaged 0.0 -> pct_change = -100.0; the honest answer is n/a
+    assert c["recent_avg_cost_per_task"] is None
+    assert c["trend"] == "n/a"
+    assert c["pct_change"] is None
+    assert c["coverage"]["subscription_only"] == 1
+
+
+def test_coverage_counter_unmoved_by_subscription_stamp(conn):
+    """AC-2: the coverage counter shrinks ONLY when a task gains real metered
+    cost — never merely because a NULL run was stamped $0 (subscription)."""
+    now = 100 * DAY
+    _add_task(conn, "T", status="done", completed_at=now - DAY)
+    _add_run(conn, "T", cost_usd=None)  # NULL: no cost data at all
+
+    def _cost():
+        return vm.compute_metrics_snapshot(conn, now=now, window_days=7)[
+            "metrics"]["cost_per_task"]
+
+    c0 = _cost()
+    assert c0["counter"]["value"] == 1
+    assert c0["coverage"]["no_cost_data"] == 1
+    assert c0["coverage"]["subscription_only"] == 0
+    assert c0["tasks_with_cost"] == 0
+
+    # subscription stamp: NULL -> 0.0. Coverage MUST NOT improve.
+    conn.execute("UPDATE task_runs SET cost_usd = 0.0 WHERE task_id = 'T'")
+    conn.commit()
+    c1 = _cost()
+    assert c1["counter"]["value"] == 1  # still blind to real consumption
+    assert c1["coverage"]["subscription_only"] == 1
+    assert c1["coverage"]["no_cost_data"] == 0
+    assert c1["tasks_with_cost"] == 0  # NOT magically covered
+
+    # real metered stamp: 0.0 -> 0.15. NOW coverage genuinely improves.
+    conn.execute("UPDATE task_runs SET cost_usd = 0.15 WHERE task_id = 'T'")
+    conn.commit()
+    c2 = _cost()
+    assert c2["counter"]["value"] == 0
+    assert c2["coverage"]["subscription_only"] == 0
+    assert c2["tasks_with_cost"] == 1
 
 
 # ---------------------------------------------------------------------------

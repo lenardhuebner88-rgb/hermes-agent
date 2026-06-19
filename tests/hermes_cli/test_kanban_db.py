@@ -1137,9 +1137,11 @@ def test_s1_fail_soft_missing_profile_db(kanban_home, monkeypatch):
 
 
 def test_s1_reduces_tasks_without_cost_data_metric(kanban_home, tmp_path, monkeypatch):
-    """S1 AC-1/AC-2 end-to-end: the backfill drives the vision metric
-    ``tasks_without_cost_data`` down while cost_usd_total rises only by real,
-    once-counted session cost."""
+    """S1 + COST-METRIC-INTEGRITY end-to-end: the backfill drives the vision
+    metric ``tasks_without_cost_data`` down ONLY for tasks that gained a real
+    metered cost. A subscription-``$0`` stamp is *no metered cost*, so it stays
+    inside the coverage counter (surfaced as ``subscription_only``) and
+    ``cost_usd_total`` rises only by real, once-counted session cost."""
     from hermes_cli import vision_metrics as vm
     profile_dir = tmp_path / "profiles" / "coder"
     monkeypatch.setattr(
@@ -1168,9 +1170,15 @@ def test_s1_reduces_tasks_without_cost_data_metric(kanban_home, tmp_path, monkey
         kb.backfill_run_costs_from_sessions(conn, limit=50)
 
         after = vm._cost_per_task_metric(conn, now=1600, window_days=7)
-        # cwd + subscription covered; API-billed stays blind → monotone drop.
-        assert after["counter"]["value"] == 1
+        # Only the cwd task gained a *real metered* cost and leaves the blind
+        # spot. The subscription task was stamped $0 (no metered cost) and the
+        # API-billed task stays NULL — both remain in the counter (honest
+        # coverage, not a phantom drop from hiding subscription tasks).
+        assert after["counter"]["value"] == 2
         assert after["counter"]["value"] < before["counter"]["value"]
+        assert after["tasks_with_cost"] == 1  # cwd only
+        assert after["coverage"]["subscription_only"] == 1  # t_sub, still blind
+        assert after["coverage"]["no_cost_data"] == 1  # t_api, still blind
         # cost_usd_total rose only by the one real $0.30 session.
         assert after["cost_usd_total"] == pytest.approx(0.30)
 
