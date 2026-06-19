@@ -1089,6 +1089,10 @@ class Comment:
     author: str
     body: str
     created_at: int
+    # F4: 'comment' (ordinary worker/operator note) or 'directive' (operator
+    # instruction that supersedes the task body in worker context). Defaults to
+    # 'comment' so legacy rows and the inline-INSERT paths keep pre-F4 framing.
+    kind: str = "comment"
 
 
 @dataclass
@@ -1406,7 +1410,10 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 3 (#11): idx_events_kind was added to the migration pass only (not
 # SCHEMA_SQL), so already-stamped boards must re-run the additive pass once to
 # backfill it — without this bump connect()'s fast path would skip it forever.
-_SCHEMA_GENERATION = 3
+# gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
+# only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
+# re-run the additive pass once to gain the operator-directive column.
+_SCHEMA_GENERATION = 4
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -2215,6 +2222,28 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "ON task_events(kind, task_id)"
     )
 
+    # F4: task_comments gained a ``kind`` column distinguishing operator
+    # directives ('directive') from ordinary worker/operator notes ('comment').
+    # Additive + NOT NULL with a 'comment' default so every legacy row and the
+    # inline-INSERT comment paths (which omit ``kind``) keep the pre-F4
+    # semantics. Mirrored in _REBUILD_SPECS so a rebuilt legacy table stays
+    # byte-identical to fresh, and the _SCHEMA_GENERATION bump backfills
+    # already-stamped boards — same guarantee idx_events_kind has. Guard on
+    # table existence (like the task_runs block above): the legacy/concurrent-
+    # migration path can run on a hand-built fixture that omits task_comments.
+    comments_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_comments'"
+    ).fetchone() is not None
+    if comments_table_exists:
+        comment_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_comments)")
+        }
+        if "kind" not in comment_cols:
+            _add_column_if_missing(
+                conn, "task_comments", "kind",
+                "kind TEXT NOT NULL DEFAULT 'comment'",
+            )
+
     # K5a: task_runs gained per-run token/cost accounting columns for D7 L1
     # cost observability. Additive + nullable — historical runs (and any run
     # the gateway can't attribute token usage to) stay NULL, which the
@@ -2380,7 +2409,12 @@ _REBUILD_SPECS = {
         "CREATE TABLE task_comments ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " task_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL,"
-        " created_at INTEGER NOT NULL)",
+        # ``kind`` is appended to fresh DBs by the additive F4 migration; mirror
+        # it here in the same trailing position so a rebuilt legacy
+        # task_comments stays byte-identical to fresh and doesn't silently drop
+        # operator-directive markers.
+        " created_at INTEGER NOT NULL,"
+        " kind TEXT NOT NULL DEFAULT 'comment')",
         ("CREATE INDEX idx_comments_task ON task_comments(task_id, created_at)",),
     ),
     "task_runs": (
@@ -3760,13 +3794,21 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # Comments & events
 # ---------------------------------------------------------------------------
 
+COMMENT_KINDS = ("comment", "directive")
+
+
 def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+    conn: sqlite3.Connection, task_id: str, author: str, body: str,
+    kind: str = "comment",
 ) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
+    if kind not in COMMENT_KINDS:
+        raise ValueError(
+            f"invalid comment kind {kind!r}; expected one of {COMMENT_KINDS}"
+        )
     now = int(time.time())
     with write_txn(conn):
         if not conn.execute(
@@ -3774,11 +3816,14 @@ def add_comment(
         ).fetchone():
             raise ValueError(f"unknown task {task_id}")
         cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (task_id, author.strip(), body.strip(), now),
+            "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (task_id, author.strip(), body.strip(), now, kind),
         )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
+        _append_event(
+            conn, task_id, "commented",
+            {"author": author, "len": len(body), "kind": kind},
+        )
         return int(cur.lastrowid or 0)
 
 
@@ -3815,6 +3860,9 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
             author=r["author"],
             body=r["body"],
             created_at=r["created_at"],
+            # Defensive: a connection opened against a not-yet-migrated DB
+            # (kind absent) falls back to the pre-F4 'comment' framing.
+            kind=(r["kind"] if "kind" in r.keys() else "comment"),
         )
         for r in rows
     ]
@@ -14227,39 +14275,64 @@ def _render_comment_thread(comments: list[Comment]) -> list[str]:
 
     Single source of truth for the comment-thread block shared by the Hermes
     worker path (:func:`build_worker_context`) and the claude-CLI worker path
-    (:func:`_spawn_claude_worker`): both show the most-recent
-    ``_CTX_MAX_COMMENTS`` comments in full (older ones collapsed into a
-    one-line marker), each capped at ``_CTX_MAX_COMMENT_BYTES``, framed with an
-    explicit ``comment from worker `<author>` at <ts>:`` line so an
-    operator-/attacker-controlled author can't be misread as a system directive
-    (#22452). Returns ``[]`` for an empty thread so callers emit no block.
+    (:func:`_spawn_claude_worker`) — both inherit identical framing from here.
+
+    F4: ``kind='directive'`` comments render FIRST in a distinct
+    ``## ⚠️ OPERATOR DIRECTIVE — supersedes the task body above`` block (framed
+    ``operator directive `<author>` at <ts>:``) so an operator instruction that
+    arrived after the body reads as authoritative — distinct from the
+    ``comment from worker `<author>` at <ts>:`` framing ordinary comments get,
+    which exists so an operator-/attacker-controlled author can't be misread as
+    a system directive (#22452). Setting ``kind='directive'`` is gated to the
+    operator at the write path (a caged worker is rejected — see ``_cmd_comment``).
+
+    Ordinary comments then show the most-recent ``_CTX_MAX_COMMENTS`` in full
+    (older ones collapsed into a one-line marker), each body capped at
+    ``_CTX_MAX_COMMENT_BYTES``. Directives are operator-gated and rare, so all
+    are shown (each body still capped). Returns ``[]`` for an empty thread so
+    callers emit no block.
     """
     if not comments:
         return []
-    if len(comments) > _CTX_MAX_COMMENTS:
-        omitted_c = len(comments) - _CTX_MAX_COMMENTS
-        shown_c = comments[-_CTX_MAX_COMMENTS:]
-    else:
-        omitted_c = 0
-        shown_c = comments
-    lines: list[str] = ["## Comment thread"]
-    if omitted_c:
-        lines.append(
-            f"_({omitted_c} earlier comment{'s' if omitted_c != 1 else ''} "
-            f"omitted; showing most recent {len(shown_c)})_"
-        )
-    for c in shown_c:
-        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
-        # Render author with explicit "comment from worker" framing so
-        # operator-controlled HERMES_PROFILE values like "hermes-system"
-        # or "operator" can't be misread by the next worker as a system
-        # directive above the (attacker-influenceable) comment body.
-        # Defense-in-depth — the LLM-controlled author-forgery surface
-        # was already closed in #22435. See #22452.
-        safe_author = (c.author or "").replace("`", "")
-        lines.append(f"comment from worker `{safe_author}` at {ts}:")
-        lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
-        lines.append("")
+    directives = [c for c in comments if getattr(c, "kind", "comment") == "directive"]
+    regular = [c for c in comments if getattr(c, "kind", "comment") != "directive"]
+
+    lines: list[str] = []
+
+    if directives:
+        lines.append("## ⚠️ OPERATOR DIRECTIVE — supersedes the task body above")
+        for c in directives:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
+            safe_author = (c.author or "").replace("`", "")
+            lines.append(f"operator directive `{safe_author}` at {ts}:")
+            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+            lines.append("")
+
+    if regular:
+        if len(regular) > _CTX_MAX_COMMENTS:
+            omitted_c = len(regular) - _CTX_MAX_COMMENTS
+            shown_c = regular[-_CTX_MAX_COMMENTS:]
+        else:
+            omitted_c = 0
+            shown_c = regular
+        lines.append("## Comment thread")
+        if omitted_c:
+            lines.append(
+                f"_({omitted_c} earlier comment{'s' if omitted_c != 1 else ''} "
+                f"omitted; showing most recent {len(shown_c)})_"
+            )
+        for c in shown_c:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
+            # Render author with explicit "comment from worker" framing so
+            # operator-controlled HERMES_PROFILE values like "hermes-system"
+            # or "operator" can't be misread by the next worker as a system
+            # directive above the (attacker-influenceable) comment body.
+            # Defense-in-depth — the LLM-controlled author-forgery surface
+            # was already closed in #22435. See #22452.
+            safe_author = (c.author or "").replace("`", "")
+            lines.append(f"comment from worker `{safe_author}` at {ts}:")
+            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+            lines.append("")
     return lines
 
 

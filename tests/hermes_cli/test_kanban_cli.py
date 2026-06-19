@@ -149,6 +149,49 @@ def test_run_slash_comment_max_len_trims_long_body(kanban_home):
     assert "x" * 30 not in show
 
 
+def test_run_slash_comment_directive_sets_kind(kanban_home, monkeypatch):
+    """`comment <tid> --directive` lands an operator directive (kind=directive)
+    when run by an operator (no HERMES_KANBAN_TASK in env)."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    out = kc.run_slash("create 'x'")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    kc.run_slash(f"comment {tid} 'switch to plan B' --directive")
+    with kb.connect() as conn:
+        comments = kb.list_comments(conn, tid)
+    assert [c.kind for c in comments] == ["directive"]
+
+
+def test_run_slash_comment_directive_rejected_inside_worker_cage(kanban_home, monkeypatch):
+    """Cage model: a spawned worker (HERMES_KANBAN_TASK set) cannot grant
+    itself an operator directive — the comment is rejected and nothing is
+    written."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    out = kc.run_slash("create 'x'")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    result = kc.run_slash(f"comment {tid} 'self-granted directive' --directive")
+    assert "operator-only" in result or "cannot be set" in result
+    with kb.connect() as conn:
+        comments = kb.list_comments(conn, tid)
+    assert comments == []
+
+
+def test_run_slash_comment_without_directive_is_plain_comment(kanban_home, monkeypatch):
+    """A worker may still post ordinary comments inside the cage — only
+    --directive is gated."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    out = kc.run_slash("create 'x'")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    kc.run_slash(f"comment {tid} 'progress update from worker'")
+    with kb.connect() as conn:
+        comments = kb.list_comments(conn, tid)
+    assert [c.kind for c in comments] == ["comment"]
+
+
 def test_run_slash_block_unblock_cycle(kanban_home):
     out = kc.run_slash("create 'x' --assignee alice")
     import re

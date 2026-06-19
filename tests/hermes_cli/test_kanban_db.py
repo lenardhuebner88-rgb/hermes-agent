@@ -2290,6 +2290,71 @@ def test_worker_context_includes_parent_results_and_comments(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# F4: operator directives (kind='directive')
+# ---------------------------------------------------------------------------
+
+def test_add_comment_defaults_to_comment_kind(kanban_home):
+    """Existing callers (and inline INSERTs) keep the 'comment' kind."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        kb.add_comment(conn, t, "user", "ordinary note")
+        comments = kb.list_comments(conn, t)
+    assert [c.kind for c in comments] == ["comment"]
+
+
+def test_add_comment_directive_kind_persists(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        kb.add_comment(conn, t, "operator", "switch to plan B", kind="directive")
+        comments = kb.list_comments(conn, t)
+    assert [c.kind for c in comments] == ["directive"]
+
+
+def test_add_comment_rejects_unknown_kind(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        with pytest.raises(ValueError, match="kind"):
+            kb.add_comment(conn, t, "operator", "body", kind="bogus")
+
+
+def test_directive_renders_as_priority_block(kanban_home):
+    """A directive surfaces in build_worker_context as a distinct ⚠️ block,
+    NOT under the 'comment from worker' framing."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", body="ORIGINAL_BODY_INSTRUCTION")
+        kb.add_comment(conn, t, "operator", "STOP — do C instead", kind="directive")
+        ctx = kb.build_worker_context(conn, t)
+    assert "⚠️ OPERATOR DIRECTIVE — supersedes the task body above" in ctx
+    assert "STOP — do C instead" in ctx
+    # Distinct framing — a directive must not be rendered as a worker comment.
+    assert "comment from worker `operator`" not in ctx
+
+
+def test_directive_kept_separate_from_regular_comment_thread(kanban_home):
+    """Directives go in the priority block; ordinary comments stay in the
+    '## Comment thread' section under the worker-comment framing."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        kb.add_comment(conn, t, "worker", "REGULAR_WORKER_NOTE")
+        kb.add_comment(conn, t, "operator", "DIRECTIVE_PAYLOAD", kind="directive")
+        ctx = kb.build_worker_context(conn, t)
+    # The directive block sits ABOVE the regular comment thread.
+    assert ctx.index("OPERATOR DIRECTIVE") < ctx.index("## Comment thread")
+    assert "comment from worker `worker`" in ctx
+    assert "REGULAR_WORKER_NOTE" in ctx
+    # The directive body is not duplicated into the worker-comment thread.
+    assert ctx.count("DIRECTIVE_PAYLOAD") == 1
+
+
+def test_no_directive_block_without_directives(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x")
+        kb.add_comment(conn, t, "worker", "just a note")
+        ctx = kb.build_worker_context(conn, t)
+    assert "OPERATOR DIRECTIVE" not in ctx
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -4260,6 +4325,35 @@ class TestClaudeCliWorkerSpawn:
         # Oldest 3 dropped; newest retained.
         assert "comment-number-0\n" not in prompt
         assert f"comment-number-{total - 1}" in prompt
+
+    def test_claude_worker_renders_operator_directive(self, kanban_home, monkeypatch):
+        """A claude-CLI worker inherits the same directive priority block as
+        build_worker_context — both paths share _render_comment_thread — so the
+        directive lands ABOVE the work instruction and is framed distinctly
+        from worker comments (AC-F4-directive)."""
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="ship the widget",
+                body="implement the widget", assignee="coder",
+                workspace_path=str(kanban_home / "ws"),
+            )
+            kb.add_comment(conn, tid, "worker", "a normal note", kind="comment")
+            kb.add_comment(
+                conn, tid, "operator", "ACTUALLY ship the gadget", kind="directive"
+            )
+            task = kb.get_task(conn, tid)
+
+        prompt = self._capture_claude_prompt(monkeypatch, task)
+
+        assert "⚠️ OPERATOR DIRECTIVE — supersedes the task body above" in prompt
+        assert "ACTUALLY ship the gadget" in prompt
+        # Distinct from worker-comment framing.
+        assert "comment from worker `operator`" not in prompt
+        # The directive reaches the worker before the work instruction.
+        assert prompt.index("OPERATOR DIRECTIVE") < prompt.index(
+            "Work in the current directory."
+        )
 
     # --- default (hermes) path stays byte-identical -----------------------
 
