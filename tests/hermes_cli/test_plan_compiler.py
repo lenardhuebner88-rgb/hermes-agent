@@ -10,7 +10,13 @@ import yaml
 
 from pydantic import ValidationError
 
-from hermes_cli.plan_compiler import TaskgraphHints, compile_plan, main, taskgraph_hints_to_children
+from hermes_cli.plan_compiler import (
+    BindingSubtask,
+    TaskgraphHints,
+    compile_plan,
+    main,
+    taskgraph_hints_to_children,
+)
 
 
 VALID_PLAN = """---
@@ -430,6 +436,54 @@ def test_subtask_kind_absent_is_lane_derived_default_strict():
         }
     )
     assert [c["kind"] for c in children] == ["code", "review", "code"]
+
+
+def test_unmarked_subtask_serialization_byte_identical_to_main():
+    """Operator-directive regression: ``model_dump`` must NOT add ``kind: ''`` for
+    an unmarked subtask. The opt-in ``kind`` field was added by A1-classaware; the
+    serialized shape of an unmarked subtask must stay byte-identical to pre-classaware
+    main (the exact field set that existed before ``kind`` was introduced)."""
+    unmarked = BindingSubtask(id="S1", title="Build", lane="coder")
+    dumped = unmarked.model_dump(mode="json")
+    assert dumped == {
+        "id": "S1",
+        "title": "Build",
+        "lane": "coder",
+        "deps": [],
+        "body": "",
+        "acceptance_criteria": [],
+    }
+    assert "kind" not in dumped
+    # python-mode dump (used by contract.model_dump recursion) is just as clean
+    assert "kind" not in unmarked.model_dump()
+
+
+def test_marked_analysis_subtask_serializes_its_kind():
+    """An explicit ``kind: analysis`` marker IS emitted (the opt-in case), so the
+    drop-when-empty serializer never hides a set value."""
+    analysis = BindingSubtask(id="S2", title="Probe", lane="coder-claude", kind="analysis")
+    assert analysis.model_dump(mode="json")["kind"] == "analysis"
+
+
+def test_taskgraph_hints_subtasks_serialization_omits_empty_kind():
+    """The serialized ``subtasks`` array in ``taskgraph.draft.yaml`` (build_taskgraph_draft,
+    line 504) and in ``contract.yaml`` (contract.model_dump recursion, line 602) must not
+    grow a ``kind: ''`` key for unmarked subtasks, while preserving an analysis marker."""
+    hints = TaskgraphHints(
+        binding=True,
+        subtasks=[
+            BindingSubtask(id="S1", title="Build", lane="coder"),
+            BindingSubtask(id="S2", title="Probe", lane="coder-claude", kind="analysis"),
+        ],
+    )
+    # line-504 path: [task.model_dump(mode="json") for task in hints.subtasks]
+    line504 = [t.model_dump(mode="json") for t in hints.subtasks]
+    assert "kind" not in line504[0]
+    assert line504[1]["kind"] == "analysis"
+    # line-602 path: contract.model_dump recurses into taskgraph_hints.subtasks
+    recursed = hints.model_dump(mode="json")["subtasks"]
+    assert "kind" not in recursed[0]
+    assert recursed[1]["kind"] == "analysis"
 
 
 def test_children_carry_only_planspec_subtask_id_not_redundant_planspec_id():

@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 DEFAULT_TEMPLATES_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/templates")
 DEFAULT_COMPILED_ROOT = Path("/home/piet/vault/03-Agents/Hermes/plans/compiled")
@@ -62,6 +69,19 @@ class BindingSubtask(BaseModel):
         if not isinstance(value, list):
             raise ValueError("must be a list")
         return [str(item).strip() for item in value if str(item).strip()]
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        """A1-classaware: keep serialized subtasks byte-identical to pre-classaware
+        PlanSpecs. The opt-in ``kind`` field is emitted ONLY when a value is set;
+        an unset/empty ``kind`` is dropped so unmarked subtasks never gain a new
+        ``kind: ''`` key in ``taskgraph.draft.yaml`` / ``contract.yaml`` (and stay
+        byte-identical to main). ``kind`` is declared last, so popping it preserves
+        the original field order of the remaining keys."""
+        data = handler(self)
+        if not str(data.get("kind") or "").strip():
+            data.pop("kind", None)
+        return data
 
 
 class TaskgraphHints(BaseModel):

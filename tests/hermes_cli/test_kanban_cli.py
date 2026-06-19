@@ -219,6 +219,37 @@ def test_run_slash_create_with_kind_sets_column(kanban_home):
     assert task.kind == "code"
 
 
+def test_run_slash_create_with_kind_analysis_sets_column(kanban_home):
+    """Operator-directive: ``analysis`` is a valid PUBLIC ``--kind`` choice (the
+    read-only counter-class to ``code``). The CLI must accept it (no argparse
+    ``invalid choice`` exit 2) and stamp the marker on the task row, so the
+    verifier emits its task-class-aware analysis header."""
+    out = kc.run_slash("create 'analysis task' --kind analysis --json")
+    payload = json.loads(out)
+    assert payload["kind"] == "analysis"
+    with kb.connect() as conn:
+        task = kb.get_task(conn, payload["id"])
+    assert task.kind == "analysis"
+
+
+def test_create_kind_argparse_choices_include_analysis():
+    """Lock the public ``--kind`` choices at their source: the argparse choices are
+    ``sorted(_VALID_TASK_KINDS)``, so ``analysis`` being in that set is what makes
+    the creation path accept it. Guards against a regression to ``invalid choice``."""
+    from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
+
+    assert "analysis" in _VALID_TASK_KINDS
+
+    # And exercised end-to-end: argparse would SystemExit(2) on an invalid choice;
+    # reaching a usage-error string (not a created card) would fail the assert above.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.exit_on_error = False  # type: ignore[attr-defined]
+    top = parser.add_subparsers(dest="_top")
+    kc.build_parser(top)
+    ns = parser.parse_args(["kanban", "create", "probe", "--kind", "analysis"])
+    assert ns.kind == "analysis"
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")

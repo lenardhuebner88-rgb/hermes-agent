@@ -387,7 +387,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "epic propagates to every decompose child.")
     p_create.add_argument("--kind", default=None, dest="kind", metavar="KIND",
                           choices=sorted(_VALID_TASK_KINDS),
-                          help="Optional task kind: code, research, review, ops, or text.")
+                          help="Optional task kind: code, research, review, ops, "
+                               "text, or analysis (read-only counter-class to "
+                               "code; verifier treats it task-class-aware).")
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",

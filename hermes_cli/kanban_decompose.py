@@ -50,7 +50,13 @@ from hermes_cli import profiles as profiles_mod
 
 logger = logging.getLogger(__name__)
 
-_VALID_TASK_KINDS = frozenset({"code", "research", "review", "ops", "text"})
+# ``analysis`` is the explicit read-only counter-class to ``code`` (the verifier
+# treats it task-class-aware — see ``_render_review_verifier_section``). It is a
+# first-class kind so the public ``--kind`` CLI choice and any explicit analysis
+# marker are never silently rejected. The decompose LLM prompt intentionally does
+# not advertise it (the decomposer picks lane-mapped kinds); the validator simply
+# accepts it when an explicit analysis kind appears.
+_VALID_TASK_KINDS = frozenset({"code", "research", "review", "ops", "text", "analysis"})
 _MIN_VERDICTS_FOR_APPROVED = 5
 
 
