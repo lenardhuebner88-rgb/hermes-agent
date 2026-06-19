@@ -13465,6 +13465,13 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     from hermes_cli import kanban_db as _kb
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
 
+    def _goal_text_from_task(t) -> str:
+        """Build the judge criterion from a card: title + body."""
+        parts = [t.title or ""]
+        if t.body:
+            parts.append(t.body)
+        return "\n\n".join(p for p in parts if p).strip()
+
     # Resolve goal text from the card (title + body = the acceptance
     # criteria the judge evaluates against).
     conn = _kb.connect()
@@ -13478,14 +13485,27 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     if task is None:
         return
 
-    goal_parts = [task.title or ""]
-    if task.body:
-        goal_parts.append(task.body)
-    goal_text = "\n\n".join(p for p in goal_parts if p).strip()
+    goal_text = _goal_text_from_task(task)
     if not goal_text:
         return
 
     max_turns = task.goal_max_turns or _DEF_TURNS
+
+    def _goal_text_live() -> "str | None":
+        """Re-read the card's title+body fresh so a mid-run respec (operator
+        edits body/AC) is judged against the CURRENT criterion. Returns None
+        on a vanished task / DB error so the loop keeps the last known goal."""
+        c = _kb.connect()
+        try:
+            t = _kb.get_task(c, task_id)
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if t is None:
+            return None
+        return _goal_text_from_task(t) or None
 
     def _run_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(
@@ -13532,6 +13552,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         block_fn=_block,
         max_turns=max_turns,
         first_response=first_response or "",
+        goal_text_fn=_goal_text_live,
         log=lambda m: logger.info("%s", m),
     )
 
