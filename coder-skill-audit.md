@@ -160,4 +160,118 @@ hermes -p coder curator archive <local>  # local archivieren
 | `openclaw-incident-rca` | devops | 653 | 653 | — | local | hermes curator archive <name>  (rev: restore) | pinned/piet-approved (protected) |
 
 ---
-*read-only Audit; keine Profil-Mutation ausgeführt. Mechanismen quell-verifiziert (skills_hub.py / skill_usage.py / curator.py / main.py). Nutzungs-Counts aus `profiles/coder/sessions/session_*.json` `skill_view`-Toolcalls (System-Prompt-Erwähnungen ausgeschlossen).*
+
+## Anhang A — Read-only Evidenz (exakte Befehle + Roh-Ausgaben)
+
+> Alle Kommandos sind **read-only** (find/grep/sed/wc/python-json-Parse), keine Profil-Mutation.
+> Profil-Root: `SK=~/.hermes/profiles/coder/skills`. Reproduziert 2026-06-19 im Task-Worktree.
+
+### A1 · Inventar — 107 Skills / 24 Kategorien
+```
+$ find "$SK" -name SKILL.md -type f | wc -l
+107
+$ ls -1 "$SK" | wc -l        # Top-Level-Kategorie-Dirs
+24
+$ ls -d "$SK"                # Pfad existiert
+/home/piet/.hermes/profiles/coder/skills   (OK)
+```
+
+### A2 · Token-Schätzung — 313.7k gesamt · hermes-agent 11.776 tok (`bytes/4`)
+```
+$ find "$SK" -name SKILL.md -printf '%s\n' | awk '{s+=$1} END{print s, s/4}'
+1254900 313725                      # gesamt bytes / est_tokens (Σ-then-/4)
+$ find "$SK" -name SKILL.md -printf '%s\n' | awk '{s+=int($1/4)} END{print s}'
+313688                              # per-file floor(bytes/4) summiert (Report-Methode ≈313.729)
+$ find "$SK" -path '*hermes-agent/SKILL.md' -printf '%s\n'
+47104                               # → 47104/4 = 11776 tok  ✓ (= genannte 11,8k)
+$ find "$SK" -path '*/test-driven-development/SKILL.md' -printf '%s\n'   #  9564 →  2391 tok
+$ find "$SK" -path '*/systematic-debugging/SKILL.md'   -printf '%s\n'    # 11244 →  2811 tok
+```
+
+### A3 · Reale Nutzung — `skill_view`-**Toolcalls** über 95 Transkripte (System-Prompt-Mentions ausgeschlossen)
+Transkripte sind OpenAI-Schema: echte Aufrufe stehen in `messages[].tool_calls[].function`
+(name=`skill_view`, `arguments`=JSON). System-Prompt-Erwähnungen (`skill_view(name='…') before answering`)
+liegen NICHT in `tool_calls` und werden so automatisch ausgeschlossen.
+```
+$ python3  # iter messages[].tool_calls[], filter function.name=='skill_view', zähle arguments.name
+files_scanned=95  total_skill_view_toolcalls=139  distinct_names=17
+  45  test-driven-development        # +  3  software-development:test-driven-development  = 48 ✓
+  32  hermes-agent                   # +  4  autonomous-ai-agents:hermes-agent  + 1 …/hermes-agent = 37 ✓
+  29  systematic-debugging           # +  3  software-development:systematic-debugging  = 32 ✓
+   6  kanban-worker
+   5  hermes-kanban-worker-scope-control   #   + 1 devops/… = 6  (historisch, kein SKILL.md mehr)
+   4  openclaw-mc-hardening                #   (historisch, kein SKILL.md mehr)
+   1  openclaw-operator · kanban-execution-worker-readiness · kanban-orchestrator
+   1  github-pr-workflow · linear · native-mcp
+```
+→ Nur 10 *on-disk* Skills mit ≥1 echtem Call; die übrigen ~97 = 0 Nutzung. (Gegenprobe: das naive
+`grep -c '"skill_view"'` = 359 mischt System-Prompt-Text mit ein → daher der Parser, nicht grep.)
+
+### A4 · Herkunft — bundled 74 / hub 7 / local 26 (Match auf **declared `name:`**, nicht Dir-Name)
+```
+$ wc -l < "$SK/.bundled_manifest"                              # Format: name:hash je Zeile
+74
+$ python3 -c '…json.load(.hub/lock.json)["installed"]…'       # hub/official
+hub_installed_count= 7
+  baoyu-article-illustrator · baoyu-comic · creative-ideation · pixel-art
+  minecraft-modpack-server · pokemon-player · dspy
+```
+**Aliasing-Hinweis (Präzision):** ein naiver *Dir-Name*-Scan ergibt 70 bundled / 30 local, weil 4
+gebündelte Skills unter abweichendem Verzeichnis liegen. Der `.bundled_manifest` keyed auf das
+**Frontmatter-`name:`** — Beleg:
+```
+$ for d in audiocraft lm-evaluation-harness segment-anything vllm; do grep -m1 '^name:' "$SK"/*/$d/SKILL.md; done
+audiocraft            → name: audiocraft-audio-generation   (∈ .bundled_manifest = bundled)
+lm-evaluation-harness → name: evaluating-llms-harness       (∈ .bundled_manifest = bundled)
+segment-anything      → name: segment-anything-model        (∈ .bundled_manifest = bundled)
+vllm                  → name: serving-llms-vllm             (∈ .bundled_manifest = bundled)
+```
+→ 30 − 4 = **26 local** (z. B. `godmode`: `name: godmode`, NICHT im Manifest → local; bestätigt die
+Grounding-Korrektur „godmode = local, nicht bundled"). 74 + 7 + 26 = **107** ✓
+
+### A5 · Pin-State — `.usage.json` = 21 agent-erstellte Skills · 9 gepinnt · 0 archiviert; `use_count` ≠ Nutzung
+```
+$ python3 -c '…json.load(.usage.json)…'
+usage_entries=21  pinned=9  archived=0
+PINNED: brainstorming · grill-me · minimax-openclaw-token-plan · openclaw-config-change-safe
+        · openclaw-discord-ops · openclaw-incident-rca · openclaw-model-routing
+        · openclaw-operator · openclaw-stability-hardening
+archived_at set: none
+$ # Pin-Marker (Beispiel brainstorming.curator_inclusion_reason):
+  "piet-approved existing local skill inclusion; pinned to block auto archive/delete"
+$ # use_count ≠ reale Nutzung — Beweis:
+  kanban-worker:     use_count=196   (Transkripte: 6 echte Calls)
+  openclaw-operator: use_count=195   (Transkripte: 1 echter Call)
+```
+→ Die 9 gepinnten Skills sind **protected** (KEIN ARCHIVE), genau wie im KEEP-Block markiert.
+
+### A6 · Mechanismus — quell-verifiziert (exakte Zeilen)
+```
+$ sed -n '3409,3415p' tools/skills_hub.py        # uninstall verweigert Nicht-Hub (builtins)
+def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
+    """Remove a hub-installed skill. Refuses to remove builtins."""
+    ...
+    if not entry:
+        return False, f"'{skill_name}' is not a hub-installed skill (may be a builtin)"   # :3415
+
+$ sed -n '672,690p' tools/skill_usage.py          # curator archive verweigert hub & bundled
+def archive_skill(skill_name: str) -> Tuple[bool, str]:                                    # :672
+    if not is_curation_eligible(skill_name):
+        if is_protected_builtin(skill_name): return False, "...protected built-in...never archived"
+        if is_hub_installed(skill_name):     return False, "...is hub-installed; never archive"   # :687
+        return False, "...is a bundled built-in; enable curator.prune_builtins to allow pruning"  # :689
+
+$ sed -n '437,446p' tools/skill_usage.py          # is_curation_eligible: protected & bundled → False
+$ sed -n '66,68p'  tools/skill_usage.py           # PROTECTED_BUILTIN_SKILLS = { "plan" }  (einziger)
+PROTECTED_BUILTIN_SKILLS: Set[str] = { "plan", }
+
+$ grep -n '_apply_profile_override\|profiles" / name' hermes_cli/main.py
+338: def _apply_profile_override():   # -p/--profile → setzt HERMES_HOME=~/.hermes/profiles/<name>
+382:     candidate = home / ".hermes" / "profiles" / name
+```
+→ Bestätigt die Mechanismus-Matrix: **bundled → `skills config`/`opt-out`** (uninstall verweigert,
+curator verweigert) · **hub → `skills uninstall`** · **local → `curator archive`** · `plan` = einziger
+PROTECTED_BUILTIN. Profil-Targeting via `-p coder` ist Pflicht (Resolver `main.py:338`).
+
+---
+*read-only Audit; keine Profil-Mutation ausgeführt. Mechanismen quell-verifiziert (skills_hub.py:3415 / skill_usage.py:672-689,437-446,66 / hermes_cli/main.py:338,382). Nutzungs-Counts aus `profiles/coder/sessions/session_*.json` `tool_calls[].function`-`skill_view`-Aufrufen (System-Prompt-Erwähnungen liegen nicht in tool_calls → automatisch ausgeschlossen). Evidenz-Anhang A reproduziert alle Kernzahlen 1:1.*
