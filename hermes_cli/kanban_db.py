@@ -2705,6 +2705,12 @@ HEILER_SOURCE_ESCALATION_SWEEP = "escalation_sweep"
 # ``kanban_worktrees`` but tags itself here so all source vocabulary is colocated.
 HEILER_SOURCE_BUDGET_RUNAWAY = "budget_runaway_park"
 HEILER_SOURCE_RELEASE_GATE = "release_gate_escalation"
+# The silent-block sweep is itself an escalation writer (it surfaces settled
+# blocks that never escalated on their own path). ESCALATION-INLINE-CLASSIFY-S1
+# closes it as the last escalation write path without inline classification: it
+# now pairs a heiler_classification atomically in the same write_txn, tagged
+# with this source so the ledger distinguishes it from the backfill sweep.
+HEILER_SOURCE_SILENT_BLOCK = "silent_block_escalation"
 # Source tag on an ``operator_escalation`` payload emitted by the silent-block
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
@@ -11564,13 +11570,13 @@ def classify_escalations_sweep(
 
     Every *known* escalation writer now classifies atomically at the escalation
     site — the failure breaker, the stall park, the budget-runaway park
-    (:func:`_park_budget_runaway`) and the release-gate
-    (``kanban_worktrees._escalate_release_gate``), the last two closed by
+    (:func:`_park_budget_runaway`), the release-gate
+    (``kanban_worktrees._escalate_release_gate``) and the silent-block sweep
+    (:func:`escalate_silent_blocks_sweep`), all closed by
     ESCALATION-INLINE-CLASSIFY-S1. This sweep remains the deterministic,
     idempotent safety net for a forgotten/legacy/future writer (the fragility
     that once starved the live ledger to 0 classifications across 9 weekly
-    escalations) and for the silent-block sweep, which emits escalations a tick
-    earlier. It closes the gap regardless of call site: it scans
+    escalations). It closes the gap regardless of call site: it scans
     operator_escalation events not yet referenced by any heiler_classification
     and emits one, deriving the class from the escalation's own evidence
     (:func:`_classify_escalation_payload`) — the same derivation the inline
@@ -11828,10 +11834,13 @@ def escalate_silent_blocks_sweep(
 
     It deliberately leaves transient blocks alone (see :func:`_block_is_settled`)
     so self-healing retries do not flood the operator (AC-2), and is idempotent
-    (a task that already escalated is never re-escalated). Mirrors
-    :func:`classify_escalations_sweep`: wired into the dispatcher tick just
-    *before* it, so each newly-surfaced escalation is also classified the same
-    tick. Safe to call from a cron or by hand — a pure DB sweep.
+    (a task that already escalated is never re-escalated). Because this sweep is
+    itself an escalation writer, it classifies each surfaced escalation INLINE in
+    the same ``write_txn`` (ESCALATION-INLINE-CLASSIFY-S1) — coverage is complete
+    the instant the escalation is written, not a poll later. The downstream
+    :func:`classify_escalations_sweep` therefore finds these already paired and
+    skips them; it remains only the backfill net for a forgotten/legacy/future
+    writer. Safe to call from a cron or by hand — a pure DB sweep.
     """
     ts = int(time.time()) if now is None else int(now)
     summary: dict = {"checked_at": ts, "escalated": []}
@@ -11868,10 +11877,28 @@ def escalate_silent_blocks_sweep(
                 body_hash=body_hash,
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
+            esc_payload = _silent_block_escalation_payload(
+                row=row, reason=reason, blocked_kind=blocked_kind,
+            )
+            esc_event_id = _append_event(
+                conn, tid, OPERATOR_ESCALATION_EVENT, esc_payload,
+                run_id=run_id,
+            )
+            # ESCALATION-INLINE-CLASSIFY-S1: this sweep is itself an escalation
+            # writer, so it must classify atomically too — not lean on the
+            # later classify_escalations_sweep poll. Derive the class from the
+            # escalation's own persisted evidence via the exact same
+            # deterministic function the backfill sweep uses, so an inline
+            # classification is byte-identical to a swept one (defense-in-depth,
+            # no divergence, no guess). Carries the escalation event id + run_id
+            # as the AC-2 belegter ledger/run reference.
+            h_class, h_ev = _classify_escalation_payload(esc_payload)
             _append_event(
-                conn, tid, OPERATOR_ESCALATION_EVENT,
-                _silent_block_escalation_payload(
-                    row=row, reason=reason, blocked_kind=blocked_kind,
+                conn, tid, HEILER_CLASSIFICATION_EVENT,
+                _heiler_classification_payload(
+                    heiler_class=h_class, evidence=h_ev,
+                    source=HEILER_SOURCE_SILENT_BLOCK, blocked=True,
+                    escalation_event_id=esc_event_id,
                 ),
                 run_id=run_id,
             )

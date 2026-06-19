@@ -3363,11 +3363,42 @@ def test_silent_block_sweep_does_not_re_escalate_existing(
         assert len(_operator_escalations(conn, t)) == 1
 
 
-def test_silent_block_sweep_escalation_gets_classified(
+def test_silent_block_sweep_writes_inline_heiler_classification(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """A swept escalation is picked up by classify_escalations_sweep the same
-    tick (the dispatcher wires the silent-block sweep just before it)."""
+    """ESCALATION-INLINE-CLASSIFY-S1 (defense-in-depth): the silent-block sweep
+    pairs a heiler_classification AT the escalation site, in the same write_txn,
+    so coverage is complete the instant the escalation is written — no separate
+    classify_escalations_sweep poll required. Exactly one classification,
+    referencing the escalation event, tagged with the inline silent-block
+    source, with a belegter (signal-source) evidence reference, not a guess
+    (AC-2)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="classify", assignee="alice")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Which credential?")
+        # Only the silent-block sweep runs — deliberately NOT the classify sweep.
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        esc = _escalation_event(conn, t)
+        heilers = _heiler_events(conn, t)
+
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == esc.id
+    assert heilers[0].payload["source"] == kb.HEILER_SOURCE_SILENT_BLOCK
+    assert heilers[0].payload["class"] in kb.HEILER_CLASSES
+    assert heilers[0].payload["blocked"] is True
+    assert heilers[0].payload["evidence"].get("signal_source")
+
+
+def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """The inline class is byte-identical to what the backfill sweep would
+    derive from the same persisted escalation payload (defense-in-depth, NOT
+    divergence), and classify_escalations_sweep then adds nothing because the
+    escalation is already paired."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     with kb.connect() as conn:
@@ -3375,13 +3406,16 @@ def test_silent_block_sweep_escalation_gets_classified(
         kb.claim_task(conn, t)
         kb.block_task(conn, t, reason="Which credential?")
         kb.escalate_silent_blocks_sweep(conn, now=base)
-        kb.classify_escalations_sweep(conn, now=base)
-        classes = [
-            e for e in kb.list_events(conn, t)
-            if e.kind == kb.HEILER_CLASSIFICATION_EVENT
-        ]
-        assert len(classes) == 1
-        assert classes[0].payload.get("escalation_event_id") is not None
+        esc = _escalation_event(conn, t)
+        inline = _heiler_events(conn, t)[0]
+        expected_class, _ = kb._classify_escalation_payload(esc.payload)
+
+        summary = kb.classify_escalations_sweep(conn, now=base)
+        heilers = _heiler_events(conn, t)
+
+    assert inline.payload["class"] == expected_class
+    assert summary["classified"] == []
+    assert len(heilers) == 1
 
 
 def test_dispatch_max_spawn_counts_existing_running_tasks(

@@ -312,6 +312,30 @@ def test_classification_coverage_full_from_inline_park_without_sweep(conn):
     assert c["counter"]["value"] == 0.0
 
 
+def test_classification_coverage_full_from_silent_block_sweep_without_classify(conn):
+    """ESCALATION-INLINE-CLASSIFY-S1 (AC-1): the silent-block sweep now pairs a
+    heiler_classification at the escalation site, so the coverage metric reads
+    100% after escalate_silent_blocks_sweep alone — without the separate
+    classify_escalations_sweep poll that used to be the only classifier for this
+    path. Closes the last escalation writer without inline classification."""
+    import time
+
+    # A settled block (no blocked run) the self-healing lane will not move.
+    _add_task(conn, "SB", status="blocked")
+    kb.escalate_silent_blocks_sweep(conn)
+    # Deliberately do NOT run classify_escalations_sweep.
+
+    snap = vm.compute_metrics_snapshot(
+        conn, now=int(time.time()) + 1, window_days=7,
+    )
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["escalations"] == 1
+    assert c["classified_within_24h"] == 1
+    assert c["coverage_pct"] == 100.0
+    assert c["counter"]["value"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Cost-per-task metric + paired counter
 # ---------------------------------------------------------------------------
