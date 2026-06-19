@@ -2635,6 +2635,36 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         assert kb.get_task(conn, t2).status == "blocked"
 
 
+def test_recompute_ready_honours_persisted_gave_up_effective_limit(kanban_home):
+    """A later recompute without dispatcher config must not reopen a task
+    that was parked by a stricter failure_limit in ``_record_task_failure``.
+    """
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="strict breaker", assignee="a")
+        assert kb.claim_task(conn, task_id, claimer="host:1") is not None
+
+        kb._record_task_failure(
+            conn,
+            task_id,
+            error="spawn boom",
+            outcome="spawn_failed",
+            failure_limit=1,
+            release_claim=True,
+            end_run=True,
+        )
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+
+        # No failure_limit argument here: this simulates a later dashboard or
+        # maintenance recompute pass that only has DEFAULT_FAILURE_LIMIT (2).
+        assert kb.recompute_ready(conn) == 0
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.status == "blocked"
+
+
 def test_recompute_ready_per_task_max_retries_overrides_dispatcher(kanban_home):
     """A per-task ``max_retries`` wins over the dispatcher failure_limit,
     matching ``_record_task_failure``'s resolution order."""
