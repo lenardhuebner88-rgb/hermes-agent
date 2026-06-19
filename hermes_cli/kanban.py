@@ -3290,7 +3290,12 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             limit=args.limit,
             since_seconds=(args.since_hours * 3600 if args.since_hours else None),
         )
-    print(f"backfilled cost on {n} runs")
+        # COST-VISIBILITY-WORKERS-S1: second pass correlates the runs the
+        # worker_session_id / claude-log paths can't link (most kanban workers)
+        # to their per-profile state.db sessions — proven token / subscription
+        # consumption so the cost metric stops being blind.
+        n_sess = kb.backfill_run_costs_from_sessions(conn, limit=args.limit)
+    print(f"backfilled cost on {n} runs (session-correlated: {n_sess})")
     return 0
 
 
