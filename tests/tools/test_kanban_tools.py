@@ -203,6 +203,49 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "runs" in d
 
 
+
+
+def test_show_worker_default_is_slim_but_full_preserves_legacy_payload(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        for idx in range(12):
+            kb.add_comment(conn, worker_env, "worker", f"comment-{idx}")
+            kb.add_event(conn, worker_env, f"event-{idx}", {"idx": idx})
+        now = 1_800_000_000
+        for idx in range(5):
+            conn.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, profile, status, started_at, ended_at, outcome, summary
+                ) VALUES (?, ?, 'done', ?, ?, 'completed', ?)
+                """,
+                (worker_env, "test-worker", now + idx, now + idx + 1, f"run-{idx}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    slim = json.loads(kt._handle_show({}))
+    assert "body" not in slim["task"]
+    assert len(slim["comments"]) == 8
+    assert len(slim["events"]) == 10
+    assert len(slim["runs"]) == 3
+    assert slim["truncated"]["comments_omitted"] == 4
+    assert slim["truncated"]["events_omitted"] > 0
+    assert slim["truncated"]["runs_omitted"] == 3
+    assert "worker_context" in slim
+
+    full = json.loads(kt._handle_show({"mode": "full"}))
+    assert "body" in full["task"]
+    assert "truncated" not in full
+    assert len(full["comments"]) == 12
+    assert len(full["events"]) > len(slim["events"])
+    assert len(full["runs"]) == 6
+
+
 def test_show_explicit_task_id(worker_env):
     """Peek at a different task than the one in env."""
     from hermes_cli import kanban_db as kb

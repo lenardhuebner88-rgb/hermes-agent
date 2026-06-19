@@ -253,6 +253,25 @@ _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
 
+_CTX_CAP_PROFILES = {
+    "full": {
+        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
+        "comments": _CTX_MAX_COMMENTS,
+        "field_bytes": _CTX_MAX_FIELD_BYTES,
+        "body_bytes": _CTX_MAX_BODY_BYTES,
+        "comment_bytes": _CTX_MAX_COMMENT_BYTES,
+        "role_history": 5,
+    },
+    "worker_slim": {
+        "prior_attempts": 3,
+        "comments": 8,
+        "field_bytes": 1536,
+        "body_bytes": 4 * 1024,
+        "comment_bytes": 1024,
+        "role_history": 2,
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -15598,7 +15617,12 @@ def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
 
 
-def _render_comment_thread(comments: list[Comment]) -> list[str]:
+def _render_comment_thread(
+    comments: list[Comment],
+    *,
+    max_comments: int = _CTX_MAX_COMMENTS,
+    comment_bytes: int = _CTX_MAX_COMMENT_BYTES,
+) -> list[str]:
     """Render a task's comment thread as worker-context lines.
 
     Single source of truth for the comment-thread block shared by the Hermes
@@ -15633,13 +15657,13 @@ def _render_comment_thread(comments: list[Comment]) -> list[str]:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
             safe_author = (c.author or "").replace("`", "")
             lines.append(f"operator directive `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+            lines.append(_cap(c.body, comment_bytes))
             lines.append("")
 
     if regular:
-        if len(regular) > _CTX_MAX_COMMENTS:
-            omitted_c = len(regular) - _CTX_MAX_COMMENTS
-            shown_c = regular[-_CTX_MAX_COMMENTS:]
+        if len(regular) > max_comments:
+            omitted_c = len(regular) - max_comments
+            shown_c = regular[-max_comments:]
         else:
             omitted_c = 0
             shown_c = regular
@@ -15659,12 +15683,17 @@ def _render_comment_thread(comments: list[Comment]) -> list[str]:
             # was already closed in #22435. See #22452.
             safe_author = (c.author or "").replace("`", "")
             lines.append(f"comment from worker `{safe_author}` at {ts}:")
-            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+            lines.append(_cap(c.body, comment_bytes))
             lines.append("")
     return lines
 
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
+def build_worker_context(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    profile: str = "full",
+) -> str:
     """Return the full text a worker should read to understand its task.
 
     Order:
@@ -15690,6 +15719,13 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
+    caps = _CTX_CAP_PROFILES.get(profile, _CTX_CAP_PROFILES["full"])
+    prior_attempts_limit = int(caps["prior_attempts"])
+    comments_limit = int(caps["comments"])
+    field_bytes = int(caps["field_bytes"])
+    body_bytes = int(caps["body_bytes"])
+    comment_bytes = int(caps["comment_bytes"])
+    role_history_limit = int(caps["role_history"])
 
     lines: list[str] = []
     lines.append(f"# Kanban task {task.id}: {task.title}")
@@ -15724,7 +15760,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
 
     if task.body and task.body.strip():
         lines.append("## Body")
-        lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append(_cap(task.body, body_bytes))
         lines.append("")
 
     # A2: verifier-only section (acceptance checklist + changed-files snapshot).
@@ -15758,9 +15794,9 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # more exist without bloating the prompt.
     all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
     # list_runs returns ascending by started_at; "most recent" = last N
-    if len(all_prior) > _CTX_MAX_PRIOR_ATTEMPTS:
-        omitted = len(all_prior) - _CTX_MAX_PRIOR_ATTEMPTS
-        shown = all_prior[-_CTX_MAX_PRIOR_ATTEMPTS:]
+    if len(all_prior) > prior_attempts_limit:
+        omitted = len(all_prior) - prior_attempts_limit
+        shown = all_prior[-prior_attempts_limit:]
         first_shown_idx = omitted + 1
     else:
         omitted = 0
@@ -15780,13 +15816,13 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             outcome = run.outcome or run.status
             lines.append(f"### Attempt {idx} — {outcome} ({profile}, {ts})")
             if run.summary and run.summary.strip():
-                lines.append(_cap(run.summary))
+                lines.append(_cap(run.summary, field_bytes))
             if run.error and run.error.strip():
-                lines.append(f"_error_: {_cap(run.error)}")
+                lines.append(f"_error_: {_cap(run.error, field_bytes)}")
             if run.metadata:
                 try:
                     meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    lines.append(f"_metadata_: `{_cap(meta_str)}`")
+                    lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
                 except Exception:
                     pass
             lines.append("")
@@ -15817,16 +15853,16 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
 
             body_lines: list[str] = []
             if run is not None and run.summary and run.summary.strip():
-                body_lines.append(_cap(run.summary))
+                body_lines.append(_cap(run.summary, field_bytes))
             elif pt.result:
-                body_lines.append(_cap(pt.result))
+                body_lines.append(_cap(pt.result, field_bytes))
             else:
                 body_lines.append("(no result recorded)")
 
             if run is not None and run.metadata:
                 try:
                     meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    body_lines.append(f"_metadata_: `{_cap(meta_str)}`")
+                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
                 except Exception:
                     pass
             lines.extend(body_lines)
@@ -15844,8 +15880,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
             "WHERE r.profile = ? AND r.task_id != ? "
             "  AND r.outcome = 'completed' "
-            "ORDER BY r.ended_at DESC LIMIT 5",
-            (task.assignee, task_id),
+            "ORDER BY r.ended_at DESC LIMIT ?",
+            (task.assignee, task_id, role_history_limit),
         ).fetchall()
         if role_rows:
             lines.append(f"## Recent work by @{task.assignee}")
@@ -15863,7 +15899,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # one-line marker like prior attempts. Rendering is shared with the
     # claude-CLI worker path (see _render_comment_thread) so both runtimes show
     # the identical view.
-    lines.extend(_render_comment_thread(list_comments(conn, task_id)))
+    lines.extend(_render_comment_thread(
+        list_comments(conn, task_id),
+        max_comments=comments_limit,
+        comment_bytes=comment_bytes,
+    ))
 
     return "\n".join(lines).rstrip() + "\n"
 

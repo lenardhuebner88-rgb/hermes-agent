@@ -2772,6 +2772,38 @@ def test_worker_context_includes_parent_results_and_comments(kanban_home):
     assert "child" in ctx
 
 
+
+
+def test_worker_context_worker_slim_uses_tighter_caps(kanban_home):
+    big_body = "BODY-" + ("x" * 9000)
+    big_comment = "COMMENT-" + ("y" * 3000)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="caps", body=big_body, assignee="coder")
+        for idx in range(12):
+            kb.add_comment(conn, t, "worker", f"{idx}-" + big_comment)
+        now = 1_800_000_000
+        for idx in range(5):
+            conn.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, profile, status, started_at, ended_at, outcome, summary
+                ) VALUES (?, ?, 'done', ?, ?, 'completed', ?)
+                """,
+                (t, "coder", now + idx, now + idx + 1, f"summary-{idx}"),
+            )
+        conn.commit()
+        full = kb.build_worker_context(conn, t)
+        slim = kb.build_worker_context(conn, t, profile="worker_slim")
+
+    assert len(slim) < len(full)
+    assert "showing most recent 8" in slim
+    assert "showing most recent 30" not in slim
+    assert "showing most recent 3" in slim
+    assert "summary-0" not in slim
+    assert "summary-4" in slim
+    assert "[truncated," in slim
+
+
 # ---------------------------------------------------------------------------
 # F4: operator directives (kind='directive')
 # ---------------------------------------------------------------------------

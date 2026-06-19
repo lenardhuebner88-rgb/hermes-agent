@@ -392,20 +392,60 @@ def _handle_show(args: dict, **kw) -> str:
                     "started_at": r.started_at, "ended_at": r.ended_at,
                 }
 
+            def _comment_dict(c):
+                return {
+                    "author": c.author, "body": c.body,
+                    "created_at": c.created_at,
+                    "kind": getattr(c, "kind", "comment"),
+                }
+
+            def _event_dict(e):
+                return {
+                    "kind": e.kind, "payload": e.payload,
+                    "created_at": e.created_at, "run_id": e.run_id,
+                }
+
+            mode = str(args.get("mode") or "worker_slim").strip()
+            if mode not in {"worker_slim", "full"}:
+                return tool_error("mode must be one of: worker_slim, full")
+
+            if mode == "worker_slim" and os.environ.get("HERMES_KANBAN_TASK"):
+                return json.dumps({
+                    "task": {
+                        "id": task.id,
+                        "title": task.title,
+                        "assignee": task.assignee,
+                        "status": task.status,
+                        "tenant": task.tenant,
+                        "priority": task.priority,
+                        "workspace_kind": task.workspace_kind,
+                        "workspace_path": task.workspace_path,
+                        "current_run_id": task.current_run_id,
+                        "model_override": task.model_override,
+                    },
+                    "parents": parents,
+                    "children": children,
+                    "comments": [_comment_dict(c) for c in comments[-8:]],
+                    "events": [_event_dict(e) for e in events[-10:]],
+                    "runs": [_run_dict(r) for r in runs[-3:]],
+                    "truncated": {
+                        "comments_omitted": max(0, len(comments) - 8),
+                        "events_omitted": max(0, len(events) - 10),
+                        "runs_omitted": max(0, len(runs) - 3),
+                    },
+                    # Also surface the worker's own context block so the
+                    # agent can include it directly if it wants. This is
+                    # the same string build_worker_context returns to the
+                    # dispatcher at spawn time.
+                    "worker_context": kb.build_worker_context(conn, tid, profile="worker_slim"),
+                })
+
             return json.dumps({
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
-                "comments": [
-                    {"author": c.author, "body": c.body,
-                     "created_at": c.created_at}
-                    for c in comments
-                ],
-                "events": [
-                    {"kind": e.kind, "payload": e.payload,
-                     "created_at": e.created_at, "run_id": e.run_id}
-                    for e in events[-50:]   # cap; full log via CLI
-                ],
+                "comments": [_comment_dict(c) for c in comments],
+                "events": [_event_dict(e) for e in events[-50:]],   # cap; full log via CLI
                 "runs": [_run_dict(r) for r in runs],
                 # Also surface the worker's own context block so the
                 # agent can include it directly if it wants. This is
@@ -1202,6 +1242,15 @@ KANBAN_SHOW_SCHEMA = {
                 "description": _DESC_TASK_ID_DEFAULT,
             },
             "board": _board_schema_prop(),
+            "mode": {
+                "type": "string",
+                "enum": ["worker_slim", "full"],
+                "description": (
+                    "worker_slim (default) returns bounded comments/events/runs "
+                    "for dispatcher-spawned workers; full preserves the legacy "
+                    "diagnostic payload."
+                ),
+            },
         },
         "required": [],
     },

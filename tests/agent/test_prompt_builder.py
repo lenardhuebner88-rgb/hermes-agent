@@ -1547,3 +1547,12 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 
 
+
+
+def test_kanban_guidance_includes_bounded_discovery_rules():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "Budget: targeted reads first" in KANBAN_GUIDANCE
+    assert "`search_files` only with tight paths" in KANBAN_GUIDANCE
+    assert "root/fan-in/receipt tasks" in KANBAN_GUIDANCE
+    assert "Aim for <=20 tool calls" in KANBAN_GUIDANCE
