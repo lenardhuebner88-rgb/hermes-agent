@@ -235,6 +235,95 @@ def test_bare_ellipsis_residue_in_body_blocks(kanban_home, tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Check 2b: code-span-aware residue — markers that are only *quoted* inside
+# backtick spans / code fences / path tokens are documentary, not residue. A
+# genuine unfilled placeholder sitting in prose is still caught.
+# ---------------------------------------------------------------------------
+
+
+def test_residue_tokens_exempts_quoted_markers_in_code_spans():
+    """Unit-level: backtick spans, code fences and path tokens are masked before
+    the marker scan, so a quoted marker yields no residue token."""
+    # Inline-backtick spans around every marker kind.
+    assert planspecs._residue_tokens("Doku: `<id>` / `TODO` / `FIXME` / `TBD` / `...`") == []
+    # The nested backtick *display* of inline-code and code-fence examples
+    # (verbatim shape from the residue-fix spec body) leaves no residue.
+    assert planspecs._residue_tokens("(`` `...` ``), Code-Fences (```` ```...``` ````)") == []
+    # An obvious path token with a trailing ellipsis is a path, not residue.
+    assert planspecs._residue_tokens("siehe `.worktrees/...` und a/b/c.py") == []
+
+
+def test_residue_tokens_still_flags_genuine_prose_placeholders():
+    """Unit-level: a marker sitting bare in prose (no backticks / not a path) is
+    still reported — the gate is not weakened."""
+    assert planspecs._residue_tokens("Implement the <handler> for X") == ["<handler>"]
+    assert planspecs._residue_tokens("TODO: write this") == ["TODO"]
+    assert planspecs._residue_tokens("Do the thing ...") == ["..."]
+
+
+def test_quoted_markers_in_backticks_in_body_and_ac_pass_rubric(kanban_home, tmp_path: Path):
+    """(1) A spec that *cites* the forbidden markers inside backticks in BOTH the
+    body AND an AC statement passes the rubric and ingests."""
+    body = CLEAN.replace(
+        'body: "Optional verbatim worker body"',
+        'body: "Doku: `<id>`/`TODO`/`FIXME`/`TBD`/`...` werden nur ZITIERT"',
+    ).replace(
+        '        - "Verbatim AC statement that must hold for this subtask"',
+        '        - "Scan nimmt `<iso>` und `...` in Backticks aus (Pfad `a/b/c.py`)"',
+    )
+    path = _write(plans_root := tmp_path / "03-Agents", body)
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    # Deterministic rubric raises nothing — no residue finding.
+    assert planspecs.validate_spec_rubric(spec) is None
+    findings = planspecs._collect_spec_rubric_findings(spec)
+    assert not any("residue" in f for f in findings), findings
+
+    # And the full ingest succeeds (judge disabled → deterministic-only).
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+    assert len(result["child_ids"]) == 2
+
+
+def test_genuine_unfilled_angle_placeholder_in_prose_body_still_blocks(kanban_home, tmp_path: Path):
+    """(2) A real unfilled, backtick-free angle placeholder in the prose body
+    still blocks — the gate is not weakened."""
+    body = CLEAN.replace(
+        'body: "Optional verbatim worker body"',
+        'body: "Implement the <handler> for the thing"',
+    )
+    path = _write(plans_root := tmp_path / "03-Agents", body)
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert any("placeholder residue in R1-S1" in f and "<handler>" in f for f in exc.value.findings)
+    assert _task_count() == 0
+
+
+def test_real_vision_flywheel_fixture_passes_rubric(kanban_home, tmp_path: Path, monkeypatch):
+    """(4) A real Vision-Flywheel PlanSpec that quotes the markers (in backticks,
+    code-fence displays and paths, in body AND AC) — the very spec describing this
+    fix — passes the deterministic rubric and ingests after the code-span fix."""
+    monkeypatch.setenv("HERMES_PLANSPEC_JUDGE", "0")  # deterministic-only, no network
+    fixture = (
+        Path(__file__).parent / "fixtures" / "vision_flywheel_haerter_residue_fix_planspec.md"
+    )
+    plans_root = tmp_path / "03-Agents"
+    path = _write(plans_root, fixture.read_text(encoding="utf-8"), name="residue-fix.md")
+
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+    # The deterministic rubric finds NO residue in the quoted markers.
+    findings = planspecs._collect_spec_rubric_findings(spec)
+    assert not any("residue" in f for f in findings), findings
+    assert planspecs.validate_spec_rubric(spec) is None
+
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert result["ok"] is True
+    assert len(result["child_ids"]) == 2
+
+
+# ---------------------------------------------------------------------------
 # Check 3: lane membership
 # ---------------------------------------------------------------------------
 
