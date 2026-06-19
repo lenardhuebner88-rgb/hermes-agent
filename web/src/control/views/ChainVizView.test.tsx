@@ -60,6 +60,8 @@ function makeNode(
     cost_usd: 0,
     input_tokens: 0,
     output_tokens: 0,
+    cost_usd_equivalent: 0,
+    cost_effective_usd: 0,
     ...extra,
   };
 }
@@ -213,8 +215,9 @@ describe("ChainNodeCard cost badge", () => {
     expect(html).toContain("—");
   });
 
-  it("renders dollar amount when cost_usd > 0", () => {
-    const node = makeNode("n2", "done", { cost_usd: 0.42, input_tokens: 1000, output_tokens: 500 });
+  it("renders dollar amount when cost_usd > 0 (real API lane)", () => {
+    // Real API lane: both cost_usd and cost_effective_usd are set.
+    const node = makeNode("n2", "done", { cost_usd: 0.42, cost_effective_usd: 0.42, input_tokens: 1000, output_tokens: 500 });
     const html = renderToStaticMarkup(<ChainNodeCard node={node} isRoot={false} />);
     expect(html).toContain("$0.42");
     // total 1500 tokens → "2 k tok"

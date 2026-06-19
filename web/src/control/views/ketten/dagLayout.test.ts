@@ -21,6 +21,8 @@ function makeNode(id: string, status: ChainGraphNode["status"] = "todo"): ChainG
     cost_usd: 0,
     input_tokens: 0,
     output_tokens: 0,
+    cost_usd_equivalent: 0,
+    cost_effective_usd: 0,
   };
 }
 

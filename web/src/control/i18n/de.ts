@@ -790,5 +790,10 @@ export const de = {
     chainCostsColRuns: "Runs",
     chainCostsLaneTitle: "Kosten je Lane",
     chainCostsLoadError: "Kosten konnten nicht geladen werden.",
+    chainCostsTotal: "Gesamt ca.",
+    // "gesch." marker tooltip — erscheint auf Abo-Schätzwert-Zellen
+    costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
+    // Legende unterhalb der Lane-Tabelle
+    chainCostsCostLegend: "$ = geschätzter API-Gegenwert; Abo-Arbeit kostet real $0, der Wert zeigt was es auf API gekostet hätte. Schätzwert nur für claude-cli/premium-Lanes gestempelt.",
   },
 } as const;

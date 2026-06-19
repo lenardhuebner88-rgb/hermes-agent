@@ -17,7 +17,7 @@
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { de } from "../i18n/de";
-import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec } from "../lib/derive";
+import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import {
   useAccountUsage,
   useBoardStats,
@@ -320,6 +320,11 @@ export function EffizienzSection({
 function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
   const { by_lane, totals } = costs;
   if (by_lane.length === 0) return null;
+  const totalEffective = formatEffectiveCost({
+    cost_usd: totals.cost_usd,
+    cost_effective_usd: totals.cost_effective_usd,
+    tokens: totals.input_tokens + totals.output_tokens,
+  });
   return (
     <div className="mt-2 space-y-1">
       <p className="text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
@@ -335,18 +340,29 @@ function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
           </tr>
         </thead>
         <tbody>
-          {by_lane.map((l) => (
-            <tr key={l.profile} className="border-b border-[var(--hc-border)] last:border-0">
-              <td className="hc-mono py-1 pr-2 text-[var(--hc-text)]">{l.profile}</td>
-              <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
-                {fmtTokens(l.input_tokens + l.output_tokens)}
-              </td>
-              <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
-                ${l.cost_usd.toFixed(2)}
-              </td>
-              <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{l.run_count}</td>
-            </tr>
-          ))}
+          {by_lane.map((l) => {
+            const laneEff = formatEffectiveCost({
+              cost_usd: l.cost_usd,
+              cost_effective_usd: l.cost_effective_usd,
+              tokens: l.input_tokens + l.output_tokens,
+            });
+            return (
+              <tr key={l.profile} className="border-b border-[var(--hc-border)] last:border-0">
+                <td className="hc-mono py-1 pr-2 text-[var(--hc-text)]">{l.profile}</td>
+                <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
+                  {fmtTokens(l.input_tokens + l.output_tokens)}
+                </td>
+                <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
+                  {laneEff.estimated ? (
+                    <span title={de.ketten.costEstimatedTooltip}>{laneEff.text}</span>
+                  ) : (
+                    laneEff.text
+                  )}
+                </td>
+                <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{l.run_count}</td>
+              </tr>
+            );
+          })}
         </tbody>
         <tfoot>
           <tr className="border-t-2 border-[var(--hc-border-strong)] text-xs font-semibold">
@@ -355,12 +371,20 @@ function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
               {fmtTokens(totals.input_tokens + totals.output_tokens)}
             </td>
             <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
-              ${totals.cost_usd.toFixed(2)}
+              {totalEffective.estimated ? (
+                <span title={de.ketten.costEstimatedTooltip}>{totalEffective.text}</span>
+              ) : (
+                totalEffective.text
+              )}
             </td>
             <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{totals.run_count}</td>
           </tr>
         </tfoot>
       </table>
+      {/* Legende: erklärt "gesch." und Abo-Semantik */}
+      <p className="mt-2 text-[10px] leading-snug text-[var(--hc-text-dim)]">
+        {de.ketten.chainCostsCostLegend}
+      </p>
     </div>
   );
 }
@@ -379,6 +403,16 @@ function ChainCostsRow({
     ? chainCosts.data.totals.input_tokens + chainCosts.data.totals.output_tokens
     : null;
 
+  // Zeige cost_effective_usd wenn vorhanden, sonst cost_usd; null = kein Wert.
+  const effectiveForRoot = formatEffectiveCost({
+    cost_usd: root.cost_usd ?? 0,
+    cost_effective_usd: root.cost_effective_usd ?? 0,
+    tokens: totalTokens ?? 0,
+  });
+  const costDisplay = root.cost_effective_usd != null || root.cost_usd != null
+    ? effectiveForRoot
+    : null;
+
   return (
     <div className="border-b border-[var(--hc-border)] last:border-0">
       <button
@@ -394,7 +428,9 @@ function ChainCostsRow({
           {totalTokens != null ? fmtTokens(totalTokens) : "—"}
         </span>
         <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text)]">
-          {root.cost_usd != null ? `$${root.cost_usd.toFixed(2)}` : "—"}
+          {costDisplay == null ? "—" : costDisplay.estimated ? (
+            <span title={de.ketten.costEstimatedTooltip}>{costDisplay.text}</span>
+          ) : costDisplay.text}
         </span>
         <span
           aria-hidden="true"
@@ -419,16 +455,31 @@ function ChainCostsRow({
   );
 }
 
-export function ChainCostsSection({ roots }: { roots: RunSummaryRoot[] }) {
+export function ChainCostsSection({
+  roots,
+  totalCostEffectiveUsd,
+}: {
+  roots: RunSummaryRoot[];
+  totalCostEffectiveUsd: number | null;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   function handleSelect(id: string) {
     setSelectedId((prev) => (prev === id ? null : id));
   }
 
+  // Gesamt-Kennzahl für den Section-Meta (zeigt geschätzten Gesamtwert wenn vorhanden).
+  const totalEff =
+    totalCostEffectiveUsd != null
+      ? formatEffectiveCost({ cost_usd: 0, cost_effective_usd: totalCostEffectiveUsd, tokens: 1 })
+      : null;
+  const metaText = totalEff && totalEff.text !== "—"
+    ? `${de.ketten.chainCostsMeta} · ${de.ketten.chainCostsTotal} ${totalEff.text}`
+    : de.ketten.chainCostsMeta;
+
   return (
     <>
-      <SectionRule title={de.ketten.chainCostsTitle} meta={de.ketten.chainCostsMeta} />
+      <SectionRule title={de.ketten.chainCostsTitle} meta={metaText} />
       {roots.length === 0 ? (
         <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
       ) : (
@@ -472,6 +523,7 @@ export function StatistikView() {
   const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
   const summaryRoots = useMemo(() => summary.data?.roots ?? [], [summary.data]);
+  const totalCostEffectiveUsd = summary.data?.total_cost_effective_usd ?? null;
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
@@ -506,7 +558,7 @@ export function StatistikView() {
       />
 
       {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
-      <ChainCostsSection roots={summaryRoots} />
+      <ChainCostsSection roots={summaryRoots} totalCostEffectiveUsd={totalCostEffectiveUsd} />
 
       <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
     </BroadsheetShell>

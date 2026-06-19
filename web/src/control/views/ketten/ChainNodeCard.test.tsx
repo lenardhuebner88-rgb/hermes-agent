@@ -21,6 +21,8 @@ const node: ChainGraphNode = {
   cost_usd: 0,
   input_tokens: 0,
   output_tokens: 0,
+  cost_usd_equivalent: 0,
+  cost_effective_usd: 0,
 };
 
 describe("ChainNodeCard", () => {
@@ -60,6 +62,34 @@ describe("ChainNodeCard", () => {
     const waiting: ChainGraphNode = { ...node, status: "todo", parents: ["t_dep"], runtime_seconds: null };
     const html = renderToStaticMarkup(<ChainNodeCard node={waiting} isRoot={false} />);
     expect(html).toContain("Wartet auf Vorgänger");
+  });
+
+  it("shows estimated cost marker 'gesch.' for Abo-only runs", () => {
+    const aboNode: ChainGraphNode = {
+      ...node,
+      cost_usd: 0,
+      cost_effective_usd: 1.5,
+      cost_usd_equivalent: 1.5,
+      input_tokens: 50_000,
+      output_tokens: 5_000,
+    };
+    const html = renderToStaticMarkup(<ChainNodeCard node={aboNode} isRoot={false} />);
+    expect(html).toContain("gesch.");
+    expect(html).toContain("$1.50 gesch.");
+  });
+
+  it("shows plain cost (no 'gesch.') when cost_usd > 0", () => {
+    const realNode: ChainGraphNode = {
+      ...node,
+      cost_usd: 0.80,
+      cost_effective_usd: 0.80,
+      cost_usd_equivalent: 0,
+      input_tokens: 20_000,
+      output_tokens: 2_000,
+    };
+    const html = renderToStaticMarkup(<ChainNodeCard node={realNode} isRoot={false} />);
+    expect(html).not.toContain("gesch.");
+    expect(html).toContain("$0.80");
   });
 
   it("prefers latest_run runtime_seconds over task-level runtime_seconds", () => {

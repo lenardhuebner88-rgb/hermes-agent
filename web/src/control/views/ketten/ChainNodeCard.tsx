@@ -1,6 +1,6 @@
 import { forwardRef, memo } from "react";
 import { cn } from "@/lib/utils";
-import { fmtDur, fmtTokens } from "../../lib/derive";
+import { fmtDur, fmtTokens, formatEffectiveCost } from "../../lib/derive";
 import { StatusPill } from "../../components/atoms";
 import type { ChainGraphNode } from "../../lib/types";
 import { statusDot, statusTone } from "./dagLayout";
@@ -105,7 +105,12 @@ export const ChainNodeCard = memo(
         </div>
 
         {/* Cost badge — dezent unterhalb des Footers; "—" wenn keine Daten. */}
-        <NodeCostBadge costUsd={node.cost_usd} inputTokens={node.input_tokens} outputTokens={node.output_tokens} />
+        <NodeCostBadge
+          costUsd={node.cost_usd}
+          costEffectiveUsd={node.cost_effective_usd}
+          inputTokens={node.input_tokens}
+          outputTokens={node.output_tokens}
+        />
       </div>
     );
   }),
@@ -114,27 +119,38 @@ export const ChainNodeCard = memo(
 /** Kompaktes Kosten/Token-Badge für einen DAG-Knoten. */
 function NodeCostBadge({
   costUsd,
+  costEffectiveUsd,
   inputTokens,
   outputTokens,
 }: {
   costUsd: number;
+  costEffectiveUsd: number;
   inputTokens: number;
   outputTokens: number;
 }) {
   const totalTokens = inputTokens + outputTokens;
+  const { text: costText, estimated } = formatEffectiveCost({
+    cost_usd: costUsd,
+    cost_effective_usd: costEffectiveUsd,
+    tokens: totalTokens,
+  });
+
   // Wenn weder Kosten noch Tokens vorhanden — dezentes "—".
-  if (costUsd === 0 && totalTokens === 0) {
+  if (costEffectiveUsd === 0 && totalTokens === 0) {
     return (
       <div className="mt-1.5 text-right text-[10px] text-[var(--hc-text-dim)]" aria-label={de.ketten.costNone}>
         —
       </div>
     );
   }
-  const costLabel = costUsd > 0 ? `$${costUsd.toFixed(2)}` : "$0.00";
   const tokLabel = totalTokens > 0 ? `${fmtTokens(totalTokens)} tok` : null;
   return (
     <div className="hc-mono mt-1.5 text-right text-[10px] tabular-nums text-[var(--hc-text-dim)]">
-      {costLabel}
+      {estimated ? (
+        <span title={de.ketten.costEstimatedTooltip}>{costText}</span>
+      ) : (
+        costText
+      )}
       {tokLabel ? ` · ${tokLabel}` : null}
     </div>
   );

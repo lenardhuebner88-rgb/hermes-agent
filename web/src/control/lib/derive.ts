@@ -212,6 +212,46 @@ export function fmtClock(epochSec: number): string {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/* ── Kosten-Anzeige (geschätzte API-Äquivalente für Abo-Runs) ───────────────
+ * Regel:
+ *   cost_effective_usd > 0 UND cost_usd > 0  → "$X.XX"          (real)
+ *   cost_effective_usd > 0 UND cost_usd === 0 → "$X.XX gesch."   (Abo-Schätzwert)
+ *   cost_effective_usd === 0 UND tokens > 0   → "—"              (kein Schätzwert; Tokens bleiben extern sichtbar)
+ *   alles 0                                   → "—"
+ * Rückgabe: { text, estimated } — `estimated=true` signalisiert dem Aufrufer,
+ * dass er einen Tooltip/Marker anzeigen soll.
+ */
+export interface EffectiveCostResult {
+  /** Anzeigetext, z. B. "$1.23", "$0.45 gesch." oder "—". */
+  text: string;
+  /** true = nur geschätzter API-Gegenwert (läuft über Abo); false = real oder leer. */
+  estimated: boolean;
+}
+
+export function formatEffectiveCost({
+  cost_usd,
+  cost_effective_usd,
+  tokens,
+}: {
+  cost_usd: number;
+  cost_effective_usd: number;
+  tokens: number;
+}): EffectiveCostResult {
+  if (cost_effective_usd > 0) {
+    if (cost_usd > 0) {
+      // Real (API-billed)
+      return { text: `$${cost_effective_usd.toFixed(2)}`, estimated: false };
+    }
+    // Rein über Abo — geschätzter Gegenwert
+    return { text: `$${cost_effective_usd.toFixed(2)} gesch.`, estimated: true };
+  }
+  // Kein Schätzwert gestempelt (z.B. Codex/verifier-Lanes), Tokens ggf. vorhanden
+  if (tokens > 0) {
+    return { text: "—", estimated: false };
+  }
+  return { text: "—", estimated: false };
+}
+
 /** Nur Uhrzeit "HH:MM" aus ISO-8601-String ODER epoch-Sekunden; leer/ungültig → "–". */
 export function fmtClockTime(at: string | number): string {
   if (at === "" || (typeof at === "number" && at <= 0)) return "–";

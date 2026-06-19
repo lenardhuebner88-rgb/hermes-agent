@@ -8,6 +8,7 @@ const summary: RunSummaryResponse = {
   now: 1780000600,
   completed_roots: 1,
   total_cost_usd: 0.42,
+  total_cost_effective_usd: null,
   cycle_time_p50_seconds: 1800,
   cycle_time_p90_seconds: 3600,
   roots: [
@@ -18,6 +19,7 @@ const summary: RunSummaryResponse = {
       assignee: "orchestrator",
       completed_at: 1780000000,
       cost_usd: 0.42,
+      cost_effective_usd: null,
       cycle_time_seconds: 1800,
       subtask_count: 3,
     },

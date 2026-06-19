@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   workerHealth, buildOverview, fmtAge, fmtDur, fmtMB, freshness, fmtClock, fmtClockTime, STUCK_HEARTBEAT_S,
+  formatEffectiveCost,
 } from './derive';
 import type { Worker, Proposal } from './types';
 
@@ -146,6 +147,39 @@ describe('fmtClock (Design-System-Format bleibt DD/MM/YYYY, HH:mm)', () => {
   // hängt am vollen Datum-Zeit-Format.
   it('epoch-Sekunden → "DD/MM/YYYY, HH:mm"', () => {
     expect(fmtClock(NOW)).toMatch(/^\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}$/);
+  });
+});
+
+// ── Kosten-Anzeige (formatEffectiveCost) ──────────────────────────────────
+describe('formatEffectiveCost', () => {
+  it('real: cost_effective > 0 AND cost_usd > 0 → "$X.XX", estimated=false', () => {
+    const r = formatEffectiveCost({ cost_usd: 0.50, cost_effective_usd: 0.50, tokens: 1000 });
+    expect(r.text).toBe('$0.50');
+    expect(r.estimated).toBe(false);
+  });
+
+  it('Abo-Schätzwert: cost_effective > 0 AND cost_usd === 0 → "$X.XX gesch.", estimated=true', () => {
+    const r = formatEffectiveCost({ cost_usd: 0, cost_effective_usd: 1.23, tokens: 50000 });
+    expect(r.text).toBe('$1.23 gesch.');
+    expect(r.estimated).toBe(true);
+  });
+
+  it('kein Schätzwert aber Tokens vorhanden → "—", estimated=false', () => {
+    const r = formatEffectiveCost({ cost_usd: 0, cost_effective_usd: 0, tokens: 5000 });
+    expect(r.text).toBe('—');
+    expect(r.estimated).toBe(false);
+  });
+
+  it('alles 0 → "—", estimated=false', () => {
+    const r = formatEffectiveCost({ cost_usd: 0, cost_effective_usd: 0, tokens: 0 });
+    expect(r.text).toBe('—');
+    expect(r.estimated).toBe(false);
+  });
+
+  it('formatiert auf 2 Dezimalstellen', () => {
+    const r = formatEffectiveCost({ cost_usd: 0, cost_effective_usd: 0.005, tokens: 100 });
+    expect(r.text).toBe('$0.01 gesch.');
+    expect(r.estimated).toBe(true);
   });
 });
 

@@ -262,6 +262,9 @@ const ChainGraphNodeSchema = z.object({
   cost_usd: z.coerce.number().catch(0),
   input_tokens: z.coerce.number().catch(0),
   output_tokens: z.coerce.number().catch(0),
+  // Geschätzter API-Gegenwert für Abo-Runs (nur claude-cli/premium gestempelt).
+  cost_usd_equivalent: z.coerce.number().catch(0),
+  cost_effective_usd: z.coerce.number().catch(0),
 });
 
 export const ChainGraphResponseSchema = z.object({
@@ -279,6 +282,9 @@ const ChainCostsLaneSchema = z.object({
   output_tokens: z.coerce.number().catch(0),
   cost_usd: z.coerce.number().catch(0),
   run_count: z.coerce.number().catch(0),
+  // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
+  cost_usd_equivalent: z.coerce.number().catch(0),
+  cost_effective_usd: z.coerce.number().catch(0),
 });
 
 export const ChainCostsResponseSchema = z.object({
@@ -289,7 +295,10 @@ export const ChainCostsResponseSchema = z.object({
     output_tokens: z.coerce.number().catch(0),
     cost_usd: z.coerce.number().catch(0),
     run_count: z.coerce.number().catch(0),
-  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, run_count: 0 }),
+    // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
+    cost_usd_equivalent: z.coerce.number().catch(0),
+    cost_effective_usd: z.coerce.number().catch(0),
+  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, cost_effective_usd: 0 }),
   // absteigend nach cost_usd (Backend-Garantie)
   by_lane: z.array(ChainCostsLaneSchema).catch([]),
 });
@@ -1004,6 +1013,8 @@ const RunSummaryRootSchema = z.object({
   assignee: z.string().nullable().catch(null),
   completed_at: nullableNumber,
   cost_usd: nullableNumber,
+  // Geschätzter API-Gegenwert + effektive Kosten (additiv; ältere Payloads → null via .catch).
+  cost_effective_usd: nullableNumber,
   cycle_time_seconds: nullableNumber,
   subtask_count: z.coerce.number().catch(0),
 });
@@ -1012,6 +1023,8 @@ export const RunSummaryResponseSchema = z.object({
   now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
   completed_roots: z.coerce.number().catch(0),
   total_cost_usd: nullableNumber,
+  // Geschätzter API-Gegenwert Gesamt (additiv; ältere Payloads → null).
+  total_cost_effective_usd: nullableNumber,
   cycle_time_p50_seconds: nullableNumber,
   cycle_time_p90_seconds: nullableNumber,
   roots: z.array(RunSummaryRootSchema).catch([]),

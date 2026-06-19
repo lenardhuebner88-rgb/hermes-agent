@@ -256,6 +256,10 @@ export interface ChainGraphNode {
   cost_usd: number;
   input_tokens: number;
   output_tokens: number;
+  /** Geschätzter API-Gegenwert für Abo-Runs (nur claude-cli/premium gestempelt); 0 wenn nicht verfügbar. */
+  cost_usd_equivalent: number;
+  /** Effektive Kosten: cost_usd + cost_usd_equivalent; 0 wenn nicht verfügbar. */
+  cost_effective_usd: number;
 }
 
 export interface ChainCostsLane {
@@ -264,6 +268,10 @@ export interface ChainCostsLane {
   output_tokens: number;
   cost_usd: number;
   run_count: number;
+  /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
+  cost_usd_equivalent: number;
+  /** Effektive Kosten; 0 wenn nicht gestempelt. */
+  cost_effective_usd: number;
 }
 
 export interface ChainCostsResponse {
@@ -274,6 +282,10 @@ export interface ChainCostsResponse {
     output_tokens: number;
     cost_usd: number;
     run_count: number;
+    /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
+    cost_usd_equivalent: number;
+    /** Effektive Kosten; 0 wenn nicht gestempelt. */
+    cost_effective_usd: number;
   };
   by_lane: ChainCostsLane[];
 }
