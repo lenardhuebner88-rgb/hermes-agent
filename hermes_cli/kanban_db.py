@@ -2687,6 +2687,16 @@ NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
 # worker and does NOT change escalation-after-N — that keeps using the existing
 # ``operator_escalation`` event next to the classification.
 HEILER_CLASSIFICATION_EVENT = "heiler_classification"
+# Operator override of an auto classification (HEILER-CLASSIFY-COVERAGE-S1).
+# Stored as its own event so the auto ``heiler_classification`` ledger
+# (``by_class``, the Stratege's input) stays the record of what the *pipeline*
+# decided, while the coverage metric can measure how often a human had to step
+# in (the AC-2 misclassification guardrail).
+HEILER_CLASSIFICATION_CORRECTED_EVENT = "heiler_classification_corrected"
+# Source tags on a ``heiler_classification`` payload: who emitted it. Inline
+# sites use their function name ("record_task_failure" / "stall_park"); the
+# safety-net sweep tags itself so the ledger shows backfilled vs atomic.
+HEILER_SOURCE_ESCALATION_SWEEP = "escalation_sweep"
 HEILER_CLASS_TRANSIENT = "transient"
 HEILER_CLASS_FLAKY = "flaky"
 HEILER_CLASS_REAL_BUG = "real-bug"
@@ -4020,21 +4030,26 @@ def _append_event(
     payload: Optional[dict] = None,
     *,
     run_id: Optional[int] = None,
-) -> None:
+) -> int:
     """Record an event row.  Called from within an already-open txn.
 
     ``run_id`` is optional: pass the current run id so UIs can group
     events by attempt. For events that aren't scoped to a single run
     (task created/edited/archived, dependency promotion) leave it None
     and the row carries NULL.
+
+    Returns the inserted row id so callers that need to reference the event
+    (e.g. pairing a ``heiler_classification`` to the ``operator_escalation``
+    it explains) can record it. Existing callers ignore the return.
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    return int(cur.lastrowid)
 
 
 def _coerce_int(val: Any) -> Optional[int]:
@@ -9929,19 +9944,29 @@ def _heiler_classification_payload(
     evidence: dict,
     source: str,
     blocked: bool,
+    escalation_event_id: Optional[int] = None,
 ) -> dict:
     """Stable payload shape for a ``heiler_classification`` event.
 
     ``source`` is the originating path (``record_task_failure`` / ``stall_park``)
     and ``blocked`` whether this failure actually parked/blocked the task — both
     let the Stratege weight a one-off transient differently from a terminal park.
+
+    ``escalation_event_id`` links this classification to the
+    ``operator_escalation`` event it explains (the AC-2 documented ledger
+    reference). It is the idempotency key the safety-net sweep dedupes on, so
+    every escalation-paired classification — inline or swept — carries it.
+    Sub-threshold failures that classify but never escalate leave it None.
     """
-    return {
+    payload = {
         "class": heiler_class,
         "evidence": evidence,
         "source": source,
         "blocked": bool(blocked),
     }
+    if escalation_event_id is not None:
+        payload["escalation_event_id"] = int(escalation_event_id)
+    return payload
 
 
 def _operator_escalation_payload(
@@ -10070,6 +10095,9 @@ def _record_task_failure(
         # run_id stays None unless a branch closes an open run; the S4 Heiler
         # classification event at the end of the txn links to it when present.
         run_id = None
+        # Set only on the breaker-trip branch; pairs the end-of-txn
+        # classification to the operator_escalation it explains.
+        esc_event_id: Optional[int] = None
         if count_failure and failures >= effective_limit:
             # Trip the breaker.
             if release_claim:
@@ -10117,7 +10145,7 @@ def _record_task_failure(
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
-            _append_event(
+            esc_event_id = _append_event(
                 conn,
                 task_id,
                 OPERATOR_ESCALATION_EVENT,
@@ -10178,6 +10206,7 @@ def _record_task_failure(
             _heiler_classification_payload(
                 heiler_class=h_class, evidence=h_ev,
                 source="record_task_failure", blocked=blocked,
+                escalation_event_id=esc_event_id,
             ),
             run_id=run_id,
         )
@@ -10448,7 +10477,7 @@ def _park_stall_once(
             return False
         if fresh["status"] != "blocked":
             _append_event(conn, task_id, "blocked", {"reason": reason})
-        _append_event(
+        esc_event_id = _append_event(
             conn,
             task_id,
             OPERATOR_ESCALATION_EVENT,
@@ -10470,6 +10499,7 @@ def _park_stall_once(
             _heiler_classification_payload(
                 heiler_class=h_class, evidence=h_ev,
                 source="stall_park", blocked=True,
+                escalation_event_id=esc_event_id,
             ),
         )
         _append_stall_marker(
@@ -11070,6 +11100,160 @@ def read_escalation_ledger(
         "by_class": by_class,
         "entries": entries,
     }
+
+
+def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
+    """Derive a Heiler class for an escalation from its own persisted evidence.
+
+    The inline failure/park paths classify at the failure site with the live
+    error string; the sweep instead reconstructs the signal from the escalation
+    event payload (``why_now`` + ``evidence``) and runs it through the same
+    deterministic :func:`_classify_failure`, so a swept classification lands in
+    the same vocabulary as an inline one.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    evidence = payload.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    why_now = str(payload.get("why_now") or "")
+    last_error = str(evidence.get("last_error") or "")
+    outcome = evidence.get("trigger_outcome")
+    stall_class = evidence.get("stall_class")
+    return _classify_failure(
+        error=last_error,
+        outcome=str(outcome) if outcome else None,
+        stall_class=str(stall_class) if stall_class else None,
+        reason=why_now,
+    )
+
+
+def classify_escalations_sweep(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    lookback_seconds: Optional[int] = None,
+) -> dict:
+    """Safety net guaranteeing every operator_escalation gets a paired
+    heiler_classification — the Stratege's ``by_class`` input.
+
+    The inline failure/park paths classify atomically at the escalation site,
+    but not every escalation writer does (the release-gate and budget-runaway
+    paths do not), and a future path could forget. That fragility is exactly
+    why the live ledger starved: 9 escalations in a week, 0 classifications.
+    This deterministic, idempotent sweep closes the gap regardless of call
+    site: it scans operator_escalation events not yet referenced by any
+    heiler_classification and emits one, deriving the class from the
+    escalation's own evidence (:func:`_classify_escalation_payload`).
+
+    Idempotent: the emitted classification carries ``escalation_event_id``, so
+    a re-run skips every escalation already classified (inline or swept). Each
+    swept classification therefore carries a documented ledger reference (the
+    escalation event id) plus the originating ``run_id`` when present (AC-2).
+
+    Wired into the dispatcher tick (runs every few seconds → far inside the 24h
+    coverage target), but a pure DB sweep safe to call from a cron or by hand.
+    ``lookback_seconds`` bounds the scan to recent escalations; ``None`` (the
+    default) considers the full history so a first run backfills the ledger.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    summary: dict = {"checked_at": ts, "scanned": 0, "classified": []}
+
+    # Idempotency key: escalation ids already referenced by a classification.
+    referenced: set[int] = set()
+    for r in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (HEILER_CLASSIFICATION_EVENT,),
+    ).fetchall():
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            ref = payload.get("escalation_event_id")
+            if ref is not None:
+                try:
+                    referenced.add(int(ref))
+                except (TypeError, ValueError):
+                    pass
+
+    where = ["kind = ?"]
+    params: list = [OPERATOR_ESCALATION_EVENT]
+    if lookback_seconds is not None:
+        where.append("created_at >= ?")
+        params.append(ts - int(lookback_seconds))
+    rows = conn.execute(
+        "SELECT id, task_id, run_id, payload FROM task_events "
+        "WHERE " + " AND ".join(where) + " ORDER BY id ASC",
+        params,
+    ).fetchall()
+    summary["scanned"] = len(rows)
+
+    pending = [r for r in rows if int(r["id"]) not in referenced]
+    if not pending:
+        return summary
+
+    with write_txn(conn):
+        for r in pending:
+            esc_id = int(r["id"])
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except Exception:
+                payload = {}
+            h_class, h_ev = _classify_escalation_payload(payload)
+            run_id = int(r["run_id"]) if r["run_id"] is not None else None
+            _append_event(
+                conn, r["task_id"], HEILER_CLASSIFICATION_EVENT,
+                _heiler_classification_payload(
+                    heiler_class=h_class, evidence=h_ev,
+                    source=HEILER_SOURCE_ESCALATION_SWEEP, blocked=True,
+                    escalation_event_id=esc_id,
+                ),
+                run_id=run_id,
+            )
+            summary["classified"].append({
+                "task_id": r["task_id"],
+                "escalation_event_id": esc_id,
+                "class": h_class,
+            })
+    return summary
+
+
+def record_classification_correction(
+    conn: sqlite3.Connection,
+    escalation_event_id: int,
+    *,
+    corrected_to: str,
+    reason: str = "",
+) -> bool:
+    """Operator override of an auto heiler_classification (AC-2 guardrail input).
+
+    Records that a human judged the pipeline's auto-classification wrong for
+    the escalation ``escalation_event_id`` and supplies the correct class.
+    Stored as a distinct :data:`HEILER_CLASSIFICATION_CORRECTED_EVENT` so the
+    auto ``heiler_classification`` ledger (``by_class``) stays the record of
+    what the pipeline decided, while the coverage metric counts how often the
+    operator had to step in (held < 10% = the misclassification guardrail).
+
+    Returns True iff a correction was recorded (the escalation event exists).
+    Raises ``ValueError`` for an unknown class.
+    """
+    if corrected_to not in HEILER_CLASSES:
+        raise ValueError(f"unknown heiler class: {corrected_to!r}")
+    with write_txn(conn):
+        esc = conn.execute(
+            "SELECT id, task_id FROM task_events WHERE id = ? AND kind = ?",
+            (int(escalation_event_id), OPERATOR_ESCALATION_EVENT),
+        ).fetchone()
+        if esc is None:
+            return False
+        _append_event(
+            conn, esc["task_id"], HEILER_CLASSIFICATION_CORRECTED_EVENT,
+            {
+                "escalation_event_id": int(escalation_event_id),
+                "corrected_to": corrected_to,
+                "reason": str(reason)[:500],
+            },
+        )
+    return True
 
 
 def kanban_dispatcher_heartbeat_path() -> Path:
