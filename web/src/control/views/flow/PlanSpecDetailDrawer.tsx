@@ -29,8 +29,10 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
   const content = (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 p-3 backdrop-blur-sm" role="presentation" onClick={onClose}>
       {/* hc-surface-card = solider Daylight-Fill (--hc-panel-card) + Border +
-          Elevation. FRÜHER bg-[var(--hc-surface)] — dieser Token existiert NICHT,
-          var() ohne Fallback = transparent → Panel war durchsichtig/unlesbar. */}
+          Elevation. Früher lag hier der Token hc-surface (ohne -card) als Fill —
+          den gibt es NICHT, also war das var() ohne Fallback transparent und das
+          Panel durchsichtig/unlesbar. (Klassen-Literal hier bewusst vermeiden —
+          Tailwind v4 scannt auch Kommentare und würde sonst tote CSS erzeugen.) */}
       <div className="hc-surface-card flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl shadow-2xl" role="dialog" aria-modal="true" aria-label="PlanSpec Details" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
           <FileText className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" />
