@@ -755,6 +755,51 @@ def test_cli_release_gate_precondition_error_exit_one(kanban_home, monkeypatch, 
     assert "not a release-gate child" in capsys.readouterr().err
 
 
+def test_cli_release_gate_calls_pre_deploy_backup(kanban_home, monkeypatch):
+    """_cmd_release_gate calls create_pre_deploy_backup before executing the gate."""
+    from hermes_cli import kanban_worktrees as kwt
+    import hermes_cli.backup as backup_mod
+
+    backup_calls = []
+
+    def fake_backup(**_kw):
+        backup_calls.append(True)
+        return None  # simulate no files / fresh install
+
+    monkeypatch.setattr(backup_mod, "create_pre_deploy_backup", fake_backup)
+    monkeypatch.setattr(
+        kwt, "execute_release_gate",
+        lambda conn, task_id, *, max_retries=None: {
+            "status": "green", "fixer_attempts": 0, "root_id": task_id,
+        },
+    )
+
+    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    assert rc == 0
+    assert backup_calls, "create_pre_deploy_backup was not called"
+
+
+def test_cli_release_gate_continues_when_backup_raises(kanban_home, monkeypatch, capsys):
+    """A crashing create_pre_deploy_backup must NOT block the release gate."""
+    from hermes_cli import kanban_worktrees as kwt
+    import hermes_cli.backup as backup_mod
+
+    def exploding_backup(**_kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(backup_mod, "create_pre_deploy_backup", exploding_backup)
+    monkeypatch.setattr(
+        kwt, "execute_release_gate",
+        lambda conn, task_id, *, max_retries=None: {
+            "status": "green", "fixer_attempts": 0, "root_id": task_id,
+        },
+    )
+
+    rc = kc.kanban_command(_release_gate_args("t_gate"))
+    # Gate still returns green exit code despite backup failure
+    assert rc == 0
+
+
 # ---------------------------------------------------------------------------
 # respec CLI smoke tests (kanban respec <id> --body/--ac)
 # ---------------------------------------------------------------------------

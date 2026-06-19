@@ -2088,3 +2088,111 @@ class TestRestoreCronJobsIfEmptied:
         result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
         assert result is not None
         assert result["job_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# create_pre_deploy_backup tests
+# ---------------------------------------------------------------------------
+
+class TestCreatePreDeployBackup:
+    def test_creates_pre_deploy_zip(self, tmp_path, monkeypatch):
+        """create_pre_deploy_backup writes pre-deploy-<stamp>.zip into backups/."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        from hermes_cli.backup import create_pre_deploy_backup
+        result = create_pre_deploy_backup(hermes_home=hermes_home)
+
+        assert result is not None
+        assert result.exists()
+        assert result.name.startswith("pre-deploy-")
+        assert result.suffix == ".zip"
+        assert result.parent == hermes_home / "backups"
+
+    def test_pre_deploy_zip_is_valid_zip(self, tmp_path, monkeypatch):
+        """The created archive is a valid zip containing expected content."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        from hermes_cli.backup import create_pre_deploy_backup
+        result = create_pre_deploy_backup(hermes_home=hermes_home)
+
+        assert result is not None
+        with zipfile.ZipFile(result, "r") as zf:
+            names = zf.namelist()
+        assert "config.yaml" in names
+        assert "skills/my-skill/SKILL.md" in names
+        # Excluded dirs must not appear
+        assert not any("hermes-agent" in n for n in names)
+        assert not any("__pycache__" in n for n in names)
+
+    def test_returns_none_on_missing_hermes_home(self, tmp_path):
+        """Returns None (never raises) when hermes_home does not exist."""
+        from hermes_cli.backup import create_pre_deploy_backup
+        result = create_pre_deploy_backup(hermes_home=tmp_path / "nonexistent")
+        assert result is None
+
+    def test_returns_none_and_does_not_raise_on_write_failure(self, tmp_path, monkeypatch):
+        """Never raises — returns None when the backup write fails."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("model: test\n")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import hermes_cli.backup as backup_mod
+
+        def _fail(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(backup_mod, "_write_full_zip_backup", _fail)
+        result = backup_mod.create_pre_deploy_backup(hermes_home=hermes_home)
+        assert result is None  # never raises
+
+    def test_prunes_old_pre_deploy_backups(self, tmp_path, monkeypatch):
+        """Old pre-deploy backups beyond keep= are removed."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        backup_dir = hermes_home / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(5):
+            (backup_dir / f"pre-deploy-2026-01-0{i+1}-120000.zip").write_bytes(b"PK")
+
+        from hermes_cli.backup import create_pre_deploy_backup
+        create_pre_deploy_backup(hermes_home=hermes_home, keep=3)
+
+        remaining = sorted(backup_dir.glob("pre-deploy-*.zip"))
+        assert len(remaining) == 3
+
+    def test_prune_does_not_touch_other_backup_types(self, tmp_path, monkeypatch):
+        """pre-deploy pruning only removes pre-deploy-*.zip, not pre-update/migration ones."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        backup_dir = hermes_home / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        # pre-update and pre-migration zips that must survive
+        (backup_dir / "pre-update-2026-01-01-120000.zip").write_bytes(b"PK")
+        (backup_dir / "pre-migration-2026-01-01-120000.zip").write_bytes(b"PK")
+        # create more pre-deploy backups than keep=1
+        for i in range(3):
+            (backup_dir / f"pre-deploy-2026-01-0{i+1}-120000.zip").write_bytes(b"PK")
+
+        from hermes_cli.backup import create_pre_deploy_backup
+        create_pre_deploy_backup(hermes_home=hermes_home, keep=1)
+
+        assert (backup_dir / "pre-update-2026-01-01-120000.zip").exists()
+        assert (backup_dir / "pre-migration-2026-01-01-120000.zip").exists()

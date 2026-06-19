@@ -1102,6 +1102,77 @@ def _prune_pre_migration_backups(backup_dir: Path, keep: int) -> int:
     return deleted
 
 
+def create_pre_deploy_backup(
+    hermes_home: Optional[Path] = None,
+    keep: int = 5,
+) -> Optional[Path]:
+    """Create a full zip backup of HERMES_HOME under ``backups/`` before an
+    autonomous deploy / release-gate run.
+
+    Shares implementation with :func:`create_pre_migration_backup` via
+    ``_write_full_zip_backup`` — same exclusions, same SQLite safe-copy,
+    restorable with ``hermes import <archive>``.  Writes to
+    ``<HERMES_HOME>/backups/pre-deploy-<timestamp>.zip`` and auto-prunes
+    old pre-deploy backups.
+
+    Returns the path to the created zip, or ``None`` if nothing was found
+    to back up (fresh install) or the write failed.  Never raises — the
+    caller decides whether to abort or proceed.
+    """
+    hermes_root = hermes_home or get_default_hermes_root()
+    if not hermes_root.is_dir():
+        return None
+
+    backup_dir = _pre_update_backup_dir(hermes_root)
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create pre-deploy backup dir %s: %s", backup_dir, exc)
+        return None
+
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    out_path = backup_dir / f"pre-deploy-{stamp}.zip"
+
+    try:
+        result = _write_full_zip_backup(out_path, hermes_root)
+    except Exception as exc:  # pragma: no cover — defensive outer catch
+        logger.warning("Pre-deploy backup failed unexpectedly: %s", exc)
+        return None
+    if result is None:
+        return None
+
+    _prune_pre_deploy_backups(backup_dir, keep=keep)
+    return out_path
+
+
+def _prune_pre_deploy_backups(backup_dir: Path, keep: int) -> int:
+    """Remove oldest pre-deploy backups beyond the keep limit.
+
+    Only touches files matching ``pre-deploy-*.zip`` so other backup types in
+    the same directory are never affected.
+    """
+    keep = max(keep, 0)
+    if not backup_dir.exists():
+        return 0
+
+    backups = sorted(
+        (p for p in backup_dir.iterdir()
+         if p.is_file() and p.name.startswith("pre-deploy-") and p.suffix.lower() == ".zip"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+
+    deleted = 0
+    for p in backups[keep:]:
+        try:
+            p.unlink()
+            deleted += 1
+        except OSError as exc:
+            logger.warning("Failed to prune pre-deploy backup %s: %s", p.name, exc)
+
+    return deleted
+
+
 def create_pre_migration_backup(
     hermes_home: Optional[Path] = None,
     keep: int = _PRE_MIGRATION_DEFAULT_KEEP,

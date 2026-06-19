@@ -1627,6 +1627,13 @@ def _cmd_release_gate(args: argparse.Namespace) -> int:
     error / failure."""
     from hermes_cli import kanban_worktrees as kwt
 
+    # Best-effort pre-deploy snapshot — never blocks the gate on failure.
+    try:
+        from hermes_cli.backup import create_pre_deploy_backup
+        create_pre_deploy_backup()
+    except Exception as exc:  # pragma: no cover
+        print(f"Warning: pre-deploy backup failed ({exc}); continuing.", file=sys.stderr)
+
     with kb.connect_closing() as conn:
         try:
             result = kwt.execute_release_gate(
