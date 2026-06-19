@@ -5996,6 +5996,108 @@ def test_4a_decompose_failure_parks_once_and_skips_funnel_root(kanban_home):
     assert funnel_escalations == []
 
 
+def test_4a_decompose_failure_skips_operator_held_chain(kanban_home):
+    # The triage-decompose-failed branch parks any task with
+    # decompose_failed >= limit whose status is not done/archived — and
+    # 'scheduled' is in that set. A freigabe:operator chain is held in
+    # 'scheduled' for explicit operator release; the held root carries the
+    # decompose_failed counter (the counter reset on a successful decompose is
+    # fail-soft and runs in a SEPARATE txn after the scheduled-flip commits, so
+    # a crash / swallowed-error window can leave a held root 'scheduled' with a
+    # non-zero counter). The sweep must NOT mistake that intentional hold for a
+    # decompose stall and park it to 'blocked' — that strips the operator hold
+    # and makes the chain eligible for auto_retry_blocked_tasks -> 'ready',
+    # building the held proposal behind the operator's back. Built via the REAL
+    # decompose topology (links: parent_id=child, child_id=root) so the
+    # child->root walk in _is_operator_held is exercised in production shape.
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="held root", assignee="orchestrator", triage=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET freigabe = 'operator' WHERE id = ?", (root,)
+            )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "build child"}],
+            initial_child_status="scheduled",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+        build_child = child_ids[0]
+
+        # Real F1 hold: both root and build child land held in 'scheduled'.
+        assert kb.get_task(conn, root).status == "scheduled"
+        assert kb.get_task(conn, build_child).status == "scheduled"
+
+        # Push BOTH past the decompose-failure limit so the §3 query would
+        # select them absent the hold exemption (root = realistic vector,
+        # child = exercises the child->root walk).
+        for _ in range(3):
+            kb.record_decompose_failure(conn, root)
+            kb.record_decompose_failure(conn, build_child)
+
+        summary = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        root_task = kb.get_task(conn, root)
+        child_task = kb.get_task(conn, build_child)
+        root_escalations = [
+            e for e in kb.list_events(conn, root)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    # The intentional hold survived: neither was parked to 'blocked'.
+    assert root_task.status == "scheduled"
+    assert child_task.status == "scheduled"
+    # Recorded as a deliberate skip, not a stall park, and no escalation fired.
+    assert root in summary.get("skipped_held", [])
+    assert build_child in summary.get("skipped_held", [])
+    assert summary["parked"] == []
+    assert root_escalations == []
+
+
+def test_4a_decompose_failure_exemption_is_scoped_to_active_hold(kanban_home):
+    # The §3 hold exemption must protect ONLY a chain still actively held in
+    # 'scheduled'. Once the operator RELEASES (release_freigabe_hold flips the
+    # root 'scheduled' -> 'todo' but never clears the freigabe column), the row
+    # is no longer held and must regain its pre-exemption behaviour — i.e. a
+    # released root carrying decompose_failed >= limit is park-eligible again,
+    # exactly as a plain non-held 'todo' root would be. Otherwise the
+    # exemption would permanently shield a real decompose stall behind a stale
+    # freigabe='operator' tag. Guards the asymmetry in _is_operator_held (the
+    # direct _held check must be scheduled-gated like the child->root walk).
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="released root", assignee="orchestrator", triage=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET freigabe = 'operator' WHERE id = ?", (root,)
+            )
+        child_ids = kb.decompose_triage_task(
+            conn, root, root_assignee="orchestrator",
+            children=[{"title": "build child"}],
+            initial_child_status="scheduled",
+        )
+        assert child_ids is not None and len(child_ids) == 1
+
+        for _ in range(3):
+            kb.record_decompose_failure(conn, root)
+
+        # Operator releases: root 'scheduled' -> 'todo', freigabe still 'operator'.
+        assert kb.release_freigabe_hold(conn, root) is True
+        assert kb.get_task(conn, root).status == "todo"
+
+        summary = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        root_task = kb.get_task(conn, root)
+
+    # The released root is no longer exempt: a genuine decompose stall is parked.
+    assert root not in summary.get("skipped_held", [])
+    assert {"task_id": root, "class": "triage_decompose_failed"} in summary["parked"]
+    assert root_task.status == "blocked"
+
+
 def test_4a_rate_limited_loop_parks_once(kanban_home):
     now = 1_900_000_000
     with kb.connect() as conn:

@@ -10708,7 +10708,14 @@ def _is_operator_held(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
         ).strip().lower()
         return freigabe == "operator" or depth == "ui-real"
 
-    if _held(row):
+    # Gate the direct check on 'scheduled' too — symmetric with the child->root
+    # walk below. ``release_freigabe_hold`` flips the root 'scheduled' -> 'todo'
+    # but never clears the ``freigabe`` column, so a released root keeps
+    # freigabe='operator' for life. Callers whose query spans more than
+    # 'scheduled' (e.g. the §3 triage-decompose-failed branch, status NOT IN
+    # done/archived) would otherwise treat that released-but-stalled chain as
+    # still held forever. Held == still parked in 'scheduled'.
+    if row["status"] == "scheduled" and _held(row):
         return True
     # Held build children carry no freigabe of their own. In the decompose
     # topology the link is (parent_id=build_child, child_id=root) — the root
@@ -11171,6 +11178,14 @@ def no_silent_stall_sweep(
     ).fetchall():
         if _is_funnel_root_task(conn, row):
             summary["skipped_funnel"].append(row["id"])
+            continue
+        if _is_operator_held(conn, row):
+            # Intentional propose-and-wait / ui-real hold — a held chain sits in
+            # 'scheduled' (in this query's status set) and the held root carries
+            # the decompose_failed counter. Parking it to 'blocked' would strip
+            # the operator hold (and feed auto_retry_blocked_tasks -> 'ready').
+            # Mirrors the scheduled-overdue branch above.
+            summary["skipped_held"].append(row["id"])
             continue
         stall_class = "triage_decompose_failed"
         if _has_stall_marker(conn, row["id"], stall_class):
