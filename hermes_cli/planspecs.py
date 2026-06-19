@@ -85,8 +85,11 @@ _CC_INSTRUMENT_AC_TOKENS = {
 
 # Template-residue patterns: a literal ``<…>`` angle placeholder, a TODO/FIXME/TBD
 # marker, or a bare ``…`` / ``...`` ellipsis left over from a spec template.
+# The TODO/FIXME/TBD marker is CASE-SENSITIVE (no re.IGNORECASE): the literal
+# template markers are all-caps by convention, so the lowercase kanban status word
+# ``todo`` is not a false positive. A genuine all-caps marker still blocks.
 _RESIDUE_ANGLE_RE = re.compile(r"<[^<>\n]{1,80}>")
-_RESIDUE_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|TBD)\b", re.IGNORECASE)
+_RESIDUE_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|TBD)\b")
 _RESIDUE_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
 
 # An *obvious* path token: slash-joined word segments with an optional leading dot
@@ -735,6 +738,79 @@ def validate_spec_rubric(spec: BindingPlanSpec) -> None:
         raise PlanSpecBlocked(findings)
 
 
+def _spec_is_signed(spec: BindingPlanSpec) -> bool:
+    """A PlanSpec is *operator-signed* when ``approved_by`` is set (non-empty)
+    AND ``freigabe == "complete"``.
+
+    A signed spec's deterministic-rubric findings are logged as warnings rather
+    than blocking ingest, and the subjective quality judge is skipped — the
+    explicit operator sign-off replaces them. The structural validation in
+    :func:`parse_binding_planspec` stays hard for everyone (it runs first).
+
+    Both conditions are required on purpose: every existing rubric block-test
+    sets ``freigabe: complete`` but no ``approved_by`` and so stays unsigned and
+    fully gated. Strategist-authored specs (no ``approved_by``) likewise remain
+    gated.
+    """
+    approved_by = str(spec.frontmatter.get("approved_by") or "").strip()
+    return bool(approved_by) and spec.freigabe.strip().lower() == "complete"
+
+
+def validate_planspec(
+    path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT
+) -> dict[str, Any]:
+    """Read-only validation preview for a PlanSpec — creates NOTHING, opens NO DB
+    connection. The dry-run companion to :func:`ingest_planspec`.
+
+    Runs the same structural parse and deterministic rubric, but never raises and
+    never writes. Returns a result dict whose ``disposition`` says what an
+    ``ingest`` (without ``--force``) would do:
+
+    * ``clean``   — no rubric findings; ingests cleanly.
+    * ``warn``    — operator-signed (see :func:`_spec_is_signed`) WITH findings;
+      ingests, logging the findings as warnings.
+    * ``block``   — unsigned WITH findings; ingest blocks (fix, sign, or --force).
+    * ``invalid`` — structural / YAML / missing-required-field error; blocks for
+      everyone regardless of signing.
+
+    Note: the subjective quality judge is NOT run here (it needs the network and
+    is non-deterministic). A ``clean`` unsigned spec can still be stopped by the
+    judge on a real ingest.
+    """
+    try:
+        spec = parse_binding_planspec(path, plans_root=plans_root)
+    except PlanSpecBlocked as exc:
+        return {
+            "ok": False,
+            "disposition": "invalid",
+            "path": str(path),
+            "signed": False,
+            "approved_by": "",
+            "freigabe": "",
+            "findings": exc.findings,
+            "would_block": True,
+        }
+
+    findings = _collect_spec_rubric_findings(spec)
+    signed = _spec_is_signed(spec)
+    if not findings:
+        disposition = "clean"
+    elif signed:
+        disposition = "warn"
+    else:
+        disposition = "block"
+    return {
+        "ok": disposition in ("clean", "warn"),
+        "disposition": disposition,
+        "path": str(spec.path),
+        "signed": signed,
+        "approved_by": str(spec.frontmatter.get("approved_by") or "").strip(),
+        "freigabe": spec.freigabe,
+        "findings": findings,
+        "would_block": disposition in ("block", "invalid"),
+    }
+
+
 # --- Subjective quality judge (Sonnet) -------------------------------------
 # After the deterministic rubric passes, a SYNCHRONOUS LLM judge scores the
 # three qualities a regex can't see: are the AC testable/observable (not
@@ -1200,6 +1276,22 @@ def ingest_planspec(
             logger.warning(
                 "PlanSpec quality judge bypassed via --force for %s",
                 spec.path,
+            )
+    elif _spec_is_signed(spec):
+        # Operator-signed (approved_by + freigabe==complete): the deterministic
+        # rubric is advisory here — collect findings and log them, but do NOT
+        # block, and SKIP the subjective judge (the explicit sign-off replaces
+        # it; otherwise a non-deterministic LLM call would gate a spec the
+        # operator already approved). Structural validation already ran above
+        # (parse_binding_planspec) and stays hard for everyone.
+        warned = _collect_spec_rubric_findings(spec)
+        if warned:
+            logger.warning(
+                "PlanSpec rubric findings WARNED (not blocked) for operator-signed "
+                "spec (approved_by=%s) %s: %s",
+                str(spec.frontmatter.get("approved_by") or "").strip(),
+                spec.path,
+                "; ".join(warned),
             )
     else:
         # Deterministic rubric first (cheap, no LLM), then the synchronous

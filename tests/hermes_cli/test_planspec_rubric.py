@@ -261,6 +261,20 @@ def test_residue_tokens_still_flags_genuine_prose_placeholders():
     assert planspecs._residue_tokens("Do the thing ...") == ["..."]
 
 
+def test_residue_marker_is_case_sensitive():
+    """Fix(a) 2026-06-19: the TODO/FIXME/TBD marker is case-sensitive. The literal
+    template markers are all-caps by convention; a lowercase status word like
+    ``todo`` (the kanban status) is NOT template residue and must not block an
+    otherwise-clean spec. The all-caps markers stay residue (gate not weakened)."""
+    # lowercase status words are NOT residue
+    assert planspecs._residue_tokens("move the card to todo and start") == []
+    assert planspecs._residue_tokens("status todo / fixme later / tbd") == []
+    # all-caps markers are still residue
+    assert planspecs._residue_tokens("TODO: real marker") == ["TODO"]
+    assert planspecs._residue_tokens("FIXME this") == ["FIXME"]
+    assert planspecs._residue_tokens("TBD") == ["TBD"]
+
+
 def test_quoted_markers_in_backticks_in_body_and_ac_pass_rubric(kanban_home, tmp_path: Path):
     """(1) A spec that *cites* the forbidden markers inside backticks in BOTH the
     body AND an AC statement passes the rubric and ingests."""
@@ -491,6 +505,202 @@ taskgraph_hints:
     assert rc["captured"]["force"] is False
     assert rc["rc"] == 2
     assert _task_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix(b) 2026-06-19: operator-signed spec = WARN (not block) + judge skipped.
+# Signed = approved_by set (non-empty) AND freigabe == "complete". Structural
+# validation stays hard for everyone (it runs before the rubric branch).
+# ---------------------------------------------------------------------------
+
+
+def _signed_ac_less_body(approved_by_line: str = "approved_by: Piet", freigabe: str = "complete") -> str:
+    return f"""---
+status: defined
+owner: Hermes
+slice: R1
+topic: "Signed but AC-less"
+{approved_by_line}
+freigabe: {freigabe}
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: R1-S1
+      title: "No acceptance criteria at all"
+      lane: coder
+      deps: []
+---
+# R1
+"""
+
+
+@pytest.mark.parametrize(
+    "approved_by_line, freigabe, expected",
+    [
+        ("approved_by: Piet", "complete", True),   # both → signed
+        ("approved_by: Piet", "operator", False),  # approved but not complete
+        ("approved_by:", "complete", False),       # empty approved_by
+        ("owner_note: x", "complete", False),      # no approved_by at all
+    ],
+)
+def test_spec_is_signed_requires_approved_by_and_freigabe_complete(
+    tmp_path: Path, approved_by_line: str, freigabe: str, expected: bool
+):
+    body = _signed_ac_less_body(approved_by_line, freigabe)
+    path = _write(plans_root := tmp_path / "03-Agents", body, name=f"signed-{freigabe}.md")
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+    assert planspecs._spec_is_signed(spec) is expected
+
+
+def test_signed_spec_with_finding_warns_skips_judge_and_ingests(
+    kanban_home, tmp_path: Path, caplog, monkeypatch
+):
+    """An operator-signed spec with a rubric finding logs a WARNING and ingests
+    (does not block), and the subjective judge is skipped (operator approval
+    replaces it)."""
+    judge_calls: list = []
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", lambda spec: judge_calls.append(spec))
+    path = _write(plans_root := tmp_path / "03-Agents", _signed_ac_less_body())
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.planspecs"):
+        result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert result["ok"] is True
+    assert len(result["child_ids"]) == 1
+    # Judge skipped for the signed spec.
+    assert judge_calls == []
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "AC-less subtask: R1-S1" in warnings
+    assert "signed" in warnings.lower()
+
+
+def test_unsigned_spec_with_finding_still_blocks(kanban_home, tmp_path: Path, monkeypatch):
+    """A spec WITHOUT approved_by (even with freigabe=complete) is unsigned — the
+    rubric still blocks. The signed-WARN path requires BOTH conditions, which is
+    exactly why the existing block-tests (freigabe:complete, no approved_by) keep
+    blocking."""
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", lambda spec: None)
+    path = _write(plans_root := tmp_path / "03-Agents", _signed_ac_less_body(approved_by_line="owner_note: x"))
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert "AC-less subtask: R1-S1" in exc.value.findings
+    assert _task_count() == 0
+
+
+def test_signed_clean_spec_ingests_and_skips_judge(kanban_home, tmp_path: Path, monkeypatch):
+    """A signed, rubric-clean spec ingests with no findings and still skips the
+    judge (operator approval is authoritative)."""
+    judge_calls: list = []
+    monkeypatch.setattr(planspecs, "run_spec_quality_judge", lambda spec: judge_calls.append(spec))
+    signed_clean = CLEAN.replace("status: freigegeben-komplett\n", "status: defined\napproved_by: Piet\n")
+    path = _write(plans_root := tmp_path / "03-Agents", signed_clean, name="signed-clean.md")
+
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert result["ok"] is True
+    assert len(result["child_ids"]) == 2
+    assert judge_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Fix(c) 2026-06-19: `hermes plan validate` — read-only preview (no DB write).
+# Reports disposition clean | warn (signed+findings) | block (unsigned+findings)
+# | invalid (structural / YAML error), with clean error messages.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_planspec_clean_signed_spec_is_clean(kanban_home, tmp_path: Path):
+    signed_clean = CLEAN.replace("status: freigegeben-komplett\n", "status: defined\napproved_by: Piet\n")
+    path = _write(plans_root := tmp_path / "03-Agents", signed_clean, name="vclean.md")
+
+    result = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert result["disposition"] == "clean"
+    assert result["ok"] is True
+    assert result["findings"] == []
+    assert result["signed"] is True
+    assert _task_count() == 0  # read-only: nothing written
+
+
+def test_validate_planspec_signed_with_finding_is_warn(tmp_path: Path):
+    path = _write(plans_root := tmp_path / "03-Agents", _signed_ac_less_body(), name="vwarn.md")
+
+    result = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert result["disposition"] == "warn"
+    assert result["ok"] is True
+    assert result["would_block"] is False
+    assert any("AC-less subtask: R1-S1" in f for f in result["findings"])
+
+
+def test_validate_planspec_unsigned_with_finding_would_block(tmp_path: Path):
+    path = _write(
+        plans_root := tmp_path / "03-Agents",
+        _signed_ac_less_body(approved_by_line="owner_note: x"),
+        name="vblock.md",
+    )
+
+    result = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert result["disposition"] == "block"
+    assert result["ok"] is False
+    assert result["would_block"] is True
+    assert any("AC-less subtask: R1-S1" in f for f in result["findings"])
+
+
+def test_validate_planspec_invalid_yaml_reports_clean_message(tmp_path: Path):
+    body = "---\nstatus: defined\nfreigabe: [unclosed\n---\n# X\n"
+    path = _write(plans_root := tmp_path / "03-Agents", body, name="vyaml.md")
+
+    result = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert result["disposition"] == "invalid"
+    assert result["ok"] is False
+    blob = " ".join(result["findings"])
+    assert "yaml" in blob.lower()           # clean, human-readable
+    assert "Traceback" not in blob          # not a raw Python traceback
+
+
+def test_validate_planspec_missing_required_field_is_invalid(tmp_path: Path):
+    body = CLEAN.replace("freigabe: complete\n", "")  # drop the required field
+    path = _write(plans_root := tmp_path / "03-Agents", body, name="vmissing.md")
+
+    result = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert result["disposition"] == "invalid"
+    assert any("freigabe is required" in f for f in result["findings"])
+
+
+def test_plan_validate_cli_wires_through(kanban_home, tmp_path: Path, capsys):
+    """`hermes plan validate <path>` exists, returns rc 2 for a would-block spec
+    and rc 0 for a signed (warn) spec, and writes nothing to the board."""
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    plan_cmd.build_plan_parser(sub)
+
+    plans_root = tmp_path / "03-Agents"
+    block_path = _write(plans_root, _signed_ac_less_body(approved_by_line="owner_note: x"), name="cliblock.md")
+    warn_path = _write(plans_root, _signed_ac_less_body(), name="cliwarn.md")
+
+    # validate_planspec relies on the def-time default plans_root; inject the tmp
+    # fixture via a spy (same pattern as the ingest CLI tests).
+    real = planspecs.validate_planspec
+    mp = pytest.MonkeyPatch()
+    mp.setattr(plan_cmd.planspecs, "validate_planspec", lambda path, **kw: real(path, **{**kw, "plans_root": plans_root}))
+    try:
+        rc_block = plan_cmd.plan_command(parser.parse_args(["plan", "validate", str(block_path)]))
+        rc_warn = plan_cmd.plan_command(parser.parse_args(["plan", "validate", str(warn_path), "--json"]))
+    finally:
+        mp.undo()
+
+    assert rc_block == 2
+    assert rc_warn == 0
+    out = capsys.readouterr()
+    assert '"disposition": "warn"' in out.out  # --json run emitted the structured result
+    assert _task_count() == 0  # validate never writes
 
 
 # ---------------------------------------------------------------------------

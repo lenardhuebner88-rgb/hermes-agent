@@ -38,6 +38,18 @@ def build_plan_parser(subparsers) -> None:
         ),
     )
 
+    validate = sub.add_parser(
+        "validate",
+        help="Validate a PlanSpec read-only (no DB write): preview rubric findings + signed status",
+        description=(
+            "Dry-run a PlanSpec: report whether an ingest (without --force) would "
+            "be clean / warn (operator-signed) / block (unsigned) / invalid "
+            "(structural or YAML error). Creates nothing, opens no DB connection."
+        ),
+    )
+    validate.add_argument("path", help="Path to a Vault PlanSpec markdown file")
+    validate.add_argument("--json", action="store_true", help="Emit JSON output")
+
     prompt = sub.add_parser("sprint-prompt", help="Generate a copy-paste sprint prompt from a PlanSpec")
     prompt.add_argument("path", help="Path to a Vault PlanSpec markdown file")
     prompt.add_argument("--json", action="store_true", help="Emit JSON output")
@@ -93,6 +105,34 @@ def plan_command(args: argparse.Namespace) -> int:
                     f"with {len(result['child_ids'])} scheduled children{supersede_note}"
                 )
             return 0
+        if action == "validate":
+            result = planspecs.validate_planspec(args.path)
+            if getattr(args, "json", False):
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                disposition = result["disposition"]
+                findings = result.get("findings") or []
+                if disposition == "clean":
+                    print(
+                        f"plan validate: CLEAN {result['path']} · signed={result['signed']} "
+                        f"· no rubric findings (deterministic preview; judge not run)"
+                    )
+                elif disposition == "warn":
+                    print(
+                        f"plan validate: WARN {result['path']} · operator-signed "
+                        f"(approved_by={result['approved_by']}) → would ingest with warnings:"
+                    )
+                    for finding in findings:
+                        print(f"- {finding}")
+                elif disposition == "block":
+                    print(f"plan validate: BLOCK {result['path']} · unsigned → ingest would block:", file=sys.stderr)
+                    for finding in findings:
+                        print(f"- {finding}", file=sys.stderr)
+                else:  # invalid
+                    print(f"plan validate: INVALID {result['path']} · structural / YAML error:", file=sys.stderr)
+                    for finding in findings:
+                        print(f"- {finding}", file=sys.stderr)
+            return 0 if result["ok"] else 2
         if action == "sprint-prompt":
             result = planspecs.sprint_prompt_for_planspec(args.path)
             if getattr(args, "json", False):
