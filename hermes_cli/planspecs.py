@@ -89,6 +89,13 @@ _RESIDUE_ANGLE_RE = re.compile(r"<[^<>\n]{1,80}>")
 _RESIDUE_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|TBD)\b", re.IGNORECASE)
 _RESIDUE_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
 
+# An *obvious* path token: slash-joined word segments with an optional leading dot
+# — e.g. ``a/b/c.py``, ``.worktrees/kanban/t_x``, ``hermes_cli/planspecs.py``. A
+# documentary file/path reference, NOT template residue, so it is masked out
+# (together with backtick code spans) before the residue scan. Angle brackets are
+# not in the segment class, so a genuine ``foo/<id>`` placeholder is never hidden.
+_PATH_TOKEN_RE = re.compile(r"\.?\w[\w.\-]*(?:/[\w.\-]+)+")
+
 _CLOSED_STATUS_PREFIXES = (
     "archived",
     "closed",
@@ -536,14 +543,79 @@ def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
     return f"planspec-ingest:{spec.path}:{content_hash}"
 
 
+def _mask_code_spans(text: str) -> str:
+    """Return *text* with backtick code spans (inline ``code`` or fenced
+    ```` ```…``` ````) replaced by equal-length runs of spaces (newlines kept), so
+    a marker that is only *quoted* inside code is not mistaken for unfilled
+    template residue.
+
+    Implements the CommonMark code-span rule: a run of *N* backticks opens a span
+    that is closed by the next run of *exactly* *N* backticks; everything between
+    (delimiters included) is code. An opener with no matching closer is left as
+    literal text — a lone stray backtick never swallows the rest of the line. This
+    also correctly handles the nested backtick *display* of inline/fence examples
+    (e.g. ``(`` `…` ``)``). Offsets are preserved 1:1 so the angle/ellipsis span
+    bookkeeping in :func:`_residue_tokens` stays valid.
+    """
+    chars = list(text)
+    n = len(chars)
+    i = 0
+    while i < n:
+        if chars[i] != "`":
+            i += 1
+            continue
+        run_start = i
+        while i < n and chars[i] == "`":
+            i += 1
+        run_len = i - run_start
+        # Hunt for a closing run of *exactly* run_len backticks.
+        k = i
+        closer_end = -1
+        while k < n:
+            if chars[k] != "`":
+                k += 1
+                continue
+            close_start = k
+            while k < n and chars[k] == "`":
+                k += 1
+            if (k - close_start) == run_len:
+                closer_end = k
+                break
+            # A run of a different length cannot close this span — keep scanning.
+        if closer_end == -1:
+            # Unbalanced opener: leave it literal, resume just past the run.
+            continue
+        for p in range(run_start, closer_end):
+            if chars[p] != "\n":
+                chars[p] = " "
+        i = closer_end
+    return "".join(chars)
+
+
+def _strip_code_and_paths(text: str) -> str:
+    """Mask backtick code spans and obvious path tokens out of *text* before the
+    residue scan. Equal-length blank replacement keeps character offsets stable.
+    """
+    masked = _mask_code_spans(text)
+    return _PATH_TOKEN_RE.sub(lambda m: " " * len(m.group(0)), masked)
+
+
 def _residue_tokens(text: str) -> list[str]:
     """Return distinct template-residue tokens found in *text* (order-preserving).
 
     A ``<…>`` angle placeholder reports the whole bracketed token; an ellipsis
     that sits *inside* an angle placeholder is not reported twice.
+
+    Markers that are only *quoted* inside a backtick code span / code fence, or
+    that are part of an obvious path token, are documentary citations — NOT an
+    unfilled template slot — so those spans are masked out (replaced by
+    equal-length blanks, offsets preserved) before the scan. A genuine unfilled
+    placeholder sitting in prose is still caught, and the bare ``…``/``...``
+    ellipsis is only flagged *outside* of code.
     """
     if not text:
         return []
+    scan = _strip_code_and_paths(text)
     found: list[str] = []
     seen: set[str] = set()
     angle_spans: list[tuple[int, int]] = []
@@ -553,12 +625,12 @@ def _residue_tokens(text: str) -> list[str]:
             seen.add(token)
             found.append(token)
 
-    for match in _RESIDUE_ANGLE_RE.finditer(text):
+    for match in _RESIDUE_ANGLE_RE.finditer(scan):
         angle_spans.append(match.span())
         _add(match.group(0))
-    for match in _RESIDUE_MARKER_RE.finditer(text):
+    for match in _RESIDUE_MARKER_RE.finditer(scan):
         _add(match.group(0))
-    for match in _RESIDUE_ELLIPSIS_RE.finditer(text):
+    for match in _RESIDUE_ELLIPSIS_RE.finditer(scan):
         if any(start <= match.start() and match.end() <= end for start, end in angle_spans):
             continue
         _add(match.group(0))
