@@ -17,32 +17,47 @@
 
 ---
 
-## ⚠ Mechanismus-Korrektur (quell-verifiziert — wichtig vor dem Apply)
+## ⚠ Mechanismus-Wahl (quell-verifiziert — wichtig vor dem Apply)
 Das Task-Grounding nennt für **bundled** zwei Optionen: `hermes -p coder skills config` *disable*
-**bzw.** `hermes -p coder skills opt-out --remove`. Beide sind so **nicht anwendbar** für eine
-*selektive, nicht-destruktive* Liste:
+**bzw.** `hermes -p coder skills opt-out --remove`. **Beide existieren** — sind aber für eine
+*skriptbare, selektive, nicht-destruktive Befehlsliste* nicht direkt brauchbar:
 
-1. **`skills config` existiert nicht als Subcommand.** Die `skills`-Subcommands sind
-   `browse/search/install/inspect/list/check/update/audit/uninstall/reset/opt-out/opt-in/repair-official/publish/snapshot/tap`
-   (`hermes_cli/subcommands/skills.py:21-265`). Es gibt **keinen** `skills config`.
+1. **`skills config` EXISTIERT** (registriert `hermes_cli/subcommands/skills.py:294-298`, Handler
+   `hermes_cli/skills_config.py`), ist aber **rein interaktiv** (curses-Checklist, **kein**
+   `<skill>`-Argument). Es pflegt die Liste `skills.disabled:` in `config.yaml`
+   (`skills_config.py:45-53`), die der Prompt-Builder beim Laden filtert
+   (`agent/skill_utils.py:353` → `agent/prompt_builder.py:1356`) — also die **leichteste, voll
+   reversible** Art, ein Skill aus dem System-Prompt zu nehmen, **ohne Datei-Bewegung**, einheitlich
+   für bundled/hub/local. Nachteil: als **TUI nicht als Zeile einer Dry-Run-Befehlsliste**
+   ausdrückbar, und `hermes config set skills.disabled '[…]'` schreibt nur einen **String** (keine
+   Liste; `hermes_cli/config.py:6711-6721`) — es gibt keinen sauberen Einzeiler dafür.
+   → **Alternative A** unten ist der interaktive Disable-Pfad für den Operator.
 2. **`opt-out --remove` ist BULK + löschend.** Es schreibt den `.no-bundled-skills`-Marker und
-   **löscht ALLE unmodifizierten bundled Skills** (`skills.py:167-188`) — also auch die KEEP-bundled
-   (z. B. `test-driven-development`, `systematic-debugging`, `plan`, alle `github-*`). Das ist weder
-   per-Skill noch „KEIN rm". (Reversibel nur via `opt-in --sync` Re-Seed.)
-3. **Die operator-gemeinte „config disable" (= per-Skill, nicht-destruktiv, → Zustand *disabled*)**
-   wird real durch **`curator archive`** umgesetzt: das verschiebt das Skill-Dir nach `.archive/`
-   (kein Löschen), setzt `state=archived` (genau der Zustand, den `skills list --enabled-only`
-   als „disabled" ausblendet) und ist via `curator restore` rückholbar
-   (`tools/skill_usage.py:672-724` / `727-759`).
-   **`curator archive` funktioniert hier auch auf bundled built-ins**, weil im Live-`coder`-Profil
-   **`curator.prune_builtins: true`** gilt (global `~/.hermes/config.yaml:528`; Profil überschreibt es
-   nicht; Default ohnehin `True`, `skill_usage.py:257`). Damit ist `is_curation_eligible()==True` für
-   alle 47 bundled-Kandidaten (empirisch bestätigt, s. u.).
+   **löscht ALLE unmodifizierten bundled Skills** auf einen Schlag
+   (`hermes_cli/skills_hub.py:1219,1251,1275`) — also auch die KEEP-bundled (z. B.
+   `test-driven-development`, `systematic-debugging`, `plan`, alle `github-*`). Weder per-Skill noch
+   „KEIN rm". (Reversibel nur via `opt-in --sync` Re-Seed.) **Nicht verwendet.**
+3. **Für eine skriptbare, per-Skill-, reversible Befehlsliste** nutzt diese Liste daher
+   **`curator archive`** (bundled+local) bzw. **`skills uninstall`** (hub). `curator archive`
+   verschiebt das Skill-Dir nach `.archive/` (kein Löschen), setzt `state=archived` (genau den
+   Zustand, den `skills list --enabled-only` ausblendet) und ist via `curator restore` rückholbar
+   (`tools/skill_usage.py:672-724` / `727-759`). **`curator archive` greift hier auch auf bundled
+   built-ins**, weil im Live-`coder`-Profil **`curator.prune_builtins: true`** gilt (global
+   `~/.hermes/config.yaml:528`; Profil überschreibt es nicht; Default ohnehin `True`,
+   `skill_usage.py:257`). Damit ist `is_curation_eligible()==True` für alle 47 bundled-Kandidaten
+   (empirisch bestätigt, s. u.).
 
-**Konsequenz:** Diese Liste benutzt **`curator archive` für bundled UND local**, **`skills uninstall`
-für hub**. Das ist die per-Skill-, reversible-, nicht-löschende Realisierung der Operator-Absicht.
-(`opt-out --remove` bleibt nur eine *bulk*-Alternative, falls man wirklich **alle** bundled inkl. KEEP
-entfernen wollte — hier **nicht empfohlen**.)
+**Konsequenz:** Die skriptbare Befehlsliste (Schritte 2–5) benutzt **`curator archive` für bundled UND
+local**, **`skills uninstall` für hub**. Das ist die per-Skill-, reversible-, nicht-löschende
+Realisierung. (`opt-out --remove` = nur *bulk*-Alternative für **alle** bundled inkl. KEEP — hier
+**nicht empfohlen**.)
+
+> **Alternative A (leichter, interaktiv, gleicher Footprint-Effekt):** Statt zu archivieren kann der
+> Operator `hermes -p coder skills config` aufrufen und die 66 abwählen — das schreibt sie nach
+> `config.yaml: skills.disabled` und nimmt sie über `get_disabled_skill_names()` aus dem Prompt, **ohne
+> Datei-Bewegung**; reversibel durch erneutes Anhaken. Wähle **Archive** (Liste unten) für einen
+> skriptbaren, belegbaren Dry-Run; wähle **Disable** für den schnellsten manuellen Weg. (Beide nehmen
+> das Skill aus demselben Prompt-Build-Filter — der Footprint-Gewinn ist identisch.)
 
 > `plan` ist der einzige `PROTECTED_BUILTIN` (`skill_usage.py:66`) und steht auf **keiner** Liste.
 
