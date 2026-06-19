@@ -2915,6 +2915,150 @@ def test_dispatch_auto_retries_blocked_after_backoff_with_feedback_comment(
         assert events[0].payload["attempt"] == 1
 
 
+def test_dispatch_auto_retry_allows_first_request_changes_block(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Verifier found a missing assertion")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (t,),
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 1)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 1
+
+
+def test_dispatch_auto_retry_escalates_repeated_request_changes_on_unchanged_body(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Verifier found issue one")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (t,),
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 302)
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Verifier found issue two")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked' AND verdict IS NULL",
+            (t,),
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 603)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        row = conn.execute(
+            "SELECT status, auto_retry_count, assignee, model_override "
+            "FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "blocked"
+        assert row["auto_retry_count"] == 1
+        assert row["assignee"] == "coder"
+        assert row["model_override"] is None
+        comments = kb.list_comments(conn, t)
+        assert comments[-1].author == "dispatcher"
+        assert "Verifier-Content-Block nach Retry auf unverändertem Body" in comments[-1].body
+        event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
+        assert event.payload["blocked_kind"] == "needs_operator"
+
+
+def test_dispatch_auto_retry_retries_transient_second_block_even_when_body_unchanged(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="research", body="AC v1")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="transient MCP unavailable")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 302)
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="tool crashed")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 603)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 2)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count, assignee FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 2
+        assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
+
+
+def test_dispatch_auto_retry_allows_request_changes_after_body_changes(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder", body="AC v1")
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Verifier found issue one")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked'",
+            (t,),
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        conn.execute("UPDATE tasks SET body = ? WHERE id = ?", ("AC v2", t))
+        monkeypatch.setattr(kb.time, "time", lambda: base + 302)
+        kb.claim_task(conn, t)
+        kb.block_task(conn, t, reason="Verifier found issue two")
+        conn.execute(
+            "UPDATE task_runs SET verdict = 'REQUEST_CHANGES' "
+            "WHERE task_id = ? AND outcome = 'blocked' AND verdict IS NULL",
+            (t,),
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 603)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == [(t, 2)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count, assignee FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 2
+        assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
+
+
 
 def test_dispatch_auto_retry_second_attempt_escalates(
     kanban_home, all_assignees_spawnable, monkeypatch

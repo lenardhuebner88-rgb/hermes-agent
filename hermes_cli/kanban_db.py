@@ -11642,7 +11642,21 @@ def _block_is_settled(
         (blocked_run["summary"] or "").strip()
         or (blocked_run["error"] or "").strip()
     )
-    if _blocked_kind_for_auto_retry(reason) != "retryable":
+    auto_retry_count = (
+        int(row["auto_retry_count"] or 0)
+        if "auto_retry_count" in row.keys() else 0
+    )
+    body_hash = (
+        _task_body_hash(row["body"])
+        if "body" in row.keys() else None
+    )
+    if _blocked_kind_for_auto_retry(
+        reason,
+        verdict=blocked_run["verdict"],
+        auto_retry_count=auto_retry_count,
+        body_hash=body_hash,
+        last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, row["id"]),
+    ) != "retryable":
         # operator_question: the lane skips it → it needs a human answer now.
         return True
     failures = int(row["consecutive_failures"] or 0)
@@ -11652,10 +11666,6 @@ def _block_is_settled(
     )
     if failures >= effective_failure_limit:
         return True  # circuit breaker tripped → lane skips it
-    auto_retry_count = (
-        int(row["auto_retry_count"] or 0)
-        if "auto_retry_count" in row.keys() else 0
-    )
     if auto_retry_count >= int(retry_limit):
         return True  # retry budget exhausted → lane gives up
     ended_at = int(blocked_run["ended_at"] or 0)
@@ -11691,7 +11701,7 @@ def silent_block_task_ids(
         ).fetchall()
     }
     rows = conn.execute(
-        "SELECT id, created_by, consecutive_failures, max_retries, "
+        "SELECT id, created_by, consecutive_failures, max_retries, body, "
         "auto_retry_count FROM tasks WHERE status = 'blocked'"
     ).fetchall()
     out: list[str] = []
@@ -11783,7 +11793,7 @@ def escalate_silent_blocks_sweep(
     with write_txn(conn):
         for tid in ids:
             row = conn.execute(
-                "SELECT id, title, status, assignee, auto_retry_count "
+                "SELECT id, title, status, assignee, body, auto_retry_count "
                 "FROM tasks WHERE id = ?",
                 (tid,),
             ).fetchone()
@@ -11799,7 +11809,14 @@ def escalate_silent_blocks_sweep(
                     (blocked_run["summary"] or "").strip()
                     or (blocked_run["error"] or "").strip()
                 )
-            blocked_kind = _blocked_kind_for_auto_retry(reason)
+            body_hash = _task_body_hash(row["body"])
+            blocked_kind = _blocked_kind_for_auto_retry(
+                reason,
+                verdict=blocked_run["verdict"] if blocked_run is not None else None,
+                auto_retry_count=int(row["auto_retry_count"] or 0),
+                body_hash=body_hash,
+                last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
+            )
             _append_event(
                 conn, tid, OPERATOR_ESCALATION_EVENT,
                 _silent_block_escalation_payload(
@@ -12817,10 +12834,84 @@ _AUTO_RETRY_QUESTION_RE = re.compile(
 )
 
 
-def _blocked_kind_for_auto_retry(reason: Optional[str]) -> str:
+def _task_body_hash(body: Optional[str]) -> str:
+    return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+
+
+def _latest_auto_retry_body_hash(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[str]:
+    rows = conn.execute(
+        """
+        SELECT payload
+          FROM task_events
+         WHERE task_id = ?
+           AND kind = 'auto_retried'
+         ORDER BY id DESC
+        """,
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            value = payload.get("body_hash")
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _add_auto_retry_needs_operator_comment_once(
+    conn: sqlite3.Connection, task_id: str, *, now: int,
+) -> None:
+    marker = "Verifier-Content-Block nach Retry auf unverändertem Body"
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM task_comments
+         WHERE task_id = ?
+           AND author = 'dispatcher'
+           AND body LIKE ?
+         LIMIT 1
+        """,
+        (task_id, f"%{marker}%"),
+    ).fetchone()
+    if existing is not None:
+        return
+    conn.execute(
+        "INSERT INTO task_comments (task_id, author, body, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            task_id,
+            "dispatcher",
+            f"{marker} — braucht Body-/AC-Fix durch Operator/Orchestrator, "
+            "kein Re-Run.",
+            int(now),
+        ),
+    )
+
+
+def _blocked_kind_for_auto_retry(
+    reason: Optional[str],
+    *,
+    verdict: Optional[str] = None,
+    auto_retry_count: int = 0,
+    body_hash: Optional[str] = None,
+    last_auto_retry_body_hash: Optional[str] = None,
+) -> str:
     text = (reason or "").strip()
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"
+    if (
+        str(verdict or "").strip().upper() == "REQUEST_CHANGES"
+        and int(auto_retry_count or 0) >= 1
+        and body_hash
+        and last_auto_retry_body_hash
+        and body_hash == last_auto_retry_body_hash
+    ):
+        return "needs_operator"
     return "retryable"
 
 
@@ -12829,7 +12920,7 @@ def _latest_blocked_run_for_auto_retry(
 ) -> Optional[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT id, profile, summary, error, ended_at
+        SELECT id, profile, summary, error, ended_at, verdict
           FROM task_runs
          WHERE task_id = ?
            AND outcome = 'blocked'
@@ -12897,7 +12988,7 @@ def auto_retry_blocked_tasks(
     retried: list[tuple[str, int]] = []
     rows = conn.execute(
         """
-        SELECT id, assignee, consecutive_failures, max_retries,
+        SELECT id, assignee, consecutive_failures, max_retries, body,
                auto_retry_count, created_by
           FROM tasks
          WHERE status = 'blocked'
@@ -12942,9 +13033,21 @@ def auto_retry_blocked_tasks(
             continue
         if ended_at + backoff_seconds > now:
             continue
-        blocked_kind = _blocked_kind_for_auto_retry(reason)
+        current_count = int(row["auto_retry_count"] or 0)
+        body_hash = _task_body_hash(row["body"])
+        blocked_kind = _blocked_kind_for_auto_retry(
+            reason,
+            verdict=blocked_run["verdict"],
+            auto_retry_count=current_count,
+            body_hash=body_hash,
+            last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, task_id),
+        )
         if blocked_kind != "retryable":
             with write_txn(conn):
+                if blocked_kind == "needs_operator":
+                    _add_auto_retry_needs_operator_comment_once(
+                        conn, task_id, now=now,
+                    )
                 _append_auto_retry_event_once(
                     conn,
                     task_id,
@@ -12970,7 +13073,6 @@ def auto_retry_blocked_tasks(
                     {"reason": "failure_limit", "failures": failures},
                 )
             continue
-        current_count = int(row["auto_retry_count"] or 0)
         if current_count >= retry_limit:
             with write_txn(conn):
                 _append_auto_retry_event_once(
@@ -13023,6 +13125,7 @@ def auto_retry_blocked_tasks(
                 "blocked_run_id": int(blocked_run["id"]),
                 "reason": (reason or "")[:500] or None,
                 "escalated": escalated,
+                "body_hash": body_hash,
             }
             if escalated:
                 payload["model_override"] = AUTO_RETRY_ESCALATION_MODEL
