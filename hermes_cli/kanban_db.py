@@ -4565,6 +4565,8 @@ def _read_state_sessions(path: Path) -> list[dict]:
         has_started = "started_at" in cols
         has_model = "model" in cols
         has_provider = "billing_provider" in cols
+        has_cread = "cache_read_tokens" in cols
+        has_cwrite = "cache_write_tokens" in cols
         select = (
             "id, "
             + ("source" if has_src else "NULL AS source") + ", "
@@ -4572,7 +4574,9 @@ def _read_state_sessions(path: Path) -> list[dict]:
             "input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd, "
             + ("cwd" if has_cwd else "NULL AS cwd") + ", "
             + ("model" if has_model else "NULL AS model") + ", "
-            + ("billing_provider" if has_provider else "NULL AS billing_provider")
+            + ("billing_provider" if has_provider else "NULL AS billing_provider") + ", "
+            + ("cache_read_tokens" if has_cread else "NULL AS cache_read_tokens") + ", "
+            + ("cache_write_tokens" if has_cwrite else "NULL AS cache_write_tokens")
         )
         rows = conn.execute(f"SELECT {select} FROM sessions").fetchall()
     except Exception:
@@ -4602,28 +4606,35 @@ def _read_state_sessions(path: Path) -> list[dict]:
             "est_cost": est_cost,
             "model": r["model"],
             "provider": r["billing_provider"],
+            # cache_read/cache_write are SEPARATE, additive token columns
+            # (prompt = input + cache_read + cache_write per the runtime's
+            # CanonicalUsage) — priced at their own rates in the equivalent.
+            "cache_read": _coerce_int(r["cache_read_tokens"]),
+            "cache_write": _coerce_int(r["cache_write_tokens"]),
             "cwd": r["cwd"],
         })
     return out
 
 
-# COST-VISIBILITY-WORKERS-S2: optional static price overrides (input, output
-# $/Mtok) for models models.dev does not list. Empty by default — models.dev
-# already covers our lanes (claude / gpt-5.x+codex / glm); add an entry only for
-# a genuinely unlisted internal model.
-_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float]] = {}
+# COST-VISIBILITY-WORKERS-S2: optional static price overrides per model for
+# models models.dev does not list. Each value is a 4-tuple of $/Mtok rates:
+# (input, output, cache_read, cache_write). Empty by default — models.dev already
+# covers our lanes (claude / gpt-5.x+codex / glm); add an entry only for a
+# genuinely unlisted internal model.
+_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {}
 
 
 def _lookup_model_price_per_mtok(
     provider: Optional[str], model: Optional[str],
-) -> Optional[tuple[float, float]]:
-    """(input, output) price per million tokens for *model*, or None.
+) -> Optional[tuple[float, float, float, float]]:
+    """(input, output, cache_read, cache_write) $/Mtok for *model*, or None.
 
     Source of truth is the community price DB at models.dev (mem+disk cached, no
     network per call after the first) via :func:`agent.models_dev.get_model_info`
     — the SAME prices the agent runtime uses, so the equivalent stays consistent.
-    A static override wins for unlisted models. Fully fail-soft: any error → None
-    (the caller then leaves the equivalent unset rather than stamp a wrong value).
+    Cache rates a model does not list default to 0.0. A static override wins for
+    unlisted models. Fully fail-soft: any error → None (the caller then leaves the
+    equivalent unset rather than stamp a wrong value).
     """
     if not model:
         return None
@@ -4638,7 +4649,12 @@ def _lookup_model_price_per_mtok(
     if info is None or not info.has_cost_data():
         return None
     try:
-        return (float(info.cost_input), float(info.cost_output))
+        return (
+            float(info.cost_input),
+            float(info.cost_output),
+            float(info.cost_cache_read or 0.0),
+            float(info.cost_cache_write or 0.0),
+        )
     except (TypeError, ValueError):
         return None
 
@@ -4646,17 +4662,24 @@ def _lookup_model_price_per_mtok(
 def _equiv_from_tokens(
     provider: Optional[str], model: Optional[str],
     in_tok: Optional[int], out_tok: Optional[int],
-    *, cache: Optional[dict] = None,
+    *, cache_read: Optional[int] = None, cache_write: Optional[int] = None,
+    cache: Optional[dict] = None,
 ) -> Optional[float]:
     """API-equivalent $ = tokens × models.dev price.
+
+    Prices input/output AND cache_read/cache_write at their own rates — these are
+    SEPARATE, additive token classes (prompt = input + cache_read + cache_write
+    per the runtime's CanonicalUsage), so omitting cache under-counts cache-heavy
+    lanes (codex) by ~half. reasoning_tokens are deliberately NOT added (they are
+    already billed inside output_tokens).
 
     FALLBACK only: used for subscription sessions the runtime left unpriced —
     notably codex 'included' sessions, which stamp ``estimated_cost_usd=0`` so
     the lane would otherwise look free despite real token burn. Returns None when
     price or tokens are unavailable — never fabricates."""
-    if not in_tok and not out_tok:
+    if not in_tok and not out_tok and not cache_read and not cache_write:
         return None
-    price: Optional[tuple[float, float]]
+    price: Optional[tuple[float, float, float, float]]
     key = (str(provider), str(model))
     if cache is not None and key in cache:
         price = cache[key]
@@ -4666,8 +4689,13 @@ def _equiv_from_tokens(
             cache[key] = price
     if not price:
         return None
-    cost_in, cost_out = price
-    return (in_tok or 0) / 1_000_000.0 * cost_in + (out_tok or 0) / 1_000_000.0 * cost_out
+    cost_in, cost_out, cost_cr, cost_cw = price
+    return (
+        (in_tok or 0) / 1_000_000.0 * cost_in
+        + (out_tok or 0) / 1_000_000.0 * cost_out
+        + (cache_read or 0) / 1_000_000.0 * cost_cr
+        + (cache_write or 0) / 1_000_000.0 * cost_cw
+    )
 
 
 def backfill_run_costs_from_sessions(
@@ -4767,7 +4795,7 @@ def backfill_run_costs_from_sessions(
     sess_cache: dict[str, list[dict]] = {}
     # Per-call (provider, model) → price cache so the models.dev fallback does at
     # most one lookup per distinct model across the whole batch.
-    price_cache: dict[tuple, Optional[tuple[float, float]]] = {}
+    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
 
     def _sessions(dbkey: str, path: Optional[Path]) -> list[dict]:
         if dbkey in sess_cache:
@@ -4806,6 +4834,8 @@ def backfill_run_costs_from_sessions(
 
             in_sum: Optional[int] = None
             out_sum: Optional[int] = None
+            cread_sum: Optional[int] = None
+            cwrite_sum: Optional[int] = None
             actual_sum: Optional[float] = None
             est_sum: Optional[float] = None
             model_seen: Optional[str] = None
@@ -4814,7 +4844,8 @@ def backfill_run_costs_from_sessions(
             source: Optional[str] = None
 
             def _take(dbkey: str, sess: dict) -> None:
-                nonlocal in_sum, out_sum, actual_sum, est_sum, model_seen
+                nonlocal in_sum, out_sum, cread_sum, cwrite_sum
+                nonlocal actual_sum, est_sum, model_seen
                 nonlocal provider_seen
                 key = f"{dbkey}::{sess['id']}"
                 if key in consumed:
@@ -4825,6 +4856,10 @@ def backfill_run_costs_from_sessions(
                     in_sum = (in_sum or 0) + sess["input_tokens"]
                 if sess["output_tokens"] is not None:
                     out_sum = (out_sum or 0) + sess["output_tokens"]
+                if sess.get("cache_read") is not None:
+                    cread_sum = (cread_sum or 0) + sess["cache_read"]
+                if sess.get("cache_write") is not None:
+                    cwrite_sum = (cwrite_sum or 0) + sess["cache_write"]
                 # Keep real metered spend (actual) apart from the API-equivalent
                 # estimate so a subscription lane can stamp cost_usd=$0 while
                 # still surfacing the estimate as cost_usd_equivalent.
@@ -4917,6 +4952,7 @@ def backfill_run_costs_from_sessions(
                         # price so the teure codex lanes stop looking free.
                         equivalent = _equiv_from_tokens(
                             provider_seen, model_seen, in_sum, out_sum,
+                            cache_read=cread_sum, cache_write=cwrite_sum,
                             cache=price_cache,
                         )
                 else:

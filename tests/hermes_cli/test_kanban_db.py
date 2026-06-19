@@ -882,20 +882,23 @@ def _write_session_rows(db_path, rows):
             "id TEXT PRIMARY KEY, source TEXT, started_at REAL, ended_at REAL, "
             "input_tokens INTEGER, output_tokens INTEGER, "
             "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT, "
-            "model TEXT, billing_provider TEXT)"
+            "model TEXT, billing_provider TEXT, "
+            "cache_read_tokens INTEGER, cache_write_tokens INTEGER)"
         )
         for r in rows:
             conn.execute(
                 "INSERT INTO sessions (id, source, started_at, ended_at, "
                 "input_tokens, output_tokens, actual_cost_usd, "
-                "estimated_cost_usd, cwd, model, billing_provider) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "estimated_cost_usd, cwd, model, billing_provider, "
+                "cache_read_tokens, cache_write_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     r["id"], r.get("source", "cli"), r.get("started_at"),
                     r.get("ended_at"), r.get("input_tokens"),
                     r.get("output_tokens"), r.get("actual_cost_usd"),
                     r.get("estimated_cost_usd"), r.get("cwd"), r.get("model"),
                     r.get("billing_provider"),
+                    r.get("cache_read_tokens"), r.get("cache_write_tokens"),
                 ),
             )
         conn.commit()
@@ -1125,7 +1128,7 @@ def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path,
     # gpt-5.5 = $5/Mtok in, $30/Mtok out.
     monkeypatch.setattr(
         kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 30.0) if model == "gpt-5.5" else None,
+        lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
     )
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="codex-burn", assignee="coder")
@@ -1148,6 +1151,42 @@ def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path,
         assert meta["cost_usd_equivalent"] == pytest.approx(8.0)
         assert meta["model"] == "gpt-5.5"
         assert meta["billing_mode"] == "subscription_included"
+
+
+def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S3: codex burns mostly cache-read tokens (a
+    separate, additive column — prompt = input + cache_read + cache_write per the
+    runtime's CanonicalUsage). The equivalent must price cache_read/cache_write at
+    their own rates, else the Codex lane is under-counted by ~half. cost_usd stays
+    $0."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "chatgpt" if p == "coder" else None)
+    # gpt-5.5: in $5, out $30, cache_read $0.5, cache_write $6.25 (per Mtok)
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="codex-cache", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-cache", "source": "cli", "started_at": 1500,
+             "input_tokens": 1_000_000, "output_tokens": 100_000,
+             "cache_read_tokens": 10_000_000, "cache_write_tokens": 200_000,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "gpt-5.5", "billing_provider": "openai-codex",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)).fetchone()[0])
+        # 1M×$5 + 0.1M×$30 + 10M×$0.5 + 0.2M×$6.25 = 5 + 3 + 5 + 1.25 = $14.25
+        assert meta["cost_usd_equivalent"] == pytest.approx(14.25)
 
 
 def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_path, monkeypatch):
