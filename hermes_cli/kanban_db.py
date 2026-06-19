@@ -5319,6 +5319,42 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _latest_unresolved_gave_up_limit(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[int]:
+    """Return the effective limit from the latest still-active breaker trip.
+
+    ``_record_task_failure`` persists the exact threshold that tripped the
+    circuit breaker in the ``gave_up`` event payload.  ``recompute_ready`` may
+    run later without the dispatcher's original ``failure_limit`` argument
+    (for example from a dashboard mutation or maintenance sweep), so relying
+    only on the caller-supplied default can disagree with the breaker and
+    re-open a task that was parked at a stricter limit.
+
+    A newer explicit ``unblocked`` event means an operator resolved that
+    breaker trip, so old ``gave_up`` payloads no longer constrain recovery.
+    """
+    row = conn.execute(
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('gave_up', 'unblocked') "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row or row["kind"] != "gave_up":
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        limit = int(payload.get("effective_limit"))
+    except (TypeError, ValueError):
+        return None
+    return limit if limit > 0 else None
+
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
@@ -5346,9 +5382,12 @@ def recompute_ready(
     disagree about when a task is permanently blocked:
 
       1. per-task ``max_retries`` if set
-      2. caller-supplied ``failure_limit`` (the dispatcher passes the
+      2. latest still-active ``gave_up.effective_limit`` payload, when
+         present, so later recompute passes honour the threshold that
+         actually tripped the breaker
+      3. caller-supplied ``failure_limit`` (the dispatcher passes the
          ``kanban.failure_limit`` config value through ``dispatch_once``)
-      3. ``DEFAULT_FAILURE_LIMIT``
+      4. ``DEFAULT_FAILURE_LIMIT``
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -5396,8 +5435,12 @@ def recompute_ready(
                     # across recovery cycles.
                     failures = int(row["consecutive_failures"] or 0)
                     task_limit = row["max_retries"]
+                    persisted_limit = _latest_unresolved_gave_up_limit(
+                        conn, task_id,
+                    )
                     effective_limit = (
                         int(task_limit) if task_limit is not None
+                        else int(persisted_limit) if persisted_limit is not None
                         else int(failure_limit)
                     )
                     if failures >= effective_limit:
