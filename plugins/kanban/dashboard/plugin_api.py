@@ -5592,22 +5592,35 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
                     task_id,
                     CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
                     CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
-                    COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd
+                    COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
+                    COALESCE(SUM(COALESCE(
+                        json_extract(metadata, '$.cost_usd_equivalent'), 0.0
+                    )), 0.0)                                          AS cost_usd_equivalent
                 FROM task_runs
                 WHERE task_id IN ({placeholders})
                 GROUP BY task_id
                 """,
                 tuple(nodes),
             ).fetchall():
+                c_usd = float(row["cost_usd"])
+                c_equiv = float(row["cost_usd_equivalent"])
                 node_costs[row["task_id"]] = {
                     "input_tokens": int(row["input_tokens"]),
                     "output_tokens": int(row["output_tokens"]),
-                    "cost_usd": float(row["cost_usd"]),
+                    "cost_usd": c_usd,
+                    "cost_usd_equivalent": c_equiv,
+                    "cost_effective_usd": c_usd + c_equiv,
                 }
         except sqlite3.OperationalError:
             pass  # pre-K5a: cost/token columns absent — leave node_costs empty
 
-    _zero_costs: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    _zero_costs: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "cost_usd_equivalent": 0.0,
+        "cost_effective_usd": 0.0,
+    }
 
     out_nodes: list[dict[str, Any]] = []
     for node_id in sorted(nodes, key=lambda item: (depth(item), item)):
@@ -5657,6 +5670,8 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
             "progress": progress.get(task.id),
             "latest_run": run_payload,
             "cost_usd": costs["cost_usd"],
+            "cost_usd_equivalent": costs["cost_usd_equivalent"],
+            "cost_effective_usd": costs["cost_effective_usd"],
             "input_tokens": costs["input_tokens"],
             "output_tokens": costs["output_tokens"],
         })

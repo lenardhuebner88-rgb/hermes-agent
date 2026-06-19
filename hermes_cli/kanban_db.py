@@ -18677,15 +18677,21 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
             "schema":  "kanban-chain-costs-v1",
             "root_id": str,
             "totals":  {"input_tokens": int, "output_tokens": int,
-                        "cost_usd": float, "run_count": int},
+                        "cost_usd": float, "cost_usd_equivalent": float,
+                        "cost_effective_usd": float, "run_count": int},
             "by_lane": [
                 {"profile": str, "input_tokens": int, "output_tokens": int,
-                 "cost_usd": float, "run_count": int},
-                ...   # descending by cost_usd
+                 "cost_usd": float, "cost_usd_equivalent": float,
+                 "cost_effective_usd": float, "run_count": int},
+                ...   # descending by cost_effective_usd
             ],
         }
 
-    NULL ``cost_usd`` rows are treated as 0 in sums (COALESCE in SQL).
+    ``cost_usd_equivalent`` is the K17 API-$ estimate stamped in
+    ``metadata.cost_usd_equivalent`` for subscription runs (which carry
+    ``cost_usd=0``).  ``cost_effective_usd`` is ``cost_usd +
+    cost_usd_equivalent`` — the real-or-estimated burn.  NULL ``cost_usd``
+    rows are treated as 0 in sums (COALESCE in SQL).
     NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
     """
     member_ids = _root_tree_member_ids(conn, root_id)
@@ -18701,11 +18707,13 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
                 CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
                 CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
                 COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
+                COALESCE(SUM(COALESCE(
+                    json_extract(metadata, '$.cost_usd_equivalent'), 0.0
+                )), 0.0)                                          AS cost_usd_equivalent,
                 COUNT(*)                                          AS run_count
             FROM task_runs
             WHERE task_id IN ({placeholders})
             GROUP BY profile
-            ORDER BY cost_usd DESC
             """,
             member_ids,
         ).fetchall()
@@ -18719,15 +18727,23 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
             "input_tokens": int(row["input_tokens"]),
             "output_tokens": int(row["output_tokens"]),
             "cost_usd": float(row["cost_usd"]),
+            "cost_usd_equivalent": float(row["cost_usd_equivalent"]),
+            "cost_effective_usd": float(row["cost_usd"]) + float(row["cost_usd_equivalent"]),
             "run_count": int(row["run_count"]),
         }
         for row in rows
     ]
 
+    # Sort descending by cost_effective_usd so subscription lanes (cost_usd=0
+    # but positive equivalent) rank ahead of zero-cost API runs.
+    by_lane.sort(key=lambda l: -l["cost_effective_usd"])
+
     totals: dict[str, Any] = {
         "input_tokens": sum(l["input_tokens"] for l in by_lane),
         "output_tokens": sum(l["output_tokens"] for l in by_lane),
         "cost_usd": sum(l["cost_usd"] for l in by_lane),
+        "cost_usd_equivalent": sum(l["cost_usd_equivalent"] for l in by_lane),
+        "cost_effective_usd": sum(l["cost_effective_usd"] for l in by_lane),
         "run_count": sum(l["run_count"] for l in by_lane),
     }
 

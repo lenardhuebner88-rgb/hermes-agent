@@ -10693,3 +10693,129 @@ def test_chain_cost_breakdown_empty_chain(kanban_home):
     assert result["totals"]["output_tokens"] == 0
     assert result["totals"]["cost_usd"] == 0.0
     assert result["by_lane"] == []
+
+
+def _insert_run_cost_with_meta(conn, task_id, *, profile, input_tokens, output_tokens,
+                               cost_usd, metadata=None):
+    """Insert a closed run with explicit cost/token data and optional metadata JSON."""
+    import json as _json
+    meta_str = _json.dumps(metadata) if metadata is not None else None
+    conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd, metadata) "
+        "VALUES (?, ?, 'done', 'completed', 1000, 2000, ?, ?, ?, ?)",
+        (task_id, profile, input_tokens, output_tokens, cost_usd, meta_str),
+    )
+
+
+def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
+    """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
+    by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="sub-chain", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "sub-task", "assignee": "claude-cli", "parents": []}],
+            author="decomposer",
+        )
+        (task_a,) = child_ids
+        with kb.write_txn(conn):
+            _insert_run_cost_with_meta(
+                conn, task_a,
+                profile="claude-cli",
+                input_tokens=1000,
+                output_tokens=200,
+                cost_usd=0.0,
+                metadata={"cost_usd_equivalent": 0.42},
+            )
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    lane = next(l for l in result["by_lane"] if l["profile"] == "claude-cli")
+    assert lane["cost_usd"] == pytest.approx(0.0)
+    assert lane["cost_usd_equivalent"] == pytest.approx(0.42)
+    assert lane["cost_effective_usd"] == pytest.approx(0.42)
+
+    totals = result["totals"]
+    assert totals["cost_usd"] == pytest.approx(0.0)
+    assert totals["cost_usd_equivalent"] == pytest.approx(0.42)
+    assert totals["cost_effective_usd"] == pytest.approx(0.42)
+
+
+def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
+    """A run with real cost_usd>0 and no equivalent → cost_effective_usd==cost_usd."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="real-cost-chain", assignee="orchestrator")
+        with kb.write_txn(conn):
+            _insert_run_cost_with_meta(
+                conn, root,
+                profile="openrouter",
+                input_tokens=500,
+                output_tokens=100,
+                cost_usd=0.03,
+                metadata=None,
+            )
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    lane = result["by_lane"][0]
+    assert lane["cost_usd"] == pytest.approx(0.03)
+    assert lane["cost_usd_equivalent"] == pytest.approx(0.0)
+    assert lane["cost_effective_usd"] == pytest.approx(0.03)
+
+    totals = result["totals"]
+    assert totals["cost_usd"] == pytest.approx(0.03)
+    assert totals["cost_usd_equivalent"] == pytest.approx(0.0)
+    assert totals["cost_effective_usd"] == pytest.approx(0.03)
+
+
+def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
+    """by_lane is sorted descending by cost_effective_usd so subscription lanes
+    with cost_usd=0 but positive equivalent rank above zero-cost API lanes."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="sort-chain", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "sub-task", "assignee": "claude-cli", "parents": []},
+                {"title": "api-task", "assignee": "openrouter", "parents": []},
+            ],
+            author="decomposer",
+        )
+        sub_task, api_task = child_ids
+        with kb.write_txn(conn):
+            # subscription run: cost_usd=0, equivalent=1.00 → effective=1.00
+            _insert_run_cost_with_meta(
+                conn, sub_task,
+                profile="claude-cli",
+                input_tokens=2000,
+                output_tokens=400,
+                cost_usd=0.0,
+                metadata={"cost_usd_equivalent": 1.00},
+            )
+            # API run: cost_usd=0.005, no equivalent → effective=0.005
+            _insert_run_cost_with_meta(
+                conn, api_task,
+                profile="openrouter",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.005,
+                metadata=None,
+            )
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    by_lane = result["by_lane"]
+    # claude-cli (effective=1.00) must rank above openrouter (effective=0.005)
+    assert by_lane[0]["profile"] == "claude-cli"
+    assert by_lane[1]["profile"] == "openrouter"

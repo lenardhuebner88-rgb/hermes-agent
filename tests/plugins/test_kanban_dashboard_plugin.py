@@ -4512,6 +4512,99 @@ def test_chain_graph_nodes_include_cost_fields(client, kanban_home):
     assert n1["output_tokens"] == 0
 
 
+def _insert_cost_run_with_meta(conn, task_id, *, profile, input_tokens, output_tokens,
+                               cost_usd, metadata=None):
+    """Insert a run row with cost data and optional metadata; does NOT commit."""
+    import json as _json
+    meta_str = _json.dumps(metadata) if metadata is not None else None
+    conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd, metadata) "
+        "VALUES (?, ?, 'done', 'completed', 1000, 2000, ?, ?, ?, ?)",
+        (task_id, profile, input_tokens, output_tokens, cost_usd, meta_str),
+    )
+
+
+def test_chain_graph_nodes_include_cost_equivalent_fields(client, kanban_home):
+    """chain-graph nodes carry cost_usd_equivalent and cost_effective_usd for
+    subscription runs (cost_usd=0, metadata.cost_usd_equivalent set)."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            # subscription run on child_ids[0]: cost_usd=0, equivalent=0.55
+            _insert_cost_run_with_meta(
+                conn, child_ids[0],
+                profile="claude-cli",
+                input_tokens=1200,
+                output_tokens=300,
+                cost_usd=0.0,
+                metadata={"cost_usd_equivalent": 0.55},
+            )
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-graph")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["schema"] == "kanban-chain-graph-v1"
+    by_id = {n["id"]: n for n in body["nodes"]}
+
+    n0 = by_id[child_ids[0]]
+    assert n0["cost_usd"] == pytest.approx(0.0)
+    assert n0["cost_usd_equivalent"] == pytest.approx(0.55)
+    assert n0["cost_effective_usd"] == pytest.approx(0.55)
+
+    # Nodes without runs: new fields present and zeroed
+    n1 = by_id[child_ids[1]]
+    assert "cost_usd_equivalent" in n1
+    assert "cost_effective_usd" in n1
+    assert n1["cost_usd_equivalent"] == 0.0
+    assert n1["cost_effective_usd"] == 0.0
+
+
+def test_chain_costs_endpoint_includes_equivalent_fields(client, kanban_home):
+    """GET /tasks/{id}/chain-costs now returns cost_usd_equivalent and
+    cost_effective_usd in totals and by_lane for subscription runs."""
+    import json as _json
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="equiv-chain", assignee="orchestrator",
+                              triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "sub-worker", "assignee": "claude-cli", "parents": []},
+            ],
+            author="decomposer",
+        )
+        (task_a,) = child_ids
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn, task_a,
+                profile="claude-cli",
+                input_tokens=900,
+                output_tokens=180,
+                cost_usd=0.0,
+                metadata={"cost_usd_equivalent": 0.77},
+            )
+
+    r = client.get(f"/api/plugins/kanban/tasks/{root}/chain-costs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["schema"] == "kanban-chain-costs-v1"
+
+    totals = body["totals"]
+    assert totals["cost_usd"] == pytest.approx(0.0)
+    assert totals["cost_usd_equivalent"] == pytest.approx(0.77)
+    assert totals["cost_effective_usd"] == pytest.approx(0.77)
+
+    by_lane = body["by_lane"]
+    lane = next(l for l in by_lane if l["profile"] == "claude-cli")
+    assert lane["cost_usd"] == pytest.approx(0.0)
+    assert lane["cost_usd_equivalent"] == pytest.approx(0.77)
+    assert lane["cost_effective_usd"] == pytest.approx(0.77)
+
+
 def test_flow_release_unknown_task_404(client):
     r = client.post("/api/plugins/kanban/tasks/t_nope/flow-release")
     assert r.status_code == 404
