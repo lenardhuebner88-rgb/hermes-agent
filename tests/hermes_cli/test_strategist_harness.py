@@ -210,6 +210,78 @@ def test_self_gate_rejects_missing_counter_metric():
 
 
 # --------------------------------------------------------------------------- #
+# 4b. COST-AWARENESS-S1: the strategist prioritises $-burn
+# --------------------------------------------------------------------------- #
+def _cost_ctx(profiles):
+    return {"metrics": None, "cost": {"profiles": profiles},
+            "ledger": {"by_class": {}, "total": 0, "entries": []},
+            "suppressed": set()}
+
+
+def test_cost_lever_opens_for_expensive_lane():
+    """A lane whose effective burn exceeds the threshold opens a single, self-
+    gate-passing cost-efficiency lever; signal scales with burn but is capped."""
+    ctx = _cost_ctx([
+        {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
+        {"profile": "coder", "cost_usd": 0.0, "cost_usd_equivalent": 129.0},
+    ])
+    levers = strategist.derive_levers(ctx)
+    cost_levers = [lv for lv in levers if lv.source == "cost"]
+    assert len(cost_levers) == 1  # only the single costliest lane
+    lv = cost_levers[0]
+    assert lv.key == "COST-EFFICIENCY-CODER-CLAUDE"
+    assert "coder-claude" in lv.target_metric
+    assert strategist.self_gate(lv).passed is True
+    # signal capped so one hot lane can't swamp the cap
+    assert lv.signal_strength == pytest.approx(strategist.COST_SIGNAL_CAP)
+
+
+def test_cost_lever_idle_below_threshold():
+    """All lanes below the threshold → no cost lever (idle is correct)."""
+    ctx = _cost_ctx([
+        {"profile": "verifier", "cost_usd": 0.24, "cost_usd_equivalent": 0.0},
+        {"profile": "coder", "cost_usd": 0.0, "cost_usd_equivalent": 1.0},
+    ])
+    assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
+
+
+def test_cost_lever_skips_synthetic_bucket():
+    """The nameless '(ohne profil)' bucket is never proposed as a lane to optimise,
+    even if it is the costliest."""
+    ctx = _cost_ctx([
+        {"profile": "(ohne profil)", "cost_usd": 0.0, "cost_usd_equivalent": 999.0},
+        {"profile": "coder", "cost_usd": 0.0, "cost_usd_equivalent": 5.0},
+    ])
+    assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
+
+
+def test_cost_lever_is_suppressed_when_vetoed():
+    """A vetoed cost lever key is not re-raised (closed veto loop)."""
+    ctx = _cost_ctx([
+        {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
+    ])
+    ctx["suppressed"] = {"COST-EFFICIENCY-CODER-CLAUDE"}
+    assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
+
+
+def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
+    """End-to-end: an injected cost view drives a held, annotated proposal on the
+    G1 surface — the strategist now ships cost-reduction work, not just
+    escalation/autonomy levers."""
+    _patch_budget(monkeypatch, 30.0)
+    cost = {"profiles": [
+        {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
+    ]}
+    out_dir = board_home / "specs"
+    result = strategist.propose(board=None, out_dir=out_dir,
+                                metrics={"autonomy_pct": 95, "green_gate_streak": 10},
+                                cost=cost)
+    assert result["skipped"] is False
+    keys = {item["key"] for item in result["ingested"]}
+    assert "COST-EFFICIENCY-CODER-CLAUDE" in keys
+
+
+# --------------------------------------------------------------------------- #
 # 5. Reflect reads approved vs vetoed
 # --------------------------------------------------------------------------- #
 def _make_held_proposal(conn, key, title_suffix):

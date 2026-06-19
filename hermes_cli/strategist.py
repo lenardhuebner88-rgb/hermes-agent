@@ -71,6 +71,17 @@ LEDGER_MIN_COUNT = 1  # a Heiler class needs >= this many escalations to drive a
 AUTONOMY_TARGET = 90.0  # autonomy_pct
 GATE_STREAK_TARGET = 7  # green_gate_streak
 
+# COST-AWARENESS-S1: a lane whose effective burn (real $ + API-equivalent of the
+# subscription token burn, ``kanban_db.runs_costs``) over the window exceeds this
+# threshold opens a cost-efficiency lever. Effective cost only became a real
+# signal once the cost-visibility backfill stamped cost_usd_equivalent for the
+# subscription lanes (Codex/claude) — before that every lane read $0 and the
+# strategist was cost-blind. The signal is capped so one very hot lane cannot
+# crowd every other lever out of the cap.
+COST_WINDOW_DAYS = 7
+COST_LANE_THRESHOLD_USD = 25.0
+COST_SIGNAL_CAP = 3.0
+
 # Weekly-usage skip threshold (percent of the subscription window consumed).
 BUDGET_THRESHOLD = 80.0
 BUDGET_PROVIDER = "anthropic"  # the strategist runs on the Opus subscription lane
@@ -229,6 +240,91 @@ def _gate_stability_lever(gap: float) -> Lever:
     )
 
 
+def _cost_lane_token(name: str) -> str:
+    """Uppercase, slug-safe token for a lane name (drops spaces/parens so the
+    lever key round-trips through ``PlanSpec <KEY>:`` titles and filenames)."""
+    out = "".join(c if c.isalnum() else "-" for c in str(name).upper())
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-")
+
+
+def _cost_efficiency_lever(lane: str, burn: float, key: str) -> Lever:
+    """Concrete, counter-bounded lever to cut the costliest lane's burn.
+
+    Unlike the blunt autonomy lever this is specific (one named lane, a 20 %
+    target, a throughput guardrail) so it bounds its counter-metric and passes
+    the self-gate. ``signal_strength`` scales with the burn (capped) so a hotter
+    lane ranks higher without swamping the cap.
+    """
+    signal = min(burn / COST_LANE_THRESHOLD_USD, COST_SIGNAL_CAP)
+    return Lever(
+        key=key,
+        title=f"Kosten-Effizienz: teuerste Lane '{lane}' entlasten",
+        lane="coder-claude",
+        target_metric=(
+            f"cost_effective_usd der Lane '{lane}' (aktuell ~${burn:.0f} pro "
+            f"{COST_WINDOW_DAYS}-Tage-Fenster, API-Aequivalent des Abo-Verbrauchs) "
+            "um mindestens 20 Prozent senken"
+        ),
+        roi=(
+            f"hoch: '{lane}' ist der groesste Aequivalent-Brenner im "
+            f"{COST_WINDOW_DAYS}-Tage-Fenster; eine gezielte Token-/Kontext-/"
+            "Routing-Straffung senkt den Abo-Verbrauch mit dem groessten Hebel"
+        ),
+        counter_metric=(
+            "Durchsatz und Erfolgsquote der Lane duerfen nicht fallen "
+            "(keine Qualitaet gegen Kosten tauschen)"
+        ),
+        rationale=(
+            f"Die Kosten-Sicht (runs_costs, {COST_WINDOW_DAYS}d) weist '{lane}' als "
+            f"teuerste Lane aus (~${burn:.0f} API-Aequivalent). Eine gezielte "
+            "Reduktion ihres Token-/Kontext-Footprints spart den groessten "
+            "Hebel am Abo-Verbrauch, ohne den Durchsatz zu opfern."
+        ),
+        gain_weight=1.0,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=signal,
+        source="cost",
+    )
+
+
+def _cost_lever(cost: Any, suppressed: set[str]) -> Optional[Lever]:
+    """Open ONE cost-efficiency lever for the single costliest lane above the
+    threshold (or None when nothing is expensive enough — idle is correct).
+
+    Reads the ``runs_costs`` shape (``{"profiles": [{profile, cost_usd,
+    cost_usd_equivalent, ...}]}``). Synthetic buckets ('(ohne profil)') are
+    skipped. Suppression-aware via the vetoed-lever set.
+    """
+    if not isinstance(cost, dict):
+        return None
+    best_lane: Optional[str] = None
+    best_burn = 0.0
+    for row in cost.get("profiles") or []:
+        if not isinstance(row, dict):
+            continue
+        name = (row.get("profile") or "").strip()
+        # skip synthetic / nameless buckets — not a real lane to optimise
+        if not name or "(" in name or " " in name:
+            continue
+        burn = (row.get("cost_usd") or 0.0) + (row.get("cost_usd_equivalent") or 0.0)
+        if burn <= COST_LANE_THRESHOLD_USD:
+            continue
+        if best_lane is None or burn > best_burn:
+            best_lane, best_burn = name, burn
+    if best_lane is None:
+        return None
+    token = _cost_lane_token(best_lane)
+    if not token:  # degenerate lane name (all punctuation) → no usable key
+        return None
+    key = f"COST-EFFICIENCY-{token}"
+    if key in suppressed:
+        return None
+    return _cost_efficiency_lever(best_lane, best_burn, key)
+
+
 # --------------------------------------------------------------------------- #
 # Context gathering
 # --------------------------------------------------------------------------- #
@@ -262,6 +358,7 @@ def gather_context(
     conn,
     *,
     metrics: Optional[dict[str, Any]] = None,
+    cost: Optional[dict[str, Any]] = None,
     notes_dir: Optional[Path] = None,
     ledger_since: Optional[int] = None,
 ) -> dict[str, Any]:
@@ -269,13 +366,21 @@ def gather_context(
 
     ``metrics`` may be injected (tests / Opus-supplied snapshot); when ``None``
     it is read from the H1 file via :func:`strategist_surface.read_vision_metrics`
-    and degrades to ``None`` if absent. The ledger read is the only DB hit.
+    and degrades to ``None`` if absent. ``cost`` (the per-lane effective-burn
+    view, ``kanban_db.runs_costs``) is likewise injectable; when ``None`` it is
+    computed over the cost window and degrades to ``None`` on any error.
     """
     if metrics is None:
         metrics = strategist_surface.read_vision_metrics()
+    if cost is None:
+        try:
+            cost = kanban_db.runs_costs(conn, days=COST_WINDOW_DAYS)
+        except Exception:  # cost view is best-effort; never break propose
+            cost = None
     ledger = kanban_db.read_escalation_ledger(conn, since=ledger_since)
     return {
         "metrics": metrics if isinstance(metrics, dict) else None,
+        "cost": cost if isinstance(cost, dict) else None,
         "ledger": ledger,
         "suppressed": _read_suppressed(notes_dir),
     }
@@ -323,6 +428,13 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
         streak = _coerce_number(metrics.get("green_gate_streak"))
         if streak is not None and streak < GATE_STREAK_TARGET and "GATE-STABILITY" not in suppressed:
             levers.append(_gate_stability_lever(float(GATE_STREAK_TARGET) - streak))
+
+    # COST-AWARENESS-S1: one lever for the costliest lane above threshold. With
+    # cost_effective_usd now real (subscription equivalents stamped), the
+    # strategist can finally prioritise $-burn, not just escalations/autonomy.
+    cost_lever = _cost_lever(context.get("cost"), suppressed)
+    if cost_lever is not None:
+        levers.append(cost_lever)
 
     return levers
 
@@ -557,6 +669,7 @@ def propose(
     conn=None,
     out_dir: Path,
     metrics: Optional[dict[str, Any]] = None,
+    cost: Optional[dict[str, Any]] = None,
     drafts: Optional[Iterable[dict[str, Any]]] = None,
     notes_dir: Optional[Path] = None,
     provider: str = BUDGET_PROVIDER,
@@ -591,7 +704,8 @@ def propose(
         conn = kanban_db.connect(board=board)
     try:
         context = gather_context(
-            conn, metrics=metrics, notes_dir=notes_dir, ledger_since=ledger_since
+            conn, metrics=metrics, cost=cost, notes_dir=notes_dir,
+            ledger_since=ledger_since,
         )
     finally:
         if owns_conn:

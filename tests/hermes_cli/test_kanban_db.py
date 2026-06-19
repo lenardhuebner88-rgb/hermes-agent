@@ -881,18 +881,21 @@ def _write_session_rows(db_path, rows):
             "CREATE TABLE IF NOT EXISTS sessions ("
             "id TEXT PRIMARY KEY, source TEXT, started_at REAL, ended_at REAL, "
             "input_tokens INTEGER, output_tokens INTEGER, "
-            "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT)"
+            "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT, "
+            "model TEXT, billing_provider TEXT)"
         )
         for r in rows:
             conn.execute(
                 "INSERT INTO sessions (id, source, started_at, ended_at, "
                 "input_tokens, output_tokens, actual_cost_usd, "
-                "estimated_cost_usd, cwd) VALUES (?,?,?,?,?,?,?,?,?)",
+                "estimated_cost_usd, cwd, model, billing_provider) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     r["id"], r.get("source", "cli"), r.get("started_at"),
                     r.get("ended_at"), r.get("input_tokens"),
                     r.get("output_tokens"), r.get("actual_cost_usd"),
-                    r.get("estimated_cost_usd"), r.get("cwd"),
+                    r.get("estimated_cost_usd"), r.get("cwd"), r.get("model"),
+                    r.get("billing_provider"),
                 ),
             )
         conn.commit()
@@ -1032,6 +1035,180 @@ def test_s1_subscription_zero_metered_when_no_session(kanban_home, tmp_path, mon
         assert meta["cost_source"] == "subscription_zero_metered"
         assert meta["billing_mode"] == "subscription_included"
         assert meta["subscription"] == "claude"
+
+
+def test_s1_subscription_match_stamps_equivalent_not_metered(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S2: a subscription lane that DOES match a session
+    keeps cost_usd=0.0 (real metered — the burn rides the subscription) but
+    surfaces the session's estimated_cost_usd as metadata.cost_usd_equivalent
+    (generalising K17 beyond claude-cli) and stamps the session's model. Tokens
+    are still attributed. This is what lights up the 'teure' lanes (Codex/
+    verifier/coder) that today show $0/'—' while burning real value."""
+    profile_dir = tmp_path / "profiles" / "coder-claude"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="sub-match", assignee="coder-claude")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-sub", "source": "cli", "started_at": 1500,
+             "input_tokens": 800, "output_tokens": 60, "actual_cost_usd": None,
+             "estimated_cost_usd": 0.20, "model": "claude-opus-4-8",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        # real metered cost stays $0 — the metric-integrity invariant holds.
+        assert row["cost_usd"] == pytest.approx(0.0)
+        assert row["input_tokens"] == 800
+        assert row["output_tokens"] == 60
+        meta = json.loads(row["metadata"])
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.20)
+        assert meta["model"] == "claude-opus-4-8"
+        assert meta["billing_mode"] == "subscription_included"
+        assert meta["subscription"] == "claude"
+        assert meta["cost_source"] == "session_cwd"
+
+
+def test_s1_subscription_actual_does_not_leak_into_metered(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S2 invariant (Codex cross-family catch): a
+    subscription-lane session carrying a stray actual_cost_usd>0 (a metered
+    fallback leg / misconfig) must NOT leak into real cost_usd — that would
+    contradict billing_mode=subscription_included and corrupt the
+    tasks_without_cost_data metric. cost_usd stays $0; the actual surfaces only as
+    the labeled equivalent."""
+    profile_dir = tmp_path / "profiles" / "coder-claude"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="sub-actual", assignee="coder-claude")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-leak", "source": "cli", "started_at": 1500,
+             "input_tokens": 100, "output_tokens": 10, "actual_cost_usd": 0.40,
+             "estimated_cost_usd": None, "model": "claude-opus-4-8",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, metadata FROM task_runs WHERE id=?",
+            (run_id,)).fetchone()
+        assert row["cost_usd"] == pytest.approx(0.0)  # NOT 0.40 — no leak
+        meta = json.loads(row["metadata"])
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.40)
+        assert meta["billing_mode"] == "subscription_included"
+
+
+def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S2: a codex subscription session stamps
+    estimated_cost_usd=0 ('included'), so the runtime leaves it unpriced. The
+    backfill then computes the API-equivalent as tokens × online price (models.
+    dev) for the session's model — this is what finally lights up the teure
+    Codex lanes that otherwise show $0/'—'. Real cost_usd stays $0."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "chatgpt" if p == "coder" else None)
+    # Pin the price so the test is hermetic (no models.dev network/cache dep):
+    # gpt-5.5 = $5/Mtok in, $30/Mtok out.
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 30.0) if model == "gpt-5.5" else None,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="codex-burn", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-codex", "source": "cli", "started_at": 1500,
+             "input_tokens": 1_000_000, "output_tokens": 100_000,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "gpt-5.5", "billing_provider": "openai-codex",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, metadata FROM task_runs WHERE id=?",
+            (run_id,)).fetchone()
+        assert row["cost_usd"] == pytest.approx(0.0)  # real metered stays $0
+        meta = json.loads(row["metadata"])
+        # 1M in × $5 + 0.1M out × $30 = 5.0 + 3.0 = $8.00
+        assert meta["cost_usd_equivalent"] == pytest.approx(8.0)
+        assert meta["model"] == "gpt-5.5"
+        assert meta["billing_mode"] == "subscription_included"
+
+
+def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S2 guardrail: when no price is resolvable the
+    fallback returns None and NO cost_usd_equivalent is invented — honesty over
+    coverage. cost_usd still stamped $0 (subscription) so the run is no longer a
+    NULL candidate."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "chatgpt" if p == "coder" else None)
+    monkeypatch.setattr(kb, "_lookup_model_price_per_mtok",
+                        lambda provider, model: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="codex-noprice", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-np", "source": "cli", "started_at": 1500,
+             "input_tokens": 5000, "output_tokens": 500,
+             "estimated_cost_usd": 0.0, "model": "mystery-model",
+             "billing_provider": "internal",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)).fetchone()[0])
+        assert "cost_usd_equivalent" not in meta
+        assert meta["model"] == "mystery-model"
+
+
+def test_s1_metered_match_keeps_cost_and_stamps_model(kanban_home, tmp_path, monkeypatch):
+    """COST-VISIBILITY-WORKERS-S2: a metered (non-subscription) lane is
+    unchanged — actual_cost_usd lands in cost_usd — but the session's model is
+    now also stamped, and no cost_usd_equivalent is invented (the real metered
+    cost already IS the effective cost)."""
+    profile_dir = tmp_path / "profiles" / "research"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="metered", assignee="research")
+        run_id = _insert_run_window(
+            conn, tid, profile="research", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-met", "source": "cli", "started_at": 1500,
+             "input_tokens": 400, "output_tokens": 30, "actual_cost_usd": 0.15,
+             "estimated_cost_usd": 0.15, "model": "gpt-5.5",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, metadata FROM task_runs WHERE id=?",
+            (run_id,)).fetchone()
+        assert row["cost_usd"] == pytest.approx(0.15)
+        meta = json.loads(row["metadata"])
+        assert meta["model"] == "gpt-5.5"
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_s1_api_billed_lane_without_session_stays_null(kanban_home, tmp_path, monkeypatch):

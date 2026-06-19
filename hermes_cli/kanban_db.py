@@ -4563,12 +4563,16 @@ def _read_state_sessions(path: Path) -> list[dict]:
         has_cwd = "cwd" in cols
         has_src = "source" in cols
         has_started = "started_at" in cols
+        has_model = "model" in cols
+        has_provider = "billing_provider" in cols
         select = (
             "id, "
             + ("source" if has_src else "NULL AS source") + ", "
             + ("started_at" if has_started else "NULL AS started_at") + ", "
             "input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd, "
-            + ("cwd" if has_cwd else "NULL AS cwd")
+            + ("cwd" if has_cwd else "NULL AS cwd") + ", "
+            + ("model" if has_model else "NULL AS model") + ", "
+            + ("billing_provider" if has_provider else "NULL AS billing_provider")
         )
         rows = conn.execute(f"SELECT {select} FROM sessions").fetchall()
     except Exception:
@@ -4581,19 +4585,89 @@ def _read_state_sessions(path: Path) -> list[dict]:
                 pass
     out: list[dict] = []
     for r in rows:
-        cost = _coerce_float(r["actual_cost_usd"])
-        if cost is None:
-            cost = _coerce_float(r["estimated_cost_usd"])
+        actual_cost = _coerce_float(r["actual_cost_usd"])
+        est_cost = _coerce_float(r["estimated_cost_usd"])
+        cost = actual_cost if actual_cost is not None else est_cost
         out.append({
             "id": r["id"],
             "source": r["source"],
             "started_at": _coerce_float(r["started_at"]),
             "input_tokens": _coerce_int(r["input_tokens"]),
             "output_tokens": _coerce_int(r["output_tokens"]),
+            # ``cost`` keeps the legacy actual-then-estimated collapse; the two
+            # are also exposed separately so the backfill can keep real metered
+            # spend (actual) apart from the API-equivalent estimate.
             "cost": cost,
+            "actual_cost": actual_cost,
+            "est_cost": est_cost,
+            "model": r["model"],
+            "provider": r["billing_provider"],
             "cwd": r["cwd"],
         })
     return out
+
+
+# COST-VISIBILITY-WORKERS-S2: optional static price overrides (input, output
+# $/Mtok) for models models.dev does not list. Empty by default — models.dev
+# already covers our lanes (claude / gpt-5.x+codex / glm); add an entry only for
+# a genuinely unlisted internal model.
+_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float]] = {}
+
+
+def _lookup_model_price_per_mtok(
+    provider: Optional[str], model: Optional[str],
+) -> Optional[tuple[float, float]]:
+    """(input, output) price per million tokens for *model*, or None.
+
+    Source of truth is the community price DB at models.dev (mem+disk cached, no
+    network per call after the first) via :func:`agent.models_dev.get_model_info`
+    — the SAME prices the agent runtime uses, so the equivalent stays consistent.
+    A static override wins for unlisted models. Fully fail-soft: any error → None
+    (the caller then leaves the equivalent unset rather than stamp a wrong value).
+    """
+    if not model:
+        return None
+    override = _PRICE_OVERRIDES_PER_MTOK.get(str(model))
+    if override is not None:
+        return override
+    try:
+        from agent.models_dev import get_model_info
+        info = get_model_info(provider or "", str(model))
+    except Exception:
+        return None
+    if info is None or not info.has_cost_data():
+        return None
+    try:
+        return (float(info.cost_input), float(info.cost_output))
+    except (TypeError, ValueError):
+        return None
+
+
+def _equiv_from_tokens(
+    provider: Optional[str], model: Optional[str],
+    in_tok: Optional[int], out_tok: Optional[int],
+    *, cache: Optional[dict] = None,
+) -> Optional[float]:
+    """API-equivalent $ = tokens × models.dev price.
+
+    FALLBACK only: used for subscription sessions the runtime left unpriced —
+    notably codex 'included' sessions, which stamp ``estimated_cost_usd=0`` so
+    the lane would otherwise look free despite real token burn. Returns None when
+    price or tokens are unavailable — never fabricates."""
+    if not in_tok and not out_tok:
+        return None
+    price: Optional[tuple[float, float]]
+    key = (str(provider), str(model))
+    if cache is not None and key in cache:
+        price = cache[key]
+    else:
+        price = _lookup_model_price_per_mtok(provider, model)
+        if cache is not None:
+            cache[key] = price
+    if not price:
+        return None
+    cost_in, cost_out = price
+    return (in_tok or 0) / 1_000_000.0 * cost_in + (out_tok or 0) / 1_000_000.0 * cost_out
 
 
 def backfill_run_costs_from_sessions(
@@ -4691,6 +4765,9 @@ def backfill_run_costs_from_sessions(
     # that resolve to one dir — is consume-once-correct regardless of how it was
     # reached. dbkey is therefore the path string.
     sess_cache: dict[str, list[dict]] = {}
+    # Per-call (provider, model) → price cache so the models.dev fallback does at
+    # most one lookup per distinct model across the whole batch.
+    price_cache: dict[tuple, Optional[tuple[float, float]]] = {}
 
     def _sessions(dbkey: str, path: Optional[Path]) -> list[dict]:
         if dbkey in sess_cache:
@@ -4729,12 +4806,16 @@ def backfill_run_costs_from_sessions(
 
             in_sum: Optional[int] = None
             out_sum: Optional[int] = None
-            cost_sum: Optional[float] = None
+            actual_sum: Optional[float] = None
+            est_sum: Optional[float] = None
+            model_seen: Optional[str] = None
+            provider_seen: Optional[str] = None
             matched: list[str] = []
             source: Optional[str] = None
 
             def _take(dbkey: str, sess: dict) -> None:
-                nonlocal in_sum, out_sum, cost_sum
+                nonlocal in_sum, out_sum, actual_sum, est_sum, model_seen
+                nonlocal provider_seen
                 key = f"{dbkey}::{sess['id']}"
                 if key in consumed:
                     return
@@ -4744,7 +4825,22 @@ def backfill_run_costs_from_sessions(
                     in_sum = (in_sum or 0) + sess["input_tokens"]
                 if sess["output_tokens"] is not None:
                     out_sum = (out_sum or 0) + sess["output_tokens"]
-                cost_sum = (cost_sum or 0.0) + (sess["cost"] or 0.0)
+                # Keep real metered spend (actual) apart from the API-equivalent
+                # estimate so a subscription lane can stamp cost_usd=$0 while
+                # still surfacing the estimate as cost_usd_equivalent.
+                if sess.get("actual_cost") is not None:
+                    actual_sum = (actual_sum or 0.0) + sess["actual_cost"]
+                if sess.get("est_cost") is not None:
+                    est_sum = (est_sum or 0.0) + sess["est_cost"]
+                # First non-empty model/provider wins. A run's sessions are
+                # same-profile/same-model in practice; if they ever differ the
+                # summed tokens are priced at the first model's rate — an
+                # approximation that only affects the labeled equivalent estimate,
+                # never the real cost_usd, so it cannot corrupt the cost metric.
+                if not model_seen and sess.get("model"):
+                    model_seen = sess["model"]
+                if not provider_seen and sess.get("provider"):
+                    provider_seen = sess["provider"]
 
             # Tier 1: deterministic cwd match (profile db + hub), keyed by path.
             cwd_sources: list[tuple[str, Path]] = []
@@ -4781,24 +4877,57 @@ def backfill_run_costs_from_sessions(
             stamp_in: Optional[int] = None
             stamp_out: Optional[int] = None
             stamp_cost: Optional[float] = None
+            equivalent: Optional[float] = None
             billing_mode: Optional[str] = None
             subscription: Optional[str] = None
 
             if matched:
                 stamp_in, stamp_out = in_sum, out_sum
-                # A matched run always gets a non-NULL cost: real metered $ if
-                # any, else 0.0 (subscription sessions bill $0). cost_sum is a
-                # float whenever >=1 session was taken.
-                stamp_cost = cost_sum if cost_sum is not None else 0.0
                 try:
                     sub = _profile_subscription(profile)
                 except Exception:
                     sub = None
                 if sub:
+                    # Subscription lane: the quota burn rides the subscription,
+                    # so real metered cost_usd is $0 (any actual is a metered
+                    # leg) — but surface the API-equivalent estimate as
+                    # cost_usd_equivalent (generalises K17 beyond claude-cli) so
+                    # the lane stops looking free. Keeps the metric-integrity
+                    # invariant: cost_usd_total rises only by real metered $.
                     subscription = sub
                     billing_mode = "subscription_included"
-                elif stamp_cost and stamp_cost > 0:
-                    billing_mode = "metered"
+                    # Subscription burn is NEVER real metered $ — cost_usd is
+                    # ALWAYS $0 here (consistent with the K17 + tier-3 paths and
+                    # the billing_mode=subscription_included label), so a stray
+                    # metered-leg actual can't corrupt cost_usd_total / the
+                    # tasks_without_cost_data metric. The value is surfaced only
+                    # as the (clearly-labeled) equivalent.
+                    stamp_cost = 0.0
+                    if est_sum is not None and est_sum > 0:
+                        # The runtime already priced the session (claude/minimax
+                        # 'estimated' sessions) — trust its number.
+                        equivalent = est_sum
+                    elif actual_sum is not None and actual_sum > 0:
+                        # A genuine metered leg on a subscription lane: use it as
+                        # the best available equivalent (not as real cost_usd).
+                        equivalent = actual_sum
+                    else:
+                        # The runtime left it unpriced (codex 'included' sessions
+                        # stamp estimated_cost_usd=0) → compute tokens × online
+                        # price so the teure codex lanes stop looking free.
+                        equivalent = _equiv_from_tokens(
+                            provider_seen, model_seen, in_sum, out_sum,
+                            cache=price_cache,
+                        )
+                else:
+                    # Metered lane: real card cost is actual; fall back to the
+                    # runtime estimate as the best proxy when no actual was
+                    # recorded. A matched run always gets a non-NULL cost.
+                    stamp_cost = actual_sum if actual_sum is not None else est_sum
+                    if stamp_cost is None:
+                        stamp_cost = 0.0
+                    if stamp_cost > 0:
+                        billing_mode = "metered"
             else:
                 # Tier 3: provable subscription lane → real metered cost is $0.
                 try:
@@ -4822,6 +4951,10 @@ def backfill_run_costs_from_sessions(
             new_meta["cost_source"] = source
             if matched:
                 new_meta["cost_session_ids"] = matched
+            if equivalent is not None:
+                new_meta.setdefault("cost_usd_equivalent", equivalent)
+            if model_seen:
+                new_meta.setdefault("model", model_seen)
             if billing_mode is not None:
                 new_meta.setdefault("billing_mode", billing_mode)
             if subscription is not None:
