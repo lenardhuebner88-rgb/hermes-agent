@@ -1859,6 +1859,17 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: no-silent-stall sweep failed on board %s",
                         slug, exc_info=True,
                     )
+                # Safety net: guarantee every operator_escalation gets a paired
+                # heiler_classification within one tick (the Stratege's by_class
+                # input). Independently guarded so a sweep failure never breaks
+                # dispatch.
+                try:
+                    _kb.classify_escalations_sweep(conn)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: escalation classification sweep "
+                        "failed on board %s", slug, exc_info=True,
+                    )
                 return _dispatch_result
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

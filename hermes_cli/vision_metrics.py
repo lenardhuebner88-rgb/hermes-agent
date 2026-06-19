@@ -315,6 +315,107 @@ def _escalation_rate_metric(
     }
 
 
+def _classification_coverage_metric(
+    conn: sqlite3.Connection, *, now: int, window_days: int
+) -> dict:
+    """Klassifikations-Abdeckung ↔ counter 'operator_corrected_pct'.
+
+    Headline = share of ``operator_escalation`` events in the window that
+    received a paired ``heiler_classification`` (one referencing the escalation
+    via ``escalation_event_id``) WITHIN 24h. The Stratege's ``by_class`` input
+    is only trustworthy when this is high — the live ledger had starved to 0%
+    (9 escalations/week, 0 classified) before the safety-net sweep.
+
+    Counter = share of *classified* escalations the operator later corrected
+    (``heiler_classification_corrected``): the auto-misclassification guardrail,
+    held under 10%. 0 corrections → 0.0 (trivially held until a human overrides).
+    """
+    window = window_days * DAY_SECONDS
+    cutoff = now - window
+
+    escalations = conn.execute(
+        "SELECT id, created_at FROM task_events "
+        "WHERE kind = ? AND created_at >= ?",
+        (kb.OPERATOR_ESCALATION_EVENT, cutoff),
+    ).fetchall()
+    total = len(escalations)
+
+    # escalation_event_id -> earliest classification created_at
+    classified_at: dict[int, int] = {}
+    for r in conn.execute(
+        "SELECT payload, created_at FROM task_events WHERE kind = ?",
+        (kb.HEILER_CLASSIFICATION_EVENT,),
+    ).fetchall():
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ref = payload.get("escalation_event_id")
+        if ref is None or r["created_at"] is None:
+            continue
+        try:
+            ref = int(ref)
+        except (TypeError, ValueError):
+            continue
+        ca = int(r["created_at"])
+        prev = classified_at.get(ref)
+        if prev is None or ca < prev:
+            classified_at[ref] = ca
+
+    corrected: set[int] = set()
+    for r in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (kb.HEILER_CLASSIFICATION_CORRECTED_EVENT,),
+    ).fetchall():
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("escalation_event_id") is not None:
+            try:
+                corrected.add(int(payload["escalation_event_id"]))
+            except (TypeError, ValueError):
+                pass
+
+    covered = 0
+    classified_in_window = 0
+    corrected_in_window = 0
+    for e in escalations:
+        eid = int(e["id"])
+        eca = int(e["created_at"]) if e["created_at"] is not None else None
+        cat = classified_at.get(eid)
+        if cat is None:
+            continue
+        classified_in_window += 1
+        if eid in corrected:
+            corrected_in_window += 1
+        if eca is None or cat <= eca + DAY_SECONDS:
+            covered += 1
+
+    coverage_pct = round(100.0 * covered / total, 1) if total else None
+    corrected_pct = (
+        round(100.0 * corrected_in_window / classified_in_window, 1)
+        if classified_in_window else 0.0
+    )
+    return {
+        "coverage_pct": coverage_pct,
+        "escalations": total,
+        "classified_within_24h": covered,
+        "window_days": window_days,
+        "counter": {
+            "name": "operator_corrected_pct",
+            "value": corrected_pct,
+            "description": (
+                "share of classified escalations the operator later corrected "
+                "(heiler_classification_corrected) — the misclassification "
+                "guardrail; held under 10%"
+            ),
+        },
+    }
+
+
 def _cost_per_task_metric(
     conn: sqlite3.Connection, *, now: int, window_days: int
 ) -> dict:
@@ -443,6 +544,9 @@ def compute_metrics_snapshot(
             "escalation_rate": _escalation_rate_metric(
                 conn, now=ts, window_days=window_days
             ),
+            "classification_coverage": _classification_coverage_metric(
+                conn, now=ts, window_days=window_days
+            ),
             "green_gate_streak": _green_gate_metric(gate_records),
         },
     }
@@ -488,6 +592,7 @@ def render_snapshot_summary(snapshot: dict) -> str:
     a = m.get("autonomy", {})
     c = m.get("cost_per_task", {})
     e = m.get("escalation_rate", {})
+    cc = m.get("classification_coverage", {})
     g = m.get("green_gate_streak", {})
     lines = [
         f"vision metrics @ {snapshot.get('generated_at')}",
@@ -507,6 +612,12 @@ def render_snapshot_summary(snapshot: dict) -> str:
             f"  escalations/wk:  {e.get('escalations_per_week')}  "
             f"↔ {e.get('counter', {}).get('name')}="
             f"{e.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  classify cover:  {cc.get('coverage_pct')}%  "
+            f"({cc.get('classified_within_24h')}/{cc.get('escalations')} "
+            f"≤24h)  ↔ {cc.get('counter', {}).get('name')}="
+            f"{cc.get('counter', {}).get('value')}"
         ),
         (
             f"  green-gate:      streak={g.get('streak')} nights  "

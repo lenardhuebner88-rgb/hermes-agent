@@ -142,6 +142,112 @@ def test_escalation_rate_window_and_silent_blocks_counter(conn):
 
 
 # ---------------------------------------------------------------------------
+# Classification-coverage metric (HEILER-CLASSIFY-COVERAGE-S1) + corrected counter
+# ---------------------------------------------------------------------------
+
+def _add_escalation(conn, tid, *, created_at):
+    cur = conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (tid, kb.OPERATOR_ESCALATION_EVENT,
+         json.dumps({"why_now": "x"}), created_at),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _add_classification(conn, tid, *, escalation_event_id, created_at,
+                        cls=kb.HEILER_CLASS_REAL_BUG):
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (tid, kb.HEILER_CLASSIFICATION_EVENT,
+         json.dumps({"class": cls,
+                     "escalation_event_id": escalation_event_id}),
+         created_at),
+    )
+    conn.commit()
+
+
+def test_classification_coverage_full_within_24h(conn):
+    now = 100 * DAY
+    _add_task(conn, "T1", status="blocked")
+    _add_task(conn, "T2", status="blocked")
+    e1 = _add_escalation(conn, "T1", created_at=now - DAY)
+    e2 = _add_escalation(conn, "T2", created_at=now - 2 * DAY)
+    # both classified at the same instant as the escalation (the sweep runs
+    # every dispatcher tick → seconds, far inside 24h)
+    _add_classification(conn, "T1", escalation_event_id=e1, created_at=now - DAY)
+    _add_classification(conn, "T2", escalation_event_id=e2,
+                        created_at=now - 2 * DAY)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["escalations"] == 2
+    assert c["classified_within_24h"] == 2
+    assert c["coverage_pct"] == 100.0
+    assert c["counter"]["name"] == "operator_corrected_pct"
+    assert c["counter"]["value"] == 0.0
+
+
+def test_classification_coverage_excludes_late_and_unclassified(conn):
+    now = 100 * DAY
+    _add_task(conn, "T1", status="blocked")
+    _add_task(conn, "T2", status="blocked")
+    _add_task(conn, "T3", status="blocked")
+    e1 = _add_escalation(conn, "T1", created_at=now - DAY)
+    e2 = _add_escalation(conn, "T2", created_at=now - 3 * DAY)
+    _add_escalation(conn, "T3", created_at=now - DAY)  # never classified
+    # T1: classified within 24h -> covered
+    _add_classification(conn, "T1", escalation_event_id=e1, created_at=now - DAY)
+    # T2: classified 2 days after the escalation -> outside the 24h bound
+    _add_classification(conn, "T2", escalation_event_id=e2,
+                        created_at=now - DAY)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["escalations"] == 3
+    assert c["classified_within_24h"] == 1
+    assert c["coverage_pct"] == 33.3
+
+
+def test_classification_coverage_counter_counts_operator_corrections(conn):
+    now = 100 * DAY
+    _add_task(conn, "T1", status="blocked")
+    _add_task(conn, "T2", status="blocked")
+    e1 = _add_escalation(conn, "T1", created_at=now - DAY)
+    e2 = _add_escalation(conn, "T2", created_at=now - DAY)
+    _add_classification(conn, "T1", escalation_event_id=e1, created_at=now - DAY)
+    _add_classification(conn, "T2", escalation_event_id=e2, created_at=now - DAY)
+    # operator corrected one of the two classified escalations
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("T1", kb.HEILER_CLASSIFICATION_CORRECTED_EVENT,
+         json.dumps({"escalation_event_id": e1,
+                     "corrected_to": kb.HEILER_CLASS_BAD_SPEC}),
+         now - DAY),
+    )
+    conn.commit()
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+
+    assert c["coverage_pct"] == 100.0
+    assert c["counter"]["value"] == 50.0  # 1 of 2 classified escalations
+
+
+def test_classification_coverage_null_when_no_escalations(conn):
+    snap = vm.compute_metrics_snapshot(conn, now=100 * DAY, window_days=7)
+    c = snap["metrics"]["classification_coverage"]
+    assert c["escalations"] == 0
+    assert c["coverage_pct"] is None
+    assert c["counter"]["value"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Cost-per-task metric + paired counter
 # ---------------------------------------------------------------------------
 
@@ -273,9 +379,9 @@ def test_write_metrics_snapshot_produces_valid_file_with_all_fields(
     assert snap["schema_version"] >= 1
     assert "generated_at" in snap
     metrics = snap["metrics"]
-    # all four headline metrics present
+    # all headline metrics present
     for key in ("autonomy", "cost_per_task", "escalation_rate",
-                "green_gate_streak"):
+                "green_gate_streak", "classification_coverage"):
         assert key in metrics, key
         # each headline metric carries a paired counter metric
         assert "counter" in metrics[key], key

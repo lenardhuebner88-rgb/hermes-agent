@@ -9071,3 +9071,189 @@ def test_s4_read_escalation_ledger_returns_entries_and_rollup(kanban_home):
         kb.HEILER_CLASS_TRANSIENT: 1,
         kb.HEILER_CLASS_REAL_BUG: 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# HEILER-CLASSIFY-COVERAGE-S1: every operator_escalation must end up with a
+# paired heiler_classification (the Stratege's by_class input). The inline
+# failure/park paths classify atomically; classify_escalations_sweep is the
+# deterministic, idempotent safety net for every other escalation writer.
+# ---------------------------------------------------------------------------
+
+def _escalation_event(conn, task_id):
+    """Return the (single) operator_escalation Event for a task."""
+    return next(
+        e for e in kb.list_events(conn, task_id)
+        if e.kind == kb.OPERATOR_ESCALATION_EVENT
+    )
+
+
+def _heiler_events(conn, task_id):
+    return [
+        e for e in kb.list_events(conn, task_id)
+        if e.kind == kb.HEILER_CLASSIFICATION_EVENT
+    ]
+
+
+def test_record_task_failure_escalation_carries_escalation_event_id(kanban_home):
+    """When the breaker trips, the inline heiler_classification references the
+    escalation event it pairs with (the AC-2 documented ledger reference)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="red gate", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        kb._record_task_failure(
+            conn, tid, "gate failed: tests failed",
+            outcome="crashed", failure_limit=1,
+            release_claim=True, end_run=True,
+        )
+        esc = _escalation_event(conn, tid)
+        heilers = _heiler_events(conn, tid)
+
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == esc.id
+    assert heilers[0].payload["class"] == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_classify_escalations_sweep_classifies_unpaired_escalation(kanban_home):
+    """A budget-runaway park emits operator_escalation but no inline
+    classification; the sweep backfills exactly one, referencing the
+    escalation event and deriving the class from its evidence."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="runaway loop", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        # Pre-sweep: escalation present, no classification.
+        assert _heiler_events(conn, tid) == []
+        esc = _escalation_event(conn, tid)
+
+        summary = kb.classify_escalations_sweep(conn)
+
+        heilers = _heiler_events(conn, tid)
+
+    assert len(heilers) == 1
+    assert heilers[0].payload["escalation_event_id"] == esc.id
+    assert heilers[0].payload["source"] == kb.HEILER_SOURCE_ESCALATION_SWEEP
+    assert heilers[0].payload["class"] in kb.HEILER_CLASSES
+    assert any(c["escalation_event_id"] == esc.id for c in summary["classified"])
+
+
+def test_classify_escalations_sweep_is_idempotent(kanban_home):
+    """Re-running the sweep adds no second classification for the same
+    escalation."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="runaway loop", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        first = kb.classify_escalations_sweep(conn)
+        second = kb.classify_escalations_sweep(conn)
+        heilers = _heiler_events(conn, tid)
+
+    assert len(heilers) == 1
+    assert len(first["classified"]) == 1
+    assert second["classified"] == []
+
+
+def test_classify_escalations_sweep_skips_inline_paired(kanban_home):
+    """An escalation already paired inline (record_task_failure) is left
+    untouched by the sweep — no duplicate classification."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="red gate", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        kb._record_task_failure(
+            conn, tid, "gate failed: tests failed",
+            outcome="crashed", failure_limit=1,
+            release_claim=True, end_run=True,
+        )
+        before = len(_heiler_events(conn, tid))
+        summary = kb.classify_escalations_sweep(conn)
+        after = len(_heiler_events(conn, tid))
+
+    assert before == 1
+    assert after == 1
+    assert summary["classified"] == []
+
+
+def test_classify_escalations_sweep_derives_class_from_evidence(kanban_home):
+    """The sweep reuses the deterministic classifier over the escalation's own
+    persisted evidence — a merge-conflict park is classed 'conflict'."""
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="merge mess", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        kb._park_stall_once(
+            conn, row,
+            stall_class="integration_parked",
+            reason="integration parked: merge conflict in api.ts",
+            evidence={"attempts": 2},
+            now=now,
+        )
+        # _park_stall_once classifies inline; strip it so we test the sweep's
+        # own derivation path on a genuinely unpaired escalation.
+        conn.execute(
+            "DELETE FROM task_events WHERE task_id = ? AND kind = ?",
+            (tid, kb.HEILER_CLASSIFICATION_EVENT),
+        )
+        conn.commit()
+        assert _heiler_events(conn, tid) == []
+
+        kb.classify_escalations_sweep(conn)
+        heilers = _heiler_events(conn, tid)
+
+    assert len(heilers) == 1
+    assert heilers[0].payload["class"] == kb.HEILER_CLASS_CONFLICT
+
+
+def test_record_classification_correction_records_event(kanban_home):
+    """An operator correction is stored as a distinct
+    heiler_classification_corrected event referencing the escalation, leaving
+    the auto by_class ledger untouched."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="runaway loop", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        kb.classify_escalations_sweep(conn)
+        esc = _escalation_event(conn, tid)
+
+        ok = kb.record_classification_correction(
+            conn, esc.id,
+            corrected_to=kb.HEILER_CLASS_BAD_SPEC,
+            reason="operator: this was an underspecified AC, not a runaway",
+        )
+        corrections = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.HEILER_CLASSIFICATION_CORRECTED_EVENT
+        ]
+        # auto ledger unchanged (still exactly one auto classification)
+        autos = _heiler_events(conn, tid)
+
+    assert ok is True
+    assert len(corrections) == 1
+    assert corrections[0].payload["escalation_event_id"] == esc.id
+    assert corrections[0].payload["corrected_to"] == kb.HEILER_CLASS_BAD_SPEC
+    assert len(autos) == 1
+
+
+def test_record_classification_correction_rejects_unknown_class(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        kb._park_budget_runaway(conn, row, token_sum=5000, cap=1000, runs=3)
+        esc = _escalation_event(conn, tid)
+        with pytest.raises(ValueError):
+            kb.record_classification_correction(
+                conn, esc.id, corrected_to="not-a-class",
+            )
+        # a non-existent escalation id is a no-op, not a crash
+        assert kb.record_classification_correction(
+            conn, 999_999, corrected_to=kb.HEILER_CLASS_REAL_BUG,
+        ) is False
