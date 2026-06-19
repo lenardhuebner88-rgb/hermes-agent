@@ -549,6 +549,7 @@ def build_root_body(spec: BindingPlanSpec) -> str:
             target_metric=_meta_str(meta.get("target_metric")),
             roi=_meta_str(meta.get("roi")),
             counter_metric=_meta_str(meta.get("counter_metric")),
+            grounding=_meta_str(meta.get("grounding")),
         )
         lines.extend(["", annotation])
     return "\n".join(lines)

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import planspecs
 from hermes_cli import strategist
 from hermes_cli import strategist_surface
 
@@ -141,7 +142,8 @@ def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
 
 def test_cap_limits_to_five(board_home, monkeypatch):
     _patch_budget(monkeypatch, 30.0)
-    # feed six passing drafts through the --drafts-file seam
+    # feed six passing drafts through the --drafts-file seam (each grounded, so
+    # the draft-path presence-gate passes them all and only CAP trims)
     drafts = [
         {
             "key": f"DRAFT-{i}",
@@ -150,6 +152,7 @@ def test_cap_limits_to_five(board_home, monkeypatch):
             "target_metric": f"metric {i} up",
             "roi": "positive",
             "counter_metric": f"guardrail {i} held",
+            "grounding": f"git log und grep belegen Luecke {i}",
             "counter_risk": 0.2,
             "gain_weight": 1.0,
             "cost": 0.3,
@@ -279,3 +282,134 @@ def test_lever_markdown_round_trips_annotation():
     assert "strategist_meta" in md
     # no template residue that the rubric would reject
     assert "TODO" not in md and "<" not in md and "..." not in md
+
+
+# --------------------------------------------------------------------------- #
+# STRATEGIST-SELF-GROUNDING-S1 — grounding presence-gate on the DRAFT path only
+# --------------------------------------------------------------------------- #
+def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes Ziel; grep in hermes_cli findet keine Implementierung"):
+    """A fully-formed Opus draft carrying a non-empty grounding evidence field."""
+    return {
+        "key": key,
+        "title": f"Hebel {key}",
+        "lane": "coder-claude",
+        "target_metric": "Kennzahl X anheben",
+        "roi": "positiv",
+        "counter_metric": "Guardrail Y gehalten",
+        "rationale": "Begruendung fuer den Hebel.",
+        "grounding": grounding,
+        "counter_risk": 0.2,
+        "gain_weight": 1.0,
+        "cost": 0.3,
+        "signal_strength": 1.0,
+    }
+
+
+def test_draft_without_grounding_is_blocked(board_home, monkeypatch):
+    """(a) A strategist draft with NO grounding field is deterministically
+    blocked from ingest — never reaches the board, surfaced as grounding_blocked."""
+    _patch_budget(monkeypatch, 20.0)
+    draft = _grounded_draft(key="UNGROUNDED")
+    draft.pop("grounding")  # the operator's failure mode: an ungrounded lever
+
+    out_dir = board_home / "specs"
+    result = strategist.propose(board=None, out_dir=out_dir, drafts=[draft])
+
+    # blocked: not ingested, recorded with a reason, nothing on the surface
+    assert result["ingested"] == []
+    assert any(b["key"] == "UNGROUNDED" for b in result["grounding_blocked"])
+    blocked = next(b for b in result["grounding_blocked"] if b["key"] == "UNGROUNDED")
+    assert "grounding" in blocked["reason"].lower()
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
+    """(b) A draft WITH a non-empty grounding field is ingested and the evidence
+    is visible in the held root body AND on the held_operator_proposals surface."""
+    _patch_budget(monkeypatch, 20.0)
+    evidence = "git log zeigt kein vorhandenes Ziel; grep in hermes_cli findet keine Implementierung"
+    draft = _grounded_draft(key="GROUNDED", grounding=evidence)
+
+    out_dir = board_home / "specs"
+    result = strategist.propose(board=None, out_dir=out_dir, drafts=[draft])
+
+    assert result["grounding_blocked"] == []
+    assert len(result["ingested"]) == 1
+    root_id = result["ingested"][0]["root_task_id"]
+
+    with kb.connect() as conn:
+        body = conn.execute("SELECT body FROM tasks WHERE id=?", (root_id,)).fetchone()["body"]
+        proposals = strategist_surface.held_operator_proposals(conn)
+
+    # evidence is in the held root body (operator-visible)
+    assert evidence in body
+    # and surfaced as a parsed field on the proposal surface
+    assert len(proposals) == 1
+    assert proposals[0]["grounding"] == evidence
+
+
+def test_general_ingest_path_unaffected_by_grounding_gate(board_home, tmp_path):
+    """(c) Non-regression: a Vault/Operator PlanSpec WITHOUT a grounding field
+    still ingests via the general planspecs.ingest_planspec path (= hermes plan
+    ingest). The presence-gate must NEVER touch the general path."""
+    plans_root = tmp_path / "plans"
+    plans_root.mkdir()
+    spec = plans_root / "operator-spec.md"
+    spec.write_text(
+        "\n".join(
+            [
+                "---",
+                "status: vorgeschlagen",
+                "owner: Operator",
+                "slice: OP-1",
+                "topic: Ein handgeschriebener Operator-Spec",
+                "freigabe: operator",
+                "live_test_depth: smoke",
+                "taskgraph_hints:",
+                "  binding: true",
+                "  subtasks:",
+                "    - id: OP-1-S1",
+                "      title: Operator-Hebel bauen (Build plus Test)",
+                "      lane: coder-claude",
+                "      deps: []",
+                "      acceptance_criteria:",
+                "        - Etwas Sinnvolles ist gebaut und getestet",
+                "      body: Bau den Operator-Hebel.",
+                "---",
+                "",
+                "# OP-1",
+                "",
+                "Ein Operator-Spec ohne grounding-Feld.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = planspecs.ingest_planspec(spec, board=None, author="operator", plans_root=plans_root)
+    assert result.get("root_task_id")
+    assert result.get("subtask_count") == 1
+
+
+def test_draft_path_still_applies_vetoed_dedup(board_home, monkeypatch, tmp_path):
+    """(d) Non-regression: the vetoed_levers.json dedup still suppresses a draft
+    even when that draft carries a grounding field (dedup runs alongside the
+    new presence-gate, not instead of it)."""
+    _patch_budget(monkeypatch, 20.0)
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    (notes_dir / "vetoed_levers.json").write_text(json.dumps(["VETOED-KEY"]), encoding="utf-8")
+
+    drafts = [
+        _grounded_draft(key="VETOED-KEY"),  # suppressed → must not ingest
+        _grounded_draft(key="FRESH-KEY"),  # grounded + not vetoed → ingests
+    ]
+    out_dir = board_home / "specs"
+    result = strategist.propose(board=None, out_dir=out_dir, drafts=drafts, notes_dir=notes_dir)
+
+    ingested_keys = {item["key"] for item in result["ingested"]}
+    assert "VETOED-KEY" not in ingested_keys
+    assert "FRESH-KEY" in ingested_keys
+    # the vetoed key was dropped by dedup, NOT by the grounding gate (it had grounding)
+    assert all(b["key"] != "VETOED-KEY" for b in result["grounding_blocked"])

@@ -45,9 +45,27 @@ def test_format_then_parse_round_trips_all_fields():
     assert parsed["counter_metric"] == "hätte-eskalieren-sollen-Rate < 5%"
 
 
+def test_grounding_round_trips():
+    """STRATEGIST-SELF-GROUNDING-S1: the grounding evidence emits and parses."""
+    evidence = "git log zeigt kein vorhandenes Ziel; grep in hermes_cli findet keine Implementierung"
+    body = "Proposal.\n\n" + ss.format_annotation(
+        target_metric="Kennzahl X",
+        roi="positiv",
+        counter_metric="Guardrail Y",
+        grounding=evidence,
+    )
+    parsed = ss.parse_annotation(body)
+    assert parsed["grounding"] == evidence
+
+
 def test_parse_missing_block_is_all_none():
     parsed = ss.parse_annotation("A plain body with no marker at all.")
-    assert parsed == {"target_metric": None, "roi": None, "counter_metric": None}
+    assert parsed == {
+        "target_metric": None,
+        "roi": None,
+        "counter_metric": None,
+        "grounding": None,
+    }
 
 
 def test_parse_none_body_is_all_none():
@@ -55,6 +73,7 @@ def test_parse_none_body_is_all_none():
         "target_metric": None,
         "roi": None,
         "counter_metric": None,
+        "grounding": None,
     }
 
 

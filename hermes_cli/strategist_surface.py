@@ -51,7 +51,7 @@ __all__ = [
 STRATEGIST_META_MARKER = "strategist-meta"
 
 # Canonical annotation keys, in display order.
-_ANNOTATION_KEYS = ("target_metric", "roi", "counter_metric")
+_ANNOTATION_KEYS = ("target_metric", "roi", "counter_metric", "grounding")
 
 # Accept a couple of natural aliases so a hand-written or slightly-different
 # strategist emission still parses instead of silently dropping to bare.
@@ -70,6 +70,11 @@ _ANNOTATION_ALIASES = {
     "counter-metric": "counter_metric",
     "gegen_metrik": "counter_metric",
     "guardrail": "counter_metric",
+    "grounding": "grounding",
+    "grounding_evidenz": "grounding",
+    "evidenz": "grounding",
+    "evidence": "grounding",
+    "beleg": "grounding",
 }
 
 _BLOCK_RE = re.compile(
@@ -83,12 +88,15 @@ def format_annotation(
     target_metric: Optional[str] = None,
     roi: Optional[str] = None,
     counter_metric: Optional[str] = None,
+    grounding: Optional[str] = None,
 ) -> str:
     """Render the strategist annotation block for embedding in a root body.
 
     I1 imports this so the emit/parse round-trips. Keys with empty values are
     omitted; an all-empty call still emits the (empty) marker so the contract
     is visible. Values are single-lined to keep the block ``key: value`` clean.
+    ``grounding`` (STRATEGIST-SELF-GROUNDING-S1) is the per-lever code/git-log
+    evidence; it is surfaced like the other fields and omitted when empty.
     """
     def _clean(value: Optional[str]) -> str:
         return " ".join(str(value).split()) if value else ""
@@ -98,6 +106,7 @@ def format_annotation(
         ("target_metric", target_metric),
         ("roi", roi),
         ("counter_metric", counter_metric),
+        ("grounding", grounding),
     ):
         cleaned = _clean(value)
         if cleaned:
@@ -109,9 +118,10 @@ def format_annotation(
 def parse_annotation(body: Optional[str]) -> dict[str, Optional[str]]:
     """Extract the strategist annotation from a held root's body.
 
-    Returns ``{"target_metric": ..., "roi": ..., "counter_metric": ...}`` with
-    ``None`` for any key the body does not carry. A body without the marker
-    yields an all-``None`` dict (the proposal still surfaces, just unannotated).
+    Returns ``{"target_metric": ..., "roi": ..., "counter_metric": ...,
+    "grounding": ...}`` with ``None`` for any key the body does not carry. A
+    body without the marker yields an all-``None`` dict (the proposal still
+    surfaces, just unannotated).
     The block may carry either ``key: value`` lines or a single JSON object.
     """
     result: dict[str, Optional[str]] = {key: None for key in _ANNOTATION_KEYS}
@@ -224,6 +234,7 @@ def held_operator_proposals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "target_metric": annotation["target_metric"],
                 "roi": annotation["roi"],
                 "counter_metric": annotation["counter_metric"],
+                "grounding": annotation["grounding"],
             }
         )
     return proposals
