@@ -1,0 +1,517 @@
+"""Distilled vision-flywheel metrics + the green-gate streak ledger.
+
+Two repo-side CLIs back the vision flywheel's "is the system actually
+trustworthy?" question (Nordstern, ``00-Canon/vision.md``):
+
+* ``hermes vision metrics-snapshot`` precomputes a small, *distilled*
+  metrics file at ``~/.hermes/state/vision-metrics.json`` — NOT a raw
+  ``kanban.db`` dump. Each headline metric ships with a paired *counter*
+  metric (the skeptic's number that keeps the headline honest, e.g.
+  Autonomie-% ↔ "hätte-eskalieren-sollen-tat-nicht").
+
+* ``hermes vision record-gate-result pass|fail`` appends a structured
+  record to a green-gate ledger. The nightly ``green-gate-heartbeat``
+  writes nothing on a green run today, so the green-gate *streak*
+  (consecutive green nights) is not derivable from the DB alone — this
+  ledger makes it derivable.
+
+The runtime wiring (a cron / heartbeat that *calls* these) is an operator
+step and lives outside this module. Everything here is pure CLI logic.
+
+State-path resolution honours ``HERMES_VISION_STATE_DIR`` so tests (and
+sandboxes) write to a temp dir instead of the live state.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+from typing import Optional
+
+from hermes_cli import kanban_db as kb
+
+DAY_SECONDS = 86_400
+SCHEMA_VERSION = 1
+METRICS_FILENAME = "vision-metrics.json"
+GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
+
+GATE_RESULTS = ("pass", "fail")
+
+# Heiler classes that indicate a *real* problem was detected (not a transient
+# blip). A task counted "autonomous" that nonetheless carries one of these is
+# the autonomy metric's skeptic counter: the system saw something real and
+# still never escalated to the operator.
+_NON_TRANSIENT_HEILER_CLASSES = (
+    kb.HEILER_CLASS_REAL_BUG,
+    kb.HEILER_CLASS_BAD_SPEC,
+    kb.HEILER_CLASS_CONFLICT,
+)
+
+
+# ---------------------------------------------------------------------------
+# State-path resolution (env-overridable for tests / sandboxes)
+# ---------------------------------------------------------------------------
+
+def vision_state_dir() -> Path:
+    """Return the directory the vision artifacts live in.
+
+    ``HERMES_VISION_STATE_DIR`` overrides the default
+    ``<root>/state`` (the same ``state/`` dir the kanban dispatcher
+    heartbeat uses). Tests set the override to a temp dir so they never
+    touch the live state.
+    """
+    override = os.environ.get("HERMES_VISION_STATE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "state"
+
+
+def metrics_snapshot_path() -> Path:
+    return vision_state_dir() / METRICS_FILENAME
+
+
+def gate_ledger_path() -> Path:
+    return vision_state_dir() / GATE_LEDGER_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Green-gate ledger: record + read + streak derivation
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts: Optional[str], *, now: Optional[int]) -> _dt.datetime:
+    """Resolve a timestamp to an aware UTC datetime.
+
+    Precedence: explicit ISO ``ts`` → explicit ``now`` epoch → wall clock.
+    A naive ISO string is interpreted as UTC.
+    """
+    if ts:
+        cleaned = ts.strip().replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.astimezone(_dt.timezone.utc)
+    epoch = int(now) if now is not None else int(time.time())
+    return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc)
+
+
+def record_gate_result(
+    result: str,
+    *,
+    ts: Optional[str] = None,
+    now: Optional[int] = None,
+    path: Optional[Path] = None,
+) -> dict:
+    """Append one structured green-gate record to the ledger.
+
+    ``result`` must be ``pass`` or ``fail``. ``ts`` is an optional ISO-8601
+    timestamp for the gate run (defaults to ``now`` / the wall clock). The
+    record carries the UTC ``date`` so the streak can be counted per night.
+    Returns the record that was written.
+    """
+    normalized = str(result).strip().lower()
+    if normalized not in GATE_RESULTS:
+        raise ValueError(
+            f"result must be one of {GATE_RESULTS}, got {result!r}"
+        )
+    dt = _parse_ts(ts, now=now)
+    record = {
+        "result": normalized,
+        "ts": dt.isoformat(),
+        "epoch": int(dt.timestamp()),
+        "date": dt.date().isoformat(),
+    }
+    target = path or gate_ledger_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def read_gate_records(path: Optional[Path] = None) -> list[dict]:
+    """Read every well-formed record from the green-gate ledger (in order)."""
+    target = path or gate_ledger_path()
+    if not target.exists():
+        return []
+    records: list[dict] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("date") and obj.get("result"):
+            records.append(obj)
+    return records
+
+
+def derive_gate_streak(records: list[dict]) -> dict:
+    """Derive the consecutive-green-nights streak from gate records.
+
+    A *night* (one UTC ``date``) is green only if **every** record for that
+    date is ``pass`` — a single ``fail`` makes the whole night red. The
+    streak counts back from the most recent recorded night and stops at the
+    first red night. Gaps (nights with no record) are simply absent; the
+    streak is measured over recorded nights.
+    """
+    per_date: dict[str, str] = {}
+    latest_ts: Optional[str] = None
+    latest_epoch = None
+    latest_result: Optional[str] = None
+    for rec in records:
+        date = str(rec.get("date"))
+        result = "pass" if str(rec.get("result")).lower() == "pass" else "fail"
+        # any fail flips the night red
+        if per_date.get(date) == "fail":
+            pass
+        elif result == "fail":
+            per_date[date] = "fail"
+        else:
+            per_date.setdefault(date, "pass")
+        epoch = rec.get("epoch")
+        if epoch is None:
+            try:
+                epoch = int(
+                    _dt.datetime.fromisoformat(
+                        str(rec.get("ts", "")).replace("Z", "+00:00")
+                    ).timestamp()
+                )
+            except (ValueError, TypeError):
+                epoch = None
+        if epoch is not None and (latest_epoch is None or epoch >= latest_epoch):
+            latest_epoch = epoch
+            latest_ts = rec.get("ts")
+            latest_result = result
+
+    dates_desc = sorted(per_date.keys(), reverse=True)
+    streak = 0
+    for date in dates_desc:
+        if per_date[date] == "pass":
+            streak += 1
+        else:
+            break
+
+    green_nights = sum(1 for v in per_date.values() if v == "pass")
+    fail_nights = sum(1 for v in per_date.values() if v == "fail")
+    return {
+        "streak": streak,
+        "green_nights": green_nights,
+        "fail_nights": fail_nights,
+        "total_recorded_nights": len(per_date),
+        "last_result": latest_result,
+        "last_ts": latest_ts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# DB-derived metrics
+# ---------------------------------------------------------------------------
+
+def _tasks_with_operator_escalation(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT task_id FROM task_events WHERE kind = ?",
+        (kb.OPERATOR_ESCALATION_EVENT,),
+    ).fetchall()
+    return {r["task_id"] for r in rows}
+
+
+def _tasks_with_nontransient_heiler(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        (kb.HEILER_CLASSIFICATION_EVENT,),
+    ).fetchall()
+    out: set[str] = set()
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("class") in _NON_TRANSIENT_HEILER_CLASSES:
+            out.add(r["task_id"])
+    return out
+
+
+def _autonomy_metric(conn: sqlite3.Connection) -> dict:
+    """Autonomie-% ↔ counter 'should_have_escalated_but_didnt'.
+
+    Autonomous = a done task that finished with ``consecutive_failures = 0``
+    AND never raised an ``operator_escalation`` event. The paired counter is
+    the subset of those "autonomous" tasks that nonetheless carry a
+    non-transient ``heiler_classification`` (real-bug / bad-spec / conflict):
+    the system saw a real problem and still didn't escalate.
+    """
+    escalated = _tasks_with_operator_escalation(conn)
+    flagged = _tasks_with_nontransient_heiler(conn)
+    rows = conn.execute(
+        "SELECT id, consecutive_failures FROM tasks WHERE status = 'done'"
+    ).fetchall()
+    total_done = len(rows)
+    autonomous = 0
+    should_have = 0
+    for r in rows:
+        tid = r["id"]
+        cf = r["consecutive_failures"] or 0
+        if cf == 0 and tid not in escalated:
+            autonomous += 1
+            if tid in flagged:
+                should_have += 1
+    pct = round(100.0 * autonomous / total_done, 1) if total_done else None
+    return {
+        "autonomy_pct": pct,
+        "autonomous_done": autonomous,
+        "total_done": total_done,
+        "counter": {
+            "name": "should_have_escalated_but_didnt",
+            "value": should_have,
+            "description": (
+                "done tasks counted autonomous that carry a non-transient "
+                "heiler_classification (real-bug/bad-spec/conflict) yet never "
+                "raised operator_escalation"
+            ),
+        },
+    }
+
+
+def _escalation_rate_metric(
+    conn: sqlite3.Connection, *, now: int, window_days: int
+) -> dict:
+    """Eskalations-Rate (per week) ↔ counter 'silent_blocks'.
+
+    Headline = count of ``operator_escalation`` events inside the window.
+    Counter = currently-blocked tasks that have NO escalation event — blocks
+    that never surfaced to the operator (the escalation rate's dark figure).
+    """
+    window = window_days * DAY_SECONDS
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events "
+        "WHERE kind = ? AND created_at >= ?",
+        (kb.OPERATOR_ESCALATION_EVENT, now - window),
+    ).fetchone()
+    escalations = int(row["n"] or 0) if row else 0
+
+    escalated = _tasks_with_operator_escalation(conn)
+    blocked_rows = conn.execute(
+        "SELECT id FROM tasks WHERE status = 'blocked'"
+    ).fetchall()
+    silent = sum(1 for r in blocked_rows if r["id"] not in escalated)
+    return {
+        "escalations_per_week": escalations,
+        "window_days": window_days,
+        "counter": {
+            "name": "silent_blocks",
+            "value": silent,
+            "description": (
+                "blocked tasks with no operator_escalation event — "
+                "escalations that did not happen"
+            ),
+        },
+    }
+
+
+def _cost_per_task_metric(
+    conn: sqlite3.Connection, *, now: int, window_days: int
+) -> dict:
+    """Kosten/Task-Trend ↔ counter 'tasks_without_cost_data'.
+
+    Cost per task = SUM(task_runs.cost_usd) grouped by task. The trend
+    compares the average cost-per-task of tasks completed in the recent
+    window against the prior window of the same length. The paired counter
+    is done tasks whose runs carry no cost data at all (the trend's blind
+    spot).
+    """
+    window = window_days * DAY_SECONDS
+
+    # SUM(cost_usd) per task across all runs (NULL costs ignored by SUM).
+    cost_rows = conn.execute(
+        "SELECT task_id, SUM(cost_usd) AS total, "
+        "COUNT(cost_usd) AS n_cost "
+        "FROM task_runs GROUP BY task_id"
+    ).fetchall()
+    cost_by_task: dict[str, float] = {}
+    for r in cost_rows:
+        if (r["n_cost"] or 0) > 0 and r["total"] is not None:
+            cost_by_task[r["task_id"]] = float(r["total"])
+    cost_total = round(sum(cost_by_task.values()), 6)
+
+    done_rows = conn.execute(
+        "SELECT id, completed_at FROM tasks WHERE status = 'done'"
+    ).fetchall()
+
+    def _avg_in_window(lo: int, hi: int) -> Optional[float]:
+        costs = [
+            cost_by_task[r["id"]]
+            for r in done_rows
+            if r["completed_at"] is not None
+            and lo <= r["completed_at"] < hi
+            and r["id"] in cost_by_task
+        ]
+        if not costs:
+            return None
+        return round(sum(costs) / len(costs), 6)
+
+    recent = _avg_in_window(now - window, now + 1)
+    prior = _avg_in_window(now - 2 * window, now - window)
+
+    if recent is None or prior is None:
+        trend = "n/a"
+        pct_change = None
+    elif recent > prior:
+        trend = "up"
+        pct_change = round(100.0 * (recent - prior) / prior, 1) if prior else None
+    elif recent < prior:
+        trend = "down"
+        pct_change = round(100.0 * (recent - prior) / prior, 1) if prior else None
+    else:
+        trend = "flat"
+        pct_change = 0.0
+
+    without_cost = sum(1 for r in done_rows if r["id"] not in cost_by_task)
+    return {
+        "cost_usd_total": cost_total,
+        "tasks_with_cost": len(cost_by_task),
+        "recent_avg_cost_per_task": recent,
+        "prior_avg_cost_per_task": prior,
+        "trend": trend,
+        "pct_change": pct_change,
+        "counter": {
+            "name": "tasks_without_cost_data",
+            "value": without_cost,
+            "description": (
+                "done tasks whose runs carry no cost_usd — the cost trend's "
+                "blind spot"
+            ),
+        },
+    }
+
+
+def _green_gate_metric(gate_records: list[dict]) -> dict:
+    """Green-Gate-Streak ↔ counter 'fail_nights'.
+
+    Headline = consecutive green nights from the ledger. Counter = total
+    recorded red nights (the streak's antagonist).
+    """
+    streak = derive_gate_streak(gate_records)
+    return {
+        "streak": streak["streak"],
+        "green_nights": streak["green_nights"],
+        "total_recorded_nights": streak["total_recorded_nights"],
+        "last_result": streak["last_result"],
+        "last_ts": streak["last_ts"],
+        "counter": {
+            "name": "fail_nights",
+            "value": streak["fail_nights"],
+            "description": (
+                "recorded red gate nights — the streak's antagonist"
+            ),
+        },
+    }
+
+
+def compute_metrics_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    window_days: int = 7,
+    gate_records: Optional[list[dict]] = None,
+) -> dict:
+    """Compute the distilled metrics snapshot (pure read; no writes).
+
+    ``gate_records`` defaults to the on-disk green-gate ledger; pass an
+    explicit list to compute the streak from supplied records (tests).
+    """
+    ts = int(now) if now is not None else int(time.time())
+    if gate_records is None:
+        gate_records = read_gate_records()
+    generated = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated.isoformat(),
+        "generated_epoch": ts,
+        "window_days": window_days,
+        "metrics": {
+            "autonomy": _autonomy_metric(conn),
+            "cost_per_task": _cost_per_task_metric(
+                conn, now=ts, window_days=window_days
+            ),
+            "escalation_rate": _escalation_rate_metric(
+                conn, now=ts, window_days=window_days
+            ),
+            "green_gate_streak": _green_gate_metric(gate_records),
+        },
+    }
+
+
+def write_metrics_snapshot(
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    board: Optional[str] = None,
+    now: Optional[int] = None,
+    window_days: int = 7,
+) -> tuple[Path, dict]:
+    """Compute and atomically write the snapshot to ``metrics_snapshot_path``.
+
+    Opens its own DB connection when ``conn`` is None. Returns the written
+    path and the snapshot dict.
+    """
+    owns_conn = conn is None
+    if owns_conn:
+        conn = kb.connect(board=board)
+    try:
+        snapshot = compute_metrics_snapshot(
+            conn, now=now, window_days=window_days
+        )
+    finally:
+        if owns_conn:
+            conn.close()
+
+    path = metrics_snapshot_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return path, snapshot
+
+
+def render_snapshot_summary(snapshot: dict) -> str:
+    """One-screen human summary of a snapshot (for the CLI's stdout)."""
+    m = snapshot.get("metrics", {})
+    a = m.get("autonomy", {})
+    c = m.get("cost_per_task", {})
+    e = m.get("escalation_rate", {})
+    g = m.get("green_gate_streak", {})
+    lines = [
+        f"vision metrics @ {snapshot.get('generated_at')}",
+        (
+            f"  autonomy:        {a.get('autonomy_pct')}%  "
+            f"({a.get('autonomous_done')}/{a.get('total_done')} done)  "
+            f"↔ {a.get('counter', {}).get('name')}="
+            f"{a.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  cost/task:       total ${c.get('cost_usd_total')}  "
+            f"trend={c.get('trend')}  "
+            f"↔ {c.get('counter', {}).get('name')}="
+            f"{c.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  escalations/wk:  {e.get('escalations_per_week')}  "
+            f"↔ {e.get('counter', {}).get('name')}="
+            f"{e.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  green-gate:      streak={g.get('streak')} nights  "
+            f"↔ {g.get('counter', {}).get('name')}="
+            f"{g.get('counter', {}).get('value')}"
+        ),
+    ]
+    return "\n".join(lines)
