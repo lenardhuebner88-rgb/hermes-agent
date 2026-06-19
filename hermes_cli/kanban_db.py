@@ -4461,6 +4461,324 @@ def backfill_run_costs(
     return updated
 
 
+# COST-VISIBILITY-WORKERS-S1: slop (seconds) around a run's [started_at,
+# ended_at] window when correlating a worker session by start time. Absorbs
+# the small claim→spawn / flush→close ordering gaps without widening the
+# window enough to swallow an unrelated session.
+_SESSION_WINDOW_SLOP_SECONDS = 2
+
+
+def _read_state_sessions(path: Path) -> list[dict]:
+    """COST-VISIBILITY-WORKERS-S1: read all sessions from a ``state.db``
+    read-only and fail-soft.
+
+    Returns a list of dicts with ``id, source, started_at, input_tokens,
+    output_tokens, cost, cwd``. ``cost`` resolves ``actual_cost_usd`` then
+    ``estimated_cost_usd``. Optional columns absent in older schemas
+    (``cwd``/``source``) default to ``None``. Any error (missing/locked db,
+    no ``sessions`` table) yields ``[]`` — it must NEVER raise into the
+    backfill loop, and opens a SEPARATE read-only connection so it can never
+    lock ``kanban.db``.
+    """
+    try:
+        if not path.exists():
+            return []
+    except Exception:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=200")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if not cols:
+            return []
+        has_cwd = "cwd" in cols
+        has_src = "source" in cols
+        has_started = "started_at" in cols
+        select = (
+            "id, "
+            + ("source" if has_src else "NULL AS source") + ", "
+            + ("started_at" if has_started else "NULL AS started_at") + ", "
+            "input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd, "
+            + ("cwd" if has_cwd else "NULL AS cwd")
+        )
+        rows = conn.execute(f"SELECT {select} FROM sessions").fetchall()
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    out: list[dict] = []
+    for r in rows:
+        cost = _coerce_float(r["actual_cost_usd"])
+        if cost is None:
+            cost = _coerce_float(r["estimated_cost_usd"])
+        out.append({
+            "id": r["id"],
+            "source": r["source"],
+            "started_at": _coerce_float(r["started_at"]),
+            "input_tokens": _coerce_int(r["input_tokens"]),
+            "output_tokens": _coerce_int(r["output_tokens"]),
+            "cost": cost,
+            "cwd": r["cwd"],
+        })
+    return out
+
+
+def backfill_run_costs_from_sessions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 1000,
+    since_seconds: Optional[int] = None,
+    board: Optional[str] = None,
+) -> int:
+    """COST-VISIBILITY-WORKERS-S1: correlate NULL-cost worker runs to their
+    agent sessions and stamp belegt (proven) token / subscription consumption,
+    so the cost metric stops being blind to subscription & token burn.
+
+    Closes the gap K5b/K16/K17 leave open: most kanban worker runs carry no
+    ``worker_session_id`` (it is stamped for ACP workers only) and the
+    claude-cli worker logs are rotated away, so neither existing path links
+    them — yet the worker's real usage sits in the per-profile ``state.db``.
+    For each closed run with ``cost_usd IS NULL`` this pass tries, in order:
+
+      1. **cwd** (deterministic) — a session whose ``cwd`` contains the run's
+         ``task_id`` (a kanban worker runs in ``…/kanban/…/<task_id>`` or
+         ``…/workspaces/<task_id>``). Searched in the run's own profile
+         ``state.db`` AND the hub one. Stamps the summed real tokens + cost.
+      2. **window** — a ``cli`` session in the run's OWN profile ``state.db``
+         whose ``started_at`` falls inside the run's active window
+         ``[started_at, ended_at]`` (± a small slop): the worker subprocess
+         that held the task. Profile-scoped so the orchestrator's own hub
+         sessions can never bleed in.
+      3. **subscription-zero** — no session found, but the run's profile is a
+         provable paid-subscription lane (``_profile_subscription`` →
+         claude / chatgpt / kimi). The real *metered* cost is then $0.0 (the
+         quota burn rides the subscription, not a metered card), so cost_usd
+         is stamped 0.0 with ``billing_mode=subscription_included``; tokens
+         stay NULL (unrecoverable).
+
+    A run that matches none of these (API-billed lane with no recoverable
+    session) is LEFT NULL — never invented to $0.
+
+    AC-2 (no fabricated / double-counted cost): a session is consumed at most
+    once — within this call AND across calls (each stamped run records the
+    sessions it consumed in ``metadata.cost_session_ids``; those are pre-loaded
+    and excluded). Only real recorded session cost is summed, so
+    ``cost_usd_total`` rises solely by once-counted real consumption and
+    ``tasks_without_cost_data`` decreases monotonically. API-billed lanes with
+    no recoverable session are LEFT NULL — never invented to $0. Fully
+    fail-soft: one bad row / db never aborts the batch.
+
+    ``since_seconds`` bounds the scan to runs that ended within the last N
+    seconds (the dispatcher heartbeat passes it so it never re-grinds the large
+    profile ``state.db`` files for old, permanently-unlinkable runs every tick);
+    the one-shot CLI omits it for a full historical sweep.
+
+    Returns the number of runs whose ``cost_usd`` was newly set.
+    """
+    sql = (
+        "SELECT id, task_id, profile, started_at, ended_at, metadata "
+        "FROM task_runs "
+        "WHERE cost_usd IS NULL AND ended_at IS NOT NULL"
+    )
+    params: list[Any] = []
+    if since_seconds is not None:
+        sql += " AND ended_at >= ?"
+        params.append(int(time.time()) - int(since_seconds))
+    sql += " ORDER BY started_at ASC, id ASC LIMIT ?"
+    params.append(int(limit))
+    candidates = conn.execute(sql, params).fetchall()
+    if not candidates:
+        return 0
+
+    # Cross-call double-count guard: every session already attributed to a run
+    # is recorded as "<dbkey>::<sid>" in that run's metadata.cost_session_ids.
+    # Pre-load them so a session is never re-counted onto a later candidate.
+    consumed: set[str] = set()
+    try:
+        for row in conn.execute(
+            "SELECT metadata FROM task_runs "
+            "WHERE cost_usd IS NOT NULL AND metadata LIKE '%cost_session_ids%'"
+        ).fetchall():
+            try:
+                meta = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            for entry in (meta.get("cost_session_ids") or []):
+                if isinstance(entry, str):
+                    consumed.add(entry)
+    except Exception:
+        pass
+
+    # Per-call session cache, keyed by the resolved db PATH (never the profile
+    # name) so the same physical state.db — e.g. the shared hub, or two profiles
+    # that resolve to one dir — is consume-once-correct regardless of how it was
+    # reached. dbkey is therefore the path string.
+    sess_cache: dict[str, list[dict]] = {}
+
+    def _sessions(dbkey: str, path: Optional[Path]) -> list[dict]:
+        if dbkey in sess_cache:
+            return sess_cache[dbkey]
+        rows = _read_state_sessions(path) if path is not None else []
+        sess_cache[dbkey] = rows
+        return rows
+
+    try:
+        hub_path: Optional[Path] = _state_db_path()
+    except Exception:
+        hub_path = None
+
+    updated = 0
+    for row in candidates:
+        try:
+            run_id = row["id"]
+            task_id = row["task_id"]
+            profile = row["profile"]
+            started = _coerce_float(row["started_at"])
+            ended = _coerce_float(row["ended_at"])
+            try:
+                metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            profile_path: Optional[Path] = None
+            if profile:
+                try:
+                    from hermes_cli.profiles import resolve_profile_env
+                    profile_path = Path(resolve_profile_env(profile)) / "state.db"
+                except Exception:
+                    profile_path = None
+
+            in_sum: Optional[int] = None
+            out_sum: Optional[int] = None
+            cost_sum: Optional[float] = None
+            matched: list[str] = []
+            source: Optional[str] = None
+
+            def _take(dbkey: str, sess: dict) -> None:
+                nonlocal in_sum, out_sum, cost_sum
+                key = f"{dbkey}::{sess['id']}"
+                if key in consumed:
+                    return
+                consumed.add(key)
+                matched.append(key)
+                if sess["input_tokens"] is not None:
+                    in_sum = (in_sum or 0) + sess["input_tokens"]
+                if sess["output_tokens"] is not None:
+                    out_sum = (out_sum or 0) + sess["output_tokens"]
+                cost_sum = (cost_sum or 0.0) + (sess["cost"] or 0.0)
+
+            # Tier 1: deterministic cwd match (profile db + hub), keyed by path.
+            cwd_sources: list[tuple[str, Path]] = []
+            if profile and profile_path is not None:
+                cwd_sources.append((str(profile_path), profile_path))
+            if hub_path is not None:
+                cwd_sources.append((str(hub_path), hub_path))
+            for dbkey, path in cwd_sources:
+                for sess in _sessions(dbkey, path):
+                    cwd = sess.get("cwd") or ""
+                    if task_id and task_id in cwd:
+                        _take(dbkey, sess)
+            if matched:
+                source = "session_cwd"
+
+            # Tier 2: time-window match in the run's OWN profile db only.
+            if not matched and profile and profile_path is not None \
+                    and started is not None and ended is not None:
+                lo = started - _SESSION_WINDOW_SLOP_SECONDS
+                hi = ended + _SESSION_WINDOW_SLOP_SECONDS
+                prof_dbkey = str(profile_path)
+                for sess in _sessions(prof_dbkey, profile_path):
+                    st = sess["started_at"]
+                    src = sess["source"]
+                    if st is None:
+                        continue
+                    if src is not None and src != "cli":
+                        continue
+                    if lo <= st <= hi:
+                        _take(prof_dbkey, sess)
+                if matched:
+                    source = "session_window"
+
+            stamp_in: Optional[int] = None
+            stamp_out: Optional[int] = None
+            stamp_cost: Optional[float] = None
+            billing_mode: Optional[str] = None
+            subscription: Optional[str] = None
+
+            if matched:
+                stamp_in, stamp_out = in_sum, out_sum
+                # A matched run always gets a non-NULL cost: real metered $ if
+                # any, else 0.0 (subscription sessions bill $0). cost_sum is a
+                # float whenever >=1 session was taken.
+                stamp_cost = cost_sum if cost_sum is not None else 0.0
+                try:
+                    sub = _profile_subscription(profile)
+                except Exception:
+                    sub = None
+                if sub:
+                    subscription = sub
+                    billing_mode = "subscription_included"
+                elif stamp_cost and stamp_cost > 0:
+                    billing_mode = "metered"
+            else:
+                # Tier 3: provable subscription lane → real metered cost is $0.
+                try:
+                    sub = _profile_subscription(profile)
+                except Exception:
+                    sub = None
+                if sub:
+                    stamp_cost = 0.0
+                    billing_mode = "subscription_included"
+                    subscription = sub
+                    source = "subscription_zero_metered"
+
+            if stamp_cost is None:
+                # No recoverable session and not a provable subscription lane
+                # (API-billed, or unknown). Leave cost_usd NULL rather than
+                # invent a value (AC-2: no fabrication). The run stays a
+                # candidate so a later session flush can still link it.
+                continue
+
+            new_meta = dict(metadata)
+            new_meta["cost_source"] = source
+            if matched:
+                new_meta["cost_session_ids"] = matched
+            if billing_mode is not None:
+                new_meta.setdefault("billing_mode", billing_mode)
+            if subscription is not None:
+                new_meta.setdefault("subscription", subscription)
+
+            with write_txn(conn):
+                conn.execute(
+                    """
+                    UPDATE task_runs
+                       SET input_tokens  = COALESCE(?, input_tokens),
+                           output_tokens = COALESCE(?, output_tokens),
+                           cost_usd      = COALESCE(cost_usd, ?),
+                           metadata      = ?
+                     WHERE id = ?
+                       AND cost_usd IS NULL
+                    """,
+                    (
+                        stamp_in, stamp_out, stamp_cost,
+                        json.dumps(new_meta, ensure_ascii=False), run_id,
+                    ),
+                )
+            updated += 1
+        except Exception:
+            # Per-row isolation: one bad row never aborts the batch.
+            continue
+    return updated
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,

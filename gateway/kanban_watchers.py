@@ -2168,9 +2168,18 @@ class GatewayKanbanWatchersMixin:
                 try:
                     def _backfill_recent_costs() -> int:
                         with _kb.connect_closing() as _c:
-                            return _kb.backfill_run_costs(
+                            n = _kb.backfill_run_costs(
                                 _c, limit=50, since_seconds=6 * 3600,
                             )
+                            # COST-VISIBILITY-WORKERS-S1: session-correlated
+                            # pass for the runs worker_session_id / claude-log
+                            # can't link (the bulk of kanban workers). Bounded to
+                            # recent runs so old, permanently-unlinkable rows
+                            # aren't re-scanned against large state.db every tick.
+                            n += _kb.backfill_run_costs_from_sessions(
+                                _c, limit=50, since_seconds=6 * 3600,
+                            )
+                            return n
                     n_cost = await asyncio.to_thread(_backfill_recent_costs)
                     if n_cost:
                         logger.info(

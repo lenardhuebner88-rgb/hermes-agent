@@ -865,6 +865,316 @@ def test_k17_extract_claude_cli_cost_shapes():
     assert empty == (None, None, None)
 
 
+# ---------------------------------------------------------------------------
+# COST-VISIBILITY-WORKERS-S1: session-correlated cost backfill
+# ---------------------------------------------------------------------------
+
+def _write_session_rows(db_path, rows):
+    """Create a realistic ``state.db`` sessions table (with cwd/source/
+    started_at) and insert ``rows`` (list of dicts). Used by the
+    session-correlation backfill tests."""
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "id TEXT PRIMARY KEY, source TEXT, started_at REAL, ended_at REAL, "
+            "input_tokens INTEGER, output_tokens INTEGER, "
+            "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT)"
+        )
+        for r in rows:
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at, ended_at, "
+                "input_tokens, output_tokens, actual_cost_usd, "
+                "estimated_cost_usd, cwd) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    r["id"], r.get("source", "cli"), r.get("started_at"),
+                    r.get("ended_at"), r.get("input_tokens"),
+                    r.get("output_tokens"), r.get("actual_cost_usd"),
+                    r.get("estimated_cost_usd"), r.get("cwd"),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def _insert_run_window(conn, task_id, *, profile, started_at, ended_at,
+                       outcome="completed", metadata=None):
+    """Insert a closed run with explicit start/end window (cost_usd NULL)."""
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, started_at, ended_at, outcome, metadata) "
+        "VALUES (?, ?, 'done', ?, ?, ?, ?)",
+        (
+            task_id, profile, started_at, ended_at, outcome,
+            json.dumps(metadata) if metadata is not None else None,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_s1_cwd_match_stamps_real_tokens_and_cost(kanban_home, tmp_path, monkeypatch):
+    """S1 tier-1 (deterministic): a session whose cwd contains the task_id is
+    attributed to the run — real tokens + real cost, provenance recorded."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="cwd-link", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=1000, ended_at=2000,
+        )
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-match", "source": "cli", "started_at": 1500,
+             "input_tokens": 500, "output_tokens": 40, "actual_cost_usd": 0.12,
+             "cwd": f"/home/x/.hermes/kanban/workspaces/{tid}"},
+            {"id": "S-other", "source": "cli", "started_at": 1500,
+             "input_tokens": 9, "output_tokens": 9, "actual_cost_usd": 9.0,
+             "cwd": "/home/x/.hermes/kanban/workspaces/t_deadbeef"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        assert row["input_tokens"] == 500
+        assert row["output_tokens"] == 40
+        assert row["cost_usd"] == pytest.approx(0.12)
+        meta = json.loads(row["metadata"])
+        assert meta["cost_source"] == "session_cwd"
+        assert any("S-match" in e for e in meta["cost_session_ids"])
+        # Idempotent: stamped run is no longer a candidate.
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 0
+
+
+def test_s1_window_match_in_own_profile_consumed_once(kanban_home, tmp_path, monkeypatch):
+    """S1 tier-2 (window): a cli session whose started_at falls in the run's
+    active window is attributed; each session is consumed by exactly one run
+    (no double-count), and a session outside the window is ignored."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="win-a", assignee="coder")
+        t2 = kb.create_task(conn, title="win-b", assignee="coder")
+        r1 = _insert_run_window(conn, t1, profile="coder", started_at=1000, ended_at=2000)
+        r2 = _insert_run_window(conn, t2, profile="coder", started_at=3000, ended_at=4000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-in1", "source": "cli", "started_at": 1500,
+             "input_tokens": 100, "output_tokens": 10, "actual_cost_usd": 0.05},
+            {"id": "S-in2", "source": "cli", "started_at": 3500,
+             "input_tokens": 200, "output_tokens": 20, "estimated_cost_usd": 0.07},
+            {"id": "S-outside", "source": "cli", "started_at": 9999,
+             "input_tokens": 1, "output_tokens": 1, "actual_cost_usd": 5.0},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 2
+        rows = {r["id"]: r for r in conn.execute(
+            "SELECT id, input_tokens, cost_usd, metadata FROM task_runs")}
+        assert rows[r1]["input_tokens"] == 100
+        assert rows[r1]["cost_usd"] == pytest.approx(0.05)
+        assert rows[r2]["input_tokens"] == 200
+        assert rows[r2]["cost_usd"] == pytest.approx(0.07)
+        assert json.loads(rows[r1]["metadata"])["cost_source"] == "session_window"
+        # S-outside never attributed → its $5.0 never enters any run.
+        total = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM task_runs").fetchone()[0]
+        assert total == pytest.approx(0.12)
+
+
+def test_s1_window_does_not_cross_profiles(kanban_home, tmp_path, monkeypatch):
+    """S1: window correlation reads ONLY the run's own profile state.db — a
+    session in a different profile's db is never window-matched."""
+    def _resolve(name):
+        return str(tmp_path / "profiles" / name)
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _resolve)
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x-prof", assignee="coder")
+        run_id = _insert_run_window(conn, tid, profile="coder", started_at=1000, ended_at=2000)
+        # session lives in critic's db, not coder's → must not match
+        _write_session_rows(tmp_path / "profiles" / "critic" / "state.db", [
+            {"id": "S-critic", "source": "cli", "started_at": 1500,
+             "input_tokens": 5, "output_tokens": 5, "actual_cost_usd": 1.0},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 0
+        assert conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id=?", (run_id,)).fetchone()[0] is None
+
+
+def test_s1_subscription_zero_metered_when_no_session(kanban_home, tmp_path, monkeypatch):
+    """S1 tier-3: a run on a provable subscription lane with no recoverable
+    session is stamped cost_usd=0.0 (real metered cost), billing_mode recorded,
+    tokens left NULL — and cost_usd_total does NOT rise."""
+    profile_dir = tmp_path / "profiles" / "coder-claude"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="sub-zero", assignee="coder-claude")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, cost_usd, metadata FROM task_runs WHERE id=?",
+            (run_id,)).fetchone()
+        assert row["cost_usd"] == pytest.approx(0.0)
+        assert row["input_tokens"] is None
+        meta = json.loads(row["metadata"])
+        assert meta["cost_source"] == "subscription_zero_metered"
+        assert meta["billing_mode"] == "subscription_included"
+        assert meta["subscription"] == "claude"
+
+
+def test_s1_api_billed_lane_without_session_stays_null(kanban_home, tmp_path, monkeypatch):
+    """S1 guardrail: an API-billed lane (no subscription) with a real-duration
+    run and no recoverable session is NEVER fabricated to $0 — cost stays NULL.
+    """
+    profile_dir = tmp_path / "profiles" / "research"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="api-lane", assignee="research")
+        run_id = _insert_run_window(
+            conn, tid, profile="research", started_at=1000, ended_at=2000)
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 0
+        assert conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id=?", (run_id,)).fetchone()[0] is None
+
+
+def test_s1_unlinkable_non_subscription_run_stays_null(kanban_home, tmp_path, monkeypatch):
+    """S1 guardrail: a run with no recoverable session and no provable
+    subscription lane (incl. an instantaneous, profile-less run) is LEFT NULL —
+    never invented to $0. Honesty over coverage."""
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(tmp_path / "profiles" / str(name)))
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="never-ran", assignee="x")
+        run_id = _insert_run_window(
+            conn, tid, profile=None, started_at=5000, ended_at=5000)
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 0
+        assert conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id=?", (run_id,)).fetchone()[0] is None
+
+
+def test_s1_does_not_double_count_across_calls(kanban_home, tmp_path, monkeypatch):
+    """S1 AC-2: a session already attributed to one run (recorded in
+    cost_session_ids) is NEVER re-counted onto a later candidate run, even
+    across separate backfill calls."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="first", assignee="coder")
+        r1 = _insert_run_window(conn, t1, profile="coder", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-shared", "source": "cli", "started_at": 1500,
+             "input_tokens": 300, "output_tokens": 30, "actual_cost_usd": 0.09},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        # A second task whose window ALSO contains S-shared appears later.
+        t2 = kb.create_task(conn, title="second", assignee="coder")
+        r2 = _insert_run_window(conn, t2, profile="coder", started_at=1400, ended_at=1600)
+        # S-shared is already consumed by r1 → r2 must NOT re-claim it.
+        kb.backfill_run_costs_from_sessions(conn, limit=50)
+        total = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM task_runs").fetchone()[0]
+        assert total == pytest.approx(0.09)  # counted once, not 0.18
+        r2_cost = conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id=?", (r2,)).fetchone()[0]
+        assert r2_cost in (None, pytest.approx(0.0))
+
+
+def test_s1_since_seconds_bounds_scan(kanban_home, tmp_path, monkeypatch):
+    """S1: since_seconds restricts the scan to recently-ended runs (the
+    heartbeat path) — an old run outside the window is not even considered."""
+    profile_dir = tmp_path / "profiles" / "coder-claude"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+    now = int(time.time())
+    with kb.connect() as conn:
+        t_old = kb.create_task(conn, title="old", assignee="coder-claude")
+        t_new = kb.create_task(conn, title="new", assignee="coder-claude")
+        _insert_run_window(conn, t_old, profile="coder-claude",
+                           started_at=now - 100_000, ended_at=now - 99_000)
+        r_new = _insert_run_window(conn, t_new, profile="coder-claude",
+                                   started_at=now - 100, ended_at=now - 50)
+        # only the recent run is in the 1h window → exactly one stamp
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50, since_seconds=3600) == 1
+        assert conn.execute(
+            "SELECT cost_usd FROM task_runs WHERE id=?", (r_new,)).fetchone()[0] == pytest.approx(0.0)
+
+
+def test_s1_fail_soft_missing_profile_db(kanban_home, monkeypatch):
+    """S1: a profile whose state.db can't be resolved never raises — the run
+    falls through to the subscription/no-execution tiers or stays NULL."""
+    def _raise(name):
+        raise FileNotFoundError(name)
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _raise)
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="ghost", assignee="ghost")
+        _insert_run_window(conn, tid, profile="ghost", started_at=1000, ended_at=2000)
+        # No raise; nothing to stamp (real duration, no sub, no session).
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 0
+
+
+def test_s1_reduces_tasks_without_cost_data_metric(kanban_home, tmp_path, monkeypatch):
+    """S1 AC-1/AC-2 end-to-end: the backfill drives the vision metric
+    ``tasks_without_cost_data`` down while cost_usd_total rises only by real,
+    once-counted session cost."""
+    from hermes_cli import vision_metrics as vm
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+    with kb.connect() as conn:
+        # three done tasks, all without cost: one cwd-linked, one subscription,
+        # one API-billed-no-session (stays blind).
+        t_cwd = kb.create_task(conn, title="cwd", assignee="coder")
+        t_sub = kb.create_task(conn, title="sub", assignee="coder-claude")
+        t_api = kb.create_task(conn, title="api", assignee="research")
+        for t, prof in ((t_cwd, "coder"), (t_sub, "coder-claude"), (t_api, "research")):
+            _insert_run_window(conn, t, profile=prof, started_at=1000, ended_at=2000)
+            conn.execute("UPDATE tasks SET status='done', completed_at=1500 WHERE id=?", (t,))
+        conn.commit()
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-cwd", "source": "cli", "started_at": 1500,
+             "input_tokens": 1000, "output_tokens": 50, "actual_cost_usd": 0.30,
+             "cwd": f"/x/kanban/workspaces/{t_cwd}"},
+        ])
+        before = vm._cost_per_task_metric(conn, now=1600, window_days=7)
+        assert before["counter"]["value"] == 3  # all blind
+
+        kb.backfill_run_costs_from_sessions(conn, limit=50)
+
+        after = vm._cost_per_task_metric(conn, now=1600, window_days=7)
+        # cwd + subscription covered; API-billed stays blind → monotone drop.
+        assert after["counter"]["value"] == 1
+        assert after["counter"]["value"] < before["counter"]["value"]
+        # cost_usd_total rose only by the one real $0.30 session.
+        assert after["cost_usd_total"] == pytest.approx(0.30)
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 
