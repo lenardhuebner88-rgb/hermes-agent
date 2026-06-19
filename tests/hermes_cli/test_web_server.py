@@ -240,7 +240,14 @@ class TestWebServerEndpoints:
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
-    def test_get_status(self):
+    def test_get_status(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        # On a Docker *host* (this server runs Docker for other services)
+        # is_container() trips on host-level docker mounts, so neutralize the
+        # managed-runtime guard to test the non-containerized status shape.
+        monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
+
         resp = self.client.get("/api/status")
         assert resp.status_code == 200
         data = resp.json()
@@ -1011,6 +1018,7 @@ class TestWebServerEndpoints:
             spawned = True
             raise AssertionError("docker update guard should not spawn hermes update")
 
+        monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
         monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "docker")
         monkeypatch.setattr(web_server, "_spawn_hermes_action", fail_spawn)
         web_server._ACTION_PROCS.pop("hermes-update", None)
@@ -1092,6 +1100,7 @@ class TestWebServerEndpoints:
             calls.append((subcommand, name))
             return Proc()
 
+        monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
         monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
         monkeypatch.setattr(web_server, "_spawn_hermes_action", fake_spawn)
         web_server._ACTION_PROCS.pop("hermes-update", None)
