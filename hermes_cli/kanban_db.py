@@ -7613,6 +7613,28 @@ def planspec_source_for_task(conn: sqlite3.Connection, task_id: str) -> Optional
     return source if isinstance(source, str) and source.strip() else None
 
 
+def planspec_chain_running_subtasks(
+    conn: sqlite3.Connection, root_id: str
+) -> list[str]:
+    """Return the ids of a PlanSpec chain's subtasks that are ``status='running'``.
+
+    A PlanSpec chain's subtasks are the tree-*parents* of its root sink — the
+    K2/F1 convention where :func:`decompose_triage_task` links the root as a
+    child of every subtask. This mirrors the active-children guard used by the
+    scratch-workspace cleanup helper, but inverts the join direction (the root
+    is the ``child_id`` here) and scopes it to ``running`` so a re-ingest
+    ``--supersede`` never archives a chain with a worker still mid-flight.
+    """
+    rows = conn.execute(
+        "SELECT t.id FROM task_links l "
+        "JOIN tasks t ON t.id = l.parent_id "
+        "WHERE l.child_id = ? AND t.status = 'running' "
+        "ORDER BY t.id",
+        (root_id,),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def release_uireal_root(conn: sqlite3.Connection, task_id: str, *, author: str = "operator") -> bool:
     """Release a ui-real PlanSpec root held in scheduled state into todo.
 
