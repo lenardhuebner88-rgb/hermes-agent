@@ -2894,6 +2894,37 @@ def test_block_then_unblock(kanban_home):
         assert kb.get_task(conn, t).status == "ready"
 
 
+def test_block_task_stores_reviewer_metadata(kanban_home):
+    """B-T10: block_task persists structured reviewer_metadata into
+    task_runs.metadata (no second migration). Default None = byte-identical."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+        kb.claim_task(conn, tid)
+        rid = kb._current_run_id(conn, tid)
+        meta = {"verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["null deref in foo()", "missing test for bar"]}
+        assert kb.block_task(conn, tid, reason="changes needed", reviewer_metadata=meta)
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (rid,)
+        ).fetchone()
+        stored = json.loads(row["metadata"])
+        assert stored["blocking_findings"][0].startswith("null deref")
+        assert stored["verdict"] == "REQUEST_CHANGES"
+
+
+def test_block_task_without_metadata_is_unchanged(kanban_home):
+    """Default None reviewer_metadata leaves the run metadata empty (today)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+        kb.claim_task(conn, tid)
+        rid = kb._current_run_id(conn, tid)
+        assert kb.block_task(conn, tid, reason="plain block")
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (rid,)
+        ).fetchone()
+        assert row["metadata"] in (None, "", "{}", "null")
+
+
 def test_unblock_resets_failure_counters(kanban_home):
     """unblock_task must reset consecutive_failures and last_failure_error."""
     with kb.connect() as conn:

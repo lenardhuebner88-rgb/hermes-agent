@@ -8517,8 +8517,15 @@ def block_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    reviewer_metadata: Optional[dict] = None,
 ) -> bool:
-    """Transition ``running -> blocked``."""
+    """Transition ``running -> blocked``.
+
+    ``reviewer_metadata`` (B): structured reviewer findings (e.g.
+    ``{"blocking_findings": [...], "required_verification": [...]}``) persisted
+    into ``task_runs.metadata`` so the auto-retry feedback can render them for
+    the coder. Default ``None`` → byte-identical to today (no metadata written).
+    """
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -8553,14 +8560,16 @@ def block_task(
             conn, task_id,
             outcome="blocked", status="blocked",
             summary=reason,
+            metadata=reviewer_metadata,
         )
         # Synthesize a run when blocking a never-claimed task so the
         # reason is preserved in attempt history.
-        if run_id is None and reason:
+        if run_id is None and (reason or reviewer_metadata):
             run_id = _synthesize_ended_run(
                 conn, task_id,
                 outcome="blocked",
                 summary=reason,
+                metadata=reviewer_metadata,
             )
         # B2: a REQUEST_CHANGES verdict is the verifier rejecting the task it
         # reviewed. Only the review lane writes it; ordinary blocks (a coder
