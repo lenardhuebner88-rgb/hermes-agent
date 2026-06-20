@@ -327,12 +327,22 @@ export interface SubscriptionBurnFlag {
   tokens: number;
 }
 
+export interface SubscriptionBurnTrendPoint {
+  date: string;
+  total_tokens: number;
+  runs: number;
+  /** Share of the window total (0..1). */
+  share: number;
+}
+
 export interface SubscriptionBurnBreakdown {
   totals: SubscriptionTokenBurnResponse["totals"];
   topLanes: Array<SubscriptionBurnLane & { share: number }>;
   classes: Array<SubscriptionBurnClass & { share: number }>;
   flags: SubscriptionBurnFlag[];
   subscriptionCount: number;
+  /** Daily aggregated burn (all subscriptions summed), ascending by date. */
+  trend: SubscriptionBurnTrendPoint[];
 }
 
 export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
@@ -397,7 +407,29 @@ export function subscriptionBurnBreakdown(
   ]
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, limit);
-  return { totals, topLanes, classes, flags, subscriptionCount };
+
+  // Aggregate daily rows by date (sum across all subscriptions), then sort asc.
+  const dailyByDate = new Map<string, { total_tokens: number; runs: number }>();
+  for (const row of burn?.daily ?? []) {
+    if (!row.date) continue;
+    const existing = dailyByDate.get(row.date);
+    if (existing) {
+      existing.total_tokens += row.total_tokens;
+      existing.runs += row.runs;
+    } else {
+      dailyByDate.set(row.date, { total_tokens: row.total_tokens, runs: row.runs });
+    }
+  }
+  const trend: SubscriptionBurnTrendPoint[] = [...dailyByDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, { total_tokens, runs }]) => ({
+      date,
+      total_tokens,
+      runs,
+      share: totalTokens > 0 ? total_tokens / totalTokens : 0,
+    }));
+
+  return { totals, topLanes, classes, flags, subscriptionCount, trend };
 }
 
 /** Gate-Effektivität = Σ rejected / Σ runs über die Roster-Profile (Reliability-Rows):

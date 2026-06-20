@@ -188,6 +188,19 @@
 [data-stats-broadsheet] .sb-subburn-flag b { color: var(--sb-navy); margin-right: 4px; }
 [data-stats-broadsheet] .sb-subburn-anti { background: rgba(166, 98, 10, .08); }
 [data-stats-broadsheet] .sb-subburn-anti b { color: var(--sb-amber); }
+
+/* ── Zeit-Trend rows (compact day-by-day burn, reuses sb-subburn-row layout) ── */
+[data-stats-broadsheet] .sb-subburn-trend-row {
+  display: grid;
+  grid-template-columns: max-content 1fr max-content max-content;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-top: 1px solid var(--sb-rule);
+}
+[data-stats-broadsheet] .sb-subburn-trend-row:last-child { border-bottom: 1px solid var(--sb-rule); }
+[data-stats-broadsheet] .sb-subburn-trend-bar { height: 5px; background: var(--sb-rule2); overflow: hidden; }
+[data-stats-broadsheet] .sb-subburn-trend-bar i { display: block; height: 100%; background: var(--sb-navy); }
 @media (max-width: 760px) {
   [data-stats-broadsheet] .sb-subburn-grid { grid-template-columns: 1fr; }
   [data-stats-broadsheet] .sb-subburn-row { grid-template-columns: minmax(0, 1fr) max-content max-content; }

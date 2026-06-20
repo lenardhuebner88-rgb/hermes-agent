@@ -383,6 +383,21 @@ export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnR
               </span>
             ))}
           </div>
+          {detail.trend.length > 0 && (
+            <div data-testid="subscription-burn-trend">
+              <p className="sb-kick">{de.stats.subscriptionBurnTrend}</p>
+              {detail.trend.map((row) => (
+                <div key={row.date} className="sb-subburn-trend-row">
+                  <span className="sb-mono" style={{ fontSize: "11px", color: "var(--sb-ink2)" }}>{row.date}</span>
+                  <div className="sb-subburn-trend-bar">
+                    <i style={{ width: `${Math.round(row.share * 100)}%` }} />
+                  </div>
+                  <b className="sb-mono" style={{ fontSize: "12px" }}>{fmtTokens(row.total_tokens)}</b>
+                  <small className="sb-mono" style={{ color: "var(--sb-ink3)" }}>{Math.round(row.share * 100)} %</small>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </>

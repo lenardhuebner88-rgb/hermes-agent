@@ -298,6 +298,40 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("meta · codex");
     expect(html).toContain("1 k");
     expect(html).toContain("sb-subburn-grid");
+    // No trend block when daily is empty.
+    expect(html).not.toContain("data-testid=\"subscription-burn-trend\"");
+  });
+
+  it("renders the Zeit-Trend block when daily data is present", () => {
+    const html = renderToStaticMarkup(
+      <SubscriptionBurnSection
+        burn={{
+          days: 7,
+          now: 100,
+          window_start: 0,
+          totals: { runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          by_lane: [
+            { subscription: "codex", profile: "coder", runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          ],
+          by_class: [],
+          daily: [
+            { subscription: "codex", date: "2026-06-17", runs: 3, input_tokens: 300, output_tokens: 100, total_tokens: 400 },
+            { subscription: "codex", date: "2026-06-18", runs: 5, input_tokens: 500, output_tokens: 100, total_tokens: 600 },
+          ],
+          buckets: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("data-testid=\"subscription-burn-trend\"");
+    // Both dates must appear in the trend block.
+    expect(html).toContain("2026-06-17");
+    expect(html).toContain("2026-06-18");
+    // Token values formatted (400 → "400", 600 → "600").
+    expect(html).toContain("400");
+    expect(html).toContain("600");
+    // i18n kicker.
+    expect(html).toContain("Zeit-Trend");
   });
 });
 
