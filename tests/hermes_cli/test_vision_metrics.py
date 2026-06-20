@@ -537,6 +537,109 @@ def test_record_gate_result_rejects_invalid_result(state_dir):
 
 
 # ---------------------------------------------------------------------------
+# record-gate-result: machine-readable first-failure forensics
+# (GREEN-GATE-FAIL-FORENSICS-S1)
+# ---------------------------------------------------------------------------
+
+def test_fail_record_carries_first_fail_gate_and_detail(state_dir):
+    rec = vm.record_gate_result(
+        "fail",
+        ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="python",
+        first_fail_detail="Python (run_tests.sh):\nE   assert 1 == 2\nVolles Log: /x.log",
+    )
+    assert rec["result"] == "fail"
+    ff = rec["first_fail"]
+    assert ff["gate"] == "python"
+    assert "assert 1 == 2" in ff["detail"]
+
+    # persisted to the ledger, machine-readable on re-read
+    loaded = vm.read_gate_records()[-1]
+    assert loaded["first_fail"]["gate"] == "python"
+    assert "assert 1 == 2" in loaded["first_fail"]["detail"]
+
+
+def test_pass_record_omits_first_fail_even_when_payload_passed(state_dir):
+    # pass-Verhalten unveraendert: a pass never carries a first_fail field,
+    # even if a caller erroneously supplies one.
+    rec = vm.record_gate_result(
+        "pass",
+        ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="python",
+        first_fail_detail="should be ignored",
+    )
+    assert "first_fail" not in rec
+    loaded = vm.read_gate_records()[-1]
+    assert "first_fail" not in loaded
+
+
+def test_fail_without_payload_omits_first_fail(state_dir):
+    # backward compat: the pre-existing `record-gate-result fail` (no payload)
+    # call still works and writes no first_fail field.
+    rec = vm.record_gate_result("fail", ts="2026-06-20T03:00:00+00:00")
+    assert "first_fail" not in rec
+
+
+def test_first_fail_detail_redacts_secrets(state_dir):
+    # AC-2: the captured tail runs through the existing response redaction so
+    # no token reaches the on-disk ledger.
+    detail = (
+        "Frontend vitest run:\n"
+        "FAIL using key sk-liveSECRETMIDDLE0000 and ghp_GH0000SECRETTOKEN00\n"
+        "Volles Log: /x.log"
+    )
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="vitest", first_fail_detail=detail,
+    )
+    stored = rec["first_fail"]["detail"]
+    assert "SECRETMIDDLE" not in stored
+    assert "SECRETTOKEN" not in stored
+
+    # and the same holds for what's actually on disk
+    raw = vm.gate_ledger_path().read_text()
+    assert "SECRETMIDDLE" not in raw
+    assert "SECRETTOKEN" not in raw
+
+
+def test_first_fail_detail_is_capped(state_dir):
+    # AC-2: the stderr tail is bounded so the ledger entry stays small.
+    huge = "A" * 10_000 + "\nTRAILING_MARKER\n"
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="build", first_fail_detail=huge,
+    )
+    stored = rec["first_fail"]["detail"]
+    assert len(stored.encode("utf-8")) <= vm.GATE_FIRST_FAIL_MAX_BYTES
+    # the tail (most-relevant end of the log) is what's kept
+    assert "TRAILING_MARKER" in stored
+
+
+def test_first_fail_gate_is_normalized(state_dir):
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="  TSC  ", first_fail_detail="boom",
+    )
+    assert rec["first_fail"]["gate"] == "tsc"
+
+
+def test_cli_record_gate_result_fail_with_first_fail(tmp_path, monkeypatch, state_dir):
+    db_path = tmp_path / "kanban.db"
+    rc = _run_cli(
+        [
+            "vision", "record-gate-result", "fail",
+            "--first-fail-gate", "python",
+            "--first-fail-detail", "boom: assert 1 == 2",
+        ],
+        monkeypatch, db_path,
+    )
+    assert rc == 0
+    rec = vm.read_gate_records()[-1]
+    assert rec["first_fail"]["gate"] == "python"
+    assert "assert 1 == 2" in rec["first_fail"]["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Snapshot file: valid JSON, all fields, counters, streak wired in
 # ---------------------------------------------------------------------------
 
