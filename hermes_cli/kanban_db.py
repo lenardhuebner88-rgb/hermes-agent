@@ -883,6 +883,10 @@ class Task:
     # list = explicitly no extra skills.
     skills: Optional[list] = None
     model_override: Optional[str] = None
+    # Staged-review depth lever (B): standard | review | critical. NULL/unset =
+    # unspecified → treated as ``standard`` (single verifier stage), unless the
+    # auto-risk classifier is enabled (kanban.review_gate.auto_tier).
+    review_tier: Optional[str] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -998,6 +1002,7 @@ class Task:
             ),
             skills=skills_value,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
+            review_tier=row["review_tier"] if "review_tier" in keys else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
@@ -3169,6 +3174,7 @@ def create_task(
     model_override: Optional[str] = None,
     freigabe: Optional[str] = None,
     live_test_depth: Optional[str] = None,
+    review_tier: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3399,8 +3405,8 @@ def create_task(
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        model_override, freigabe, live_test_depth
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        model_override, freigabe, live_test_depth, review_tier
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3429,6 +3435,7 @@ def create_task(
                         (model_override or "").strip() or None,
                         freigabe,
                         live_test_depth,
+                        (review_tier or "").strip().lower() or None,
                     ),
                 )
                 for pid in parents:
@@ -9134,13 +9141,14 @@ def decompose_triage_task(
             # taskgraph_hints_to_children).  NULL on non-planspec children.
             child_planspec_subtask_id = child.get("planspec_subtask_id")
             child_planspec_source = child.get("planspec_source")
+            child_review_tier = child.get("review_tier")
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
                 " acceptance_criteria, epic_id, kind, "
-                " planspec_subtask_id, planspec_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " planspec_subtask_id, planspec_source, review_tier) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -9157,6 +9165,7 @@ def decompose_triage_task(
                     kind,
                     child_planspec_subtask_id if isinstance(child_planspec_subtask_id, str) else None,
                     child_planspec_source if isinstance(child_planspec_source, str) else None,
+                    (child_review_tier or "").strip().lower() or None if isinstance(child_review_tier, str) else None,
                 ),
             )
             _append_event(

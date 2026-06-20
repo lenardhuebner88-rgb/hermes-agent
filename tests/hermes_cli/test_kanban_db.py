@@ -71,6 +71,15 @@ def test_review_tier_column_migration_is_idempotent(kanban_home):
     assert cols.count("review_tier") == 1
 
 
+def test_create_task_persists_and_reads_review_tier(kanban_home):
+    """B-T2: create_task accepts review_tier and get_task reads it back; default NULL."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder", review_tier="critical")
+        assert kb.get_task(conn, tid).review_tier == "critical"
+        tid2 = kb.create_task(conn, title="t2", assignee="coder")
+        assert kb.get_task(conn, tid2).review_tier is None
+
+
 _PLANSPEC_COLS = [
     "planspec_subtask_id",
     "planspec_source",

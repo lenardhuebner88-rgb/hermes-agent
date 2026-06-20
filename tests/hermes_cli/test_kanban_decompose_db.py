@@ -91,6 +91,30 @@ def test_decompose_persists_optional_child_kind(kanban_home):
     assert by_id[child_ids[1]] is None
 
 
+def test_decompose_persists_optional_child_review_tier(kanban_home):
+    """B-T2: decompose carries child['review_tier'] into the created child task."""
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="classify review tier")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "risky migration", "review_tier": "critical"},
+                {"title": "plain"},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        rows = conn.execute(
+            "SELECT id, review_tier FROM tasks WHERE id IN (?, ?)",
+            tuple(child_ids),
+        ).fetchall()
+    by_id = {row["id"]: row["review_tier"] for row in rows}
+    assert by_id[child_ids[0]] == "critical"
+    assert by_id[child_ids[1]] is None
+
+
 def test_decompose_returns_none_when_task_missing(kanban_home):
     with kb.connect() as conn:
         result = kb.decompose_triage_task(
