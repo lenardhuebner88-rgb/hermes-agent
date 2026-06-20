@@ -114,6 +114,12 @@ Rules:
         kind=code or build/implementation tasks.
       * research: research lane; never assign it kind=code or
         build/implementation tasks. Do not invent "researcher" as an alias.
+      * scout: read-only code-recon PREP lane (cheap/fast). OPTIONAL — only for a
+        genuinely large or risky implementation. Use it as a FIRST child
+        (parents=[]) that the heavy implementation child then depends on, so the
+        scout's file/caller/risk brief grounds the coder before it starts. It
+        edits, commits and deploys NOTHING; never assign it kind=code or
+        build/implementation work, and never use it for a small/simple task.
   - For any code/build implementation child, set kind="code" and pick one of
     the available code lanes above. For review/verdict work, set kind="review".
     For research-only work, set kind="research".
@@ -562,6 +568,9 @@ _WORKER_SCOPE_LANES: frozenset[str] = frozenset({
     "reviewer",
     "critic",
     "verifier",
+    # Slice c: scout is a real gateway-dispatched worker (read-only recon), so it
+    # gets the same kanban-lifecycle scope-contract attestation as research.
+    "scout",
 })
 
 _BASE_WORKER_ALLOWED_TOOLS: tuple[str, ...] = (

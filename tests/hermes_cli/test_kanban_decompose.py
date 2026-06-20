@@ -542,6 +542,24 @@ def test_decompose_prompt_mentions_scope_contract_allowed_tools():
     assert "require_scope_attestation" in decomp._SYSTEM_PROMPT
 
 
+def test_decompose_prompt_offers_scout_prep_lane():
+    """Slice c: the decomposer may propose a read-only scout recon predecessor."""
+    prompt = decomp._SYSTEM_PROMPT
+    assert "scout:" in prompt          # listed in the lane routing table
+    assert "recon" in prompt.lower()
+    assert "read-only" in prompt.lower()
+
+
+def test_scout_is_a_worker_scope_lane_and_gets_a_contract():
+    """Slice c: scout is a real gateway worker — treated as a worker lane and
+    given the kanban-lifecycle scope contract like research."""
+    assert "scout" in decomp._WORKER_SCOPE_LANES
+    assert decomp._is_worker_lane("scout")
+    child = {"title": "recon the area", "body": "Read the affected code.", "assignee": "scout", "parents": []}
+    out = decomp._ensure_worker_scope_contract(child)
+    _assert_worker_scope_contract(out["body"] or "")
+
+
 def test_decompose_prompt_requires_verifiable_acceptance_criteria():
     prompt = decomp._SYSTEM_PROMPT
     assert "at least two acceptance criteria" in prompt.lower()
