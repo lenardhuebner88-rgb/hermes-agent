@@ -3,12 +3,105 @@ import { useSearchParams } from "react-router-dom";
 
 import { useBoard, useChainGraph } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
-import { fmtAge, nowSec } from "../lib/derive";
+import { fmtAge, fmtTokens, formatEffectiveCost, nowSec } from "../lib/derive";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
+import type { ChainGraphNode } from "../lib/types";
+
+// ── Chain summary (derived from already-loaded graph nodes, no new endpoint) ──
+
+interface ChainSummaryProps {
+  nodes: ChainGraphNode[];
+  rootId: string;
+}
+
+function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
+  // Derive totals by folding over the already-loaded nodes.
+  const totals = useMemo(() => {
+    let costEffective = 0;
+    let tokens = 0;
+    let runs = 0;
+    let done = 0;
+    let running = 0;
+    let waiting = 0;
+
+    for (const n of nodes) {
+      costEffective += n.cost_effective_usd ?? 0;
+      tokens += (n.input_tokens ?? 0) + (n.output_tokens ?? 0);
+      // Count runs from latest_run presence as a proxy (each node ~ 1 run).
+      if (n.latest_run != null || n.cost_usd > 0 || n.input_tokens > 0) runs += 1;
+      if (n.status === "done") done++;
+      else if (n.status === "running") running++;
+      else waiting++;
+    }
+
+    const total = nodes.length;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { costEffective, tokens, runs, done, running, waiting, total, pct };
+  }, [nodes]);
+
+  if (nodes.length === 0) return null;
+
+  const { text: costText } = formatEffectiveCost({
+    cost_usd: totals.costEffective,
+    cost_effective_usd: totals.costEffective,
+    tokens: totals.tokens,
+  });
+
+  return (
+    <div
+      className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]"
+    >
+      {/* Eyebrow */}
+      <p className="hc-eyebrow">{de.ketten.summaryEyebrow}</p>
+
+      {/* Progress bar */}
+      <div className="mt-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="h-2 flex-1 overflow-hidden rounded-full bg-[rgba(26,29,40,.06)]">
+            <div
+              className="h-full rounded-full bg-[var(--hc-aurora)]"
+              style={{ width: `${totals.pct}%` }}
+            />
+          </div>
+          <span className="hc-mono shrink-0 text-[13px] font-semibold tabular-nums text-[var(--hc-text-soft)]">
+            {totals.pct} %
+          </span>
+        </div>
+        <p className="hc-mono mt-1 text-[11px] text-[var(--hc-text-dim)]">
+          {de.ketten.summaryProgress(totals.done, totals.total, totals.running, totals.waiting)}
+        </p>
+      </div>
+
+      {/* 3-column mini-stats: Kosten / Tokens / Runs */}
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <div className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+          <p className="hc-eyebrow" style={{ fontSize: 9 }}>{de.ketten.summaryStatCost}</p>
+          <p className="hc-mono mt-1 text-[15px] font-semibold tabular-nums text-[var(--hc-emerald)]">
+            {costText}
+          </p>
+        </div>
+        <div className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+          <p className="hc-eyebrow" style={{ fontSize: 9 }}>{de.ketten.summaryStatTokens}</p>
+          <p className="hc-mono mt-1 text-[15px] font-semibold tabular-nums text-[var(--hc-text)]">
+            {totals.tokens > 0 ? fmtTokens(totals.tokens) : "—"}
+          </p>
+        </div>
+        <div className="rounded-[10px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2">
+          <p className="hc-eyebrow" style={{ fontSize: 9 }}>{de.ketten.summaryStatRuns}</p>
+          <p className="hc-mono mt-1 text-[15px] font-semibold tabular-nums text-[var(--hc-text)]">
+            {totals.runs}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function ChainPanel({ rootId }: { rootId: string }) {
   const graph = useChainGraph(rootId);
@@ -29,6 +122,9 @@ function ChainPanel({ rootId }: { rootId: string }) {
 
   return (
     <>
+      {/* Kette-Summary card — totals derived from loaded nodes, no new endpoint */}
+      <ChainSummary nodes={graph.data.nodes} rootId={graph.data.root_id} />
+
       <KettenGraph nodes={graph.data.nodes} edges={graph.data.edges} rootId={graph.data.root_id} />
       <p className="text-right text-xs text-[var(--hc-text-dim)]">
         {graph.data.checked_at ? (

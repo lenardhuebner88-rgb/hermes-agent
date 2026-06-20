@@ -51,11 +51,13 @@ describe("ChainNodeCard", () => {
     expect(html).not.toContain("jetzt");
   });
 
-  it("renders a progress bar with percent and subtask counter", () => {
+  it("renders a progress bar with percent label and a separate subtask chip", () => {
     const withProgress: ChainGraphNode = { ...node, progress: { done: 1, total: 2 } };
     const html = renderToStaticMarkup(<ChainNodeCard node={withProgress} isRoot={false} />);
     expect(html).toContain("width:50%");
-    expect(html).toContain("50% — 1 von 2 Subtasks");
+    // Percent now reads out to the right of the bar; the subtask rollup is a chip.
+    expect(html).toContain("50%");
+    expect(html).toContain("1 von 2 Subtasks");
   });
 
   it("shows 'waiting on predecessor' for an open node with deps and no progress", () => {
