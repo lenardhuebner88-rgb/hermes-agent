@@ -2783,6 +2783,12 @@ INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
 # — or there is no provisioned worktree to fix in — the chain escalates to the
 # operator exactly as before. The transient §5 path is untouched.
 CONFLICT_FIXER_DISPATCHED_EVENT = "conflict_fixer_dispatched"
+# idempotency_key prefix stamped on every conflict-park fixer subtask. The
+# dispatcher uses it to EXEMPT the fixer from the serialize_by_repo guard: the
+# fixer repairs its own parked (blocked) chain inside that chain's worktree, so
+# it must be allowed into the repo the blocked parent still holds — otherwise
+# the parked chain deadlocks (the fixer can never run to clear the block).
+CONFLICT_FIXER_IDEM_PREFIX = "conflict-fixer:"
 CONFLICT_FIXER_MAX_ATTEMPTS = 2
 CONFLICT_FIXER_BACKOFF_SECONDS = 300
 CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
@@ -11666,7 +11672,7 @@ def _create_conflict_park_fixer_subtask(
             workspace_kind="dir",
             workspace_path=str(wt),
             kind="code",
-            idempotency_key=f"conflict-fixer:{parent_id}:{attempt}",
+            idempotency_key=f"{CONFLICT_FIXER_IDEM_PREFIX}{parent_id}:{attempt}",
             max_runtime_seconds=CONFLICT_FIXER_MAX_RUNTIME_SECONDS,
             max_retries=1,
         )
@@ -14155,7 +14161,7 @@ def dispatch_once(
 
     ready_rows = conn.execute(
         "SELECT id, assignee, workflow_template_id, current_step_key, "
-        "workspace_kind, workspace_path, created_by FROM tasks "
+        "workspace_kind, workspace_path, created_by, idempotency_key FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -14515,7 +14521,23 @@ def dispatch_once(
         # serialize_by_repo guard: another non-terminal task holds this repo_root
         # this tick -> defer THIS candidate (continue, never break: other repos must
         # still flow). Emit ONE deduped repo_serialized event (role_fit_held pattern).
-        if serialize_by_repo and _cand_repo and _cand_repo in _repo_locked:
+        #
+        # EXEMPTION: a conflict-park fixer is dispatched specifically to repair a
+        # parked (blocked) chain INSIDE that chain's own worktree. The blocked
+        # parent still holds the repo slot (intended: keeps other tasks from
+        # branching N+1 off stale main — the 0167-0171 invariant). But the fixer
+        # works in the SAME parked worktree, not a fresh branch, so it must break
+        # the slot — otherwise parent (holds slot) and fixer (needs slot to clear
+        # the block) deadlock forever (2026-06-20 burn-dashboard incident). Only
+        # the fixer is exempt; every other same-repo candidate stays serialized.
+        _is_conflict_fixer = bool(
+            row["idempotency_key"]
+            and str(row["idempotency_key"]).startswith(CONFLICT_FIXER_IDEM_PREFIX)
+        )
+        if (
+            serialize_by_repo and _cand_repo and _cand_repo in _repo_locked
+            and not _is_conflict_fixer
+        ):
             result.skipped_repo_serialized.append((row["id"], _cand_repo))
             if not dry_run:
                 latest = conn.execute(

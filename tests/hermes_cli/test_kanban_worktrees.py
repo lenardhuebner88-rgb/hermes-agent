@@ -535,6 +535,49 @@ def test_scheduled_tasks_do_not_hold_repo_serialization_lock(
     assert parked not in spawned
 
 
+def test_conflict_fixer_exempt_from_repo_serialization_lock(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """A parked chain (blocked) holds its repo via serialize_by_repo. The
+    conflict-park fixer created to REPAIR that chain works inside the same
+    repo, so it must be exempt from the serialize guard — otherwise the parked
+    chain deadlocks (2026-06-20 burn-dashboard: fixer stuck `ready` forever,
+    needed manual rescue). A *normal* same-repo task stays serialized."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        # Parked parent (blocked) holds the repo serialize slot.
+        parent = kb.create_task(
+            conn, title="parked chain", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        assert kb.block_task(conn, parent, reason="integration parked")
+        # The conflict-fixer for that parent, same repo, idempotency-marked
+        # exactly as _create_conflict_park_fixer_subtask does.
+        fixer = kb.create_task(
+            conn, title="Konflikt-Fixer Kette", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+            idempotency_key=f"conflict-fixer:{parent}:1",
+        )
+        # Control: a normal same-repo ready task must STAY serialized.
+        normal = kb.create_task(
+            conn, title="normal same-repo", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn, serialize_by_repo=True)
+
+    serialized_ids = [t[0] for t in res.skipped_repo_serialized]
+    assert fixer in spawned, "conflict-fixer must break the serialize lock"
+    assert fixer not in serialized_ids
+    assert normal not in spawned
+    assert normal in serialized_ids, "normal same-repo task must stay serialized"
+    assert parent not in spawned
+
+
 def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
     assert kwt.isolation_mode() == "off"
@@ -651,6 +694,17 @@ def _install_fake_web_bins(repo):
         tool.chmod(0o755)
 
 
+def _install_fake_root_bins(repo):
+    # Hoisted npm-workspace layout: a single-version dep (e.g. typescript) is
+    # deduped into the ROOT node_modules/.bin, leaving web/node_modules/.bin empty.
+    bin_dir = repo / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("tsc", "vitest"):
+        tool = bin_dir / name
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+
+
 def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypatch):
     _install_fake_web_bins(repo)
     calls = []
@@ -678,6 +732,53 @@ def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypat
     assert ["/usr/bin/npx", "vitest", "run", "src/control"] in calls
     assert any(cmd[-2:] == ["-b", "--noEmit"] and "tsc" in cmd[0] for cmd in calls)
     assert ["/usr/bin/npm", "run", "build"] not in calls
+
+
+def test_default_quick_gate_web_diff_resolves_hoisted_root_bins(repo, monkeypatch):
+    # Regression (2026-06-20 burn-dashboard incident): npm-workspace hoisting puts
+    # tsc/vitest in ROOT node_modules/.bin, NOT web/node_modules/.bin. The gate must
+    # resolve them from root and pass instead of reverting the merge as "tsc missing".
+    _install_fake_root_bins(repo)  # ROOT bins only; web/node_modules/.bin absent
+    calls = []
+
+    def fake_which(name):
+        return {"npm": "/usr/bin/npm", "npx": "/usr/bin/npx"}.get(name)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", fake_which)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["web/src/control/App.tsx"])
+
+    assert ok is True, detail
+    assert "tsc -b ok" in detail
+    assert "vitest[control] ok" in detail
+    # tsc must have been invoked from the ROOT node_modules/.bin, not web/.
+    root_tsc = str(repo / "node_modules" / ".bin" / "tsc")
+    assert any(cmd[-2:] == ["-b", "--noEmit"] and cmd[0] == root_tsc for cmd in calls)
+
+
+def test_default_quick_gate_web_diff_fails_when_bins_missing_everywhere(repo, monkeypatch):
+    # Neither web/ nor root has the bins → fail closed (cannot type-check the diff).
+    calls = []
+
+    def fake_which(name):
+        return {"npm": "/usr/bin/npm", "npx": "/usr/bin/npx"}.get(name)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", fake_which)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["web/src/control/App.tsx"])
+
+    assert ok is False
+    assert "tsc" in detail and "not found" in detail
 
 
 def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch):

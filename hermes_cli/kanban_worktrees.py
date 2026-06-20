@@ -1398,6 +1398,24 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
     return sorted(modules)
 
 
+def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
+    """Resolve a node executable tolerant of npm-workspace hoisting.
+
+    A workspace's direct dependency bin may live in ``web/node_modules/.bin``
+    OR be deduped (hoisted) into the ROOT ``node_modules/.bin`` when no other
+    workspace pins a conflicting version (npm's default). Returning the first
+    that exists keeps the non-hoisted layout working unchanged while also
+    handling the hoisted layout — the cause of the 2026-06-20 burn-dashboard
+    auto-revert, where ``typescript`` had hoisted to root and the hard-coded
+    ``web/node_modules/.bin/tsc`` path no longer existed after ``npm ci``.
+    """
+    for base in (repo_root / "web", repo_root):
+        cand = base / "node_modules" / ".bin" / name
+        if cand.is_file():
+            return cand
+    return None
+
+
 def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
     """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
     modules; when the diff touches ``web/``, run lint:control,
@@ -1454,24 +1472,26 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
 
     if any(f.startswith("web/") for f in changed_files):
         web_root = repo_root / "web"
-        tsc = web_root / "node_modules" / ".bin" / "tsc"
-        vitest = web_root / "node_modules" / ".bin" / "vitest"
+        # Resolve tolerant of npm-workspace hoisting (bins may live in web/ OR
+        # the hoisted ROOT node_modules/.bin). See _resolve_node_bin.
+        tsc = _resolve_node_bin(repo_root, "tsc")
+        vitest = _resolve_node_bin(repo_root, "vitest")
         npm_bin = shutil.which("npm") or "npm"
         npx_bin = shutil.which("npx") or "npx"
 
         err = _run("lint:control", [npm_bin, "run", "lint:control"], web_root, 600)
         if err:
             return False, err
-        if not tsc.is_file():
+        if tsc is None:
             # Fail closed: a web diff we cannot type-check is not "green".
-            return False, "tsc: web/ in diff but web/node_modules/.bin/tsc missing"
+            return False, "tsc: web/ in diff but tsc not found in web/ or root node_modules/.bin"
         err = _run("tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600)
         if err:
             return False, err
-        if not vitest.is_file():
+        if vitest is None:
             return False, (
                 "vitest[control]: web/ in diff but "
-                "web/node_modules/.bin/vitest missing"
+                "vitest not found in web/ or root node_modules/.bin"
             )
         err = _run("vitest[control]", [npx_bin, "vitest", "run", "src/control"], web_root, 900)
         if err:
