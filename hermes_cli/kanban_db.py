@@ -6456,6 +6456,46 @@ def _review_gate_config() -> dict:
     }
 
 
+_TIER_ORDER = {"standard": 0, "review": 1, "critical": 2}
+
+
+def _task_plan_spec(task: "Task") -> dict:
+    """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads."""
+    return {
+        "risk_class": (task.kind or ""),
+        "objective": (task.title or ""),
+        "goal": (task.body or ""),
+    }
+
+
+def _effective_review_tier(
+    conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None
+) -> str:
+    """Resolve a task's effective staged-review tier.
+
+    An explicitly set ``tasks.review_tier`` column is authoritative in BOTH
+    directions (operator/PlanSpec override — up AND down; 'Spalte gesetzt =
+    bewusster Override', Grill-Entscheid 2). When the column is NULL the
+    auto-risk classifier decides ONLY if ``auto_tier`` is enabled in the
+    review-gate config; otherwise the tier is ``standard`` — byte-identical to
+    today's single-verifier behavior.
+    """
+    task = get_task(conn, task_id)
+    if task is None:
+        return "standard"
+    explicit = (task.review_tier or "").strip().lower()
+    if explicit in _TIER_ORDER:
+        return explicit  # authoritative override, up AND down — always wins
+    cfg = cfg if cfg is not None else _review_gate_config()
+    if not cfg.get("auto_tier"):
+        return "standard"  # opt-in OFF (default) → no auto-escalation
+    try:
+        from hermes_cli.control_plane_gate import classify_review_tier
+        return classify_review_tier(_task_plan_spec(task))
+    except Exception:
+        return "standard"
+
+
 def _worker_gate_config() -> dict:
     """Resolve kanban.worker_gate from the ROOT config.yaml (mirrors
     _review_gate_config). Workers run under HERMES_HOME=<root>/profiles/<name>,

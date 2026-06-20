@@ -52,6 +52,49 @@ def gate_on(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# B-T5: effective review tier (explicit column wins; NULL → auto only if opt-in)
+# ---------------------------------------------------------------------------
+
+def test_effective_review_tier_explicit_wins_both_ways(kanban_home, monkeypatch):
+    """Explicit review_tier is authoritative up AND down; NULL → auto (auto_tier ON)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True},
+    )
+    with kb.connect() as conn:
+        # explicit UPGRADES a trivial task
+        t1 = kb.create_task(conn, title="trivial", assignee="coder", review_tier="critical")
+        assert kb._effective_review_tier(conn, t1) == "critical"
+        # explicit DOWNGRADES an auto-critical task (operator override, both ways)
+        t2 = kb.create_task(conn, title="db change",
+                            body="run a database migration and deploy",
+                            assignee="coder", review_tier="standard")
+        assert kb._effective_review_tier(conn, t2) == "standard"
+        # NULL + auto_tier ON → auto decides (critical marker in body)
+        t3 = kb.create_task(conn, title="db change",
+                            body="run a database migration", assignee="coder")
+        assert kb._effective_review_tier(conn, t3) == "critical"
+        # NULL, no markers → standard
+        t4 = kb.create_task(conn, title="tweak copy", body="reword a label", assignee="coder")
+        assert kb._effective_review_tier(conn, t4) == "standard"
+
+
+def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypatch):
+    """auto_tier OFF (default): a NULL-column risky task stays standard = today."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": False},
+    )
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="db change",
+                           body="run a database migration and deploy", assignee="coder")
+        assert kb._effective_review_tier(conn, t) == "standard"   # auto OFF → no chain
+        # explicit column still wins even with auto OFF
+        t2 = kb.create_task(conn, title="x", assignee="coder", review_tier="critical")
+        assert kb._effective_review_tier(conn, t2) == "critical"
+
+
+# ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
 
