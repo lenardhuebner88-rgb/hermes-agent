@@ -152,6 +152,46 @@ def test_review_chain_target_reads_event(kanban_home, gate_on):
 
 
 # ---------------------------------------------------------------------------
+# B-T9: complete_task chain advance (APPROVED intermediate → next stage)
+# ---------------------------------------------------------------------------
+
+def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", body="database migration",
+                             assignee="coder", review_tier="critical")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"          # stage 0 (verifier) pending
+
+        # stage 0: verifier APPROVED → re-park for stage 1 (reviewer)
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+        assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
+
+        # stage 1: reviewer APPROVED → re-park for stage 2 (critic)
+        kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        kb.complete_task(conn, tid, summary="reviewer ok", review_gate=True)
+        assert kb.get_task(conn, tid).status == "review"
+        assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
+
+        # stage 2: critic APPROVED → terminal done
+        kb.claim_review_task(conn, tid, reviewer_profile="critic")
+        kb.complete_task(conn, tid, summary="critic ok", review_gate=True)
+        assert kb.get_task(conn, tid).status == "done"
+
+
+def test_standard_tier_still_single_stage(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="trivial", body="reword label", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.complete_task(conn, tid, summary="verifier ok", review_gate=True)
+        assert kb.get_task(conn, tid).status == "done"   # standard → one stage only
+
+
+# ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
 

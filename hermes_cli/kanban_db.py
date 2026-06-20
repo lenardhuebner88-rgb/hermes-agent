@@ -6521,15 +6521,18 @@ def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
     critical = [verifier, reviewer, critic]. An unknown tier falls back to the
     single verifier stage (today's behavior).
     """
+    # Tolerate a minimal config dict (verifier_profile only) — fall back to the
+    # module defaults so the reviewer/critic stages degrade gracefully and the
+    # standard tier never needs the extra keys (callers that monkeypatch
+    # _review_gate_config with a verifier-only dict keep working).
+    verifier = cfg.get("verifier_profile", _DEFAULT_VERIFIER_PROFILE)
+    review = cfg.get("review_profile", _DEFAULT_REVIEW_PROFILE)
+    critic = cfg.get("critic_profile", _DEFAULT_CRITIC_PROFILE)
     seq = {
-        "standard": [cfg["verifier_profile"]],
-        "review": [cfg["verifier_profile"], cfg["review_profile"]],
-        "critical": [
-            cfg["verifier_profile"],
-            cfg["review_profile"],
-            cfg["critic_profile"],
-        ],
-    }.get(tier, [cfg["verifier_profile"]])
+        "standard": [verifier],
+        "review": [verifier, review],
+        "critical": [verifier, review, critic],
+    }.get(tier, [verifier])
     try:
         from hermes_cli.profiles import profile_exists
     except Exception:
@@ -7482,6 +7485,78 @@ def set_task_workflow(
         return cur.rowcount == 1
 
 
+def _maybe_advance_review_chain(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int],
+    *,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+) -> Optional[bool]:
+    """If this APPROVED completion closes an INTERMEDIATE review stage, re-park
+    the task in ``review`` for the next stage (verifier→reviewer→critic) and
+    return True. Return None to let the normal completion path run — terminal
+    ``done`` on the final stage, and every non-review completion.
+
+    Called BEFORE the worktree-integration hook so an intermediate stage never
+    triggers a premature chain merge: integration happens only when the FINAL
+    stage falls through to the done path. The chain state (frozen tier + stage)
+    lives in the latest ``submitted_for_review`` event, not a second column.
+    """
+    run_id = (
+        expected_run_id if expected_run_id is not None
+        else _current_run_id(conn, task_id)
+    )
+    # Only a review-originated run (claim_review_task) can advance the chain;
+    # a coder's own completion is never re-parked here.
+    if not _run_originated_from_review(conn, task_id, run_id):
+        return None
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not (row and row["payload"]):
+        return None
+    try:
+        payload = json.loads(row["payload"]) or {}
+    except Exception:
+        return None
+    tier = str(payload.get("review_tier") or "standard")
+    stage = int(payload.get("review_stage") or 0)
+    cfg = _review_gate_config()
+    stages = _review_stages_for_tier(tier, cfg)
+    if stage + 1 >= len(stages):
+        return None  # final stage → terminal done (normal path)
+    next_stage = stage + 1
+    next_profile = stages[next_stage]
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'review', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('running','ready','review') "
+            "AND current_run_id = ?",
+            (task_id, int(run_id)),
+        )
+        if cur.rowcount != 1:
+            return None
+        rid = _end_run(
+            conn, task_id, outcome="completed", status="review",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+        if rid is not None:
+            _set_run_verdict(conn, rid, "APPROVED")
+        _append_event(conn, task_id, "submitted_for_review", {
+            "review_tier": tier,
+            "review_stage": next_stage,
+            "target_profile": next_profile,
+            "advanced_from_stage": stage,
+        }, run_id=rid)
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7585,6 +7660,17 @@ def complete_task(
             result=result, summary=summary, metadata=metadata,
             verified_cards=verified_cards, expected_run_id=expected_run_id,
         )
+
+    # B (staged review gate): an APPROVED completion of an INTERMEDIATE review
+    # stage re-parks the task for the next stage (verifier→reviewer→critic)
+    # instead of going done. Placed BEFORE the worktree-integration hook so a
+    # mid-chain stage never triggers a premature merge; the FINAL stage (and any
+    # non-review completion) returns None and falls through to the done path.
+    if _maybe_advance_review_chain(
+        conn, task_id, expected_run_id,
+        result=result, summary=summary, metadata=metadata,
+    ):
+        return True
 
     # Worker-isolation integrator (kanban_worktrees, Phase 3): when this
     # completion closes the LAST open task of a dispatcher-provisioned
