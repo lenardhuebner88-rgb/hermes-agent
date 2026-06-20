@@ -6580,7 +6580,14 @@ def _review_spawn_profile_for(
     the no-silent-stall sweep, and has_spawnable_review so all three agree. A
     staged review task whose original coder lane profile is gone is still
     spawnable via its stage target and must not be stranded as nonspawnable.
+
+    A blank/None assignee returns ``None``: dispatch buckets those as
+    ``skipped_unassigned`` (a distinct operator signal — the task has no owner)
+    BEFORE consulting the stage target, so they are not "spawnable" here either.
+    Keeping that branch here keeps all three call sites in agreement.
     """
+    if not (assignee and str(assignee).strip()):
+        return None
     stage = _review_chain_target(conn, task_id, cfg)
     try:
         from hermes_cli.profiles import profile_exists

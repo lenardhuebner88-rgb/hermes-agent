@@ -8087,6 +8087,26 @@ def test_has_spawnable_review_true_via_stage_profile(kanban_home, monkeypatch):
         assert kb.has_spawnable_review(conn) is True
 
 
+def test_blank_assignee_review_spawnability_is_consistent(kanban_home, monkeypatch):
+    """A blank-assignee review task is bucketed skipped_unassigned by dispatch,
+    so the stage-aware spawnability helper must NOT report it spawnable — else
+    health/sweep disagree with dispatch and it sits unspawned-and-unparked."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review", assignee="coder")
+        _set_task_status(conn, t, "review")
+        conn.execute("UPDATE tasks SET assignee = '' WHERE id = ?", (t,))
+        res = kb.dispatch_once(conn, dry_run=True)
+        assert t in res.skipped_unassigned
+        assert t not in res.skipped_nonspawnable
+        assert not any(tid == t for (tid, _p, _w) in res.spawned)
+        # health must agree with dispatch (not spawnable here)
+        assert kb.has_spawnable_review(conn) is False
+        # and the helper itself returns None for a blank assignee
+        assert kb._review_spawn_profile_for(conn, t, "", kb._review_gate_config()) is None
+
+
 def test_review_status_in_valid_statuses():
     """'review' is a valid task status."""
     assert "review" in kb.VALID_STATUSES
