@@ -3650,6 +3650,7 @@ class TestRunConversation:
         # 6 responses: original + 2 prefill + 3 retries after prefill exhaustion
         with (
             patch.object(agent, "_interruptible_api_call", side_effect=[empty_resp] * 6),
+            patch("agent.conversation_loop.time.sleep", lambda *a, **k: None),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4006,6 +4007,7 @@ class TestRunConversation:
             patch.object(
                 agent.context_compressor, "should_compress", return_value=True
             ),
+            patch("agent.conversation_loop.time.sleep", lambda *a, **k: None),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4037,6 +4039,7 @@ class TestRunConversation:
         ]
 
         with (
+            patch("agent.conversation_loop.time.sleep", lambda *a, **k: None),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4080,6 +4083,7 @@ class TestRunConversation:
         ]
 
         with (
+            patch("agent.conversation_loop.time.sleep", lambda *a, **k: None),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4126,6 +4130,7 @@ class TestRunConversation:
         ]
 
         with (
+            patch("agent.conversation_loop.time.sleep", lambda *a, **k: None),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),

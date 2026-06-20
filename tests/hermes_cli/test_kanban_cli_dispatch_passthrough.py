@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -17,16 +18,49 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _is_purgeable_hermes_module(name: str) -> bool:
+    return (
+        name.startswith("hermes_cli")
+        or name.startswith("hermes_state")
+        or name == "hermes_constants"
+    )
+
+
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
-    """Spin up a fresh HERMES_HOME with a clean kanban DB."""
+    """Spin up a fresh HERMES_HOME with a clean kanban DB.
+
+    Purges the hermes_cli/hermes_state/hermes_constants modules so they
+    re-import against this fixture's fresh HERMES_HOME, then **restores the
+    original module objects on teardown**. Without that restore, every test
+    file that bound these modules at import time (e.g.
+    ``import hermes_cli.kanban_db as kb``) keeps a reference to the now
+    orphaned pre-purge module while lazy imports inside it resolve to the
+    freshly re-imported copy — a module-identity split that silently points
+    later tests at the wrong kanban DB. A bisect traced 12 spurious
+    test_kanban_db.py failures (stale-claim / detect-stale / heartbeat) under
+    a single-process run straight back to this missing restore.
+    """
     test_home = tempfile.mkdtemp(prefix="kanban_cli_passthrough_")
     os.makedirs(os.path.join(test_home, "profiles", "default"), exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
-    yield test_home
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if _is_purgeable_hermes_module(name)
+    }
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield test_home
+    finally:
+        # Drop anything re-imported during the test, then put the original
+        # module objects back so sys.modules is exactly what it was before
+        # this fixture ran — no orphaned/duplicated hermes modules leak out.
+        for name in [n for n in sys.modules if _is_purgeable_hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        shutil.rmtree(test_home, ignore_errors=True)
 
 
 def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, monkeypatch):
