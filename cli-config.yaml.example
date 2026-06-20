@@ -1140,6 +1140,32 @@ display:
 #   redact_pii: false
 
 # =============================================================================
+# Kanban
+# =============================================================================
+# kanban:
+#   # Per-task input-token runaway guard (ACTIVE by default: 2,000,000 input
+#   # tokens). The dispatcher sums input tokens across all runs of one task;
+#   # once the task exceeds this ceiling it is hard-parked as `blocked` and an
+#   # operator escalation is emitted. Set to null/0 only when you deliberately
+#   # want to disable this guard.
+#   per_task_input_token_cap: 2000000
+#
+#   # Rolling-24h per-profile token advisory cap (OFF by default: null). When
+#   # set to a positive integer, tasks for the capped profile remain `ready`
+#   # and are retried on later dispatcher ticks; they are not auto-blocked.
+#   daily_token_cap_per_profile:
+#
+#   # Rolling-24h board-wide metered-spend advisory cap in USD (OFF by default:
+#   # null). When set to a positive number, all ready tasks on the board are
+#   # held while metered spend is over the cap; held tasks remain `ready`.
+#   daily_cost_cap_usd:
+#
+#   # Important: a missing key in config.yaml does NOT mean "off". load_config()
+#   # deep-merges DEFAULT_CONFIG from hermes_cli/config.py (see the default near
+#   # config.py:2399), so omitting per_task_input_token_cap keeps the active
+#   # 2,000,000-token default. Use null/0 explicitly to disable it.
+
+# =============================================================================
 # Shell-script hooks
 # =============================================================================
 # Register shell scripts as plugin-hook callbacks.  Each entry is executed as
