@@ -730,6 +730,16 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         return ownership_err
     note = args.get("note")
     board = args.get("board")
+    # B3: optional token sampling — int-coerce, None-safe.
+    def _to_int_or_none(val: object) -> Optional[int]:
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+    input_tokens = _to_int_or_none(args.get("input_tokens"))
+    output_tokens = _to_int_or_none(args.get("output_tokens"))
     try:
         kb, conn = _connect(board=board)
         try:
@@ -746,6 +756,8 @@ def _handle_heartbeat(args: dict, **kw) -> str:
                 tid,
                 note=note,
                 expected_run_id=_worker_run_id(tid),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
             if not ok:
                 return tool_error(

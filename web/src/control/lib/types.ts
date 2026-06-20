@@ -51,11 +51,23 @@ export interface Worker {
   /** Phase A: ehrliche ETA — p50/p90 abgeschlossener Runs des Profils. */
   eta_p50_seconds?: number | null;
   eta_p90_seconds?: number | null;
+  /** Phase B (Live-Telemetrie): Schritt-Key aus dem laufenden Run. */
+  step_key?: string | null;
+  /** Phase B: Modell-Override falls gesetzt (sonst null = aus Lane geerbt). */
+  model_override?: string | null;
+  /** Phase B: effektiv verwendetes Modell (override ?? lane-Modell). */
+  effective_model?: string | null;
+  /** Phase B: Live-Input-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
+  input_tokens?: number | null;
+  /** Phase B: Live-Output-Token-Zähler — nur Hermes-Runtime-Lanes, sonst null. */
+  output_tokens?: number | null;
 }
 
 export interface WorkersResponse {
   workers: Worker[];
   count: number;
+  /** Round C: kanban.max_in_progress — null when not configured. */
+  cap: number | null;
   checked_at: number;
 }
 
@@ -470,6 +482,8 @@ export interface BoardTask {
   completed_at: number | null;
   branch_name: string | null;
   latest_summary: string | null;
+  /** Round D: block reason for blocked tasks (latest task_run summary). "operator hold" marks an operator hold. Older payloads → undefined/null. */
+  block_reason?: string | null;
   auto_retry_count?: number;
   link_counts: { parents: number; children: number };
   comment_count: number;

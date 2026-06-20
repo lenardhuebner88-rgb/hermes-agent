@@ -1,15 +1,17 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { useBoard, useChainGraph } from "../hooks/useControlData";
+import { useBoard, useChainGraph, useHermesWorkers, useRunInspect, useTaskAction } from "../hooks/useControlData";
 import { buildChains } from "../lib/fleet";
-import { fmtAge, fmtTokens, formatEffectiveCost, nowSec } from "../lib/derive";
+import { fmtAge, fmtTokens, formatEffectiveCost, nowSec, workerSortRank } from "../lib/derive";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { de } from "../i18n/de";
 import { ChainSelector } from "./ketten/ChainSelector";
 import { KettenGraph } from "./ketten/KettenGraph";
-import type { ChainGraphNode } from "../lib/types";
+import type { ChainGraphNode, Worker } from "../lib/types";
+import type { WorkerActionKey } from "../components/WorkerCard";
+import { fetchJSON } from "@/lib/api";
 
 // ── Chain summary (derived from already-loaded graph nodes, no new endpoint) ──
 
@@ -103,7 +105,29 @@ function ChainSummary({ nodes, rootId: _rootId }: ChainSummaryProps) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ChainPanel({ rootId }: { rootId: string }) {
+interface ChainPanelProps {
+  rootId: string;
+  workerByTaskId: Map<string, Worker>;
+  operatorHeldIds: Set<string>;
+  inspectLoading: string | null;
+  onInspect: (runId: string) => void;
+  onWorkerAction: (runId: string, action: WorkerActionKey, extra?: { model_override?: string; assignee?: string }) => void | Promise<void>;
+  workerActionBusyRunId: string | null;
+  onResume: (taskId: string) => void | Promise<void>;
+  resumeBusyId: string | null;
+}
+
+function ChainPanel({
+  rootId,
+  workerByTaskId,
+  operatorHeldIds,
+  inspectLoading,
+  onInspect,
+  onWorkerAction,
+  workerActionBusyRunId,
+  onResume,
+  resumeBusyId,
+}: ChainPanelProps) {
   const graph = useChainGraph(rootId);
   const now = nowSec();
 
@@ -125,7 +149,20 @@ function ChainPanel({ rootId }: { rootId: string }) {
       {/* Kette-Summary card — totals derived from loaded nodes, no new endpoint */}
       <ChainSummary nodes={graph.data.nodes} rootId={graph.data.root_id} />
 
-      <KettenGraph nodes={graph.data.nodes} edges={graph.data.edges} rootId={graph.data.root_id} />
+      <KettenGraph
+        nodes={graph.data.nodes}
+        edges={graph.data.edges}
+        rootId={graph.data.root_id}
+        workerByTaskId={workerByTaskId}
+        operatorHeldIds={operatorHeldIds}
+        now={now}
+        inspectLoading={inspectLoading}
+        onInspect={onInspect}
+        onWorkerAction={onWorkerAction}
+        workerActionBusyRunId={workerActionBusyRunId}
+        onResume={onResume}
+        resumeBusyId={resumeBusyId}
+      />
       <p className="text-right text-xs text-[var(--hc-text-dim)]">
         {graph.data.checked_at ? (
           <time dateTime={new Date(graph.data.checked_at * 1000).toISOString()}>
@@ -143,6 +180,75 @@ export function ChainVizView(_props: { density?: unknown }) {
   const [params, setParams] = useSearchParams();
   const board = useBoard();
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
+
+  // Round C: Worker + Inspect + Resume wiring für die KettenGraph-Pipeline.
+  const workers = useHermesWorkers();
+  const { inspectByRun, loadingRun, inspect } = useRunInspect();
+  const [busyRun, setBusyRun] = useState<string | null>(null);
+  const workersReload = workers.reload;
+
+  const workerByTaskId = useMemo(() => {
+    const now = nowSec();
+    const map = new Map<string, Worker>();
+    for (const w of workers.data?.workers ?? []) {
+      // merge live inspect data if present
+      map.set(w.task_id, { ...w, inspect: inspectByRun[w.run_id] ?? w.inspect });
+    }
+    // sort stability: not needed for Map lookup but preserve for determinism
+    void workerSortRank; void now;
+    return map;
+  }, [workers.data, inspectByRun]);
+
+  const onWorkerAction = useCallback(async (
+    runId: string,
+    action: WorkerActionKey,
+    extra?: { model_override?: string; assignee?: string },
+  ) => {
+    setBusyRun(runId);
+    try {
+      if (action === "terminate") {
+        await fetchJSON<{ ok?: boolean }>(
+          `/api/plugins/kanban/runs/${encodeURIComponent(runId)}/terminate`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Operator-Terminate aus dem Ketten-Tab" }) },
+        );
+      } else {
+        await fetchJSON<{ ok?: boolean }>(
+          `/api/plugins/kanban/workers/${encodeURIComponent(runId)}/action`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, confirm: true, ...extra }) },
+        );
+      }
+    } catch {
+      // errors are non-fatal in the Ketten tab
+    } finally {
+      setBusyRun(null);
+      await workersReload();
+    }
+  }, [workersReload]);
+
+  // Resume: unblock-path via PATCH /tasks/{id} (status → ready).
+  const { run: runTaskAction, busyId: resumeBusyId } = useTaskAction(board.reload);
+  const onResume = useCallback(async (taskId: string) => {
+    await runTaskAction(taskId, "ready");
+  }, [runTaskAction]);
+
+  // Operator-held tasks: blocked tasks where block_reason contains "operator hold"
+  // (case-insensitive). Tasks blocked by other causes (circuit-breaker, review-
+  // required, dependency stall) do NOT show the Resume button. Older board
+  // payloads without block_reason fall through to null → not treated as held.
+  const operatorHeldIds = useMemo(() => {
+    const allTasks = board.data?.columns.flatMap((c) => c.tasks) ?? [];
+    const held = new Set<string>();
+    for (const t of allTasks) {
+      if (
+        t.status === "blocked" &&
+        t.block_reason != null &&
+        t.block_reason.toLowerCase().includes("operator hold")
+      ) {
+        held.add(t.id);
+      }
+    }
+    return held;
+  }, [board.data]);
 
   const activeChains = useMemo(() => {
     if (!board.data) return [];
@@ -209,7 +315,20 @@ export function ChainVizView(_props: { density?: unknown }) {
             </div>
           </div>
 
-          {focusedRootId ? <ChainPanel key={focusedRootId} rootId={focusedRootId} /> : null}
+          {focusedRootId ? (
+            <ChainPanel
+              key={focusedRootId}
+              rootId={focusedRootId}
+              workerByTaskId={workerByTaskId}
+              operatorHeldIds={operatorHeldIds}
+              inspectLoading={loadingRun}
+              onInspect={inspect}
+              onWorkerAction={onWorkerAction}
+              workerActionBusyRunId={busyRun}
+              onResume={onResume}
+              resumeBusyId={resumeBusyId}
+            />
+          ) : null}
         </div>
       )}
     </div>

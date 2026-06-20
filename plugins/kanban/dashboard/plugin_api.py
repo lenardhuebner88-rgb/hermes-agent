@@ -1424,6 +1424,14 @@ def get_board(
         # are omitted, so their cards render no cost footer.
         cost_map = kanban_db.batch_task_costs(conn, [t.id for t in tasks])
 
+        # Block-reason for blocked tasks: the latest task_runs.summary for each
+        # blocked task distinguishes operator holds ("operator hold") from other
+        # blocked causes (circuit-breaker, dependency stall). One batch query.
+        blocked_ids = [t.id for t in tasks if t.status == "blocked"]
+        block_reason_map: dict[str, Optional[str]] = {}
+        if blocked_ids:
+            block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
+
         for t in tasks:
             full = summary_map.get(t.id)
             preview = (
@@ -1435,6 +1443,11 @@ def get_board(
                 # body alone dominates the payload on real boards.
                 d.pop("body", None)
                 d.pop("result", None)
+            # Surface block_reason for blocked tasks so the UI can distinguish
+            # operator holds (block_reason contains "operator hold") from other
+            # blocked states (circuit-breaker, review-required, etc.).
+            # Non-blocked tasks carry null — additive, old clients skip the key.
+            d["block_reason"] = block_reason_map.get(t.id) if t.status == "blocked" else None
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -2575,7 +2588,9 @@ def list_active_workers(
                 r.max_runtime_seconds,
                 r.status       AS run_status,
                 r.outcome      AS run_outcome,
-                t.result       AS block_reason
+                t.result       AS block_reason,
+                r.step_key,
+                t.model_override AS model_override
             FROM task_runs r
             JOIN tasks t ON t.id = r.task_id
             WHERE r.ended_at IS NULL
@@ -2608,10 +2623,20 @@ def list_active_workers(
         eta = kanban_db.run_duration_percentiles(
             conn, [row["profile"] for row in rows],
         )
+        # B1: batch lane-model lookup — one call per distinct (profile, board)
+        # pair, not one per worker row.
+        distinct_profiles = list({(row["profile"] or "").strip() for row in rows})
+        lane_models: dict[str, Optional[str]] = {}
+        for prof in distinct_profiles:
+            _, lm = kanban_db._lane_provider_model_for_profile(prof, board=board)
+            lane_models[prof] = lm
         workers = []
         for row in rows:
             note = notes.get(int(row["run_id"]), {})
             prof_eta = eta.get((row["profile"] or "").strip(), {})
+            model_override = row["model_override"] or None
+            lane_model = lane_models.get((row["profile"] or "").strip())
+            effective_model = model_override or lane_model
             workers.append({
                 "run_id": row["run_id"],
                 "task_id": row["task_id"],
@@ -2635,11 +2660,84 @@ def list_active_workers(
                 "last_heartbeat_note_at": note.get("at"),
                 "eta_p50_seconds": prof_eta.get("p50"),
                 "eta_p90_seconds": prof_eta.get("p90"),
+                # B1: step progress + model resolution
+                "step_key": row["step_key"],
+                "model_override": model_override,
+                "effective_model": effective_model,
             })
-        return {"workers": workers, "count": len(workers), "checked_at": int(time.time())}
+        # F4: expose the live concurrency cap (kanban.max_in_progress) so the UI
+        # can show capacity/Engpass honestly — "3 von 3 Worker, warum dispatcht
+        # nichts" instead of guessing. None when no cap is configured.
+        cap: Optional[int] = None
+        try:
+            from hermes_cli.config import load_config
+            _k = (load_config() or {}).get("kanban") or {}
+            _cap = _k.get("max_in_progress")
+            cap = int(_cap) if isinstance(_cap, (int, float)) and int(_cap) >= 1 else None
+        except Exception:
+            cap = None
+        return {
+            "workers": workers,
+            "count": len(workers),
+            "cap": cap,
+            "checked_at": int(time.time()),
+        }
     finally:
         conn.close()
 
+
+# ---------------------------------------------------------------------------
+# B2 — Task activity timeline (read-only)
+# ---------------------------------------------------------------------------
+_ACTIVITY_DEFAULT_LIMIT = 12
+_ACTIVITY_MAX_LIMIT = 50
+
+
+@router.get("/tasks/{task_id}/activity")
+def get_task_activity(
+    task_id: str,
+    limit: int = Query(_ACTIVITY_DEFAULT_LIMIT, ge=1, le=_ACTIVITY_MAX_LIMIT),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Recent task events for the activity timeline in the cockpit view (F1).
+
+    Returns the most recent *limit* events (newest-first) from ``task_events``.
+    ``note`` is extracted from ``payload.note`` if present, otherwise null.
+    Default limit 12; hard-capped at 50.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        # Hard-cap regardless of the query-param validator (defence-in-depth).
+        effective_limit = min(max(1, int(limit)), _ACTIVITY_MAX_LIMIT)
+        rows = conn.execute(
+            """
+            SELECT id, run_id, kind, payload, created_at
+              FROM task_events
+             WHERE task_id = ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (task_id, effective_limit),
+        ).fetchall()
+        events = []
+        for row in rows:
+            note: Optional[str] = None
+            if row["payload"]:
+                try:
+                    note = json.loads(row["payload"]).get("note")
+                except Exception:
+                    note = None
+            events.append({
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "kind": row["kind"],
+                "note": note,
+                "at": row["created_at"],
+            })
+        return {"task_id": task_id, "events": events}
+    finally:
+        conn.close()
 
 
 @router.get("/decision-queue")
@@ -4234,12 +4332,15 @@ def terminate_run_endpoint(
 # claim or dispatch logic is introduced here.
 # ---------------------------------------------------------------------------
 class WorkerActionBody(BaseModel):
-    action: ShortText = Field(..., description="unlock | nudge | restart | dispatch")
+    action: ShortText = Field(..., description="unlock | nudge | restart | dispatch | hold | resume")
     confirm: bool = False
     reason: Optional[FreeText] = None
+    # B4: optional overrides applied on restart
+    model_override: Optional[ShortText] = None
+    assignee: Optional[ShortText] = None
 
 
-_WORKER_ACTIONS = {"unlock", "nudge", "restart", "dispatch"}
+_WORKER_ACTIONS = {"unlock", "nudge", "restart", "dispatch", "hold", "resume"}
 
 
 @router.post("/workers/{run_id}/action")
@@ -4308,12 +4409,47 @@ def worker_action_endpoint(
             return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
                     "detail": "Claim gelöst — Task ist wieder beanspruchbar (ready)."}
 
+        # B4 — hold: atomically stop the worker and park the task as blocked so
+        # no Dispatcher tick can claim it between the kill and the block step.
+        # The reason "operator hold" contains the word "operator" which matches
+        # _AUTO_RETRY_QUESTION_RE inside auto_retry_blocked_tasks — so that
+        # sweep classifies it as "operator_question" (non-retryable) and skips it.
+        # hold_task performs the full transition in a single write_txn.
+        if action == "hold":
+            ok = kanban_db.hold_task(conn, task_id, reason="operator hold")
+            if not ok:
+                log.info("control worker-action=hold run=%s task=%s hold=False", run_id, task_id)
+                return {"ok": False, "action": action, "run_id": run_id, "task_id": task_id,
+                        "detail": "Konnte Task nicht halten (nicht running)."}
+            log.info("control worker-action=hold run=%s task=%s parked=blocked", run_id, task_id)
+            return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
+                    "detail": "Worker gestoppt und Task als operator_hold geparkt (kein Auto-Redispatch)."}
+
+        # B4 — resume: release the operator_hold block back to ready/todo.
+        if action == "resume":
+            released = kanban_db.unblock_task(conn, task_id)
+            log.info("control worker-action=resume run=%s task=%s released=%s", run_id, task_id, released)
+            if not released:
+                return {"ok": False, "action": action, "run_id": run_id, "task_id": task_id,
+                        "detail": "Hold lösen fehlgeschlagen (Task nicht blocked/scheduled)."}
+            return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
+                    "detail": "Hold aufgehoben — Task ist wieder beanspruchbar."}
+
         # restart: reclaim the run, then one dispatcher tick so it is re-picked.
+        # B4: apply model_override / assignee overrides BEFORE re-dispatch.
         ok = kanban_db.reclaim_task(conn, task_id, reason=(payload.reason or "control restart"))
         if not ok:
             log.info("control worker-action=restart run=%s task=%s reclaimed=False", run_id, task_id)
             return {"ok": False, "action": action, "run_id": run_id, "task_id": task_id,
                     "detail": "Konnte Run nicht zurückholen (kein aktiver Claim)."}
+        if payload.model_override:
+            kanban_db.set_task_model_override(conn, task_id, payload.model_override)
+        if payload.assignee:
+            with kanban_db.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET assignee = ? WHERE id = ?",
+                    (payload.assignee.strip() or None, task_id),
+                )
         redispatch = kanban_db.dispatch_once(conn, board=board)
         log.info("control worker-action=restart run=%s task=%s reclaimed=True", run_id, task_id)
         return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,

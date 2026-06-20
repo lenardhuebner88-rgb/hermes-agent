@@ -183,6 +183,145 @@ describe('formatEffectiveCost', () => {
   });
 });
 
+// ── Zeit-Achsen-Zustand (Phase B) ────────────────────────────────────────
+import { workerTimeAxisState, timeAxisScaleMax } from './derive';
+
+describe('workerTimeAxisState', () => {
+  const BUDGET = 7200;
+
+  it('im_plan wenn elapsed < p50', () => {
+    const r = workerTimeAxisState(300, 600, 900, BUDGET, 10, true);
+    expect(r.key).toBe('im_plan');
+    expect(r.tone).toBe('emerald');
+    expect(r.noEta).toBe(false);
+  });
+
+  it('laeuft wenn p50 ≤ elapsed < p90', () => {
+    const r = workerTimeAxisState(700, 600, 900, BUDGET, 10, true);
+    expect(r.key).toBe('laeuft');
+    expect(r.tone).toBe('cyan');
+  });
+
+  it('langsamer wenn elapsed ≥ p90', () => {
+    const r = workerTimeAxisState(950, 600, 900, BUDGET, 10, true);
+    expect(r.key).toBe('langsamer');
+    expect(r.tone).toBe('amber');
+  });
+
+  it('steht überschreibt im_plan wenn Heartbeat > STUCK_HEARTBEAT_S und hasHeartbeat', () => {
+    const r = workerTimeAxisState(300, 600, 900, BUDGET, STUCK_HEARTBEAT_S + 1, true);
+    expect(r.key).toBe('steht');
+    expect(r.tone).toBe('red');
+  });
+
+  it('steht greift NICHT ohne Heartbeat (hasHeartbeat=false)', () => {
+    // Ohne Heartbeat darf "steht" nicht feuern, auch bei großem heartbeatAge
+    const r = workerTimeAxisState(300, 600, 900, BUDGET, STUCK_HEARTBEAT_S + 1, false);
+    expect(r.key).toBe('im_plan');
+  });
+
+  it('ueber_budget wenn elapsed > budget', () => {
+    const r = workerTimeAxisState(7300, 600, 900, 7200, 10, true);
+    expect(r.key).toBe('ueber_budget');
+    expect(r.tone).toBe('red');
+  });
+
+  it('steht schlägt ueber_budget (stuck hat Vorrang)', () => {
+    const r = workerTimeAxisState(7300, 600, 900, 7200, STUCK_HEARTBEAT_S + 1, true);
+    expect(r.key).toBe('steht');
+  });
+
+  it('no_eta wenn p50=null', () => {
+    const r = workerTimeAxisState(300, null, null, BUDGET, 10, true);
+    expect(r.key).toBe('no_eta');
+    expect(r.noEta).toBe(true);
+  });
+
+  it('no_eta wenn p50=0', () => {
+    const r = workerTimeAxisState(300, 0, 900, BUDGET, 10, true);
+    expect(r.key).toBe('no_eta');
+  });
+
+  it('noEta=true auch wenn stuck (wegen fehlender ETA)', () => {
+    const r = workerTimeAxisState(300, null, null, BUDGET, STUCK_HEARTBEAT_S + 1, true);
+    expect(r.key).toBe('steht');
+    expect(r.noEta).toBe(true);
+  });
+});
+
+describe('timeAxisScaleMax', () => {
+  it('mindestens elapsed*1.1 wenn kein p90 und kein Budget', () => {
+    expect(timeAxisScaleMax(100, null, 0)).toBeCloseTo(110);
+  });
+
+  it('max(budget, p90*1.2, elapsed*1.1)', () => {
+    // budget=7200, p90=900 → p90*1.2=1080, elapsed*1.1=330 → max=7200
+    expect(timeAxisScaleMax(300, 900, 7200)).toBe(7200);
+  });
+
+  it('p90*1.2 wenn größer als budget', () => {
+    expect(timeAxisScaleMax(300, 9000, 7200)).toBe(10800);
+  });
+});
+
+// ── F2: Burn-Wächter ─────────────────────────────────────────────────────
+import { workerBurnRate } from './derive';
+
+describe('workerBurnRate', () => {
+  it('noData wenn keine Tokens vorhanden', () => {
+    const r = workerBurnRate(null, null, 600);
+    expect(r.noData).toBe(true);
+    expect(r.ratePerMin).toBeNull();
+    expect(r.projectedTotal).toBeNull();
+  });
+
+  it('noData wenn elapsed=0', () => {
+    const r = workerBurnRate(1000, 500, 0);
+    expect(r.noData).toBe(false); // Tokens vorhanden
+    expect(r.ratePerMin).toBeNull(); // aber kein elapsed
+    expect(r.projectedTotal).toBeNull();
+  });
+
+  it('berechnet Rate aus In+Out über elapsed', () => {
+    // 1500 Tokens in 300s (5 Min) = 300 Tok/min
+    const r = workerBurnRate(1000, 500, 300);
+    expect(r.noData).toBe(false);
+    expect(r.ratePerMin).toBeCloseTo(300, 1);
+    expect(r.projectedTotal).toBeNull(); // kein ETA
+  });
+
+  it('berechnet Hochrechnung wenn p50 bekannt', () => {
+    // 300 Tok/min × 10 Min (600s p50) = 3000
+    const r = workerBurnRate(1000, 500, 300, 600);
+    expect(r.ratePerMin).toBeCloseTo(300, 1);
+    expect(r.projectedTotal).toBeCloseTo(3000, 0);
+  });
+
+  it('nutzt Budget als Hochrechnungs-Horizont wenn kein p50', () => {
+    // 300 Tok/min × 20 Min (1200s Budget) = 6000
+    const r = workerBurnRate(1000, 500, 300, null, 1200);
+    expect(r.projectedTotal).toBeCloseTo(6000, 0);
+  });
+
+  it('p50 hat Vorrang vor Budget für Hochrechnung', () => {
+    // p50=600s (300 Tok/min × 10min=3000), Budget=1200 wäre 6000 — p50 gewinnt
+    const r = workerBurnRate(1000, 500, 300, 600, 1200);
+    expect(r.projectedTotal).toBeCloseTo(3000, 0);
+  });
+
+  it('funktioniert wenn nur outputTokens gesetzt (input=null)', () => {
+    // 600 out in 60s = 600 Tok/min
+    const r = workerBurnRate(null, 600, 60);
+    expect(r.noData).toBe(false);
+    expect(r.ratePerMin).toBeCloseTo(600, 1);
+  });
+
+  it('keine Hochrechnung wenn p50=0', () => {
+    const r = workerBurnRate(1000, 500, 300, 0);
+    expect(r.projectedTotal).toBeNull();
+  });
+});
+
 // ── Runaway-Erkennung (Phase 2, Operator-Vertrag 2026-06-10) ───────────────
 import { workerRunaway, RUNAWAY_RUNTIME_WARN_PCT } from './derive';
 
@@ -212,5 +351,37 @@ describe('workerRunaway', () => {
     const r = workerRunaway(w, NOW);
     expect(r.level).toBe('none');
     expect(r.pct).toBe(0);
+  });
+});
+
+// ── F4: Kapazitäts-Ableitung (Round C) ───────────────────────────────────────
+import { deriveCapacity } from './derive';
+
+describe('deriveCapacity', () => {
+  it('kein Engpass wenn count < cap', () => {
+    const r = deriveCapacity(2, 3, 5);
+    expect(r.bottleneck).toBe(false);
+    expect(r.count).toBe(2);
+    expect(r.cap).toBe(3);
+    expect(r.queueDepth).toBe(5);
+  });
+
+  it('Engpass wenn count >= cap UND queue > 0', () => {
+    expect(deriveCapacity(3, 3, 2).bottleneck).toBe(true);
+    expect(deriveCapacity(4, 3, 1).bottleneck).toBe(true);
+  });
+
+  it('kein Engpass wenn cap null (nicht konfiguriert)', () => {
+    const r = deriveCapacity(3, null, 10);
+    expect(r.bottleneck).toBe(false);
+    expect(r.cap).toBeNull();
+  });
+
+  it('kein Engpass wenn queue leer, auch bei count >= cap', () => {
+    expect(deriveCapacity(3, 3, 0).bottleneck).toBe(false);
+  });
+
+  it('count=0, cap=3, queue=0 → kein Engpass', () => {
+    expect(deriveCapacity(0, 3, 0).bottleneck).toBe(false);
   });
 });

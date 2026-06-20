@@ -3,16 +3,41 @@ import { cn } from "@/lib/utils";
 import { FleetEmptyState } from "../../components/fleet/atoms";
 import { ChainNodeCard } from "./ChainNodeCard";
 import { linearizeNodes } from "./dagLayout";
-import type { ChainGraphEdge, ChainGraphNode } from "../../lib/types";
+import type { ChainGraphEdge, ChainGraphNode, Worker } from "../../lib/types";
+import type { WorkerActionKey } from "../../components/WorkerCard";
 import { de } from "../../i18n/de";
 
 interface KettenGraphProps {
   nodes: ChainGraphNode[];
   edges: ChainGraphEdge[];
   rootId: string;
+  /** Round C: aktive Worker, geindext nach task_id. */
+  workerByTaskId?: Map<string, Worker>;
+  /** Round C: task-IDs, die als Operator-Hold gelten (blocked + hold-Grund). */
+  operatorHeldIds?: Set<string>;
+  now?: number;
+  inspectLoading?: string | null;
+  onInspect?: (runId: string) => void;
+  onWorkerAction?: (runId: string, action: WorkerActionKey, extra?: { model_override?: string; assignee?: string }) => void | Promise<void>;
+  workerActionBusyRunId?: string | null;
+  onResume?: (taskId: string) => void | Promise<void>;
+  resumeBusyId?: string | null;
 }
 
-export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
+export function KettenGraph({
+  nodes,
+  edges,
+  rootId,
+  workerByTaskId,
+  operatorHeldIds,
+  now,
+  inspectLoading,
+  onInspect,
+  onWorkerAction,
+  workerActionBusyRunId,
+  onResume,
+  resumeBusyId,
+}: KettenGraphProps) {
   const ordered = useMemo(() => linearizeNodes(nodes, edges), [nodes, edges]);
 
   // The pipeline line is cyan up to (and including) the last running/done node,
@@ -55,6 +80,9 @@ export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
           const isRoot = node.id === rootId;
           const isRunning = node.status === "running";
           const dotKind = isRunning ? "running" : isRoot ? "root" : "open";
+          const worker = workerByTaskId?.get(node.id) ?? null;
+          const isOperatorHeld = operatorHeldIds?.has(node.id) ?? false;
+          const workerRunId = worker?.run_id ?? null;
 
           // Node dot: 16×16, centred on the pipeline line at left:13px (line centre = 14.5px).
           // Position: left = -(38 - 13 + 8) = -33px from content edge → aligns with line centre.
@@ -84,7 +112,19 @@ export function KettenGraph({ nodes, edges, rootId }: KettenGraphProps) {
                     : "0 0 0 4px var(--hc-bg)",
                 }}
               />
-              <ChainNodeCard node={node} isRoot={isRoot} />
+              <ChainNodeCard
+                node={node}
+                isRoot={isRoot}
+                worker={isRunning ? worker : undefined}
+                isOperatorHeld={isOperatorHeld}
+                now={now}
+                inspectLoading={workerRunId != null && inspectLoading === workerRunId}
+                onInspect={onInspect}
+                onWorkerAction={onWorkerAction}
+                workerActionBusy={workerRunId != null && workerActionBusyRunId === workerRunId}
+                onResume={onResume}
+                resumeBusy={resumeBusyId === node.id}
+              />
             </div>
           );
         })}

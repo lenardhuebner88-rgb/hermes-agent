@@ -1,8 +1,10 @@
-import { forwardRef, memo } from "react";
+import { forwardRef, memo, useState } from "react";
 import { cn } from "@/lib/utils";
-import { fmtDur, fmtTokens, formatEffectiveCost } from "../../lib/derive";
+import { fmtDur, fmtTokens, formatEffectiveCost, workerHealth } from "../../lib/derive";
 import { StatusPill } from "../../components/atoms";
-import type { ChainGraphNode } from "../../lib/types";
+import { WorkerCard } from "../../components/WorkerCard";
+import type { ChainGraphNode, Worker } from "../../lib/types";
+import type { WorkerActionKey } from "../../components/WorkerCard";
 import { statusDot, statusTone } from "./dagLayout";
 import { de } from "../../i18n/de";
 import { taskStatusLabel } from "../../lib/tones";
@@ -10,12 +12,32 @@ import { taskStatusLabel } from "../../lib/tones";
 export interface ChainNodeCardProps {
   node: ChainGraphNode;
   isRoot: boolean;
+  /** Round C: laufender Worker für diesen Knoten (null = noch nicht gestartet). */
+  worker?: Worker | null;
+  /** Round C: true wenn der Task blocked + Operator-Hold ist → Fortsetzen-Button. */
+  isOperatorHeld?: boolean;
+  now?: number;
+  inspectLoading?: boolean;
+  onInspect?: (runId: string) => void;
+  onWorkerAction?: (runId: string, action: WorkerActionKey, extra?: { model_override?: string; assignee?: string }) => void | Promise<void>;
+  workerActionBusy?: boolean;
+  /** Round C: Callback für Fortsetzen (Unblock via PATCH /tasks/{id} → ready). */
+  onResume?: (taskId: string) => void | Promise<void>;
+  resumeBusy?: boolean;
 }
 
 export const ChainNodeCard = memo(
-  forwardRef<HTMLDivElement, ChainNodeCardProps>(function ChainNodeCard({ node, isRoot }, ref) {
+  forwardRef<HTMLDivElement, ChainNodeCardProps>(function ChainNodeCard(
+    { node, isRoot, worker, isOperatorHeld, now, inspectLoading, onInspect, onWorkerAction, workerActionBusy, onResume, resumeBusy },
+    ref,
+  ) {
+    // now-Fallback ohne Date.now() im Default-Parameter (impure function lint).
+    const effectiveNow = now ?? 0;
     const tone = statusTone(node.status);
     const dot = statusDot(node.status);
+
+    // Round C: laufende Knoten sind erweiterbar (Cockpit inline).
+    const [expanded, setExpanded] = useState(false);
 
     // Prefer the richer latest_run runtime; fall back to the task-level value.
     const runtime = node.latest_run?.runtime_seconds ?? node.runtime_seconds ?? null;
@@ -74,6 +96,17 @@ export const ChainNodeCard = memo(
               </span>
             ) : null}
             <StatusPill tone={tone} label={taskStatusLabel[node.status] ?? node.status} dot={dot} size="sm" />
+            {/* Round C: Aufklapp-Toggle für laufende Knoten */}
+            {isRunning ? (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="hc-mono rounded-full border border-[var(--hc-border)] px-2 py-0.5 text-[10px] text-[var(--hc-text-soft)] transition hover:border-[var(--hc-border-strong)]"
+                aria-expanded={expanded}
+              >
+                {expanded ? "▲" : "▼"}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -118,6 +151,53 @@ export const ChainNodeCard = memo(
             ) : null}
           </div>
         )}
+
+        {/* Round C: Inline WorkerCard-Cockpit für laufende Knoten (aufgeklappt). */}
+        {isRunning && expanded ? (
+          <div className="mt-4 border-t border-[var(--hc-border)] pt-4">
+            {worker && onInspect && onWorkerAction ? (
+              <WorkerCard
+                worker={worker}
+                health={workerHealth(worker, effectiveNow)}
+                density="airy"
+                collapsible={false}
+                now={effectiveNow}
+                inspectLoading={inspectLoading}
+                onInspect={onInspect}
+                onAction={onWorkerAction}
+                actionBusy={workerActionBusy}
+              />
+            ) : worker == null ? (
+              <p className="hc-mono text-[11px] text-[var(--hc-text-dim)]">
+                {de.flow.chainNodeWorkerStarting}
+              </p>
+            ) : (
+              <p className="hc-mono text-[11px] text-[var(--hc-text-dim)]">
+                {de.flow.chainNodeWorkerNoData}
+              </p>
+            )}
+          </div>
+        ) : null}
+
+        {/* Round C: Fortsetzen-Button für Operator-Hold-Knoten. */}
+        {isOperatorHeld && onResume ? (
+          <div className="mt-4 border-t border-[var(--hc-border)] pt-3">
+            <button
+              type="button"
+              disabled={resumeBusy}
+              onClick={() => void onResume(node.id)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-[8px] border border-emerald-400/50 bg-emerald-400/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition",
+                "hover:border-emerald-400/80 hover:bg-emerald-400/20 disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
+            >
+              {resumeBusy ? "…" : de.flow.chainNodeResume}
+            </button>
+            <p className="mt-1.5 text-[10px] text-[var(--hc-text-dim)]">
+              {de.flow.chainNodeResumeHint}
+            </p>
+          </div>
+        ) : null}
 
         {/* Footer: assignee (left) · cost read-out (right), on a hairline. */}
         <div className="mt-3 flex min-w-0 items-center justify-between gap-2 border-t border-[var(--hc-border)] pt-2.5">

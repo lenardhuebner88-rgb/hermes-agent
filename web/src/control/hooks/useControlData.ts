@@ -41,9 +41,11 @@ import {
   RunInspectSchema,
   SystemHealthResponseSchema,
   WorkersResponseSchema,
+  WorkerActivityResponseSchema,
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
@@ -586,6 +588,25 @@ export function useHermesWorkers() {
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
     5000,
   );
+}
+
+// F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).
+// Interval ~8000ms; pausiert automatisch wenn taskId null.
+export function useWorkerActivity(taskId: string | null) {
+  const key = taskId ? `worker-activity/${taskId}` : "worker-activity/__none__";
+  const loader = useCallback(async (): Promise<WorkerActivityResponse> => {
+    if (!taskId) return { task_id: "", events: [] };
+    return parseOrThrow(
+      WorkerActivityResponseSchema,
+      await fetchJSON<unknown>(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activity?limit=12`),
+      `worker-activity/${taskId}`,
+    );
+  }, [taskId]);
+  // Null-taskId → Intervall auf sehr groß setzen + leeren Snapshot zurückgeben
+  // (usePolling pausiert nicht von sich aus; Loader gibt sofort leeres Objekt zurück)
+  const result = usePolling<WorkerActivityResponse>(key, loader, taskId ? 8000 : 600_000);
+  if (!taskId) return { ...result, data: { task_id: "", events: [] } as WorkerActivityResponse };
+  return result;
 }
 
 export function useAccountUsage() {

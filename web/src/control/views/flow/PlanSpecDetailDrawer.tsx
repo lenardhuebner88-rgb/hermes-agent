@@ -27,13 +27,15 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
     return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
   }, [onClose]);
   const content = (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50 p-3 backdrop-blur-sm" role="presentation" onClick={onClose}>
+    // Mobil: Bottom-Sheet (items-end); Desktop (sm+): rechtsbündig (justify-end).
+    <div className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm sm:items-stretch sm:p-3" role="presentation" onClick={onClose}>
       {/* hc-surface-card = solider Daylight-Fill (--hc-panel-card) + Border +
           Elevation. Früher lag hier der Token hc-surface (ohne -card) als Fill —
           den gibt es NICHT, also war das var() ohne Fallback transparent und das
           Panel durchsichtig/unlesbar. (Klassen-Literal hier bewusst vermeiden —
           Tailwind v4 scannt auch Kommentare und würde sonst tote CSS erzeugen.) */}
-      <div className="hc-surface-card flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl shadow-2xl" role="dialog" aria-modal="true" aria-label="PlanSpec Details" onClick={(e) => e.stopPropagation()}>
+      {/* Mobil: volle Breite, abgerundete Oberkante; Desktop (sm+): max-w-2xl, alle Ecken rund. */}
+      <div className="hc-surface-card flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl sm:max-h-full sm:h-full sm:max-w-2xl sm:rounded-2xl" role="dialog" aria-modal="true" aria-label="PlanSpec Details" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
           <FileText className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" />
           <div className="min-w-0 flex-1">

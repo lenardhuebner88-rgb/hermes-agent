@@ -108,6 +108,71 @@ export function workerRunaway(w: Worker, now: number = nowSec()): RunawayState {
   return { level, pct, reasons };
 }
 
+/* ── Zeit-Achsen-Zustand (Phase B: ehrliche Zeit-Achse im Cockpit) ────────
+ * Leitet ein Zustandswort + Ton aus elapsed / p50 / p90 / budget / heartbeat ab.
+ * Stuck-Check schlägt alle anderen (ein hängender Worker ist immer rot, auch wenn
+ * er eigentlich noch im Plan wäre). Fehlt p50/p90 (zu wenig Historie) → noEta.
+ */
+
+export type TimeAxisStateKey =
+  | 'im_plan'         // elapsed < p50              → emerald
+  | 'laeuft'          // p50 ≤ elapsed < p90         → cyan
+  | 'langsamer'       // elapsed ≥ p90               → amber
+  | 'steht'           // heartbeatAge > STUCK_HEARTBEAT_S → red (überschreibt)
+  | 'ueber_budget'    // elapsed > budget            → red
+  | 'no_eta';         // p50/p90 null → ehrlicher Fallback
+
+export interface TimeAxisState {
+  key: TimeAxisStateKey;
+  tone: 'emerald' | 'cyan' | 'amber' | 'red' | 'zinc';
+  label: string;
+  /** true wenn p50/p90 nicht vorhanden (zu wenig Historie) */
+  noEta: boolean;
+}
+
+export function workerTimeAxisState(
+  elapsed: number,
+  p50: number | null | undefined,
+  p90: number | null | undefined,
+  budget: number,
+  heartbeatAge: number,
+  hasHeartbeat: boolean,
+): TimeAxisState {
+  // Stuck überschreibt alles (wie workerHealth: nur wenn tatsächlich Heartbeats existieren)
+  if (hasHeartbeat && heartbeatAge > STUCK_HEARTBEAT_S) {
+    return { key: 'steht', tone: 'red', label: 'steht', noEta: p50 == null || p90 == null };
+  }
+  // Über Budget
+  if (budget > 0 && elapsed > budget) {
+    return { key: 'ueber_budget', tone: 'red', label: 'über Budget', noEta: p50 == null || p90 == null };
+  }
+  // Fehlende ETA → noEta-Fallback
+  if (p50 == null || p90 == null || p50 <= 0) {
+    return { key: 'no_eta', tone: 'zinc', label: 'kein Vergleichswert', noEta: true };
+  }
+  if (elapsed >= p90) {
+    return { key: 'langsamer', tone: 'amber', label: 'langsamer als üblich', noEta: false };
+  }
+  if (elapsed >= p50) {
+    return { key: 'laeuft', tone: 'cyan', label: 'läuft', noEta: false };
+  }
+  return { key: 'im_plan', tone: 'emerald', label: 'im Plan', noEta: false };
+}
+
+/** Berechnet die Skalierungs-Max der Zeit-Achse.
+ * Immer mindestens budget oder p90*1.2 oder elapsed*1.1 — damit Marker nie
+ * über den Rand hinausragen und der aktuelle Zeitpunkt sichtbar bleibt. */
+export function timeAxisScaleMax(
+  elapsed: number,
+  p90: number | null | undefined,
+  budget: number,
+): number {
+  const candidates: number[] = [elapsed * 1.1];
+  if (p90 != null && p90 > 0) candidates.push(p90 * 1.2);
+  if (budget > 0) candidates.push(budget);
+  return Math.max(...candidates, 1);
+}
+
 /* ── Übersichts-Aggregation („Ist alles gesund?") ──────────────────────── */
 
 export type Warning = { kind: 'hermes'; worker: Worker; health: WorkerHealth };
@@ -252,7 +317,76 @@ export function formatEffectiveCost({
   return { text: "—", estimated: false };
 }
 
+/* ── F2: Burn-Wächter ──────────────────────────────────────────────────────
+ * Berechnet Burn-Rate und optionale Hochrechnung aus echten Token-Zahlen.
+ * Alle Felder null-safe — wenn keine Tokens vorhanden, gibt die Funktion
+ * einen expliziten noData-Marker zurück (niemals erfundene Werte).
+ */
+
+export interface BurnInfo {
+  /** Tokens/Minute (Gesamt over elapsed). null wenn keine Tokens vorhanden. */
+  ratePerMin: number | null;
+  /** Hochrechnung = rate × p50-Minuten (wenn eta verfügbar). Sonst null. */
+  projectedTotal: number | null;
+  /** true wenn überhaupt keine Live-Tokens vorhanden */
+  noData: boolean;
+}
+
+/**
+ * Berechnet Burn-Rate + optionale Hochrechnung.
+ * @param inputTokens  Gesamte In-Tokens seit Run-Start (oder null)
+ * @param outputTokens Gesamte Out-Tokens seit Run-Start (oder null)
+ * @param elapsedSec   Laufzeit in Sekunden (> 0 erwartet)
+ * @param etaP50Sec    ETA p50 in Sekunden (optional — für Hochrechnung)
+ * @param budgetSec    Budget in Sekunden (Fallback für Hochrechnung wenn kein p50)
+ */
+export function workerBurnRate(
+  inputTokens: number | null | undefined,
+  outputTokens: number | null | undefined,
+  elapsedSec: number,
+  etaP50Sec?: number | null,
+  budgetSec?: number,
+): BurnInfo {
+  const hasData = inputTokens != null || outputTokens != null;
+  if (!hasData || elapsedSec <= 0) {
+    return { ratePerMin: null, projectedTotal: null, noData: !hasData };
+  }
+  const total = (inputTokens ?? 0) + (outputTokens ?? 0);
+  const elapsedMin = elapsedSec / 60;
+  const ratePerMin = total / elapsedMin;
+
+  // Hochrechnung: rate × p50-Minuten (Vorrang) oder Budget-Minuten (Fallback)
+  const horizonSec = (etaP50Sec != null && etaP50Sec > 0)
+    ? etaP50Sec
+    : (budgetSec != null && budgetSec > 0 ? budgetSec : null);
+  const projectedTotal = horizonSec != null ? ratePerMin * (horizonSec / 60) : null;
+
+  return { ratePerMin, projectedTotal, noData: false };
+}
+
 /** Nur Uhrzeit "HH:MM" aus ISO-8601-String ODER epoch-Sekunden; leer/ungültig → "–". */
+// ── F4: Kapazitäts-Ableitung (Round C) ───────────────────────────────────────
+// Pure function — testbar ohne DOM.
+export interface CapacityState {
+  /** Anzahl aktiver Worker. */
+  count: number;
+  /** Konfiguriertes Worker-Maximum — null = nicht konfiguriert. */
+  cap: number | null;
+  /** Anzahl wartender Tasks (status=ready OR todo). */
+  queueDepth: number;
+  /** true wenn count >= cap (und cap != null) UND queue > 0. */
+  bottleneck: boolean;
+}
+
+export function deriveCapacity(
+  count: number,
+  cap: number | null,
+  queueDepth: number,
+): CapacityState {
+  const bottleneck = cap != null && count >= cap && queueDepth > 0;
+  return { count, cap, queueDepth, bottleneck };
+}
+
 export function fmtClockTime(at: string | number): string {
   if (at === "" || (typeof at === "number" && at <= 0)) return "–";
   const value = typeof at === 'number' ? at * 1000 : Date.parse(at);

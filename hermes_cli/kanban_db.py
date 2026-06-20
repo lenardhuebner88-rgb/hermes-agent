@@ -6200,6 +6200,75 @@ def reclaim_task(
     return True
 
 
+def hold_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str = "operator hold",
+    signal_fn=None,
+) -> bool:
+    """Atomically stop a running worker and park the task as ``blocked``.
+
+    Unlike the two-step ``reclaim_task`` + ``block_task`` sequence, the
+    entire transition happens inside a single ``write_txn``, so no
+    Dispatcher tick can claim the briefly-``ready`` task between steps.
+
+    The synthesized ``blocked`` run record carries ``summary="operator hold"``
+    (always contains the literal word "operator"), which matches
+    ``_AUTO_RETRY_QUESTION_RE``'s ``\\boperator\\b`` boundary inside
+    ``auto_retry_blocked_tasks`` — classifying the block as
+    ``"operator_question"`` and preventing any auto-retry.
+
+    The ``"blocked"`` event emitted at the end means ``_has_sticky_block``
+    returns ``True`` for this task, so ``recompute_ready`` will not
+    silently promote it.
+
+    Returns ``True`` if the hold landed (task was ``running``), ``False``
+    if the task is not in a ``running`` state or does not exist.
+    """
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["status"] != "running":
+        return False
+    prev_lock = row["claim_lock"]
+    termination = _terminate_reclaimed_worker(
+        row["worker_pid"], prev_lock, signal_fn=signal_fn,
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET status = 'blocked', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'running'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        # Close the active run and synthesize one if none was open, so the
+        # block reason is preserved in attempt history.
+        run_id = _end_run(
+            conn, task_id,
+            outcome="blocked", status="blocked",
+            summary=reason,
+        )
+        if run_id is None:
+            run_id = _synthesize_ended_run(
+                conn, task_id,
+                outcome="blocked",
+                summary=reason,
+            )
+        # Emit the "blocked" event so _has_sticky_block returns True and
+        # recompute_ready does not silently promote this task.
+        _append_event(
+            conn, task_id, "blocked",
+            {"reason": reason, "manual": True, **termination},
+            run_id=run_id,
+        )
+    return True
+
+
 def reassign_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -10247,6 +10316,8 @@ def heartbeat_worker(
     *,
     note: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
 ) -> bool:
     """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
 
@@ -10284,6 +10355,20 @@ def heartbeat_worker(
                 "UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?",
                 (now, run_id),
             )
+            # B3: optional token sampling — monotone-non-decreasing: a later
+            # heartbeat with a smaller value (e.g. a transient partial count)
+            # must NOT lower the stored figure.  NULL input is also safe: when
+            # the caller omits a token argument the stored value is kept as-is.
+            if input_tokens is not None or output_tokens is not None:
+                conn.execute(
+                    "UPDATE task_runs "
+                    "SET input_tokens  = CASE WHEN ? IS NULL THEN input_tokens "
+                    "                         ELSE MAX(?, COALESCE(input_tokens, 0)) END, "
+                    "    output_tokens = CASE WHEN ? IS NULL THEN output_tokens "
+                    "                         ELSE MAX(?, COALESCE(output_tokens, 0)) END "
+                    "WHERE id = ? AND ended_at IS NULL",
+                    (input_tokens, input_tokens, output_tokens, output_tokens, run_id),
+                )
         _append_event(
             conn, task_id, "heartbeat",
             {"note": note} if note else None,

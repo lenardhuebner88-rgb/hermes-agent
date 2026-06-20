@@ -73,13 +73,39 @@ export const WorkerSchema = z.object({
   last_heartbeat_note_at: z.coerce.number().nullable().catch(null),
   eta_p50_seconds: z.coerce.number().nullable().catch(null),
   eta_p90_seconds: z.coerce.number().nullable().catch(null),
+  // Phase B (Live-Telemetrie): Schritt-Key, Modell-Override, effektives Modell,
+  // Live-Token-Zähler. Alle nullable — nur Hermes-Runtime-Lanes liefern Tokens live.
+  step_key: z.string().nullable().catch(null),
+  model_override: z.string().nullable().catch(null),
+  effective_model: z.string().nullable().catch(null),
+  input_tokens: z.coerce.number().nullable().catch(null),
+  output_tokens: z.coerce.number().nullable().catch(null),
 });
 
 export const WorkersResponseSchema = z.object({
   workers: z.array(WorkerSchema).catch([]),
   count: z.coerce.number().catch(0),
+  // Round C: kanban.max_in_progress — null when not configured.
+  cap: z.coerce.number().nullable().catch(null),
   checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
 });
+
+// F1: Aktivitäts-Timeline — Task-Events (neueste zuerst).
+export const WorkerActivityEventSchema = z.object({
+  id: z.coerce.number().catch(0),
+  run_id: z.coerce.number().nullable().catch(null),
+  kind: z.string().catch("unknown"),
+  note: z.string().nullable().catch(null),
+  at: z.coerce.number().catch(0),
+});
+
+export const WorkerActivityResponseSchema = z.object({
+  task_id: z.string().catch(""),
+  events: z.array(WorkerActivityEventSchema).catch([]),
+});
+
+export type WorkerActivityEvent = z.infer<typeof WorkerActivityEventSchema>;
+export type WorkerActivityResponse = z.infer<typeof WorkerActivityResponseSchema>;
 
 const AccountUsageWindowSchema = z.object({
   label: z.string().catch("Limit"),
@@ -352,6 +378,10 @@ export const BoardTaskSchema = z.object({
   // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
   // Ältere Tasks ohne dieses Feld liefern null.
   idempotency_key: z.string().nullable().catch(null),
+  // Round D: Blockier-Grund für blocked Tasks (aus letztem task_run.summary).
+  // Ältere Server / nicht-blocked Tasks liefern null.
+  // Enthält „operator hold" → explizit vom Operator gestoppt (Resume-Button zeigen).
+  block_reason: z.string().nullable().catch(null),
   // K8 Kosten/Tokens pro Run — additiv; nur Tasks mit echtem Run tragen sie,
   // sonst null (kein Kosten-Footer auf der Karte). Spiegelt die Chain-Graph-
   // Knotenfelder: cost_effective_usd = cost_usd (metered) + cost_usd_equivalent

@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge, fmtDur, fmtTokens, formatEffectiveCost, freshness, workerHealth, workerSortRank } from "../lib/derive";
+import { deriveCapacity, fmtAge, fmtDur, fmtTokens, formatEffectiveCost, freshness, workerHealth, workerSortRank } from "../lib/derive";
 import {
   FLEET_STAGES,
   STAGE_META,
@@ -212,6 +212,47 @@ function RecoveryStrip() {
       ) : (
         <p className="mt-3 text-sm hc-dim">Keine Recovery-Parks.</p>
       )}
+    </div>
+  );
+}
+
+// F4 — Kapazitäts-/Engpass-Banner: schlanke Leiste, kein eigener Poll.
+// Nutzt die schon vorhandenen workers- und board-Hooks.
+interface CapacityBannerProps {
+  count: number;
+  cap: number | null;
+  queueDepth: number;
+}
+
+function CapacityBanner({ count, cap, queueDepth }: CapacityBannerProps) {
+  // Zeige die Leiste nur wenn mindestens ein Worker läuft oder Tasks warten.
+  if (count === 0 && queueDepth === 0) return null;
+  const state = deriveCapacity(count, cap, queueDepth);
+  return (
+    <div
+      data-testid="capacity-banner"
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[10px] border px-3 py-2 text-xs",
+        state.bottleneck
+          ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
+          : "border-[var(--hc-border)] bg-[var(--hc-panel)] text-[var(--hc-text-soft)]",
+      )}
+    >
+      <span className="hc-mono font-medium">
+        {cap != null
+          ? de.flow.capacityWorkers(count, cap)
+          : de.flow.capacityWorkersNoCap(count)}
+      </span>
+      {queueDepth > 0 ? (
+        <span className="hc-mono opacity-80">
+          {de.flow.capacityQueue(queueDepth)}
+        </span>
+      ) : null}
+      {state.bottleneck ? (
+        <span className="ml-auto font-semibold text-amber-300">
+          {de.flow.capacityBottleneck(queueDepth)}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -575,6 +616,14 @@ function FlowCardActions({ status, busy, error, dispatchChoice, verifierGateStat
         </div>
       ) : actions.length ? (
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* Round D: Dispatch-Prüf-Spinner — solange busy+dispatch-Aktion vorhanden
+              ist kein dispatchChoice gesetzt, d.h. der Check läuft noch. */}
+          {busy && actions.some((a) => a.key === "dispatch") ? (
+            <span className="inline-flex items-center gap-1.5 hc-type-label hc-dim">
+              <span className="h-3 w-3 animate-spin rounded-full border border-[var(--hc-border-strong)] border-t-[var(--hc-accent-text)]" aria-hidden />
+              {de.flow.dispatchChecking}
+            </span>
+          ) : null}
           {actions.map((action) => {
             const color = TONE_HEX[action.tone];
             return (
@@ -910,6 +959,9 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
               </button>
             ))}
           </div>
+          <p className="mt-1 hc-type-label hc-dim">
+            {releaseLevel === "live" ? de.flow.plan.hintReleaseLevelLive : de.flow.plan.hintReleaseLevelMerge}
+          </p>
         </div>
       ) : gate.loading ? (
         <p className="mt-2 hc-type-label hc-dim">Gate wird geladen…</p>
@@ -962,7 +1014,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
 
       {heldCount > 0 ? (
         <div className="mt-2.5">
-          <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+          <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
             <button
               type="button"
               disabled={gate.busy || selectedSizing.length !== 2}
@@ -986,6 +1038,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
               Split
             </button>
           </div>
+          <p className="mb-2 hc-type-label hc-dim">{de.flow.plan.hintSizing}</p>
           <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
             {laneOptions.length ? (
               <label className="inline-flex items-center gap-1.5 hc-type-label hc-soft">
@@ -1029,6 +1082,8 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
               Scout-Vorlauf
             </label>
           </div>
+          <p className="mb-1 hc-type-label hc-dim">{de.flow.plan.hintReviewTier}</p>
+          <p className="mb-1 hc-type-label hc-dim">{de.flow.plan.hintScout}</p>
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="hc-type-label hc-soft">{de.flow.plan.releaseConfirm(heldCount)}</span>
@@ -1652,7 +1707,7 @@ function DeliveredList({ items, selectedId, onSelect, now, enrichmentById }: {
 // Bottom-Sheet für die Receipt-Kette unter xl (Handy/Tablet): ersetzt das
 // frühere Auto-Scrollen zur unten gestapelten Leiste — der Tap holt das Detail
 // zum Operator statt den Operator ans Seitenende zu schieben.
-function FlowDetailSheet({ taskId, onClose, children }: { taskId: string; onClose: () => void; children: React.ReactNode }) {
+function FlowDetailSheet({ taskId, taskTitle, onClose, children }: { taskId: string; taskTitle?: string; onClose: () => void; children: React.ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -1679,7 +1734,12 @@ function FlowDetailSheet({ taskId, onClose, children }: { taskId: string; onClos
         className="absolute inset-x-0 bottom-0 flex max-h-[85dvh] flex-col rounded-t-2xl border border-b-0 border-[var(--hc-border)] bg-[var(--hc-panel)] shadow-2xl"
       >
         <div className="flex items-center justify-between gap-2 border-b border-[var(--hc-border)] px-4 py-2.5">
-          <span className="hc-mono hc-type-label hc-dim truncate">{taskId}</span>
+          <div className="min-w-0 flex-1">
+            {taskTitle ? (
+              <p className="line-clamp-1 text-sm font-semibold leading-snug text-white">{taskTitle}</p>
+            ) : null}
+            <span className="hc-mono hc-type-label hc-dim truncate">{taskId}</span>
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -1797,7 +1857,11 @@ export function FlowView() {
     [workers.data, inspectByRun, now],
   );
   const workersReload = workers.reload;
-  const onWorkerAction = useCallback(async (runId: string, action: WorkerActionKey) => {
+  const onWorkerAction = useCallback(async (
+    runId: string,
+    action: WorkerActionKey,
+    extra?: { model_override?: string; assignee?: string },
+  ) => {
     setBusyRun(runId);
     setWorkerActionError(null);
     try {
@@ -1808,9 +1872,11 @@ export function FlowView() {
           { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Operator-Terminate aus dem Flow-Board" }) },
         );
       } else {
+        // extra (model_override, assignee) wird optional in den Body gemerged.
+        const body: Record<string, unknown> = { action, confirm: true, ...extra };
         const res = await fetchJSON<{ ok?: boolean; detail?: string }>(
           `/api/plugins/kanban/workers/${encodeURIComponent(runId)}/action`,
-          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, confirm: true }) },
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
         );
         if (res.ok === false) setWorkerActionError(res.detail || de.worker.actionFailed);
       }
@@ -1970,6 +2036,12 @@ export function FlowView() {
   const fresh = freshness(board.lastUpdated, 8000, now);
   const hasAnyFiltered = filteredTasks.some((t) => t.status !== "archived");
 
+  // F4: Queue-Tiefe = ready+todo Tasks über alle (ungefilterten) Tasks.
+  const queueDepth = useMemo(
+    () => allTasks.filter((t) => t.status === "ready" || t.status === "todo").length,
+    [allTasks],
+  );
+
   // Geliefert-Liste: fertige Ketten + fertige Einzeltasks, jüngste zuerst.
   const deliveredItems = useMemo<DeliveredItem[]>(() => {
     const items: DeliveredItem[] = [
@@ -2108,6 +2180,16 @@ export function FlowView() {
       ) : null}
 
       <RecoveryStrip />
+
+      {/* F4: Kapazitäts-/Engpass-Banner — schlanke Leiste, nur wenn Worker
+          aktiv oder Tasks warten; amber wenn Engpass (alle belegt + Queue > 0). */}
+      {workers.data != null ? (
+        <CapacityBanner
+          count={workers.data.count}
+          cap={workers.data.cap}
+          queueDepth={queueDepth}
+        />
+      ) : null}
 
       {/* Phase F (Programm 3): Fehler-Triage — failed/blocked 48h mit
           „Nochmal" / „Nochmal stärker" (model_override-Eskalation). Rendert
@@ -2310,7 +2392,7 @@ export function FlowView() {
       <PlanSpecHub onIngested={onCaptured} />
 
       {detailSheetOpen && selectedId ? (
-        <FlowDetailSheet taskId={selectedId} onClose={() => setDetailSheetOpen(false)}>
+        <FlowDetailSheet taskId={selectedId} taskTitle={selectedTask?.title} onClose={() => setDetailSheetOpen(false)}>
           <FlowReceiptRail
             taskId={selectedId}
             task={selectedTask}

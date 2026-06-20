@@ -5782,3 +5782,70 @@ def test_get_task_planspec_source_null_for_plain_task(client):
     r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
     assert r.status_code == 200, r.text
     assert r.json()["task"]["planspec_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# Round D: block_reason in board payload
+# ---------------------------------------------------------------------------
+
+
+def test_board_block_reason_operator_hold(client):
+    """GET /board exposes block_reason='operator hold' for a held task.
+
+    hold_task() is the only path that synthesises a run with summary='operator hold'.
+    The board endpoint must surface that summary as block_reason so the UI can
+    distinguish operator holds from other blocked causes.
+    """
+    # Create + claim (running) so hold_task has something to act on.
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "held task", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, tid)
+        held = kb.hold_task(conn, tid, reason="operator hold")
+    assert held, "hold_task must return True for a running task"
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    blocked_col = next(c for c in data["columns"] if c["name"] == "blocked")
+    task_card = next((t for t in blocked_col["tasks"] if t["id"] == tid), None)
+    assert task_card is not None, "held task must appear in blocked column"
+    assert task_card["block_reason"] == "operator hold", (
+        f"expected 'operator hold', got {task_card.get('block_reason')!r}"
+    )
+
+
+def test_board_block_reason_null_for_non_hold(client):
+    """GET /board block_reason is null for a task blocked without hold_task.
+
+    A task blocked via block_task (worker-side, e.g. 'review-required: ...') must
+    NOT show block_reason='operator hold'. The UI must not show a Resume button.
+    """
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "worker-blocked task", "assignee": "coder"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, tid)
+        # block_task with a non-hold reason simulates worker hitting a wall.
+        kb.block_task(conn, tid, reason="review-required: missing tests")
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    blocked_col = next(c for c in data["columns"] if c["name"] == "blocked")
+    task_card = next((t for t in blocked_col["tasks"] if t["id"] == tid), None)
+    assert task_card is not None
+    # block_reason may be the worker reason string, but must NOT contain "operator hold"
+    reason = task_card.get("block_reason") or ""
+    assert "operator hold" not in reason.lower(), (
+        f"non-hold blocked task must not have operator-hold block_reason, got {reason!r}"
+    )
