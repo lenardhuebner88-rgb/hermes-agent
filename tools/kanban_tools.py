@@ -673,6 +673,17 @@ def _handle_block(args: dict, **kw) -> str:
     reason = args.get("reason")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
+    # B: structured reviewer findings (optional) → reviewer_metadata so the
+    # auto-retry feedback can render them for the coder. Absent → None = today.
+    bf = args.get("blocking_findings")
+    rv = args.get("required_verification")
+    reviewer_metadata = None
+    if bf or rv:
+        reviewer_metadata = {
+            "verdict": "REQUEST_CHANGES",
+            "blocking_findings": [str(x) for x in (bf or []) if str(x).strip()],
+            "required_verification": [str(x) for x in (rv or []) if str(x).strip()],
+        }
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
@@ -681,6 +692,7 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 expected_run_id=_worker_run_id(tid),
+                reviewer_metadata=reviewer_metadata,
             )
             if not ok:
                 return tool_error(
@@ -1420,6 +1432,22 @@ KANBAN_BLOCK_SCHEMA = {
                     "What you need answered, in one or two sentences. "
                     "Don't paste the whole conversation; the human has "
                     "the board and can ask follow-ups via comments."
+                ),
+            },
+            "blocking_findings": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Reviewer use (B): the concrete, actionable findings the "
+                    "coder must fix before re-submitting — one per item."
+                ),
+            },
+            "required_verification": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Reviewer use (B): the checks the coder must re-run before "
+                    "re-submitting (e.g. a failing test or gate)."
                 ),
             },
             "board": _board_schema_prop(),

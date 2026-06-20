@@ -743,6 +743,40 @@ def test_block_rejects_empty_reason(worker_env):
         assert json.loads(out).get("error")
 
 
+def test_kanban_block_schema_exposes_findings():
+    """B-T11: the block tool advertises structured reviewer findings."""
+    from tools.kanban_tools import KANBAN_BLOCK_SCHEMA
+    props = KANBAN_BLOCK_SCHEMA["parameters"]["properties"]
+    assert "blocking_findings" in props
+    assert "required_verification" in props
+    # reason stays the only required field — findings are optional.
+    assert KANBAN_BLOCK_SCHEMA["parameters"]["required"] == ["reason"]
+
+
+def test_block_passes_structured_findings_to_metadata(worker_env):
+    """B-T11: findings flow through _handle_block into task_runs.metadata."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    out = kt._handle_block({
+        "reason": "changes needed",
+        "blocking_findings": ["null deref in foo()"],
+        "required_verification": ["re-run pytest"],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (d["run_id"],)
+        ).fetchone()
+        stored = json.loads(row["metadata"])
+        assert stored["blocking_findings"] == ["null deref in foo()"]
+        assert stored["required_verification"] == ["re-run pytest"]
+        assert stored["verdict"] == "REQUEST_CHANGES"
+    finally:
+        conn.close()
+
+
 def test_heartbeat_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_heartbeat({"note": "progress"})
