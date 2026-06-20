@@ -1128,6 +1128,43 @@ export type CostBucket = z.infer<typeof CostBucketSchema>;
 export type CostProfileRow = z.infer<typeof CostProfileRowSchema>;
 export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
 
+const TokenBurnBucketSchema = z.object({
+  runs: z.coerce.number().catch(0),
+  input_tokens: z.coerce.number().catch(0),
+  output_tokens: z.coerce.number().catch(0),
+  total_tokens: z.coerce.number().catch(0),
+});
+const SubscriptionBurnLaneSchema = TokenBurnBucketSchema.extend({
+  subscription: z.string().catch("unknown"),
+  profile: z.string().catch("unbekannt"),
+});
+const SubscriptionBurnClassSchema = TokenBurnBucketSchema.extend({
+  subscription: z.string().catch("unknown"),
+  value_class: z.string().catch("unknown"),
+});
+const SubscriptionBurnDailySchema = TokenBurnBucketSchema.extend({
+  subscription: z.string().catch("unknown"),
+  date: z.string().catch(""),
+});
+const SubscriptionBurnBucketSchema = SubscriptionBurnLaneSchema.extend({
+  value_class: z.string().catch("unknown"),
+  date: z.string().catch(""),
+});
+export const SubscriptionTokenBurnResponseSchema = z.object({
+  days: z.coerce.number().catch(7),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  window_start: z.coerce.number().catch(0),
+  totals: TokenBurnBucketSchema,
+  by_lane: z.array(SubscriptionBurnLaneSchema).catch([]),
+  by_class: z.array(SubscriptionBurnClassSchema).catch([]),
+  daily: z.array(SubscriptionBurnDailySchema).catch([]),
+  buckets: z.array(SubscriptionBurnBucketSchema).catch([]),
+});
+export type TokenBurnBucket = z.infer<typeof TokenBurnBucketSchema>;
+export type SubscriptionBurnLane = z.infer<typeof SubscriptionBurnLaneSchema>;
+export type SubscriptionBurnClass = z.infer<typeof SubscriptionBurnClassSchema>;
+export type SubscriptionTokenBurnResponse = z.infer<typeof SubscriptionTokenBurnResponseSchema>;
+
 // ST5 (Effizienz): die zwei ST2-Aggregate, die die Flotten-Effizienz-Karte
 // braucht. chain_completion_rate = done-Roots, deren Abhängigkeits-Leaves alle
 // done sind, / done-Roots (eigener Endpunkt /stats/chain-completion).

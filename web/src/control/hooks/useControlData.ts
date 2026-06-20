@@ -20,6 +20,7 @@ import {
   ReliabilityResponseSchema,
   RunsDailyResponseSchema,
   RunsCostsResponseSchema,
+  SubscriptionTokenBurnResponseSchema,
   ChainCompletionResponseSchema,
   ChainCostsResponseSchema,
   BoardStatsResponseSchema,
@@ -43,7 +44,7 @@ import {
   VaultProvenanceResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1411,6 +1412,18 @@ export function useHermesRunsCosts() {
       RunsCostsResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/costs?days=7"),
       "runs/costs",
+    ),
+    60000,
+  );
+}
+
+export function useHermesSubscriptionBurn() {
+  return usePolling<SubscriptionTokenBurnResponse>(
+    "runs/subscription-burn",
+    async () => parseOrThrow(
+      SubscriptionTokenBurnResponseSchema,
+      await fetchJSON<unknown>("/api/plugins/kanban/runs/subscription-burn?days=7"),
+      "runs/subscription-burn",
     ),
     60000,
   );

@@ -17211,6 +17211,144 @@ def subscription_token_totals(
     return totals
 
 
+def _empty_token_burn_bucket() -> dict:
+    return {
+        "runs": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _token_burn_add(bucket: dict, *, runs: int, input_tokens: int, output_tokens: int) -> None:
+    in_tok = int(input_tokens or 0)
+    out_tok = int(output_tokens or 0)
+    bucket["runs"] += int(runs or 0)
+    bucket["input_tokens"] += in_tok
+    bucket["output_tokens"] += out_tok
+    bucket["total_tokens"] += in_tok + out_tok
+
+
+def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
+    """Read-only Batch-Aggregation des Abo-Token-Burns.
+
+    Liefert den Token-Burn geschlossener ``task_runs`` nach Abo, Lane/Profile,
+    Wert-/Task-Klasse und lokalem Kalendertag. Die DB-Arbeit ist bewusst eine
+    einzelne aggregierende SELECT-Query mit einem JOIN auf ``tasks``; die
+    bestehende ``value_class``-Heuristik klassifiziert anschließend die bereits
+    aggregierten Task-Signale, ohne eine neue Spalte oder Write-Pfad einzuführen.
+    """
+    days = max(1, min(90, int(days)))
+    now = int(time.time())
+    today = _dt.date.fromtimestamp(now)
+    start_day = today - _dt.timedelta(days=days - 1)
+    window_start = int(time.mktime(start_day.timetuple()))
+
+    totals = _empty_token_burn_bucket()
+    by_lane: dict[tuple[str, str], dict] = {}
+    by_class: dict[tuple[str, str], dict] = {}
+    daily: dict[tuple[str, str], dict] = {}
+    buckets: dict[tuple[str, str, str, str], dict] = {}
+
+    for row in conn.execute(
+        """
+        SELECT
+            tr.profile AS profile,
+            COALESCE(t.created_by, '') AS created_by,
+            COALESCE(t.title, '') AS title,
+            COALESCE(t.epic_id, '') AS epic_id,
+            DATE(tr.ended_at, 'unixepoch', 'localtime') AS day,
+            COUNT(*) AS runs,
+            COALESCE(SUM(COALESCE(tr.input_tokens, 0)), 0) AS input_tokens,
+            COALESCE(SUM(COALESCE(tr.output_tokens, 0)), 0) AS output_tokens
+        FROM task_runs tr
+        LEFT JOIN tasks t ON t.id = tr.task_id
+        WHERE tr.ended_at IS NOT NULL
+          AND tr.ended_at >= ?
+          AND tr.profile IS NOT NULL
+        GROUP BY tr.profile, created_by, title, epic_id, day
+        """,
+        (window_start,),
+    ).fetchall():
+        profile = (row["profile"] or "").strip()
+        subscription = _profile_subscription(profile)
+        if not subscription:
+            continue
+        cls = value_class(
+            row["created_by"],
+            title=row["title"],
+            epic_id=row["epic_id"],
+        )
+        day = row["day"] or ""
+        runs = int(row["runs"] or 0)
+        input_tokens = int(row["input_tokens"] or 0)
+        output_tokens = int(row["output_tokens"] or 0)
+
+        _token_burn_add(
+            totals,
+            runs=runs,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        lane_bucket = by_lane.setdefault(
+            (subscription, profile),
+            {"subscription": subscription, "profile": profile, **_empty_token_burn_bucket()},
+        )
+        class_bucket = by_class.setdefault(
+            (subscription, cls),
+            {"subscription": subscription, "value_class": cls, **_empty_token_burn_bucket()},
+        )
+        day_bucket = daily.setdefault(
+            (subscription, day),
+            {"subscription": subscription, "date": day, **_empty_token_burn_bucket()},
+        )
+        granular_bucket = buckets.setdefault(
+            (subscription, profile, cls, day),
+            {
+                "subscription": subscription,
+                "profile": profile,
+                "value_class": cls,
+                "date": day,
+                **_empty_token_burn_bucket(),
+            },
+        )
+        for bucket in (lane_bucket, class_bucket, day_bucket, granular_bucket):
+            _token_burn_add(
+                bucket,
+                runs=runs,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+
+    def _token_sort(row: dict) -> tuple:
+        return (-int(row.get("total_tokens") or 0), str(row.get("subscription") or ""))
+
+    return {
+        "days": days,
+        "now": now,
+        "window_start": window_start,
+        "totals": totals,
+        "by_lane": sorted(
+            by_lane.values(), key=lambda r: (*_token_sort(r), str(r.get("profile") or ""))
+        ),
+        "by_class": sorted(
+            by_class.values(), key=lambda r: (*_token_sort(r), str(r.get("value_class") or ""))
+        ),
+        "daily": sorted(
+            daily.values(), key=lambda r: (str(r.get("date") or ""), str(r.get("subscription") or ""))
+        ),
+        "buckets": sorted(
+            buckets.values(),
+            key=lambda r: (
+                str(r.get("date") or ""),
+                str(r.get("subscription") or ""),
+                str(r.get("profile") or ""),
+                str(r.get("value_class") or ""),
+            ),
+        ),
+    }
+
+
 def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     """F4 (Statistik): Kosten-Sicht — heute + N-Tage-Fenster gesamt und pro
     Profil. Liest ausschließlich gestempelte ``task_runs``-Spalten plus

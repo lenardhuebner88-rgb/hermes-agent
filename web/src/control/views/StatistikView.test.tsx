@@ -7,6 +7,7 @@ import {
   LatencySection,
   ReliabilitySection,
   StatsMasthead,
+  SubscriptionBurnSection,
 } from "./StatistikView";
 import { broadsheet } from "../lib/broadsheetTokens";
 import type {
@@ -263,6 +264,74 @@ describe("BudgetLedgerSection (ST5)", () => {
     );
     expect(html).toContain("no oauth token");
     expect(html).toContain("—");
+  });
+});
+
+describe("SubscriptionBurnSection (S3)", () => {
+  it("renders real breakdown, top-N burners and anti-pattern flags", () => {
+    const html = renderToStaticMarkup(
+      <SubscriptionBurnSection
+        burn={{
+          days: 7,
+          now: 100,
+          window_start: 0,
+          totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          by_lane: [
+            { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200 },
+            { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800 },
+          ],
+          by_class: [
+            { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700 },
+            { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+          ],
+          daily: [],
+          buckets: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Abo-Burn-Breakdown");
+    expect(html).toContain("data-testid=\"subscription-burn-breakdown\"");
+    expect(html).toContain("Top-N-Burner");
+    expect(html).toContain("Anti-Muster");
+    expect(html).toContain("coder · codex");
+    expect(html).toContain("meta · codex");
+    expect(html).toContain("1 k");
+    expect(html).toContain("sb-subburn-grid");
+    // No trend block when daily is empty.
+    expect(html).not.toContain("data-testid=\"subscription-burn-trend\"");
+  });
+
+  it("renders the Zeit-Trend block when daily data is present", () => {
+    const html = renderToStaticMarkup(
+      <SubscriptionBurnSection
+        burn={{
+          days: 7,
+          now: 100,
+          window_start: 0,
+          totals: { runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          by_lane: [
+            { subscription: "codex", profile: "coder", runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          ],
+          by_class: [],
+          daily: [
+            { subscription: "codex", date: "2026-06-17", runs: 3, input_tokens: 300, output_tokens: 100, total_tokens: 400 },
+            { subscription: "codex", date: "2026-06-18", runs: 5, input_tokens: 500, output_tokens: 100, total_tokens: 600 },
+          ],
+          buckets: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("data-testid=\"subscription-burn-trend\"");
+    // Both dates must appear in the trend block.
+    expect(html).toContain("2026-06-17");
+    expect(html).toContain("2026-06-18");
+    // Token values formatted (400 → "400", 600 → "600").
+    expect(html).toContain("400");
+    expect(html).toContain("600");
+    // i18n kicker.
+    expect(html).toContain("Zeit-Trend");
   });
 });
 

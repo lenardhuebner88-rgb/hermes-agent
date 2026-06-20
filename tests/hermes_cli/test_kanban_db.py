@@ -334,6 +334,103 @@ def test_subscription_token_totals_excludes_non_kimi_profiles(
     assert totals["total_tokens"] == 110
 
 
+def test_subscription_token_burn_batches_by_lane_class_and_day(
+    kanban_home, monkeypatch,
+):
+    """Abo-Burn aggregation uses one read-only batch SELECT, then folds by axes."""
+    now = 1_700_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    monkeypatch.setattr(
+        kb,
+        "_profile_subscription",
+        {"coder-claude": "claude", "premium": "chatgpt", "critic": None}.get,
+    )
+    with kb.connect() as conn:
+        user_task = kb.create_task(conn, title="[FO] Family Organizer export", assignee="coder")
+        hardening_task = kb.create_task(conn, title="review gate", assignee="reviewer")
+        meta_task = kb.create_task(conn, title="platform cleanup", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_by='kanban-review-chain' WHERE id=?",
+                (hardening_task,),
+            )
+            for task_id, profile, tin, tout in [
+                (user_task, "coder-claude", 100, 10),
+                (user_task, "coder-claude", 200, 20),
+                (hardening_task, "premium", 300, 30),
+                (meta_task, "critic", 999, 999),
+            ]:
+                _insert_token_run(
+                    conn,
+                    task_id=task_id,
+                    profile=profile,
+                    started_at=now - 60,
+                    ended_at=now - 30,
+                    input_tokens=tin,
+                    output_tokens=tout,
+                )
+
+        statements: list[str] = []
+        conn.set_trace_callback(lambda stmt: statements.append(stmt.strip().upper()))
+        burn = kb.subscription_token_burn(conn, days=7)
+        conn.set_trace_callback(None)
+
+    selects = [stmt for stmt in statements if stmt.startswith("SELECT")]
+    writes = [stmt for stmt in statements if stmt.startswith(("INSERT", "UPDATE", "DELETE"))]
+    assert len(selects) == 1
+    assert writes == []
+    assert burn["totals"] == {
+        "runs": 3,
+        "input_tokens": 600,
+        "output_tokens": 60,
+        "total_tokens": 660,
+    }
+    assert burn["by_lane"] == [
+        {
+            "subscription": "chatgpt",
+            "profile": "premium",
+            "runs": 1,
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "total_tokens": 330,
+        },
+        {
+            "subscription": "claude",
+            "profile": "coder-claude",
+            "runs": 2,
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "total_tokens": 330,
+        },
+    ]
+    assert {row["value_class"]: row["total_tokens"] for row in burn["by_class"]} == {
+        "haertung": 330,
+        "nutzer": 330,
+    }
+    assert burn["buckets"] == [
+        {
+            "subscription": "chatgpt",
+            "profile": "premium",
+            "value_class": "haertung",
+            "date": "2023-11-14",
+            "runs": 1,
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "total_tokens": 330,
+        },
+        {
+            "subscription": "claude",
+            "profile": "coder-claude",
+            "value_class": "nutzer",
+            "date": "2023-11-14",
+            "runs": 2,
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "total_tokens": 330,
+        },
+    ]
+
+
 def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
     with kb.connect() as conn:
         base = 1_700_000_000

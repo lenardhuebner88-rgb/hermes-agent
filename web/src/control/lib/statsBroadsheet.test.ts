@@ -15,6 +15,7 @@ import {
   nutzerwert,
   reliabilityStatus,
   rosterProfiles,
+  subscriptionBurnBreakdown,
 } from "./statsBroadsheet";
 import { formatEffectiveCost } from "./derive";
 import { broadsheet } from "./broadsheetTokens";
@@ -400,6 +401,96 @@ describe("laneBurn", () => {
     });
     expect(eff.estimated).toBe(false);
     expect(eff.text).not.toContain("gesch.");
+  });
+});
+
+describe("subscriptionBurnBreakdown", () => {
+  it("sorts top lanes and raises non-user anti-pattern flags", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+      by_lane: [
+        { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200 },
+        { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800 },
+      ],
+      by_class: [
+        { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700 },
+        { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+      ],
+      daily: [],
+      buckets: [],
+    });
+
+    expect(breakdown.topLanes.map((row) => row.profile)).toEqual(["coder", "verifier"]);
+    expect(breakdown.classes.map((row) => row.value_class)).toEqual(["meta", "nutzer"]);
+    expect(breakdown.subscriptionCount).toBe(2);
+    expect(breakdown.flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "anti", title: "meta · codex" }),
+      expect.objectContaining({ kind: "top", title: "Coder · codex" }),
+    ]));
+  });
+
+  it("returns an empty trend when daily is empty", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: { runs: 2, input_tokens: 100, output_tokens: 100, total_tokens: 200 },
+      by_lane: [],
+      by_class: [],
+      daily: [],
+      buckets: [],
+    });
+    expect(breakdown.trend).toEqual([]);
+  });
+
+  it("aggregates daily rows by date across subscriptions, sorts ascending, and computes share", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: { runs: 10, input_tokens: 800, output_tokens: 200, total_tokens: 1000 },
+      by_lane: [],
+      by_class: [],
+      daily: [
+        // Two subscriptions on 2026-06-18 → should be summed (300 + 100 = 400)
+        { subscription: "claude-max", date: "2026-06-18", runs: 4, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+        { subscription: "codex",      date: "2026-06-18", runs: 2, input_tokens:  80, output_tokens: 20, total_tokens: 100 },
+        // Earlier day (should appear first after sort)
+        { subscription: "claude-max", date: "2026-06-17", runs: 4, input_tokens: 500, output_tokens: 100, total_tokens: 600 },
+      ],
+      buckets: [],
+    });
+
+    expect(breakdown.trend).toHaveLength(2);
+    // Ascending by date: 2026-06-17 first
+    expect(breakdown.trend[0].date).toBe("2026-06-17");
+    expect(breakdown.trend[0].total_tokens).toBe(600);
+    expect(breakdown.trend[0].runs).toBe(4);
+    expect(breakdown.trend[0].share).toBeCloseTo(0.6, 5);
+    // 2026-06-18: summed across both subscriptions
+    expect(breakdown.trend[1].date).toBe("2026-06-18");
+    expect(breakdown.trend[1].total_tokens).toBe(400);
+    expect(breakdown.trend[1].runs).toBe(6);
+    expect(breakdown.trend[1].share).toBeCloseTo(0.4, 5);
+  });
+
+  it("returns trend with zero share when window total_tokens is 0", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: { runs: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      by_lane: [],
+      by_class: [],
+      daily: [
+        { subscription: "claude-max", date: "2026-06-18", runs: 1, input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      ],
+      buckets: [],
+    });
+    expect(breakdown.trend[0].share).toBe(0);
   });
 });
 
