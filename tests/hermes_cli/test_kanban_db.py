@@ -8058,6 +8058,35 @@ def test_dispatch_review_skips_nonspawnable(kanban_home, monkeypatch):
     assert not res.spawned
 
 
+def test_dispatch_review_spawns_stage_profile_when_assignee_profile_missing(
+    kanban_home, monkeypatch,
+):
+    """B cross-family-review fix: spawnability keys off the CURRENT stage target
+    (verifier→reviewer→critic), not the original coder assignee. A review task
+    whose coder-lane profile is gone is still spawnable via its stage profile —
+    not stranded as nonspawnable."""
+    from hermes_cli import profiles
+    # only the verifier stage profile exists; the coder assignee profile is gone
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review", assignee="removed-lane")
+        _set_task_status(conn, t, "review")
+        res = kb.dispatch_once(conn, dry_run=True)
+    assert t not in res.skipped_nonspawnable
+    assert any(tid == t and prof == "verifier" for (tid, prof, _) in res.spawned)
+
+
+def test_has_spawnable_review_true_via_stage_profile(kanban_home, monkeypatch):
+    """has_spawnable_review agrees with dispatch: a stage target that exists
+    makes the review task spawnable even when the assignee profile is gone."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "verifier")
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review", assignee="removed-lane")
+        _set_task_status(conn, t, "review")
+        assert kb.has_spawnable_review(conn) is True
+
+
 def test_review_status_in_valid_statuses():
     """'review' is a valid task status."""
     assert "review" in kb.VALID_STATUSES

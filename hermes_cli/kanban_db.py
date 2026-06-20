@@ -6565,6 +6565,36 @@ def _review_chain_target(conn: sqlite3.Connection, task_id: str, cfg: dict) -> s
     return cfg["verifier_profile"]
 
 
+def _review_spawn_profile_for(
+    conn: sqlite3.Connection,
+    task_id: str,
+    assignee: Optional[str],
+    cfg: dict,
+) -> Optional[str]:
+    """The profile the dispatcher would actually spawn for a review task: the
+    current stage target (verifier→reviewer→critic, from the latest
+    submitted_for_review event) if it maps to a real profile, else the original
+    assignee if it does, else ``None`` (genuinely nonspawnable).
+
+    Single source of truth for review spawnability — shared by dispatch_once,
+    the no-silent-stall sweep, and has_spawnable_review so all three agree. A
+    staged review task whose original coder lane profile is gone is still
+    spawnable via its stage target and must not be stranded as nonspawnable.
+    """
+    stage = _review_chain_target(conn, task_id, cfg)
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        # Cannot check profiles → fail-open on the stage target (matches the
+        # dispatcher's behavior when the profiles module is unavailable).
+        return stage or (assignee or None)
+    if stage and profile_exists(stage):
+        return stage
+    if assignee and profile_exists(assignee):
+        return assignee
+    return None
+
+
 def _worker_gate_config() -> dict:
     """Resolve kanban.worker_gate from the ROOT config.yaml (mirrors
     _review_gate_config). Workers run under HERMES_HOME=<root>/profiles/<name>,
@@ -12218,13 +12248,13 @@ def no_silent_stall_sweep(
         if not _old_enough(row["id"], "submitted_for_review", row["created_at"]):
             continue
         assignee = (row["assignee"] or "").strip()
-        spawnable = bool(assignee)
-        if spawnable:
-            try:
-                from hermes_cli.profiles import profile_exists
-                spawnable = bool(profile_exists(assignee))
-            except Exception:
-                spawnable = True
+        # B: spawnability keys off the CURRENT stage target (verifier→reviewer→
+        # critic), not just the assignee — so a staged review task with a valid
+        # stage profile is never parked as review_without_verifier just because
+        # its original coder lane profile is gone.
+        spawnable = _review_spawn_profile_for(
+            conn, row["id"], assignee or None, _review_gate_config()
+        ) is not None
         if not spawnable:
             reason = "review task has no runnable verifier/reviewer profile"
             if _park_stall_once(
@@ -13472,26 +13502,25 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
-    """Return True iff there is at least one review+assigned+unclaimed task
-    whose assignee maps to a real Hermes profile.
+    """Return True iff there is at least one review+assigned+unclaimed task the
+    dispatcher could spawn — judged by the task's CURRENT stage target
+    (verifier→reviewer→critic), with the assignee as fallback (B), so health
+    telemetry agrees with dispatch_once on what is spawnable.
 
     Mirror of :func:`has_spawnable_ready` for the review column —
     used by the health telemetry to decide whether the dispatcher
     should have spawned a review agent.
     """
     rows = conn.execute(
-        "SELECT DISTINCT assignee FROM tasks "
+        "SELECT id, assignee FROM tasks "
         "WHERE status = 'review' AND assignee IS NOT NULL "
         "    AND claim_lock IS NULL"
     ).fetchall()
     if not rows:
         return False
-    try:
-        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-    except Exception:
-        return True
+    cfg = _review_gate_config()
     for row in rows:
-        if profile_exists(row["assignee"]):
+        if _review_spawn_profile_for(conn, row["id"], row["assignee"], cfg) is not None:
             return True
     return False
 
@@ -15148,16 +15177,25 @@ def dispatch_once(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        try:
-            from hermes_cli.profiles import profile_exists
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        # Phase 2 + B: run the review agent as the task's CURRENT stage profile
+        # (verifier → reviewer → critic, from the latest submitted_for_review
+        # event), NOT the task's own code-writing assignee. The override is
+        # in-memory only — the DB ``assignee`` stays the original coder, so a
+        # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
+        # coder for a follow-up fix. ``_review_spawn_profile_for`` resolves the
+        # stage target, falling back to the assignee, and returns None only when
+        # neither maps to a real profile. Keying spawnability off the stage
+        # target (not the assignee) means a staged task whose coder lane profile
+        # is gone is still spawnable and never stranded as nonspawnable.
+        _rg_cfg = _review_gate_config()
+        _spawn_profile = _review_spawn_profile_for(
+            conn, row["id"], row["assignee"], _rg_cfg
+        )
+        if _spawn_profile is None:
             result.skipped_nonspawnable.append(row["id"])
-            # Mirror of the ready-path diagnostic above: emit ONE deduped
-            # ``nonspawnable`` event so a review task whose assignee is not a
-            # runnable profile is visible on the timeline instead of silently
-            # rotting in ``review``.
+            # Emit ONE deduped ``nonspawnable`` event so a review task with no
+            # runnable stage/assignee profile is visible on the timeline instead
+            # of silently rotting in ``review``.
             if not dry_run:
                 latest = conn.execute(
                     "SELECT kind FROM task_events WHERE task_id = ? "
@@ -15172,31 +15210,8 @@ def dispatch_once(
                         )
             continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], _spawn_profile, ""))
             continue
-        # Phase 2: run the review agent as the independent ``verifier`` profile
-        # (terminal-enabled, file-disabled → runs tests/build/lint but cannot
-        # edit), NOT the task's own code-writing assignee. The override is
-        # in-memory only — the DB ``assignee`` stays the original coder, so a
-        # REQUEST_CHANGES (kanban_block → blocked) leaves the task owned by the
-        # coder for a follow-up fix. Falls back to the original assignee if the
-        # verifier profile is missing (degenerate self-review, never a stall).
-        # The historical ``sdlc-review`` skill does not exist in this tree; the
-        # verifier's review logic lives in its profile SOUL.md, so we don't
-        # force a phantom skill (it would be silently skipped anyway).
-        _rg_cfg = _review_gate_config()
-        # B: spawn the profile for the task's CURRENT review stage (verifier →
-        # reviewer → critic), read from the latest submitted_for_review event.
-        # Falls back to verifier_profile, then to the original assignee if even
-        # that profile is missing (degenerate self-review, never a stall).
-        _stage_profile = _review_chain_target(conn, row["id"], _rg_cfg)
-        try:
-            from hermes_cli.profiles import profile_exists as _pexists
-        except Exception:
-            _pexists = None
-        _spawn_profile = row["assignee"]
-        if _stage_profile and (_pexists is None or _pexists(_stage_profile)):
-            _spawn_profile = _stage_profile
         claimed = claim_review_task(
             conn, row["id"], ttl_seconds=ttl_seconds, reviewer_profile=_spawn_profile,
         )
