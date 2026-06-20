@@ -116,6 +116,28 @@ def test_review_stages_for_tier(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# B-T7: submit stamps the frozen tier + stage 0 + target profile into the event
+# ---------------------------------------------------------------------------
+
+def test_submit_for_review_stamps_stage_zero(kanban_home, gate_on):
+    import json
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="hard db work",
+                             body="database migration", assignee="coder",
+                             review_tier="critical")
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()
+        p = json.loads(ev["payload"])
+        assert p["review_stage"] == 0
+        assert p["review_tier"] == "critical"
+        assert p["target_profile"] == "verifier"
+
+
+# ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
 

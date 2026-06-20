@@ -6820,6 +6820,9 @@ def _submit_for_review(
     metadata: Optional[dict],
     verified_cards: list,
     expected_run_id: Optional[int],
+    stage: int = 0,
+    effective_tier: Optional[str] = None,
+    target_profile: Optional[str] = None,
 ) -> bool:
     """Park a code-bearing completion in ``review`` instead of ``done``.
 
@@ -6979,6 +6982,17 @@ def _submit_for_review(
         # #3-A: additive worker_gate stamp — gives the verifier machine-readable
         # gate evidence without changing any existing payload fields.
         payload["worker_gate"] = _wg_stamp
+        # B: stamp the staged-review chain position so dispatch_once spawns the
+        # right profile and complete_task can advance the chain. The tier is
+        # frozen at first submit (stage 0) so a mid-chain edit of the column
+        # cannot bend a running chain.
+        _chain_cfg = _review_gate_config()
+        _tier = effective_tier or _effective_review_tier(conn, task_id, cfg=_chain_cfg)
+        _stages = _review_stages_for_tier(_tier, _chain_cfg)
+        _stage = max(0, min(int(stage), len(_stages) - 1))
+        payload["review_tier"] = _tier
+        payload["review_stage"] = _stage
+        payload["target_profile"] = target_profile or _stages[_stage]
         _append_event(
             conn, task_id, "submitted_for_review", payload, run_id=run_id,
         )
