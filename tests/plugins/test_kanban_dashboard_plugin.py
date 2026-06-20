@@ -4259,15 +4259,48 @@ def test_flow_release_sets_review_tier_on_children(client):
 
 
 def test_flow_release_without_options_is_backward_compatible(client):
-    """No review_tier / no inject_scout → children untagged, no scout (byte-identical)."""
+    """No review_tier / no inject_scout → byte-identical: NO new keys in the
+    response or the flow_gate_released event, children untagged, no scout."""
     root, child_ids = _setup_gated_root()
     r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body.get("review_tier") is None
-    assert body.get("scout_id") is None
+    # byte-identical: the new keys are absent entirely (not present-as-null)
+    assert "review_tier" not in body
+    assert "scout_id" not in body
     with kb.connect() as conn:
         assert all(kb.get_task(conn, c).review_tier is None for c in child_ids)
+        events = [e for e in kb.list_events(conn, root) if e.kind == "flow_gate_released"]
+        assert events
+        assert "review_tier" not in events[-1].payload
+        assert "scout_id" not in events[-1].payload
+
+
+def test_flow_release_review_tier_only_stamps_children_started_this_call(client):
+    """Tier is applied only to children RELEASED this call (chain-start), never
+    re-mutating already-started children on a later release (no mid-flight edit)."""
+    root, child_ids = _setup_gated_root()
+    # First release starts every child at critical.
+    r1 = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "critical"},
+    )
+    assert r1.status_code == 200, r1.text
+    # An entry child progresses to running and its tier is cleared.
+    with kb.connect() as conn:
+        kb.set_task_review_tier(conn, child_ids[0], None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child_ids[0],))
+    # A second release with a different tier releases nothing (none scheduled) →
+    # must NOT re-stamp the already-started child.
+    r2 = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "review"},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["released"] == 0
+    with kb.connect() as conn:
+        assert kb.get_task(conn, child_ids[0]).review_tier is None
 
 
 def test_flow_release_rejects_invalid_review_tier(client):

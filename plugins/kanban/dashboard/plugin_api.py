@@ -5884,13 +5884,15 @@ def _release_flow_gate(
             if kanban_db.unblock_task(conn, child_id):
                 released.append(child_id)
 
-    # Phase C lever: a chain-wide review_tier is stamped on EVERY child so the
-    # staged-review resolver (verifier→reviewer→critic) governs the whole chain.
-    # The typed body already constrains the value; the setter validates again as
-    # defense-in-depth. Harmless on non-code children (they never gate).
+    # Phase C lever: a chain-wide review_tier is stamped on the children RELEASED
+    # this call (chain-start) so the staged-review resolver (verifier→reviewer→
+    # critic) governs them. Scoped to ``released`` — NOT all child_ids — so a
+    # later release (released == 0) never re-routes an already-started/done child
+    # (Grill-Entscheid: tier is set at start only, no mid-flight edit). The typed
+    # body constrains the value; the setter validates again (defense-in-depth).
     tier_value = (review_tier or "").strip().lower() or None
     if tier_value is not None:
-        for child_id in child_ids:
+        for child_id in released:
             kanban_db.set_task_review_tier(conn, child_id, tier_value)
 
     # Phase C lever: prepend ONE read-only scout recon task before the entry
@@ -5922,19 +5924,19 @@ def _release_flow_gate(
             for cid in entry_children:
                 kanban_db.link_tasks(conn, scout_id, cid)
 
-    _append_flow_gate_event(
-        conn,
-        root_id,
-        "flow_gate_released",
-        {
-            "released_ids": released,
-            "release_level": release_level,
-            "assignee_overrides": overrides,
-            "review_tier": tier_value,
-            "scout_id": scout_id,
-            "reason": reason,
-        },
-    )
+    event_payload: dict[str, Any] = {
+        "released_ids": released,
+        "release_level": release_level,
+        "assignee_overrides": overrides,
+        "reason": reason,
+    }
+    # Phase C keys are added ONLY when set, so a no-option release records a
+    # byte-identical event (no present-as-null keys for old consumers).
+    if tier_value is not None:
+        event_payload["review_tier"] = tier_value
+    if scout_id is not None:
+        event_payload["scout_id"] = scout_id
+    _append_flow_gate_event(conn, root_id, "flow_gate_released", event_payload)
     # If this flow-capture root is ALSO a freigabe:operator hold, releasing its
     # children via the flow gate must clear the operator hold at the root too —
     # otherwise the root stays scheduled+freigabe=operator and keeps masquerading
@@ -5945,16 +5947,20 @@ def _release_flow_gate(
     # no-op for a non-operator root, and the children are already unblocked above
     # so its own child loop finds nothing scheduled (no double-release).
     kanban_db.release_freigabe_hold(conn, root_id, author="flow-gate")
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "task_id": root_id,
         "released": len(released),
         "released_ids": released,
         "release_level": release_level,
         "assignee_overrides": overrides,
-        "review_tier": tier_value,
-        "scout_id": scout_id,
     }
+    # Echo the Phase C levers only when set (byte-identical response otherwise).
+    if tier_value is not None:
+        result["review_tier"] = tier_value
+    if scout_id is not None:
+        result["scout_id"] = scout_id
+    return result
 
 
 @router.post("/tasks/flow-capture")
