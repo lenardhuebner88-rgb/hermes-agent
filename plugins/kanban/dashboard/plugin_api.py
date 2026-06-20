@@ -3858,6 +3858,20 @@ def get_runs_costs(
         conn.close()
 
 
+@router.get("/runs/subscription-burn")
+def get_runs_subscription_burn(
+    days: int = Query(7, ge=1, le=90),
+    board: Optional[str] = Query(None),
+):
+    """Read-only Abo-Token-Burn by subscription lane, value class, and day."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.subscription_token_burn(conn, days=days)
+    finally:
+        conn.close()
+
+
 @router.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),
