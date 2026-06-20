@@ -6468,6 +6468,10 @@ def _review_gate_config() -> dict:
     )
     # B Grill-Entscheid 2: auto-risk classification is opt-in, default OFF.
     auto_tier = bool(rg.get("auto_tier", False))
+    # Phase-C-followup (a): couple scout to review_tier:critical, opt-in default
+    # OFF. With this false, a critical task gets no automatic scout predecessor —
+    # byte-identical to today (the operator can still inject one via flow-release).
+    auto_scout_on_critical = bool(rg.get("auto_scout_on_critical", False))
     return {
         "enabled": bool(rg.get("enabled", False)),
         "code_roles": code_roles,
@@ -6476,6 +6480,7 @@ def _review_gate_config() -> dict:
         "review_profile": review_profile,
         "critic_profile": critic_profile,
         "auto_tier": auto_tier,
+        "auto_scout_on_critical": auto_scout_on_critical,
     }
 
 
@@ -9515,6 +9520,13 @@ def decompose_triage_task(
     # for manual-review-first workflows.
     if auto_promote:
         recompute_ready(conn)
+    # Phase-C-followup (a): couple scout to any child stamped review_tier:critical
+    # (flag-gated, default off → byte-identical). Outside the write_txn above.
+    # Read the flag once; each child is deduped/guarded inside the helper.
+    _rg_cfg = _review_gate_config()
+    if _rg_cfg.get("auto_scout_on_critical", False):
+        for cid in child_ids:
+            _maybe_inject_critical_scout(conn, cid, cfg=_rg_cfg)
     return child_ids
 
 
@@ -18723,6 +18735,72 @@ def set_task_model_override(
         return True
 
 
+_SCOUT_PREDECESSOR_PRERUN_STATUSES = frozenset({"scheduled", "todo", "ready"})
+
+
+def ensure_scout_predecessor(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[str]:
+    """Ensure a read-only ``scout`` recon task precedes ``task_id`` — idempotent.
+
+    Pure mechanism (no flag/tier check — callers gate). Mirrors the Phase-C
+    flow-release scout (``assignee='scout'``, linked as predecessor so
+    :func:`link_tasks` demotes a ``ready`` child to ``todo``). Returns ``None``
+    without acting, when:
+      * the task does not exist, or is itself a scout (no scouting a scout);
+      * the task already has a ``scout`` predecessor (dedup — never a 2nd scout);
+      * the task has already started (status past pre-run) — we never retro-fit a
+        predecessor onto a running/review/done task and bend a live chain.
+    On success creates the scout and links it as parent, returning its id. A
+    fresh scout has no links, so :func:`link_tasks` can never cycle.
+    """
+    task = get_task(conn, task_id)
+    if task is None or task.assignee == "scout":
+        return None
+    if task.status not in _SCOUT_PREDECESSOR_PRERUN_STATUSES:
+        return None
+    for pid in parent_ids(conn, task_id):
+        parent = get_task(conn, pid)
+        if parent is not None and parent.assignee == "scout":
+            return pid  # dedup: already scouted
+    scout_id = create_task(
+        conn,
+        title=f"Scout: {task.title}",
+        body=(
+            "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und "
+            "liefere knappe Fund-Notizen (Dateien, Symbole, Risiken) für den "
+            "nachfolgenden Coder. Nichts editieren, committen oder deployen."
+        ),
+        assignee="scout",
+        created_by="auto-scout-critical",
+        priority=task.priority,
+        tenant=task.tenant,
+    )
+    link_tasks(conn, scout_id, task_id)
+    return scout_id
+
+
+def _maybe_inject_critical_scout(
+    conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None,
+) -> Optional[str]:
+    """Phase-C-followup (a): couple ``scout`` to ``review_tier:critical``.
+
+    Gated by ``kanban.review_gate.auto_scout_on_critical`` (default OFF →
+    byte-identical to today). Fires only when the task's *explicit* review_tier
+    column is ``critical`` — exactly the two chokepoints that stamp it
+    (``set_task_review_tier`` and plan-ingest/decompose), not the submit-time
+    auto-classifier. Idempotent + guarded via :func:`ensure_scout_predecessor`.
+    Pass ``cfg`` to avoid re-reading the config in a per-child loop.
+    """
+    cfg = cfg if cfg is not None else _review_gate_config()
+    if not cfg.get("auto_scout_on_critical", False):
+        return None
+    task = get_task(conn, task_id)
+    if task is None or (task.review_tier or "").strip().lower() != "critical":
+        return None
+    return ensure_scout_predecessor(conn, task_id)
+
+
 def set_task_review_tier(
     conn: sqlite3.Connection, task_id: str, tier: Optional[str],
 ) -> bool:
@@ -18749,7 +18827,12 @@ def set_task_review_tier(
         if cur.rowcount != 1:
             return False
         _append_event(conn, task_id, "review_tier_set", {"review_tier": value})
-        return True
+    # Phase-C-followup (a): couple scout to critical (flag-gated, default off →
+    # byte-identical). Outside the write_txn — the scout's own create_task /
+    # link_tasks open their own BEGIN IMMEDIATE, which is not re-entrant.
+    if value == "critical":
+        _maybe_inject_critical_scout(conn, task_id)
+    return True
 
 
 def _to_epoch(val) -> Optional[int]:

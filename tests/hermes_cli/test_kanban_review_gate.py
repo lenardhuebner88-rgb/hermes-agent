@@ -484,3 +484,119 @@ def test_cli_complete_operator_context_stays_direct_done(
     assert _cli_complete(tid) == 0
     with kb.connect() as conn:
         assert kb.get_task(conn, tid).status == "done"
+
+
+# ---------------------------------------------------------------------------
+# Phase-C-followup (a): Scout-Auto-Insertion bei review_tier:critical.
+# Flag kanban.review_gate.auto_scout_on_critical (default OFF = byte-identical).
+# Couples the two chokepoints where a task becomes critical:
+#   (1) set_task_review_tier(critical)  (2) plan-ingest / decompose critical child.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def auto_scout_on(monkeypatch):
+    """Enable auto_scout_on_critical (the opt-in critical→scout coupling)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": False,
+            "auto_scout_on_critical": True,
+        },
+    )
+    return True
+
+
+def _scout_parents(conn, tid):
+    """Parent ids of ``tid`` whose task is a scout (assignee=='scout')."""
+    out = []
+    for pid in kb.parent_ids(conn, tid):
+        p = kb.get_task(conn, pid)
+        if p is not None and p.assignee == "scout":
+            out.append(pid)
+    return out
+
+
+def test_auto_scout_off_is_byte_identical(kanban_home):
+    """Default (flag absent/off): setting critical injects NO scout — today's behaviour."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky", assignee="coder")
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert _scout_parents(conn, tid) == []
+        assert kb.get_task(conn, tid).status == "ready"   # not demoted
+
+
+def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_scout_on):
+    """Flag on: set_task_review_tier(critical) ensures ONE read-only scout predecessor."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky build", assignee="coder")
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        scouts = _scout_parents(conn, tid)
+        assert len(scouts) == 1
+        scout = kb.get_task(conn, scouts[0])
+        assert scout.assignee == "scout"
+        assert kb.parent_ids(conn, scouts[0]) == []          # scout has no parents
+        assert kb.get_task(conn, tid).status == "todo"        # demoted ready->todo, waits on scout
+
+
+def test_non_critical_tier_does_not_inject_scout(kanban_home, auto_scout_on):
+    """Flag on but tier=review: no scout — only critical couples."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="meh", assignee="coder")
+        assert kb.set_task_review_tier(conn, tid, "review") is True
+        assert _scout_parents(conn, tid) == []
+
+
+def test_scout_injection_is_deduped(kanban_home, auto_scout_on):
+    """Re-setting critical (or clear+re-set) never spawns a second scout."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky", assignee="coder")
+        kb.set_task_review_tier(conn, tid, "critical")
+        kb.set_task_review_tier(conn, tid, "critical")   # idempotent
+        assert len(_scout_parents(conn, tid)) == 1
+        # clear then re-set: still one scout (dedup is structural, not event-based)
+        kb.set_task_review_tier(conn, tid, None)
+        kb.set_task_review_tier(conn, tid, "critical")
+        assert len(_scout_parents(conn, tid)) == 1
+
+
+def test_scout_not_injected_for_running_task(kanban_home, auto_scout_on):
+    """A task already past pre-run is not retro-fitted — no live-chain bending."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="already going", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert _scout_parents(conn, tid) == []            # too late, skipped
+
+
+def test_decompose_critical_child_injects_scout_when_flag_on(kanban_home, auto_scout_on):
+    """Plan-ingest chokepoint: a decomposed child stamped critical gets a scout predecessor."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[
+                {"title": "critical slice", "assignee": "coder", "review_tier": "critical"},
+                {"title": "trivial slice", "assignee": "coder"},
+            ],
+        )
+        assert kids is not None and len(kids) == 2
+        crit, triv = kids
+        assert len(_scout_parents(conn, crit)) == 1        # critical child scouted
+        assert _scout_parents(conn, triv) == []            # trivial child not
+
+
+def test_decompose_critical_child_no_scout_when_flag_off(kanban_home):
+    """Flag off (default): decompose with a critical child injects no scout."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []
