@@ -10,6 +10,25 @@
 > **`coder` = Codex/GPT (gpt-5.5)**, **`premium` = der Claude-Coder (claude-cli/Opus)**;
 > **`coder-claude` ist ein deprecated, rückwärtskompatibler Alias → `premium`**. Wo unten noch
 > `opus-coder` steht, lies `premium`.
+>
+> **PROGRAMM-STATUS (2026-06-20, am Code verifiziert — Live schlägt Doku):**
+> - **Phase A — LIVE** (`e6ea7ce2b`): Lane-Konsolidierung, `coder-claude`→`premium`-Alias
+>   (`_LANE_ALIASES`, `kanban_db.py`), Decompose-Routing-Tabelle migriert.
+> - **Phase B — LIVE** (`499fe12a0`/`000ee405d`/`fee7672cd`): `review_tier`-Spalte
+>   (`kanban_db.py:889`, Migration `:2217`, Werte `standard|review|critical`), gestufter Gate
+>   `verifier→reviewer→critic` (`_review_stages_for_tier`, `_review_spawn_profile_for:6568`,
+>   `_advance_review_chain:7549`), Auto-Retry mit strukturierten Findings
+>   (`auto_retry_blocked_tasks:14287` + `_render_review_findings:3790`). Build-Receipt vorhanden.
+>   Auto-Risk hinter Flag `kanban.review_gate.auto_tier` (default false = byte-identisch).
+> - **Phase C — SHIPPED** (`f3ef7f54b` + `24b78f334`): Flow-Tab Operator-Hebel (Lane-Dropdown,
+>   review_tier-Toggle, Scout-Checkbox, ChainCard Review-Pill), deployed, Gates grün.
+> - **Offene Folge-Slices** (am Code lokalisiert, noch ungebaut): (a) Scout-Auto-Insertion bei
+>   `review_tier:critical` — Flag `auto_scout_on_critical` default OFF, koppelt plan-ingest +
+>   `set_task_review_tier→critical`; (b) Live-Stage-Pill (laufende Stufe statt konfiguriertem Tier
+>   im `/board`-Payload); (c) Decompose-LLM darf Scout vorschlagen.
+> - **Phase D — vertagt** (eigene Session): Canon-Entscheidungstabelle + „keine hardcodierten
+>   Modellnamen" (Ziel 5 unten).
+> - IST-Stand-Beleg: `vault/03-Agents/Claude-Code/receipts/2026-06-20-lane-review-routing-ist-stand.md`.
 
 ## Problem
 
