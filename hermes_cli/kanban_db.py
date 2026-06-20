@@ -11686,7 +11686,7 @@ def _create_conflict_park_fixer_subtask(
             conn,
             title=title,
             body=body,
-            assignee="coder-claude",
+            assignee="premium",
             created_by="orchestrator",
             workspace_kind="dir",
             workspace_path=str(wt),
