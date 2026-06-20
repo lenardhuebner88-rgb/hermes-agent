@@ -13,12 +13,21 @@ Covers:
 """
 from __future__ import annotations
 
+import shutil
 import sys
 import tempfile
 import types
 from pathlib import Path
 
 import pytest
+
+
+def _is_purgeable_hermes_module(name: str) -> bool:
+    return (
+        name.startswith("hermes_cli")
+        or name.startswith("hermes_state")
+        or name == "hermes_constants"
+    )
 
 
 @pytest.fixture()
@@ -28,13 +37,15 @@ def isolated_kanban_home(monkeypatch):
     wf_dir = tempfile.mkdtemp(prefix="kanban_wf_templates_")
     monkeypatch.setenv("HERMES_HOME", test_home)
     monkeypatch.setenv("HERMES_KANBAN_WORKFLOWS_DIR", wf_dir)
-    for mod in list(sys.modules.keys()):
-        if (
-            mod.startswith("hermes_cli")
-            or mod.startswith("hermes_state")
-            or mod == "hermes_constants"
-        ):
-            del sys.modules[mod]
+    # Purge so the modules re-import against the fresh HERMES_HOME, then restore
+    # the original module objects on teardown (an unrestored purge causes a
+    # module-identity split that contaminates later test files).
+    saved = {
+        name: mod for name, mod in sys.modules.items()
+        if _is_purgeable_hermes_module(name)
+    }
+    for name in saved:
+        del sys.modules[name]
     from hermes_cli import kanban_db, kanban_workflows
 
     # Every dispatch route resolves through profile_exists; in a bare test
@@ -42,8 +53,15 @@ def isolated_kanban_home(monkeypatch):
     # real worker — spawn_fn is a stub).
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: True)
     kanban_workflows.clear_workflow_cache()
-    yield kanban_db, kanban_workflows, Path(wf_dir)
-    kanban_workflows.clear_workflow_cache()
+    try:
+        yield kanban_db, kanban_workflows, Path(wf_dir)
+    finally:
+        kanban_workflows.clear_workflow_cache()
+        for name in [n for n in sys.modules if _is_purgeable_hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        shutil.rmtree(test_home, ignore_errors=True)
+        shutil.rmtree(wf_dir, ignore_errors=True)
 
 
 def _write_template(wf_dir: Path, template_id: str, body: str) -> None:

@@ -7,6 +7,7 @@ count, no extra ``promoted`` event. A past/equal ``due_at`` promotes normally.
 """
 from __future__ import annotations
 
+import shutil
 import sys
 import tempfile
 import time
@@ -14,20 +15,36 @@ import time
 import pytest
 
 
+def _is_purgeable_hermes_module(name: str) -> bool:
+    return (
+        name.startswith("hermes_cli")
+        or name.startswith("hermes_state")
+        or name == "hermes_constants"
+    )
+
+
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
     test_home = tempfile.mkdtemp(prefix="kanban_due_at_test_")
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if (
-            mod.startswith("hermes_cli")
-            or mod.startswith("hermes_state")
-            or mod == "hermes_constants"
-        ):
-            del sys.modules[mod]
+    # Purge so kanban_db re-imports against the fresh HERMES_HOME, then restore
+    # the original module objects on teardown (an unrestored purge causes a
+    # module-identity split that contaminates later test files).
+    saved = {
+        name: mod for name, mod in sys.modules.items()
+        if _is_purgeable_hermes_module(name)
+    }
+    for name in saved:
+        del sys.modules[name]
     from hermes_cli import kanban_db
 
-    yield kanban_db
+    try:
+        yield kanban_db
+    finally:
+        for name in [n for n in sys.modules if _is_purgeable_hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        shutil.rmtree(test_home, ignore_errors=True)
 
 
 def _make_todo(kb, conn, *, due_at=None, status="todo", title="t"):

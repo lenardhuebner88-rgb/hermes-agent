@@ -8,26 +8,50 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 
 import pytest
 
 
+def _is_purgeable_hermes_module(name: str) -> bool:
+    return (
+        name.startswith("hermes_cli")
+        or name.startswith("hermes_state")
+        or name == "hermes_constants"
+    )
+
+
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
-    """Spin up a fresh HERMES_HOME with a clean kanban DB."""
+    """Spin up a fresh HERMES_HOME with a clean kanban DB.
+
+    Purges the hermes_cli/hermes_state/hermes_constants modules so they
+    re-import against this fixture's fresh HERMES_HOME, then **restores the
+    original module objects on teardown**. Without that restore, every later
+    test file that bound these modules at import time keeps a reference to the
+    orphaned pre-purge module while lazy imports inside it resolve to the
+    freshly re-imported copy — a module-identity split that silently points
+    later tests (e.g. test_kanban_db.py) at the wrong kanban DB.
+    """
     test_home = tempfile.mkdtemp(prefix="kanban_default_assignee_test_")
     monkeypatch.setenv("HERMES_HOME", test_home)
     # Force-reimport so the fresh HERMES_HOME is picked up.
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
+    saved = {
+        name: mod for name, mod in sys.modules.items()
+        if _is_purgeable_hermes_module(name)
+    }
+    for name in saved:
+        del sys.modules[name]
     from hermes_cli import kanban_db
-    yield kanban_db, test_home
-    # Cleanup is best-effort; tempfile dir survives but pytest isolation
-    # gives each test its own monkeypatched HERMES_HOME so no cross-test
-    # contamination.
+    try:
+        yield kanban_db, test_home
+    finally:
+        for name in [n for n in sys.modules if _is_purgeable_hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        shutil.rmtree(test_home, ignore_errors=True)
 
 
 def _fake_spawn(*args, **kwargs):

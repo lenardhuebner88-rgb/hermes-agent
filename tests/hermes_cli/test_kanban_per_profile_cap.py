@@ -8,10 +8,19 @@ model / API quota / browser pool from being overwhelmed by a fan-out.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
 import pytest
+
+
+def _is_purgeable_hermes_module(name: str) -> bool:
+    return (
+        name.startswith("hermes_cli")
+        or name.startswith("hermes_state")
+        or name == "hermes_constants"
+    )
 
 
 @pytest.fixture()
@@ -21,11 +30,23 @@ def isolated_kanban_home_with_profiles(monkeypatch):
     for prof in ("alpha", "beta", "default"):
         os.makedirs(os.path.join(test_home, "profiles", prof), exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
+    # Purge so kanban_db re-imports against the fresh HERMES_HOME, then restore
+    # the original module objects on teardown (an unrestored purge causes a
+    # module-identity split that contaminates later test files).
+    saved = {
+        name: mod for name, mod in sys.modules.items()
+        if _is_purgeable_hermes_module(name)
+    }
+    for name in saved:
+        del sys.modules[name]
     from hermes_cli import kanban_db
-    yield kanban_db
+    try:
+        yield kanban_db
+    finally:
+        for name in [n for n in sys.modules if _is_purgeable_hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        shutil.rmtree(test_home, ignore_errors=True)
 
 
 def _fake_spawn(*args, **kwargs):
