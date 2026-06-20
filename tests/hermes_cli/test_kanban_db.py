@@ -421,6 +421,8 @@ def _write_state_session(
     home, session_id, *,
     input_tokens=None, output_tokens=None,
     actual_cost=None, estimated_cost=None,
+    model=None, billing_provider=None,
+    cache_read_tokens=None, cache_write_tokens=None,
 ):
     """Create a minimal state.db with a single sessions row (K5b fixture)."""
     db = Path(home) / "state.db"
@@ -429,13 +431,19 @@ def _write_state_session(
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             "id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, "
-            "actual_cost_usd REAL, estimated_cost_usd REAL)"
+            "actual_cost_usd REAL, estimated_cost_usd REAL, "
+            "model TEXT, billing_provider TEXT, "
+            "cache_read_tokens INTEGER, cache_write_tokens INTEGER)"
         )
         conn.execute(
             "INSERT INTO sessions "
-            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, input_tokens, output_tokens, actual_cost, estimated_cost),
+            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd, "
+            "model, billing_provider, cache_read_tokens, cache_write_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, input_tokens, output_tokens, actual_cost, estimated_cost,
+                model, billing_provider, cache_read_tokens, cache_write_tokens,
+            ),
         )
         conn.commit()
     finally:
@@ -549,6 +557,8 @@ def _write_profile_state_session(
     profile_dir, session_id, *,
     input_tokens=None, output_tokens=None,
     actual_cost=None, estimated_cost=None,
+    model=None, billing_provider=None,
+    cache_read_tokens=None, cache_write_tokens=None,
 ):
     """Create a profile-local state.db with a single sessions row (K16)."""
     profile_dir = Path(profile_dir)
@@ -559,13 +569,19 @@ def _write_profile_state_session(
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             "id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, "
-            "actual_cost_usd REAL, estimated_cost_usd REAL)"
+            "actual_cost_usd REAL, estimated_cost_usd REAL, "
+            "model TEXT, billing_provider TEXT, "
+            "cache_read_tokens INTEGER, cache_write_tokens INTEGER)"
         )
         conn.execute(
             "INSERT INTO sessions "
-            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, input_tokens, output_tokens, actual_cost, estimated_cost),
+            "(id, input_tokens, output_tokens, actual_cost_usd, estimated_cost_usd, "
+            "model, billing_provider, cache_read_tokens, cache_write_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, input_tokens, output_tokens, actual_cost, estimated_cost,
+                model, billing_provider, cache_read_tokens, cache_write_tokens,
+            ),
         )
         conn.commit()
     finally:
@@ -655,6 +671,63 @@ def test_k16_backfill_run_costs_sets_cost_and_counts(kanban_home, tmp_path, monk
 
         # Idempotent: cost is no longer NULL → the row is no longer a candidate.
         assert kb.backfill_run_costs(conn, limit=50) == 0
+
+
+def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
+    kanban_home, tmp_path, monkeypatch
+):
+    """K16 must not freeze subscription rows before the API equivalent lands."""
+    profile_dir = tmp_path / "profiles" / "reviewer"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env",
+        lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: "kimi")
+    sid = "S-kimi-k27"
+    _write_profile_state_session(
+        profile_dir, sid,
+        input_tokens=1000,
+        output_tokens=2000,
+        estimated_cost=0.0,
+        model="kimi-k2.7",
+        billing_provider="kimi",
+        cache_read_tokens=3000,
+        cache_write_tokens=4000,
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="sub", assignee="reviewer")
+        run_id = _insert_ended_run(
+            conn, tid, profile="reviewer", metadata={"worker_session_id": sid},
+        )
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row["input_tokens"] == 1000
+        assert row["output_tokens"] == 2000
+        assert row["cost_usd"] == pytest.approx(0.0)
+        meta = json.loads(row["metadata"])
+        assert meta["billing_mode"] == "subscription_included"
+        assert meta["subscription"] == "kimi"
+        assert meta["model"] == "kimi-k2.7"
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.01095)
+
+        # Idempotent: K16 already moved the row out of the cost_usd-NULL gate.
+        assert kb.backfill_run_costs(conn, limit=50) == 0
+        meta2 = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()["metadata"]
+        assert json.loads(meta2)["cost_usd_equivalent"] == pytest.approx(0.01095)
+
+
+def test_k16_kimi_k27_price_override_is_available():
+    assert kb._lookup_model_price_per_mtok("kimi", "kimi-k2.7") == pytest.approx(
+        (0.67, 3.50, 0.20, 0.67)
+    )
 
 
 def test_k16_backfill_run_costs_skips_run_without_session_id(kanban_home, tmp_path, monkeypatch):

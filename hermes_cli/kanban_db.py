@@ -4197,12 +4197,12 @@ def _state_db_path() -> Path:
     return get_default_hermes_root() / "state.db"
 
 
-def _backfill_cost_from_state_db(
+def _backfill_usage_from_state_db(
     session_id: str,
     *,
     profile: Optional[str] = None,
-) -> tuple[Optional[int], Optional[int], Optional[float]]:
-    """K5b: read a worker session's token/cost from ``state.db`` (read-only).
+) -> dict[str, Any]:
+    """K5b/K16: read worker session usage from ``state.db`` (read-only).
 
     Keyed by ``metadata.worker_session_id`` (stamped only for ACP workers, so
     coverage is intentionally PARTIAL). Fully fail-soft and isolated:
@@ -4212,7 +4212,7 @@ def _backfill_cost_from_state_db(
     * Short busy-timeout so a locked/contended ``state.db`` fails fast to a
       NO-OP instead of extending the caller's open kanban write transaction.
     * Any error (missing/locked DB, absent ``sessions`` table, no matching
-      row) returns ``(None, None, None)`` — it must NEVER raise into
+      row) returns empty fields — it must NEVER raise into
       ``_end_run``.
 
     K16: when ``profile`` is given and non-empty, prefer that profile's
@@ -4222,8 +4222,18 @@ def _backfill_cost_from_state_db(
     resolved or doesn't exist we fall back to the hub ``_state_db_path()`` so
     the existing ``_end_run`` caller (``profile=None``) is unaffected.
     """
+    empty: dict[str, Any] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "actual_cost_usd": None,
+        "estimated_cost_usd": None,
+        "model": None,
+        "billing_provider": None,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+    }
     if not session_id:
-        return None, None, None
+        return dict(empty)
     path = None
     if profile:
         try:
@@ -4237,12 +4247,12 @@ def _backfill_cost_from_state_db(
         try:
             path = _state_db_path()
         except Exception:
-            return None, None, None
+            return dict(empty)
     try:
         if not path.exists():
-            return None, None, None
+            return dict(empty)
     except Exception:
-        return None, None, None
+        return dict(empty)
     conn = None
     try:
         conn = sqlite3.connect(
@@ -4250,13 +4260,9 @@ def _backfill_cost_from_state_db(
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=200")
-        row = conn.execute(
-            "SELECT input_tokens, output_tokens, actual_cost_usd, "
-            "estimated_cost_usd FROM sessions WHERE id = ?",
-            (session_id,),
-        ).fetchone()
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     except Exception:
-        return None, None, None
+        return dict(empty)
     finally:
         if conn is not None:
             try:
@@ -4264,12 +4270,33 @@ def _backfill_cost_from_state_db(
             except Exception:
                 pass
     if row is None:
-        return None, None, None
-    in_tok = _coerce_int(row["input_tokens"])
-    out_tok = _coerce_int(row["output_tokens"])
-    cost = _coerce_float(row["actual_cost_usd"])
+        return dict(empty)
+    keys = set(row.keys())
+    out = dict(empty)
+    for key in out:
+        if key in keys:
+            out[key] = row[key]
+    out["input_tokens"] = _coerce_int(out["input_tokens"])
+    out["output_tokens"] = _coerce_int(out["output_tokens"])
+    out["cache_read_tokens"] = _coerce_int(out["cache_read_tokens"])
+    out["cache_write_tokens"] = _coerce_int(out["cache_write_tokens"])
+    out["actual_cost_usd"] = _coerce_float(out["actual_cost_usd"])
+    out["estimated_cost_usd"] = _coerce_float(out["estimated_cost_usd"])
+    return out
+
+
+def _backfill_cost_from_state_db(
+    session_id: str,
+    *,
+    profile: Optional[str] = None,
+) -> tuple[Optional[int], Optional[int], Optional[float]]:
+    """Backward-compatible token/cost tuple for legacy callers/tests."""
+    usage = _backfill_usage_from_state_db(session_id, profile=profile)
+    in_tok = _coerce_int(usage.get("input_tokens"))
+    out_tok = _coerce_int(usage.get("output_tokens"))
+    cost = _coerce_float(usage.get("actual_cost_usd"))
     if cost is None:
-        cost = _coerce_float(row["estimated_cost_usd"])
+        cost = _coerce_float(usage.get("estimated_cost_usd"))
     return in_tok, out_tok, cost
 
 
@@ -4504,22 +4531,76 @@ def backfill_run_costs(
             session_id = metadata.get("worker_session_id")
             if not session_id:
                 continue
-            b_in, b_out, b_cost = _backfill_cost_from_state_db(
-                str(session_id), profile=profile,
-            )
+            usage = _backfill_usage_from_state_db(str(session_id), profile=profile)
+            b_in = _coerce_int(usage.get("input_tokens"))
+            b_out = _coerce_int(usage.get("output_tokens"))
+            b_cost = _coerce_float(usage.get("actual_cost_usd"))
+            if b_cost is None:
+                b_cost = _coerce_float(usage.get("estimated_cost_usd"))
             if b_in is None and b_out is None and b_cost is None:
                 continue
+            stamped: Optional[dict] = None
+            try:
+                sub = _profile_subscription(profile)
+            except Exception:
+                sub = None
+            if sub:
+                # K16 runs before K_sessions for metadata.worker_session_id rows.
+                # If we only stamp cost_usd=0.0, K_sessions' ``cost_usd IS NULL``
+                # gate can never add the subscription API-equivalent later.
+                # Mirror the K_sessions subscription branch here, including
+                # cache-inclusive tokens for the equivalent calculation.
+                b_cost = 0.0
+                estimated = _coerce_float(usage.get("estimated_cost_usd"))
+                actual = _coerce_float(usage.get("actual_cost_usd"))
+                equivalent: Optional[float]
+                if estimated is not None and estimated > 0:
+                    equivalent = estimated
+                elif actual is not None and actual > 0:
+                    equivalent = actual
+                else:
+                    equivalent = _equiv_from_tokens(
+                        usage.get("billing_provider"),
+                        usage.get("model"),
+                        b_in,
+                        b_out,
+                        cache_read=_coerce_int(usage.get("cache_read_tokens")),
+                        cache_write=_coerce_int(usage.get("cache_write_tokens")),
+                    )
+                stamped = dict(metadata or {})
+                stamped.setdefault("billing_mode", "subscription_included")
+                stamped.setdefault("subscription", sub)
+                if equivalent is not None:
+                    stamped.setdefault("cost_usd_equivalent", equivalent)
+                if usage.get("model"):
+                    stamped.setdefault("model", str(usage.get("model")))
             with write_txn(conn):
-                conn.execute(
-                    """
-                    UPDATE task_runs
-                       SET input_tokens  = COALESCE(?, input_tokens),
-                           output_tokens = COALESCE(?, output_tokens),
-                           cost_usd      = COALESCE(?, cost_usd)
-                     WHERE id = ?
-                    """,
-                    (b_in, b_out, b_cost, run_id),
-                )
+                if stamped is not None:
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                           SET input_tokens  = COALESCE(?, input_tokens),
+                               output_tokens = COALESCE(?, output_tokens),
+                               cost_usd      = COALESCE(?, cost_usd),
+                               metadata      = ?
+                         WHERE id = ?
+                        """,
+                        (
+                            b_in, b_out, b_cost,
+                            json.dumps(stamped, ensure_ascii=False), run_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                           SET input_tokens  = COALESCE(?, input_tokens),
+                               output_tokens = COALESCE(?, output_tokens),
+                               cost_usd      = COALESCE(?, cost_usd)
+                         WHERE id = ?
+                        """,
+                        (b_in, b_out, b_cost, run_id),
+                    )
             if b_cost is not None:
                 updated += 1
         except Exception:
@@ -4621,7 +4702,16 @@ def _read_state_sessions(path: Path) -> list[dict]:
 # (input, output, cache_read, cache_write). Empty by default — models.dev already
 # covers our lanes (claude / gpt-5.x+codex / glm); add an entry only for a
 # genuinely unlisted internal model.
-_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {}
+_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
+    # Kimi K2.7 is an internal reviewer-lane alias not yet present in
+    # models.dev. Use the closest public successor-family price known to the
+    # cache at implementation time (OpenRouter moonshotai/Kimi-K2.6:
+    # input=$0.67/M, output=$3.50/M, cache_read=$0.20/M).  cache_write is set
+    # to the input rate as a conservative equivalent until official K2.7 pricing
+    # lands in models.dev.
+    "kimi-k2.7": (0.67, 3.50, 0.20, 0.67),
+    "moonshotai/Kimi-K2.7": (0.67, 3.50, 0.20, 0.67),
+}
 
 
 def _lookup_model_price_per_mtok(
@@ -4639,6 +4729,8 @@ def _lookup_model_price_per_mtok(
     if not model:
         return None
     override = _PRICE_OVERRIDES_PER_MTOK.get(str(model))
+    if override is None:
+        override = _PRICE_OVERRIDES_PER_MTOK.get(str(model).lower())
     if override is not None:
         return override
     try:
