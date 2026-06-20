@@ -375,6 +375,10 @@ export const BoardTaskSchema = z.object({
   // Phase C: staged-review tier (Phase B column). Additiv — ältere Server / Karten
   // ohne das Feld fallen auf null zurück (= standard / kein Tier-Pill).
   review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
+  // Slice b: die GERADE laufende Review-Stufe (verifier→reviewer→critic) eines
+  // Tasks in `review`-Status — abgeleitet aus dem jüngsten submitted_for_review-
+  // Event. Additiv; null wenn nicht in Review oder älterer Server.
+  active_review_stage: z.enum(["verifier", "reviewer", "critic"]).nullable().catch(null),
   // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
   // Ältere Tasks ohne dieses Feld liefern null.
   idempotency_key: z.string().nullable().catch(null),

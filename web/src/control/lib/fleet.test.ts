@@ -12,6 +12,7 @@ import {
   flowCaptureRequest,
   usesFlowCaptureEndpoint,
   chainReviewTier,
+  chainActiveReviewStage,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
@@ -27,6 +28,28 @@ describe("chainReviewTier", () => {
     expect(chainReviewTier([{ review_tier: "review" }, { review_tier: "critical" }, {}])).toBe("critical");
     expect(chainReviewTier([{ review_tier: "review" }, { review_tier: "standard" }])).toBe("review");
     expect(chainReviewTier([{ review_tier: "critical" }])).toBe("critical");
+  });
+});
+
+describe("chainActiveReviewStage", () => {
+  it("returns null when no member is in review (live pill stays hidden)", () => {
+    expect(chainActiveReviewStage([{ status: "running" }, { status: "done" }])).toBeNull();
+    expect(chainActiveReviewStage([])).toBeNull();
+  });
+
+  it("returns the active_review_stage of the member currently in review", () => {
+    expect(
+      chainActiveReviewStage([
+        { status: "done", active_review_stage: "verifier" },
+        { status: "review", active_review_stage: "reviewer" },
+      ]),
+    ).toBe("reviewer");
+    expect(chainActiveReviewStage([{ status: "review", active_review_stage: "critic" }])).toBe("critic");
+  });
+
+  it("returns null when the review member carries no stage yet (graceful)", () => {
+    expect(chainActiveReviewStage([{ status: "review", active_review_stage: null }])).toBeNull();
+    expect(chainActiveReviewStage([{ status: "review" }])).toBeNull();
   });
 });
 

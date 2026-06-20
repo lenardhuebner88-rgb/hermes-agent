@@ -9,7 +9,7 @@
  * Pure + framework-neutral so the stage maths is unit-tested without React.
  * Nothing here calls the API — it only describes WHAT a button should do.
  */
-import type { ToneName, TaskStatus, WorkerProfile, ReviewTier } from "./types";
+import type { ToneName, TaskStatus, WorkerProfile, ReviewTier, ActiveReviewStage } from "./types";
 
 export type FleetStage = "capture" | "plan" | "execute" | "verify" | "ship";
 
@@ -405,6 +405,7 @@ export interface ChainTaskLite extends BoardTaskLite {
   epic_id?: string | null;
   progress?: { done: number; total: number } | null;
   review_tier?: ReviewTier | null;
+  active_review_stage?: ActiveReviewStage | null;
 }
 
 const REVIEW_TIER_RANK: Record<ReviewTier, number> = { standard: 0, review: 1, critical: 2 };
@@ -421,6 +422,18 @@ export function chainReviewTier(members: Array<{ review_tier?: ReviewTier | null
     if (best === null || REVIEW_TIER_RANK[tier] > REVIEW_TIER_RANK[best]) best = tier;
   }
   return best;
+}
+
+/** The review stage actually RUNNING for a chain right now — the
+ *  `active_review_stage` of whichever member currently sits in `review`
+ *  status. Unlike {@link chainReviewTier} (the configured ceiling) this is the
+ *  live verifier→reviewer→critic step. At most one member reviews at a time, so
+ *  no ranking is needed; returns null when nothing is in review (or the review
+ *  member carries no stage yet). */
+export function chainActiveReviewStage(
+  members: Array<{ status?: TaskStatus | string; active_review_stage?: ActiveReviewStage | null }>,
+): ActiveReviewStage | null {
+  return members.find((m) => m.status === "review")?.active_review_stage ?? null;
 }
 
 export interface ChainModel<T extends ChainTaskLite> {

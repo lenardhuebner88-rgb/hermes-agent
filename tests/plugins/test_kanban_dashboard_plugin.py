@@ -156,6 +156,28 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_board_surfaces_active_review_stage_only_while_in_review(client):
+    """Slice b: a task in ``review`` carries ``active_review_stage`` (the latest
+    submitted_for_review target_profile) on its board card; a task NOT in review
+    never shows the field (no stale stage)."""
+    with kb.connect() as conn:
+        reviewing = kb.create_task(conn, title="in review", assignee="coder")
+        done_once = kb.create_task(conn, title="was reviewed, now done", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (reviewing,))
+            kb._append_event(conn, reviewing, "submitted_for_review", {"target_profile": "reviewer"})
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (done_once,))
+            kb._append_event(conn, done_once, "submitted_for_review", {"target_profile": "verifier"})
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200, r.text
+    cols = {c["name"]: c["tasks"] for c in r.json()["columns"]}
+    review_card = next(t for t in cols["review"] if t["id"] == reviewing)
+    assert review_card["active_review_stage"] == "reviewer"
+    done_card = next(t for t in cols["done"] if t["id"] == done_once)
+    assert done_card.get("active_review_stage") is None   # not in review → no stale stage
+
+
 def test_board_retries_transient_corrupt_open_and_keeps_flow_card_visible(client, monkeypatch):
     """A transient corrupt-open signal must not make the Flow board vanish.
 
@@ -4337,6 +4359,36 @@ def test_flow_release_injects_scout_predecessor(client):
         assert kb.get_task(conn, child_ids[0]).status == "todo"
         assert kb.get_task(conn, child_ids[1]).status == "todo"
         assert kb.parent_ids(conn, scout_id) == []
+
+
+def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeypatch):
+    """Combined lever (Phase-C-followup a): review_tier=critical + inject_scout with
+    auto_scout_on_critical ON must NOT give any child a SECOND scout. The per-child
+    auto-scout (from the chain-wide tier stamp) fires first; the explicit inject_scout
+    then dedups against it. Each released child ends with exactly one scout parent."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": False,
+            "auto_scout_on_critical": True,
+        },
+    )
+    root, child_ids = _setup_gated_root()
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "critical", "inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    with kb.connect() as conn:
+        for cid in child_ids:
+            scouts = [
+                p for p in kb.parent_ids(conn, cid)
+                if kb.get_task(conn, p).assignee == "scout"
+            ]
+            assert len(scouts) == 1, (cid, scouts)   # exactly one scout, never two
 
 
 def test_flow_release_clears_freigabe_operator_hold_at_root(client):

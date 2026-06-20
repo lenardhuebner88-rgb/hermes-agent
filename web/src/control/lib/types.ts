@@ -205,6 +205,11 @@ export interface FlowGateResponse {
 
 export type ReviewTier = "standard" | "review" | "critical";
 
+// Live-Stage-Pill: the review profile currently running for a task in `review`
+// status (the staged gate's verifier→reviewer→critic). Distinct from the
+// CONFIGURED `ReviewTier` — this is the stage actually executing right now.
+export type ActiveReviewStage = "verifier" | "reviewer" | "critic";
+
 export interface FlowReleaseOptions {
   assignee_overrides?: Record<string, string | null>;
   release_level?: FlowGateReleaseLevel;
@@ -496,6 +501,9 @@ export interface BoardTask {
   /** Phase C: staged-review tier (Phase B column). Explicit value drives
    * verifier→reviewer→critic; null/absent = standard (auto-risk may still apply). */
   review_tier?: ReviewTier | null;
+  /** Slice b: the staged-review stage actually running now (the latest
+   * submitted_for_review target_profile); only present while in `review`. */
+  active_review_stage?: ActiveReviewStage | null;
   /** Epic membership when assigned (first-class backend grouping). */
   epic_id: string | null;
   /** Workspace model (worker isolation): "scratch" | "dir" | "worktree".

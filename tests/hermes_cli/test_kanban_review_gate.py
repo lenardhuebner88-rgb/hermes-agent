@@ -484,3 +484,181 @@ def test_cli_complete_operator_context_stays_direct_done(
     assert _cli_complete(tid) == 0
     with kb.connect() as conn:
         assert kb.get_task(conn, tid).status == "done"
+
+
+# ---------------------------------------------------------------------------
+# Phase-C-followup (a): Scout-Auto-Insertion bei review_tier:critical.
+# Flag kanban.review_gate.auto_scout_on_critical (default OFF = byte-identical).
+# Couples the two chokepoints where a task becomes critical:
+#   (1) set_task_review_tier(critical)  (2) plan-ingest / decompose critical child.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def auto_scout_on(monkeypatch):
+    """Enable auto_scout_on_critical (the opt-in critical→scout coupling)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": False,
+            "auto_scout_on_critical": True,
+        },
+    )
+    return True
+
+
+def _scout_parents(conn, tid):
+    """Parent ids of ``tid`` whose task is a scout (assignee=='scout')."""
+    out = []
+    for pid in kb.parent_ids(conn, tid):
+        p = kb.get_task(conn, pid)
+        if p is not None and p.assignee == "scout":
+            out.append(pid)
+    return out
+
+
+def test_auto_scout_off_is_byte_identical(kanban_home):
+    """Default (flag absent/off): setting critical injects NO scout — today's behaviour."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky", assignee="coder")
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert _scout_parents(conn, tid) == []
+        assert kb.get_task(conn, tid).status == "ready"   # not demoted
+
+
+def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_scout_on):
+    """Flag on: set_task_review_tier(critical) ensures ONE read-only scout predecessor."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky build", assignee="coder")
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        scouts = _scout_parents(conn, tid)
+        assert len(scouts) == 1
+        scout = kb.get_task(conn, scouts[0])
+        assert scout.assignee == "scout"
+        assert kb.parent_ids(conn, scouts[0]) == []          # scout has no parents
+        assert kb.get_task(conn, tid).status == "todo"        # demoted ready->todo, waits on scout
+        # Atomic dedup: the scout carries a per-task idempotency_key so two
+        # concurrent critical setters converge on ONE scout (no race-created 2nd).
+        key = conn.execute(
+            "SELECT idempotency_key FROM tasks WHERE id=?", (scouts[0],)
+        ).fetchone()[0]
+        assert key == f"auto-scout:{tid}"
+
+
+def test_non_critical_tier_does_not_inject_scout(kanban_home, auto_scout_on):
+    """Flag on but tier=review: no scout — only critical couples."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="meh", assignee="coder")
+        assert kb.set_task_review_tier(conn, tid, "review") is True
+        assert _scout_parents(conn, tid) == []
+
+
+def test_scout_injection_is_deduped(kanban_home, auto_scout_on):
+    """Re-setting critical (or clear+re-set) never spawns a second scout."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky", assignee="coder")
+        kb.set_task_review_tier(conn, tid, "critical")
+        kb.set_task_review_tier(conn, tid, "critical")   # idempotent
+        assert len(_scout_parents(conn, tid)) == 1
+        # clear then re-set: still one scout (dedup is structural, not event-based)
+        kb.set_task_review_tier(conn, tid, None)
+        kb.set_task_review_tier(conn, tid, "critical")
+        assert len(_scout_parents(conn, tid)) == 1
+
+
+def test_scout_not_injected_for_running_task(kanban_home, auto_scout_on):
+    """A task already past pre-run is not retro-fitted — no live-chain bending."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="already going", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert _scout_parents(conn, tid) == []            # too late, skipped
+
+
+def test_decompose_critical_child_injects_scout_when_flag_on(kanban_home, auto_scout_on):
+    """Plan-ingest chokepoint: a decomposed child stamped critical gets a scout predecessor."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[
+                {"title": "critical slice", "assignee": "coder", "review_tier": "critical"},
+                {"title": "trivial slice", "assignee": "coder"},
+            ],
+        )
+        assert kids is not None and len(kids) == 2
+        crit, triv = kids
+        assert len(_scout_parents(conn, crit)) == 1        # critical child scouted
+        assert _scout_parents(conn, triv) == []            # trivial child not
+
+
+def test_decompose_critical_child_no_scout_when_flag_off(kanban_home):
+    """Flag off (default): decompose with a critical child injects no scout."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []
+
+
+def test_decompose_scheduled_held_child_defers_scout(kanban_home, auto_scout_on):
+    """Operator-held chain (initial_child_status='scheduled'): no auto-scout before
+    release — spawning a dispatchable scout would bypass the operator hold. The
+    flow-release path re-couples the scout post-approval."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            initial_child_status="scheduled",
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []            # deferred, not bypassed
+        assert kb.get_task(conn, kids[0]).status == "scheduled"  # still held
+
+
+def test_release_freigabe_hold_recouples_scout_for_critical_child(kanban_home, auto_scout_on):
+    """Closes the held-chain loop: the decompose-time guard DEFERS (no bypass), and
+    release_freigabe_hold RE-COUPLES the scout post-approval — so a held critical
+    chain released via the bare operator path still gets its scout, just on RELEASE."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            initial_child_status="scheduled", expected_root_status="triage",
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []            # deferred while held
+        # operator GO via the bare release path (not flow-release)
+        assert kb.release_freigabe_hold(conn, root) is True
+        assert len(_scout_parents(conn, kids[0])) == 1        # re-coupled on release
+        # idempotent: a second release does not spawn a second scout
+        kb.release_freigabe_hold(conn, root)
+        assert len(_scout_parents(conn, kids[0])) == 1
+
+
+# ---------------------------------------------------------------------------
+# Slice b: batch_active_review_stages — the live review stage per task, read from
+# the latest submitted_for_review event (powers the dashboard live-stage pill).
+# ---------------------------------------------------------------------------
+
+def test_batch_active_review_stages_latest_event_wins(kanban_home):
+    """Returns the target_profile of the LATEST submitted_for_review event; tasks
+    without such an event are omitted."""
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="reviewing", assignee="coder")
+        t2 = kb.create_task(conn, title="no review events", assignee="coder")
+        with kb.write_txn(conn):
+            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "verifier"})
+            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "reviewer"})
+        m = kb.batch_active_review_stages(conn, [t1, t2])
+        assert m == {t1: "reviewer"}   # latest event wins; t2 (no event) omitted
+        assert kb.batch_active_review_stages(conn, []) == {}
