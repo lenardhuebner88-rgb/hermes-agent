@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { de } from "../i18n/de";
 import { TONE_HEX, profileLabel, taskStatusLabel } from "../lib/tones";
-import { fmtAge, fmtDur, fmtTokens, freshness, workerHealth, workerSortRank } from "../lib/derive";
+import { fmtAge, fmtDur, fmtTokens, formatEffectiveCost, freshness, workerHealth, workerSortRank } from "../lib/derive";
 import {
   FLEET_STAGES,
   STAGE_META,
@@ -620,6 +620,29 @@ function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
   );
 }
 
+/** Per-run cost read-out on the bottom hairline of a board card — "$0.42 · 31k tok"
+ *  ($ in emerald; a subscription $-equivalent is flagged via title). Renders only
+ *  when the task carries cost data (i.e. it actually ran — otherwise no footer).
+ *  Reuses formatEffectiveCost so the $/token rule matches the chain-graph NodeCost. */
+function FlowCostFooter({ task }: { task: BoardTask }) {
+  if (task.cost_effective_usd == null) return null;
+  const totalTokens = (task.input_tokens ?? 0) + (task.output_tokens ?? 0);
+  const { text: costText, estimated } = formatEffectiveCost({
+    cost_usd: task.cost_usd ?? 0,
+    cost_effective_usd: task.cost_effective_usd,
+    tokens: totalTokens,
+  });
+  return (
+    <div className="mt-2 flex items-center justify-between gap-2 border-t border-[var(--hc-border)] pt-2">
+      <span className="hc-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--hc-text-dim)]">Kosten / Run</span>
+      <span className="hc-mono shrink-0 text-[10px] tabular-nums text-[var(--hc-text-dim)]">
+        <span className="font-semibold text-[var(--hc-emerald)]" title={estimated ? "geschätzter Abo-Gegenwert (kein metered $)" : undefined}>{costText}</span>
+        {totalTokens > 0 ? ` · ${fmtTokens(totalTokens)} tok` : null}
+      </span>
+    </div>
+  );
+}
+
 export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, manualReviewFallback, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
   const role = roleChip(enriched.workerProfile ?? task.assignee, task.status === "review" ? "verification" : null);
   const isBlocked = task.status === "blocked";
@@ -724,6 +747,7 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
           <DeliverableOpenButton url={resultArtifact.url} label="RESULT öffnen" />
         </div>
       ) : null}
+      <FlowCostFooter task={task} />
       <FlowCardActions
         status={task.status}
         busy={busy}

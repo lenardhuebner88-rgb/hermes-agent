@@ -1419,6 +1419,10 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
+        # Per-task cost/token rollup for the Flow-board card footer — one batch
+        # query (mirrors the chain-graph per-node aggregate). Tasks with no runs
+        # are omitted, so their cards render no cost footer.
+        cost_map = kanban_db.batch_task_costs(conn, [t.id for t in tasks])
 
         for t in tasks:
             full = summary_map.get(t.id)
@@ -1437,6 +1441,16 @@ def get_board(
             # Chain key for the /control Flow board: equals the task's own id
             # for standalone tasks and chain roots, the sink's id for members.
             d["root_id"] = _resolve_root(t.id)
+            cost = cost_map.get(t.id)
+            if cost is not None:
+                # Per-run cost read-out for the card footer — only attached when
+                # the task actually ran (no runs → no keys → no footer). Same
+                # five fields the chain-graph nodes carry, so one renderer fits both.
+                d["cost_usd"] = cost["cost_usd"]
+                d["input_tokens"] = cost["input_tokens"]
+                d["output_tokens"] = cost["output_tokens"]
+                d["cost_usd_equivalent"] = cost["cost_usd_equivalent"]
+                d["cost_effective_usd"] = cost["cost_effective_usd"]
             diags = diagnostics_per_task.get(t.id)
             if diags:
                 # The full list lets a drawer render without a second round-trip

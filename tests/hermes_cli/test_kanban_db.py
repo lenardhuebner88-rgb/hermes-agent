@@ -923,6 +923,54 @@ def _insert_run_window(conn, task_id, *, profile, started_at, ended_at,
     return cur.lastrowid
 
 
+def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
+    """batch_task_costs: one query sums cost/tokens per task, folds the
+    subscription $-equivalent into cost_effective_usd, and omits tasks with no
+    runs (so their board cards render no cost footer)."""
+    with kb.connect() as conn:
+        ran = kb.create_task(conn, title="ran twice", assignee="coder")
+        sub = kb.create_task(conn, title="subscription run", assignee="coder-claude")
+        idle = kb.create_task(conn, title="never ran")
+        with kb.write_txn(conn):
+            for cusd, tin, tout in [(0.10, 1000, 200), (0.05, 500, 100)]:
+                conn.execute(
+                    "INSERT INTO task_runs "
+                    "(task_id, profile, status, started_at, ended_at, outcome, "
+                    "input_tokens, output_tokens, cost_usd, metadata) "
+                    "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', ?, ?, ?, NULL)",
+                    (ran, tin, tout, cusd),
+                )
+            # Subscription run: metered cost_usd 0, but an estimated $-equivalent.
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'coder-claude', 'done', 1000, 1010, 'completed', ?, ?, ?, ?)",
+                (sub, 3000, 400, 0.0, json.dumps({"cost_usd_equivalent": 0.42})),
+            )
+
+        costs = kb.batch_task_costs(conn, [ran, sub, idle])
+
+    # Metered task: tokens + $ summed across both runs; no subscription equivalent.
+    assert costs[ran]["input_tokens"] == 1500
+    assert costs[ran]["output_tokens"] == 300
+    assert costs[ran]["cost_usd"] == pytest.approx(0.15)
+    assert costs[ran]["cost_usd_equivalent"] == pytest.approx(0.0)
+    assert costs[ran]["cost_effective_usd"] == pytest.approx(0.15)
+    # Subscription task: metered $0 but the estimated equivalent is the effective $.
+    assert costs[sub]["cost_usd"] == pytest.approx(0.0)
+    assert costs[sub]["cost_usd_equivalent"] == pytest.approx(0.42)
+    assert costs[sub]["cost_effective_usd"] == pytest.approx(0.42)
+    assert costs[sub]["input_tokens"] == 3000
+    # A task with no runs is omitted entirely → its card renders no cost footer.
+    assert idle not in costs
+
+
+def test_batch_task_costs_empty_input_returns_empty(kanban_home):
+    with kb.connect() as conn:
+        assert kb.batch_task_costs(conn, []) == {}
+
+
 def test_s1_cwd_match_stamps_real_tokens_and_cost(kanban_home, tmp_path, monkeypatch):
     """S1 tier-1 (deterministic): a session whose cwd contains the task_id is
     attributed to the run — real tokens + real cost, provenance recorded."""

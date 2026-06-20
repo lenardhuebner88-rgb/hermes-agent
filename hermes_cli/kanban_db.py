@@ -19098,6 +19098,59 @@ def latest_summaries(
     return {r["task_id"]: r["summary"] for r in rows}
 
 
+def batch_task_costs(
+    conn: sqlite3.Connection, task_ids: Iterable[str]
+) -> dict[str, dict]:
+    """Batch-fetch token/cost aggregates per task for a list of task ids.
+
+    Sums ``task_runs`` cost/token columns grouped by ``task_id`` in a single
+    query, so the dashboard board endpoint can attach a per-run cost read-out to
+    every card without an N+1. Mirrors the per-node aggregate the chain-graph
+    view already computes — same five fields, same ``cost_effective_usd =
+    cost_usd + cost_usd_equivalent`` rule (metered $ + the estimated $-equivalent
+    of subscription runs). Tasks with no runs are omitted from the result, so a
+    card with no run renders no cost footer.
+
+    Fail-soft on pre-K5a databases where the cost/token columns are absent →
+    returns ``{}`` instead of raising.
+    """
+    ids = list(task_ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                task_id,
+                CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
+                CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
+                COALESCE(SUM(COALESCE(
+                    json_extract(metadata, '$.cost_usd_equivalent'), 0.0
+                )), 0.0)                                          AS cost_usd_equivalent
+            FROM task_runs
+            WHERE task_id IN ({placeholders})
+            GROUP BY task_id
+            """,
+            ids,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # pre-K5a: cost/token columns absent — no cost footer
+    out: dict[str, dict] = {}
+    for row in rows:
+        c_usd = float(row["cost_usd"])
+        c_equiv = float(row["cost_usd_equivalent"])
+        out[row["task_id"]] = {
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "cost_usd": c_usd,
+            "cost_usd_equivalent": c_equiv,
+            "cost_effective_usd": c_usd + c_equiv,
+        }
+    return out
+
+
 def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
     """Return token/cost aggregates for a Kanban chain, grouped by lane/profile.
 

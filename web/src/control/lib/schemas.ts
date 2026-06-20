@@ -346,6 +346,15 @@ export const BoardTaskSchema = z.object({
   // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
   // Ältere Tasks ohne dieses Feld liefern null.
   idempotency_key: z.string().nullable().catch(null),
+  // K8 Kosten/Tokens pro Run — additiv; nur Tasks mit echtem Run tragen sie,
+  // sonst null (kein Kosten-Footer auf der Karte). Spiegelt die Chain-Graph-
+  // Knotenfelder: cost_effective_usd = cost_usd (metered) + cost_usd_equivalent
+  // (geschätzter $-Gegenwert der Abo-Runs).
+  cost_usd: z.coerce.number().nullable().catch(null),
+  input_tokens: z.coerce.number().nullable().catch(null),
+  output_tokens: z.coerce.number().nullable().catch(null),
+  cost_usd_equivalent: z.coerce.number().nullable().catch(null),
+  cost_effective_usd: z.coerce.number().nullable().catch(null),
 });
 
 export const BoardResponseSchema = z.object({

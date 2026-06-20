@@ -480,6 +480,15 @@ export interface BoardTask {
   /** Stable dedup key set at creation — e.g. `fo-backlog:<id>` for FO tasks.
    * Null for tasks created without one (older tasks or non-FO tasks). */
   idempotency_key?: string | null;
+  /** K8 per-run cost/token roll-up for the Flow-board card footer. Only set when
+   * the task actually ran (no runs → null → no footer). Mirrors the chain-graph
+   * node fields; `cost_effective_usd = cost_usd + cost_usd_equivalent` (metered $
+   * plus the estimated $-equivalent of subscription runs). */
+  cost_usd?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost_usd_equivalent?: number | null;
+  cost_effective_usd?: number | null;
 }
 
 /** True when the task runs in a dispatcher-provisioned isolated worktree
