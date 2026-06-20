@@ -28,6 +28,7 @@ import {
   useHermesRunsDaily,
   useHermesRunsIssues,
   useHermesRunSummary,
+  useHermesSubscriptionBurn,
 } from "../hooks/useControlData";
 import type {
   AccountUsageProvider,
@@ -37,6 +38,7 @@ import type {
   ReliabilityProfile,
   RunsDailyPoint,
   RunSummaryRoot,
+  SubscriptionTokenBurnResponse,
 } from "../lib/schemas";
 import {
   BroadsheetShell,
@@ -68,6 +70,7 @@ import {
   leaderboard,
   nutzerwert,
   rosterProfiles,
+  subscriptionBurnBreakdown,
   type LedgerEntry,
 } from "../lib/statsBroadsheet";
 
@@ -333,6 +336,74 @@ export function EffizienzSection({
   );
 }
 
+export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnResponse | null }) {
+  const detail = useMemo(() => subscriptionBurnBreakdown(burn), [burn]);
+  const hasBurn = detail.totals.total_tokens > 0;
+  return (
+    <>
+      <SectionRule title={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
+      {!hasBurn ? (
+        <Verdict tone="calm">{de.stats.subscriptionBurnEmpty}</Verdict>
+      ) : (
+        <div className="sb-subburn" data-testid="subscription-burn-breakdown">
+          <div className="sb-subburn-hero">
+            <span className="sb-kick">{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</span>
+            <strong className="sb-disp">{fmtTokens(detail.totals.total_tokens)}</strong>
+            <span>{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
+          </div>
+          <div className="sb-subburn-grid">
+            <div>
+              <p className="sb-kick">{de.stats.subscriptionBurnTop}</p>
+              {detail.topLanes.map((row) => (
+                <div key={`${row.subscription}:${row.profile}`} className="sb-subburn-row">
+                  <span>{row.profile} · {row.subscription}</span>
+                  <i />
+                  <b className="sb-mono">{fmtTokens(row.total_tokens)}</b>
+                  <small className="sb-mono">{Math.round(row.share * 100)} %</small>
+                </div>
+              ))}
+            </div>
+            <div>
+              <p className="sb-kick">{de.stats.subscriptionBurnClasses}</p>
+              {detail.classes.map((row) => (
+                <div key={`${row.subscription}:${row.value_class}`} className="sb-subburn-row">
+                  <span>{row.value_class} · {row.subscription}</span>
+                  <i />
+                  <b className="sb-mono">{fmtTokens(row.total_tokens)}</b>
+                  <small className="sb-mono">{Math.round(row.share * 100)} %</small>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="sb-subburn-flags" aria-label={de.stats.subscriptionBurnFlags}>
+            {detail.flags.map((flag) => (
+              <span key={`${flag.kind}:${flag.title}`} className={flag.kind === "anti" ? "sb-subburn-flag sb-subburn-anti" : "sb-subburn-flag"}>
+                <b>{flag.kind === "anti" ? de.stats.subscriptionBurnAnti : de.stats.subscriptionBurnTopFlag}</b>
+                {flag.title} · {flag.detail}
+              </span>
+            ))}
+          </div>
+          {detail.trend.length > 0 && (
+            <div data-testid="subscription-burn-trend">
+              <p className="sb-kick">{de.stats.subscriptionBurnTrend}</p>
+              {detail.trend.map((row) => (
+                <div key={row.date} className="sb-subburn-trend-row">
+                  <span className="sb-mono" style={{ fontSize: "11px", color: "var(--sb-ink2)" }}>{row.date}</span>
+                  <div className="sb-subburn-trend-bar">
+                    <i style={{ width: `${Math.round(row.share * 100)}%` }} />
+                  </div>
+                  <b className="sb-mono" style={{ fontSize: "12px" }}>{fmtTokens(row.total_tokens)}</b>
+                  <small className="sb-mono" style={{ color: "var(--sb-ink3)" }}>{Math.round(row.share * 100)} %</small>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Kosten pro Kette ─────────────────────────────────────────────────────────
 // Tabelle der abgeschlossenen Ketten (aus RunSummary.roots). Bei Auswahl einer
 // Zeile wird die by_lane-Aufschlüsselung via useHermesChainCosts geladen.
@@ -532,6 +603,7 @@ export function StatistikView() {
   const issues = useHermesRunsIssues();
   const accountUsage = useAccountUsage();
   const costs = useHermesRunsCosts();
+  const subscriptionBurn = useHermesSubscriptionBurn();
   const chain = useChainCompletion();
   const board = useBoardStats();
 
@@ -569,6 +641,8 @@ export function StatistikView() {
 
       {/* ── ST5: Budget-Ledger (Provider-Limits) + Flotten-Effizienz ───────── */}
       <BudgetLedgerSection providers={providers} />
+
+      <SubscriptionBurnSection burn={subscriptionBurn.data ?? null} />
 
       <EffizienzSection
         profiles={profiles}

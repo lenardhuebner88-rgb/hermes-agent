@@ -19,6 +19,9 @@ import type {
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
+  SubscriptionBurnClass,
+  SubscriptionBurnLane,
+  SubscriptionTokenBurnResponse,
 } from "./schemas";
 
 // ── Phantom filter ──────────────────────────────────────────────────────────
@@ -317,6 +320,31 @@ export interface LaneBurn {
   runs: number;
 }
 
+export interface SubscriptionBurnFlag {
+  kind: "top" | "anti";
+  title: string;
+  detail: string;
+  tokens: number;
+}
+
+export interface SubscriptionBurnTrendPoint {
+  date: string;
+  total_tokens: number;
+  runs: number;
+  /** Share of the window total (0..1). */
+  share: number;
+}
+
+export interface SubscriptionBurnBreakdown {
+  totals: SubscriptionTokenBurnResponse["totals"];
+  topLanes: Array<SubscriptionBurnLane & { share: number }>;
+  classes: Array<SubscriptionBurnClass & { share: number }>;
+  flags: SubscriptionBurnFlag[];
+  subscriptionCount: number;
+  /** Daily aggregated burn (all subscriptions summed), ascending by date. */
+  trend: SubscriptionBurnTrendPoint[];
+}
+
 export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
   return rosterProfiles(profiles)
     .map((p) => {
@@ -334,6 +362,74 @@ export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
     .filter((l) => l.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, limit);
+}
+
+export function subscriptionBurnBreakdown(
+  burn: SubscriptionTokenBurnResponse | null | undefined,
+  limit = 5,
+): SubscriptionBurnBreakdown {
+  const totals = burn?.totals ?? { runs: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+  const totalTokens = Math.max(0, totals.total_tokens || 0);
+  const pct = (share: number) => `${Math.round(share * 100)} %`;
+  const withShare = <T extends { total_tokens: number }>(row: T): T & { share: number } => ({
+    ...row,
+    share: totalTokens > 0 ? row.total_tokens / totalTokens : 0,
+  });
+  const topLanes = [...(burn?.by_lane ?? [])]
+    .filter((row) => row.total_tokens > 0)
+    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .slice(0, limit)
+    .map(withShare);
+  const classes = [...(burn?.by_class ?? [])]
+    .filter((row) => row.total_tokens > 0)
+    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .slice(0, limit)
+    .map(withShare);
+  const subscriptionCount = new Set(
+    (burn?.by_lane ?? []).filter((row) => row.total_tokens > 0).map((row) => row.subscription),
+  ).size;
+  const flags = [
+    ...topLanes.slice(0, 3).map((row): SubscriptionBurnFlag => ({
+      kind: "top",
+      title: `${profileLabel[row.profile] ?? row.profile} · ${row.subscription}`,
+      detail: `${pct(row.share)} des Fenster-Burns`,
+      tokens: row.total_tokens,
+    })),
+    ...classes
+      .filter((row) => row.value_class !== "nutzer" && row.share >= 0.2)
+      .slice(0, 3)
+      .map((row): SubscriptionBurnFlag => ({
+        kind: "anti",
+        title: `${row.value_class} · ${row.subscription}`,
+        detail: `${pct(row.share)} nicht-nutzernaher Burn`,
+        tokens: row.total_tokens,
+      })),
+  ]
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, limit);
+
+  // Aggregate daily rows by date (sum across all subscriptions), then sort asc.
+  const dailyByDate = new Map<string, { total_tokens: number; runs: number }>();
+  for (const row of burn?.daily ?? []) {
+    if (!row.date) continue;
+    const existing = dailyByDate.get(row.date);
+    if (existing) {
+      existing.total_tokens += row.total_tokens;
+      existing.runs += row.runs;
+    } else {
+      dailyByDate.set(row.date, { total_tokens: row.total_tokens, runs: row.runs });
+    }
+  }
+  const trend: SubscriptionBurnTrendPoint[] = [...dailyByDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, { total_tokens, runs }]) => ({
+      date,
+      total_tokens,
+      runs,
+      share: totalTokens > 0 ? total_tokens / totalTokens : 0,
+    }));
+
+  return { totals, topLanes, classes, flags, subscriptionCount, trend };
 }
 
 /** Gate-Effektivität = Σ rejected / Σ runs über die Roster-Profile (Reliability-Rows):
