@@ -138,6 +138,20 @@ def test_submit_for_review_stamps_stage_zero(kanban_home, gate_on):
 
 
 # ---------------------------------------------------------------------------
+# B-T8: dispatch reads the stage profile from the event (not fixed verifier)
+# ---------------------------------------------------------------------------
+
+def test_review_chain_target_reads_event(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", body="database migration",
+                             assignee="coder", review_tier="critical")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)  # stage 0 → verifier
+        cfg = kb._review_gate_config()
+        assert kb._review_chain_target(conn, tid, cfg) == "verifier"
+
+
+# ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
 

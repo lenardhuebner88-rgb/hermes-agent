@@ -6537,6 +6537,25 @@ def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
     return [p for p in seq if p and profile_exists(p)] or [seq[0]]
 
 
+def _review_chain_target(conn: sqlite3.Connection, task_id: str, cfg: dict) -> str:
+    """Profile to spawn for the task's current review stage, read from the
+    latest ``submitted_for_review`` event. Fail-soft: falls back to
+    ``verifier_profile`` when no event/target is recorded."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row and row["payload"]:
+        try:
+            tp = (json.loads(row["payload"]) or {}).get("target_profile")
+            if isinstance(tp, str) and tp.strip():
+                return tp.strip()
+        except Exception:
+            pass
+    return cfg["verifier_profile"]
+
+
 def _worker_gate_config() -> dict:
     """Resolve kanban.worker_gate from the ROOT config.yaml (mirrors
     _review_gate_config). Workers run under HERMES_HOME=<root>/profiles/<name>,
@@ -15047,14 +15066,18 @@ def dispatch_once(
         # verifier's review logic lives in its profile SOUL.md, so we don't
         # force a phantom skill (it would be silently skipped anyway).
         _rg_cfg = _review_gate_config()
-        _verifier_profile = _rg_cfg["verifier_profile"]
+        # B: spawn the profile for the task's CURRENT review stage (verifier →
+        # reviewer → critic), read from the latest submitted_for_review event.
+        # Falls back to verifier_profile, then to the original assignee if even
+        # that profile is missing (degenerate self-review, never a stall).
+        _stage_profile = _review_chain_target(conn, row["id"], _rg_cfg)
         try:
             from hermes_cli.profiles import profile_exists as _pexists
         except Exception:
             _pexists = None
         _spawn_profile = row["assignee"]
-        if _verifier_profile and (_pexists is None or _pexists(_verifier_profile)):
-            _spawn_profile = _verifier_profile
+        if _stage_profile and (_pexists is None or _pexists(_stage_profile)):
+            _spawn_profile = _stage_profile
         claimed = claim_review_task(
             conn, row["id"], ttl_seconds=ttl_seconds, reviewer_profile=_spawn_profile,
         )
