@@ -192,6 +192,43 @@ def test_standard_tier_still_single_stage(kanban_home, gate_on):
 
 
 # ---------------------------------------------------------------------------
+# B-T12: auto-retry renders structured findings (else plaintext fallback)
+# ---------------------------------------------------------------------------
+
+def test_auto_retry_feedback_renders_structured_findings(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.block_task(conn, tid, reason="changes needed", reviewer_metadata={
+            "verdict": "REQUEST_CHANGES",
+            "blocking_findings": ["null deref in foo()", "missing test for bar"]})
+        kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        body = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? "
+            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()["body"]
+        assert "null deref in foo()" in body
+        assert "missing test for bar" in body
+
+
+def test_auto_retry_feedback_plaintext_fallback(kanban_home, gate_on):
+    """No structured findings → the historical plaintext-reason path (unchanged)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="y", assignee="coder")
+        kb.claim_task(conn, tid)
+        kb.block_task(conn, tid, reason="just stuck")
+        kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        body = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? "
+            "AND author = 'dispatcher' ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()["body"]
+        assert "Previous block reason" in body
+        assert "just stuck" in body
+
+
+# ---------------------------------------------------------------------------
 # Producer routing
 # ---------------------------------------------------------------------------
 

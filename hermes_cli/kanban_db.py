@@ -3787,14 +3787,25 @@ def rewire_superseding_review_parent(
     return payload
 
 
+def _render_review_findings(reviewer_metadata: dict[str, Any]) -> str:
+    """Render the structured reviewer findings block (B). Shared by the
+    NEEDS_REVISION fix-body and the auto-retry feedback comment so both surface
+    identical, actionable findings to the coder."""
+    findings = reviewer_metadata.get("blocking_findings") or []
+    required = reviewer_metadata.get("required_verification") or []
+    lines = ["blocking_findings:"]
+    lines.extend([f"  - {item}" for item in findings] or ["  - none provided"])
+    lines.append("required_verification:")
+    lines.extend([f"  - {item}" for item in required] or ["  - none provided"])
+    return "\n".join(lines)
+
+
 def _needs_revision_fix_body(
     source: Task,
     review_task: str,
     reviewer_metadata: dict[str, Any],
     reason: str,
 ) -> str:
-    findings = reviewer_metadata.get("blocking_findings") or []
-    required = reviewer_metadata.get("required_verification") or []
     lines = [
         f"# Fix task for NEEDS_REVISION on {source.id}",
         "",
@@ -3810,16 +3821,11 @@ def _needs_revision_fix_body(
         "- The original source remains blocked until an explicit finalization gate rewires/supersedes and finalizes it.",
         f"- Reason: {reason}",
         "",
-        "blocking_findings:",
-    ]
-    lines.extend([f"  - {item}" for item in findings] or ["  - none provided"])
-    lines.append("required_verification:")
-    lines.extend([f"  - {item}" for item in required] or ["  - none provided"])
-    lines.extend([
+        _render_review_findings(reviewer_metadata),
         "",
         "reviewer_metadata_json:",
         json.dumps(reviewer_metadata, indent=2, sort_keys=True, ensure_ascii=False),
-    ])
+    ]
     return "\n".join(lines)
 
 
@@ -14188,7 +14194,7 @@ def _latest_blocked_run_for_auto_retry(
 ) -> Optional[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT id, profile, summary, error, ended_at, verdict
+        SELECT id, profile, summary, error, ended_at, verdict, metadata
           FROM task_runs
          WHERE task_id = ?
            AND outcome = 'blocked'
@@ -14377,11 +14383,29 @@ def auto_retry_blocked_tasks(
                         task_id,
                     ),
                 )
-            feedback = (
-                f"Auto-Retry {attempt}/{retry_limit} after blocked run "
-                f"{blocked_run['id']}. Previous block reason: "
-                f"{(reason or '(none)')[:500]}"
-            )
+            # B: prefer structured reviewer findings (from task_runs.metadata)
+            # over the plaintext reason; fall back to the historical plaintext
+            # path when no findings were recorded (no regression).
+            _md = None
+            try:
+                _raw = blocked_run["metadata"]
+                _md = json.loads(_raw) if _raw else None
+            except Exception:
+                _md = None
+            if isinstance(_md, dict) and (
+                _md.get("blocking_findings") or _md.get("required_verification")
+            ):
+                feedback = (
+                    f"Auto-Retry {attempt}/{retry_limit} after blocked run "
+                    f"{blocked_run['id']}. Reviewer findings:\n"
+                    f"{_render_review_findings(_md)}"
+                )
+            else:
+                feedback = (
+                    f"Auto-Retry {attempt}/{retry_limit} after blocked run "
+                    f"{blocked_run['id']}. Previous block reason: "
+                    f"{(reason or '(none)')[:500]}"
+                )
             conn.execute(
                 "INSERT INTO task_comments (task_id, author, body, created_at) "
                 "VALUES (?, ?, ?, ?)",
