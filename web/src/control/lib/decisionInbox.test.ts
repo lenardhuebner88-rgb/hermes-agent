@@ -190,6 +190,23 @@ describe("buildDecisionInbox — kanban surface", () => {
     // K3: nur review_rejected trägt den Inline-Resolve-Anker.
     expect(items[0].fixTaskId).toBe("t1");
     expect(items[1].fixTaskId).toBeUndefined();
+    // Befund 3: das age_seconds des Gateway-Payloads reicht bis ins InboxItem
+    // durch — TopDecision/Queue können "vor Xm" zeigen.
+    expect(items[0].ageSeconds).toBe(10);
+    expect(items[1].ageSeconds).toBe(99);
+  });
+
+  it("lässt das Alter leer, wenn der Payload kein age_seconds trägt (graceful)", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "operator_escalation", task_id: "t1", title: "Ohne Alter", reason: "x", age_seconds: null, suggested_command: null },
+      ],
+    });
+    expect(items[0].ageSeconds).toBeUndefined();
   });
 
   it("ranks operator escalation above generic blocked rows", () => {

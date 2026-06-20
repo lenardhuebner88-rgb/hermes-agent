@@ -30,6 +30,11 @@ export interface InboxItem {
   tone: ToneName;
   target: string;
   weight: number;
+  /** Verstrichene Sekunden, seit die Entscheidung anstand — speist die
+   *  "vor Xm"-Anzeige auf TopDecision/Queue. Nur Quellen mit echtem
+   *  Sekunden-Zeitstempel füllen es (Kanban `age_seconds`); fehlt es,
+   *  bleibt das Alter leer statt erfunden zu werden. */
+  ageSeconds?: number;
   /** K3: nur für `review_rejected` gesetzt — schaltet den Inline-Resolve
    *  ("Fix-Lauf starten": unblock → ready + Dispatcher-Tick) am CommandHome
    *  frei. Alle anderen Kinds lösen weiter über den Deep-Link auf. */
@@ -199,6 +204,9 @@ export function buildDecisionInbox(input: {
       // Deep-link to the task in the Board/backlog tab (reads ?focus).
       target: `/control/backlog?focus=${encodeURIComponent(d.task_id)}`,
       weight: meta.weight,
+      // Gateway liefert age_seconds bereits mit (kanban_db._age) — durchreichen,
+      // damit die TopDecision "vor Xm" zeigen kann. null → kein Alter.
+      ...(d.age_seconds != null ? { ageSeconds: d.age_seconds } : {}),
       // K3: a verifier rejection has ONE dominant resolution (fix run by the
       // owning coder — the retry sees the verifier feedback in its
       // worker_context), so it earns the inline action.

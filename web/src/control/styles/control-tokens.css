@@ -160,6 +160,17 @@ body:has([data-control]) header[role="banner"] { display: none; }
   background: linear-gradient(180deg, #ffffff 0%, var(--hc-panel) 100%);
   box-shadow: var(--hc-elev-2);
 }
+/* Floating glass panel — the hero Pulse-Rail recipe: a translucent porcelain
+   pane lifted off the field (white top-edge stroke + soft ambient shadow + blur).
+   Distinct from the opaque .hc-surface-card so a hero centrepiece reads as
+   "glass over the field", not just another inset panel. Token-only, no new colour. */
+.hc-glass {
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-radius);
+  background: color-mix(in srgb, var(--hc-panel-card) 66%, transparent);
+  box-shadow: var(--hc-elev-1);
+  backdrop-filter: blur(10px);
+}
 
 .hc-soft { color: var(--hc-text-soft); }
 .hc-dim { color: var(--hc-text-dim); }

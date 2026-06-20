@@ -13,7 +13,7 @@
  * inbox+overview+pulse triple that all re-rendered slices of the same sources.
  */
 import { useMemo, useState } from "react";
-import { ArrowRight, ChevronRight, Inbox as InboxIcon } from "lucide-react";
+import { ArrowRight, ChevronRight, HeartPulse, Inbox as InboxIcon } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import {
@@ -32,7 +32,7 @@ import type { BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
-import { fmtAge, fmtTokens, nowSec } from "../lib/derive";
+import { fmtAge, fmtDur, fmtTokens, nowSec } from "../lib/derive";
 import { StaleBadge, StatusPill } from "../components/atoms";
 import { RoleChip } from "../components/fleet/atoms";
 import { Eyebrow, Text } from "../components/primitives";
@@ -210,6 +210,9 @@ function TopDecision({ item, onOpen, fix, repair }: { item: InboxItem; onOpen: (
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill tone={surface.tone} label={surface.label} />
           <span className="text-[10px] font-semibold uppercase tracking-[.16em] hc-dim">Als Erstes</span>
+          {item.ageSeconds != null ? (
+            <span className="hc-mono text-[10px] tabular-nums hc-dim">vor {fmtDur(item.ageSeconds)}</span>
+          ) : null}
         </div>
         <p className="mt-1.5 line-clamp-2 text-base font-semibold leading-snug text-white">{item.title}</p>
         <p className="mt-1 line-clamp-2 text-sm hc-soft">{item.why}</p>
@@ -326,7 +329,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
     ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
   ];
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-[var(--hc-border)] bg-black/20 p-4 backdrop-blur-sm">
+    <div className="hc-glass flex flex-col gap-3 p-4">
       <div className="grid grid-cols-3 gap-3">
         <RailStat label="Laufen" value={running} tone="cyan" dot={running > 0 ? "live" : "idle"} />
         <RailStat label="In Prüfung" value={inReview} tone={inReview > 0 ? "amber" : "zinc"} dot={inReview > 0 ? "warn" : "idle"} />
@@ -402,8 +405,9 @@ function FleetStrip({ workers, loading, now, onOpen, freshness }: { workers: Wor
               <div key={w.run_id} className="hc-surface-card min-w-[15rem] max-w-[18rem] shrink-0 p-3">
                 <div className="flex items-center gap-2">
                   <RoleChip role={role} />
-                  <span className="ml-auto inline-flex items-center gap-1.5 text-[0.68rem] hc-dim">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />♥ {fmtAge(w.last_heartbeat_at, now)}
+                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.68rem] text-[var(--hc-emerald)]">
+                    <HeartPulse className="h-3 w-3 motion-safe:animate-pulse" aria-hidden />
+                    {fmtAge(w.last_heartbeat_at, now)}
                   </span>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-white">{w.task_title}</p>
@@ -427,7 +431,7 @@ function DecisionRow({ item, onOpen, fix, repair }: { item: InboxItem; onOpen: (
           <StatusPill tone={surface.tone} label={surface.label} />
           <span className="truncate text-sm font-semibold text-white">{item.title}</span>
         </div>
-        <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
+        <p className="mt-1 line-clamp-1 text-xs hc-soft">{item.ageSeconds != null ? <span className="hc-mono tabular-nums hc-dim">vor {fmtDur(item.ageSeconds)} · </span> : null}{item.why} · <span className="text-zinc-300">{item.nextAction}</span></p>
       </button>
       {item.fixTaskId ? <FixRedispatchButton taskId={item.fixTaskId} fix={fix} /> : null}
       {item.repairTaskId ? <RepairButton taskId={item.repairTaskId} repair={repair} /> : null}
