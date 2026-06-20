@@ -259,3 +259,32 @@ describe("FlowView loading guard", () => {
     expect(skeletonIdx).toBeLessThan(elseBranchStart);
   });
 });
+
+describe("FlowView Phase C operator levers (chain-start)", () => {
+  it("wires a chain-wide review_tier toggle into the release options", () => {
+    expect(src).toMatch(/reviewTier/);
+    expect(src).toMatch(/setReviewTier/);
+    // spread into the FlowReleaseOptions sent to flow-release
+    expect(src).toMatch(/review_tier:/);
+  });
+
+  it("wires a scout pre-pass checkbox into the release options", () => {
+    expect(src).toMatch(/injectScout/);
+    expect(src).toMatch(/setInjectScout/);
+    expect(src).toMatch(/inject_scout:/);
+  });
+
+  it("offers a chain-wide lane override folded into assignee_overrides (per-subtask wins)", () => {
+    expect(src).toMatch(/laneAll/);
+    expect(src).toMatch(/setLaneAll/);
+    // chain-wide lane spreads first, then the per-subtask overridePayload overrides it
+    expect(src).toMatch(/Object\.fromEntries/);
+  });
+
+  it("renders a Review-tier pill on the chain card derived from its members", () => {
+    expect(src).toMatch(/chainReviewTier/);
+    expect(src).toMatch(/Review: /);
+    // the staged-review pill uses the indigo tone
+    expect(src).toMatch(/tone="indigo"/);
+  });
+});

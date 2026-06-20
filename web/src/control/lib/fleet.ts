@@ -9,7 +9,7 @@
  * Pure + framework-neutral so the stage maths is unit-tested without React.
  * Nothing here calls the API — it only describes WHAT a button should do.
  */
-import type { ToneName, TaskStatus, WorkerProfile } from "./types";
+import type { ToneName, TaskStatus, WorkerProfile, ReviewTier } from "./types";
 
 export type FleetStage = "capture" | "plan" | "execute" | "verify" | "ship";
 
@@ -404,6 +404,23 @@ export interface ChainTaskLite extends BoardTaskLite {
   tenant?: string | null;
   epic_id?: string | null;
   progress?: { done: number; total: number } | null;
+  review_tier?: ReviewTier | null;
+}
+
+const REVIEW_TIER_RANK: Record<ReviewTier, number> = { standard: 0, review: 1, critical: 2 };
+
+/** Highest staged-review tier across a chain's members, or null when the chain
+ *  carries no elevated tier (every member standard/unset → no Review pill).
+ *  Mirrors the backend ``_TIER_ORDER`` ranking; ``standard`` is the silent
+ *  baseline and never surfaces a pill. */
+export function chainReviewTier(members: Array<{ review_tier?: ReviewTier | null }>): ReviewTier | null {
+  let best: ReviewTier | null = null;
+  for (const m of members) {
+    const tier = m.review_tier;
+    if (!tier || tier === "standard") continue;
+    if (best === null || REVIEW_TIER_RANK[tier] > REVIEW_TIER_RANK[best]) best = tier;
+  }
+  return best;
 }
 
 export interface ChainModel<T extends ChainTaskLite> {

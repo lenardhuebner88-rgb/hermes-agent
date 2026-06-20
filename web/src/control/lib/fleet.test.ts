@@ -11,10 +11,24 @@ import {
   captureRequest,
   flowCaptureRequest,
   usesFlowCaptureEndpoint,
+  chainReviewTier,
   STAGE_META,
   type BoardTaskLite,
 } from "./fleet";
 import type { TaskStatus } from "./types";
+
+describe("chainReviewTier", () => {
+  it("returns null when every member is standard or unset (no Review pill)", () => {
+    expect(chainReviewTier([{}, { review_tier: "standard" }, { review_tier: null }])).toBeNull();
+    expect(chainReviewTier([])).toBeNull();
+  });
+
+  it("returns the highest elevated tier across the members", () => {
+    expect(chainReviewTier([{ review_tier: "review" }, { review_tier: "critical" }, {}])).toBe("critical");
+    expect(chainReviewTier([{ review_tier: "review" }, { review_tier: "standard" }])).toBe("review");
+    expect(chainReviewTier([{ review_tier: "critical" }])).toBe("critical");
+  });
+});
 
 describe("statusToStage", () => {
   it("maps every kanban status onto an operator stage", () => {

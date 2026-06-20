@@ -18723,6 +18723,35 @@ def set_task_model_override(
         return True
 
 
+def set_task_review_tier(
+    conn: sqlite3.Connection, task_id: str, tier: Optional[str],
+) -> bool:
+    """Phase C: set/clear ``tasks.review_tier`` — the operator override the
+    staged-review resolver treats as authoritative in both directions
+    (``_effective_review_tier``). ``tier=None``/leer löscht den Override (the
+    auto-risk classifier decides again). A non-empty value is normalised to the
+    canonical lowercase token and validated against ``_TIER_ORDER``; an unknown
+    tier raises ``ValueError`` rather than silently storing garbage. Greift ab
+    dem nächsten Submit; eine bereits eingefrorene Review-Kette bleibt unberührt.
+
+    Returns False if the task doesn't exist.
+    """
+    value = (tier or "").strip().lower() or None
+    if value is not None and value not in _TIER_ORDER:
+        raise ValueError(
+            f"unknown review_tier {value!r}; expected one of {sorted(_TIER_ORDER)}"
+        )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET review_tier = ? WHERE id = ?",
+            (value, task_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "review_tier_set", {"review_tier": value})
+        return True
+
+
 def _to_epoch(val) -> Optional[int]:
     """Normalise a timestamp to unix epoch seconds.
 

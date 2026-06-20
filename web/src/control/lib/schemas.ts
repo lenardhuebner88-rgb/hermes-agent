@@ -217,6 +217,9 @@ export const FlowReleaseResponseSchema = z.object({
   released_ids: z.array(z.string()).catch([]),
   release_level: FlowGateReleaseLevelSchema,
   assignee_overrides: z.record(z.string(), z.string().nullable()).catch({}),
+  // Phase C: echoed levers (additiv; ältere Server liefern sie nicht → null).
+  review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
+  scout_id: z.string().nullable().catch(null),
 });
 
 export const FlowTimeoutSweepResponseSchema = z.object({
@@ -343,6 +346,9 @@ export const BoardTaskSchema = z.object({
   tenant: z.string().nullable().catch(null),
   root_id: z.string().nullable().catch(null),
   epic_id: z.string().nullable().catch(null),
+  // Phase C: staged-review tier (Phase B column). Additiv — ältere Server / Karten
+  // ohne das Feld fallen auf null zurück (= standard / kein Tier-Pill).
+  review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
   // Stables Dedup-Feld — wird z.B. als `fo-backlog:<id>` für FO-Tasks vergeben.
   // Ältere Tasks ohne dieses Feld liefern null.
   idempotency_key: z.string().nullable().catch(null),

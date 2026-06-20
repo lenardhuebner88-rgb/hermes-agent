@@ -191,9 +191,15 @@ export interface FlowGateResponse {
   cost_estimate: FlowGateCostEstimate;
 }
 
+export type ReviewTier = "standard" | "review" | "critical";
+
 export interface FlowReleaseOptions {
   assignee_overrides?: Record<string, string | null>;
   release_level?: FlowGateReleaseLevel;
+  /** Phase C: chain-wide staged-review tier stamped on every released child. */
+  review_tier?: ReviewTier;
+  /** Phase C: prepend one read-only scout recon task before the entry children. */
+  inject_scout?: boolean;
 }
 
 export interface FlowSizingResponse {
@@ -214,6 +220,10 @@ export interface FlowReleaseResponse {
   released_ids: string[];
   release_level: FlowGateReleaseLevel;
   assignee_overrides: Record<string, string | null>;
+  /** Phase C: the chain-wide tier applied (null when not set). */
+  review_tier?: ReviewTier | null;
+  /** Phase C: the injected scout task id (null when no scout was prepended). */
+  scout_id?: string | null;
 }
 
 export interface FlowTimeoutSweepResponse {
@@ -469,6 +479,9 @@ export interface BoardTask {
   tenant: string | null;
   /** Chain key — the tree-sink root this task rolls up into (own id for standalone/roots). */
   root_id: string | null;
+  /** Phase C: staged-review tier (Phase B column). Explicit value drives
+   * verifier→reviewer→critic; null/absent = standard (auto-risk may still apply). */
+  review_tier?: ReviewTier | null;
   /** Epic membership when assigned (first-class backend grouping). */
   epic_id: string | null;
   /** Workspace model (worker isolation): "scratch" | "dir" | "worktree".

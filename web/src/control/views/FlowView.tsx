@@ -22,6 +22,7 @@ import {
   FLEET_STAGES,
   STAGE_META,
   buildChains,
+  chainReviewTier,
   flowCounts,
   groupChainsByEpic,
   projectKey,
@@ -55,7 +56,7 @@ import {
 } from "../hooks/useControlData";
 import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
 import { planSpecKanbanTone, planSpecKanbanLabel } from "./flow/planSpecKanban";
-import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
+import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -769,6 +770,11 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
 // (documented method), and a "Kette starten" release when subtasks are gate-held
 // in `scheduled`. This is the visible+operative proof — the same child ids run
 // on through Execute → Verify → Ship.
+const REVIEW_TIER_LABEL: Record<ReviewTier, string> = { standard: "Standard", review: "Review", critical: "Kritisch" };
+// Phase C: the operator's chain-wide lane choices at start (canonical code lanes;
+// premium = the Claude Opus lane, coder = the default code lane).
+const FLOW_LANE_OPTIONS: ReadonlyArray<string> = ["coder", "premium"];
+
 function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy, releaseError, released, onGateChanged }: {
   rootId: string; detail?: TaskDetailResponse; boardTasks: BoardTask[];
   now: number; onRelease: (rootId: string, n: number, options?: FlowReleaseOptions) => void; releaseBusy: boolean; releaseError?: string; released?: number; onGateChanged?: () => void | Promise<void>;
@@ -778,6 +784,10 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
   const [assigneeOverrides, setAssigneeOverrides] = useState<Record<string, string>>({});
   const [selectedSizing, setSelectedSizing] = useState<string[]>([]);
   const [splitTitle, setSplitTitle] = useState("");
+  // Phase C operator levers (chain-wide, applied at start via flow-release).
+  const [reviewTier, setReviewTier] = useState<ReviewTier | "">("");
+  const [injectScout, setInjectScout] = useState(false);
+  const [laneAll, setLaneAll] = useState("");
   const autoSweepRef = useRef<string | null>(null);
   const gate = useFlowGate(rootId, onGateChanged);
   const events = detail?.events ?? [];
@@ -835,9 +845,17 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
       }
     });
   };
+  const laneOptions = FLOW_LANE_OPTIONS.filter((p) => !profiles.length || profiles.includes(p));
+  // Chain-wide lane spreads onto every child first; a per-subtask override
+  // (overridePayload) is applied AFTER so the more specific choice wins.
+  const laneOverrides: Record<string, string | null> = laneAll
+    ? Object.fromEntries(childIds.map((id) => [id, laneAll]))
+    : {};
   const releaseOptions: FlowReleaseOptions = {
     release_level: releaseLevel,
-    assignee_overrides: overridePayload,
+    assignee_overrides: { ...laneOverrides, ...overridePayload },
+    ...(reviewTier ? { review_tier: reviewTier } : {}),
+    ...(injectScout ? { inject_scout: true } : {}),
   };
 
   return (
@@ -967,6 +985,49 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
             >
               Split
             </button>
+          </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+            {laneOptions.length ? (
+              <label className="inline-flex items-center gap-1.5 hc-type-label hc-soft">
+                Lane
+                <select
+                  value={laneAll}
+                  onChange={(e) => setLaneAll(e.target.value)}
+                  className="min-h-8 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-[var(--hc-text)]"
+                >
+                  <option value="">unverändert</option>
+                  {laneOptions.map((p) => <option key={p} value={p}>{profileLabel[p] ?? p}</option>)}
+                </select>
+              </label>
+            ) : null}
+            <div className="inline-flex items-center gap-1">
+              <span className="hc-type-label hc-soft">Review</span>
+              {(["standard", "review", "critical"] as ReviewTier[]).map((tier) => (
+                <button
+                  key={tier}
+                  type="button"
+                  aria-pressed={reviewTier === tier}
+                  onClick={() => setReviewTier((prev) => (prev === tier ? "" : tier))}
+                  className={cn(
+                    "inline-flex min-h-8 items-center rounded-full border px-2.5 hc-type-label transition",
+                    reviewTier === tier
+                      ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+                      : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
+                  )}
+                >
+                  {REVIEW_TIER_LABEL[tier]}
+                </button>
+              ))}
+            </div>
+            <label className="inline-flex items-center gap-1.5 hc-type-label hc-soft">
+              <input
+                type="checkbox"
+                checked={injectScout}
+                onChange={(e) => setInjectScout(e.target.checked)}
+                className="h-3.5 w-3.5 accent-[var(--hc-accent)]"
+              />
+              Scout-Vorlauf
+            </label>
           </div>
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -1396,6 +1457,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
   const openMembers = chain.members.filter((m) => m.status !== "done");
   const doneMembers = chain.members.filter((m) => m.status === "done");
   const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
+  const reviewTier = chainReviewTier(chain.members);
   return (
     <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card min-w-0 max-w-full overflow-hidden scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
       <div
@@ -1430,6 +1492,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
           <span className="hc-mono hc-type-label hc-soft">{de.flow.chainMembers(chain.doneCount, chain.total)}</span>
           {chain.blockedCount > 0 ? <StatusPill tone="red" label={`${chain.blockedCount} blockiert`} dot="error" /> : null}
           {chain.runningCount > 0 ? <StatusPill tone="cyan" label={`${chain.runningCount} läuft`} dot="live" /> : null}
+          {reviewTier ? <StatusPill tone="indigo" label={`Review: ${REVIEW_TIER_LABEL[reviewTier]}`} /> : null}
         </div>
       </div>
       {expanded ? (

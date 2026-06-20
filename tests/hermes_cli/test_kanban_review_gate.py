@@ -98,6 +98,44 @@ def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypat
 
 
 # ---------------------------------------------------------------------------
+# C-T1: operator setter set_task_review_tier (mirror of set_task_model_override)
+# ---------------------------------------------------------------------------
+
+def test_set_task_review_tier_roundtrip(kanban_home):
+    """Setter mirrors set_task_model_override: set/clear, normalise, validate, event."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="tier setter", assignee="coder")
+        # set → column authoritative, effective tier follows
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert kb.get_task(conn, tid).review_tier == "critical"
+        assert kb._effective_review_tier(conn, tid) == "critical"
+        # normalises case + whitespace to the canonical lowercase token
+        assert kb.set_task_review_tier(conn, tid, "  Review  ") is True
+        assert kb.get_task(conn, tid).review_tier == "review"
+        # None clears → NULL (auto-risk decides again)
+        assert kb.set_task_review_tier(conn, tid, None) is True
+        assert kb.get_task(conn, tid).review_tier is None
+        # empty string also clears
+        assert kb.set_task_review_tier(conn, tid, "critical") is True
+        assert kb.set_task_review_tier(conn, tid, "") is True
+        assert kb.get_task(conn, tid).review_tier is None
+        # invalid non-empty tier raises — never silently stores garbage
+        with pytest.raises(ValueError):
+            kb.set_task_review_tier(conn, tid, "bogus")
+        # a real set stamps a review_tier_set event
+        kinds = [
+            r[0]
+            for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? AND kind='review_tier_set'",
+                (tid,),
+            ).fetchall()
+        ]
+        assert kinds, "expected at least one review_tier_set event"
+        # missing task → False, no raise
+        assert kb.set_task_review_tier(conn, "t_doesnotexist", "review") is False
+
+
+# ---------------------------------------------------------------------------
 # B-T6: ordered stage list per tier (missing profiles degrade gracefully)
 # ---------------------------------------------------------------------------
 

@@ -5252,6 +5252,12 @@ class FlowCaptureBody(BaseModel):
 class FlowReleaseBody(BaseModel):
     assignee_overrides: dict[str, Optional[str]] = Field(default_factory=dict)
     release_level: Literal["merge", "live"] = "merge"
+    # Phase C operator levers (both optional → calls without them are
+    # byte-identical to today). ``review_tier`` is applied chain-wide to every
+    # child; ``inject_scout`` prepends one read-only scout recon task before the
+    # entry children of the released chain.
+    review_tier: Optional[Literal["standard", "review", "critical"]] = None
+    inject_scout: bool = False
 
 
 class FlowSizingBody(BaseModel):
@@ -5845,8 +5851,11 @@ def _release_flow_gate(
     assignee_overrides: dict[str, Optional[str]],
     release_level: Literal["merge", "live"],
     reason: str,
+    review_tier: Optional[str] = None,
+    inject_scout: bool = False,
 ) -> dict[str, Any]:
-    if kanban_db.get_task(conn, root_id) is None:
+    root = kanban_db.get_task(conn, root_id)
+    if root is None:
         raise HTTPException(status_code=404, detail=f"task {root_id} not found")
     child_ids = _flow_gate_child_ids(conn, root_id)
     child_set = set(child_ids)
@@ -5874,6 +5883,45 @@ def _release_flow_gate(
         if child is not None and child.status == "scheduled":
             if kanban_db.unblock_task(conn, child_id):
                 released.append(child_id)
+
+    # Phase C lever: a chain-wide review_tier is stamped on EVERY child so the
+    # staged-review resolver (verifier→reviewer→critic) governs the whole chain.
+    # The typed body already constrains the value; the setter validates again as
+    # defense-in-depth. Harmless on non-code children (they never gate).
+    tier_value = (review_tier or "").strip().lower() or None
+    if tier_value is not None:
+        for child_id in child_ids:
+            kanban_db.set_task_review_tier(conn, child_id, tier_value)
+
+    # Phase C lever: prepend ONE read-only scout recon task before the entry
+    # children (released children with no in-chain parent), so the cheap scout
+    # surfaces findings before the coders run. Only when this call actually
+    # released children — a re-release (nothing scheduled) must not spawn a
+    # second scout. A freshly created scout has no links, so link_tasks can
+    # never cycle; it demotes each ready entry child to todo (waiting on scout).
+    scout_id: Optional[str] = None
+    if inject_scout and released:
+        entry_children = [
+            cid for cid in released
+            if not (set(kanban_db.parent_ids(conn, cid)) & child_set)
+        ]
+        if entry_children:
+            scout_id = kanban_db.create_task(
+                conn,
+                title=f"Scout: {root.title}",
+                body=(
+                    "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code "
+                    "und liefere knappe Fund-Notizen (Dateien, Symbole, Risiken) "
+                    "für die nachfolgenden Coder. Nichts editieren."
+                ),
+                assignee="scout",
+                created_by="flow-gate",
+                priority=root.priority,
+                tenant=root.tenant,
+            )
+            for cid in entry_children:
+                kanban_db.link_tasks(conn, scout_id, cid)
+
     _append_flow_gate_event(
         conn,
         root_id,
@@ -5882,6 +5930,8 @@ def _release_flow_gate(
             "released_ids": released,
             "release_level": release_level,
             "assignee_overrides": overrides,
+            "review_tier": tier_value,
+            "scout_id": scout_id,
             "reason": reason,
         },
     )
@@ -5902,6 +5952,8 @@ def _release_flow_gate(
         "released_ids": released,
         "release_level": release_level,
         "assignee_overrides": overrides,
+        "review_tier": tier_value,
+        "scout_id": scout_id,
     }
 
 
@@ -6118,6 +6170,8 @@ def flow_release(
             assignee_overrides=body.assignee_overrides,
             release_level=body.release_level,
             reason="operator-release",
+            review_tier=body.review_tier,
+            inject_scout=body.inject_scout,
         )
     finally:
         conn.close()

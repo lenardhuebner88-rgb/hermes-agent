@@ -324,6 +324,21 @@ def test_board_card_body_none_omits_long_text(client):
     assert "root_id" in trimmed
 
 
+def test_board_card_body_none_preserves_review_tier(client):
+    """Phase C: the Flow-Tab Stage-Pill reads review_tier from the /board poll —
+    card_body=none must NOT strip it (it only drops body+result)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="tiered", assignee="coder", review_tier="critical")
+    data = client.get(
+        "/api/plugins/kanban/board?card_diagnostics=summary&card_body=none"
+    ).json()
+    card = next(
+        (t for col in data["columns"] for t in col["tasks"] if t["id"] == tid), None
+    )
+    assert card is not None, "tiered task missing from board"
+    assert card["review_tier"] == "critical"
+
+
 def test_board_etag_304_roundtrip(client):
     """The board sends a weak ETag (computed without the per-second ``now``)
     and answers an If-None-Match revalidation with 304 while the board is
@@ -4222,6 +4237,73 @@ def test_flow_release_applies_lane_override_and_records_release_level(client):
     assert release_events
     assert release_events[-1].payload["release_level"] == "live"
     assert release_events[-1].payload["released_ids"] == child_ids
+
+
+# ---------------------------------------------------------------------------
+# Phase C — flow-release operator levers: review_tier + Scout injection
+# ---------------------------------------------------------------------------
+
+
+def test_flow_release_sets_review_tier_on_children(client):
+    """A chain-wide review_tier on flow-release stamps every child's column."""
+    root, child_ids = _setup_gated_root()
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "critical"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["review_tier"] == "critical"
+    with kb.connect() as conn:
+        tiers = {c: kb.get_task(conn, c).review_tier for c in child_ids}
+    assert all(t == "critical" for t in tiers.values()), tiers
+
+
+def test_flow_release_without_options_is_backward_compatible(client):
+    """No review_tier / no inject_scout → children untagged, no scout (byte-identical)."""
+    root, child_ids = _setup_gated_root()
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("review_tier") is None
+    assert body.get("scout_id") is None
+    with kb.connect() as conn:
+        assert all(kb.get_task(conn, c).review_tier is None for c in child_ids)
+
+
+def test_flow_release_rejects_invalid_review_tier(client):
+    """An unknown tier is rejected by the typed body (no garbage written)."""
+    root, _ = _setup_gated_root()
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "bogus"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_flow_release_injects_scout_predecessor(client):
+    """inject_scout prepends one scout task as predecessor of the entry children
+    (those with no in-chain parent), demoting them to todo; scout itself is ready."""
+    root, child_ids = _setup_gated_root()
+    # child_ids: [0]=a (entry), [1]=b (entry), [2]=c depends on [0,1] (not entry)
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    scout_id = r.json()["scout_id"]
+    assert scout_id, r.json()
+    with kb.connect() as conn:
+        scout = kb.get_task(conn, scout_id)
+        assert scout.assignee == "scout"
+        assert scout.status == "ready"
+        # scout is a predecessor of BOTH entry children, not the dependent one
+        assert scout_id in kb.parent_ids(conn, child_ids[0])
+        assert scout_id in kb.parent_ids(conn, child_ids[1])
+        assert scout_id not in kb.parent_ids(conn, child_ids[2])
+        # entry children demoted ready->todo (waiting on the scout); scout has no parents
+        assert kb.get_task(conn, child_ids[0]).status == "todo"
+        assert kb.get_task(conn, child_ids[1]).status == "todo"
+        assert kb.parent_ids(conn, scout_id) == []
 
 
 def test_flow_release_clears_freigabe_operator_hold_at_root(client):
