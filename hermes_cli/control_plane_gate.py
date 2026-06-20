@@ -49,6 +49,20 @@ _REVIEW_REQUIRED_MARKERS = {
     "dispatch",
     "push",
 }
+# B (staged review gate): the strong markers that escalate an already
+# review-required task all the way to the 'critical' tier (verifier→reviewer→
+# critic). Conservative on purpose — DB writes, deploys and secrets/auth only.
+_CRITICAL_REVIEW_MARKERS = frozenset({
+    "database",
+    "db",
+    "migration",
+    "deploy",
+    "secret",
+    "credential",
+    "drop",
+    "alter",
+    "auth",
+})
 
 
 @dataclass(frozen=True)
@@ -144,6 +158,23 @@ def reviewer_gate_required(plan_spec: Mapping[str, Any] | None) -> bool:
             return False
         return True
     return False
+
+
+def classify_review_tier(plan_spec: Mapping[str, Any] | None) -> str:
+    """Auto-risk → staged-review tier ∈ {standard, review, critical}.
+
+    Conservative by design and reuses the existing review classifier:
+    ``standard`` whenever there is no spec or no reviewer gate is required;
+    ``critical`` only when a strong DB/deploy/security marker is present; every
+    other gate-required scope is ``review``. NULL/None → ``standard`` so an
+    unclassified task keeps today's single-verifier behavior.
+    """
+    if not plan_spec or not reviewer_gate_required(plan_spec):
+        return "standard"
+    blob = _plan_text(plan_spec)
+    if any(marker in blob for marker in _CRITICAL_REVIEW_MARKERS):
+        return "critical"
+    return "review"
 
 
 def validate_reviewer_verdict_metadata(

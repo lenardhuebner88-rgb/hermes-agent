@@ -7,6 +7,7 @@ import pytest
 from hermes_cli.control_plane_gate import (
     GateDecision,
     SubstantiveCoordinatorChangeError,
+    classify_review_tier,
     coordinator_gate_decision,
     orchestrator_gate_decision,
     reviewer_gate_required,
@@ -98,6 +99,21 @@ def test_missing_approval_blocks_even_low_risk_docs_plan():
         reason="orchestrator_apply_blocked",
         blocking_findings=["current_thread_piet_approval_required"],
     )
+
+
+def test_classify_review_tier_levels():
+    """B-T4: None/low → standard; gate-required non-critical → review;
+    DB/deploy/security markers → critical."""
+    assert classify_review_tier(None) == "standard"
+    assert classify_review_tier(
+        {"risk_class": "low", "action_class": "", "scope": "docs only"}
+    ) == "standard"
+    assert classify_review_tier(
+        {"risk_class": "medium", "objective": "refactor code module"}
+    ) == "review"
+    assert classify_review_tier(
+        {"risk_class": "high", "objective": "run database migration + deploy"}
+    ) == "critical"
 
 
 def test_medium_or_runtime_scope_requires_reviewer_or_explicit_piet_override():
