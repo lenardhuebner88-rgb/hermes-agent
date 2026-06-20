@@ -107,6 +107,24 @@ def build_vision_parser(subparsers) -> None:
         default=None,
         help="ISO-8601 timestamp of the gate run (default: now)",
     )
+    record.add_argument(
+        "--first-fail-gate",
+        default=None,
+        help=(
+            "On a fail: the first failing gate (python|tsc|vitest|build). "
+            "Stored on the ledger entry as a machine-readable cause; ignored "
+            "for a pass."
+        ),
+    )
+    record.add_argument(
+        "--first-fail-detail",
+        default=None,
+        help=(
+            "On a fail: the first non-empty failure text (a short stderr "
+            "tail). Redacted and capped before it is written to the ledger; "
+            "ignored for a pass."
+        ),
+    )
     record.add_argument("--json", action="store_true", help="Emit JSON output")
 
 
@@ -164,7 +182,12 @@ def vision_command(args: argparse.Namespace) -> int:
         return 0
 
     if action == "record-gate-result":
-        record = vm.record_gate_result(args.result, ts=getattr(args, "ts", None))
+        record = vm.record_gate_result(
+            args.result,
+            ts=getattr(args, "ts", None),
+            first_fail_gate=getattr(args, "first_fail_gate", None),
+            first_fail_detail=getattr(args, "first_fail_detail", None),
+        )
         if getattr(args, "json", False):
             print(json.dumps(record, ensure_ascii=False))
         else:

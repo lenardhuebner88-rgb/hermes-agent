@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_db as kb
 
 DAY_SECONDS = 86_400
@@ -42,6 +43,16 @@ METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 
 GATE_RESULTS = ("pass", "fail")
+
+# Canonical gate names a red heartbeat run can attribute a first failure to.
+# Not enforced (forward-compat: a future gate or the toolchain-missing edge can
+# carry its own label) — used for documentation and normalization expectations.
+GATE_NAMES = ("python", "tsc", "vitest", "build")
+
+# AC-2: the captured stderr tail is capped so each red ledger entry stays
+# bounded. 2 KiB keeps the first-failure cause readable without letting a
+# pathological log balloon the append-only ledger.
+GATE_FIRST_FAIL_MAX_BYTES = 2048
 
 # Heiler classes that indicate a *real* problem was detected (not a transient
 # blip). A task counted "autonomous" that nonetheless carries one of these is
@@ -102,19 +113,58 @@ def _parse_ts(ts: Optional[str], *, now: Optional[int]) -> _dt.datetime:
     return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc)
 
 
+def _build_first_fail(gate: Optional[str], detail: Optional[str]) -> dict:
+    """Build the redacted, bounded ``first_fail`` payload for a red record.
+
+    ``gate`` is normalized (lowercased/stripped). ``detail`` (the heartbeat's
+    first non-empty ``fails[]`` entry — a gate label plus a short stderr tail)
+    is run through the existing response redaction so no secret reaches the
+    on-disk ledger, then capped to :data:`GATE_FIRST_FAIL_MAX_BYTES`.
+
+    Redaction runs on the *full* string before capping so a credential can
+    never survive by being split across the cap boundary; the kept slice is
+    the tail (the most-relevant end of a failing log). Returns ``{}`` when
+    neither field carries content.
+    """
+    first_fail: dict = {}
+    if gate:
+        cleaned = str(gate).strip().lower()
+        if cleaned:
+            first_fail["gate"] = cleaned
+    if detail:
+        # force=True: the ledger persists to disk, so it must never carry raw
+        # secrets regardless of the operator's global redaction preference.
+        redacted = redact_sensitive_text(str(detail), force=True)
+        raw = redacted.encode("utf-8")
+        if len(raw) > GATE_FIRST_FAIL_MAX_BYTES:
+            redacted = raw[-GATE_FIRST_FAIL_MAX_BYTES:].decode("utf-8", "ignore")
+        if redacted:
+            first_fail["detail"] = redacted
+    return first_fail
+
+
 def record_gate_result(
     result: str,
     *,
     ts: Optional[str] = None,
     now: Optional[int] = None,
     path: Optional[Path] = None,
+    first_fail_gate: Optional[str] = None,
+    first_fail_detail: Optional[str] = None,
 ) -> dict:
     """Append one structured green-gate record to the ledger.
 
     ``result`` must be ``pass`` or ``fail``. ``ts`` is an optional ISO-8601
     timestamp for the gate run (defaults to ``now`` / the wall clock). The
     record carries the UTC ``date`` so the streak can be counted per night.
-    Returns the record that was written.
+
+    On a ``fail`` an optional first-failure payload (``first_fail_gate`` +
+    ``first_fail_detail``) is attached as a ``first_fail`` field so each red
+    entry carries a machine-readable cause (which gate, a redacted/capped
+    stderr tail) the strategist / StrategistView can surface. ``pass`` records
+    never carry it — pass behaviour is unchanged — and a ``fail`` without a
+    payload is also unchanged (backward-compatible). Returns the record that
+    was written.
     """
     normalized = str(result).strip().lower()
     if normalized not in GATE_RESULTS:
@@ -128,6 +178,10 @@ def record_gate_result(
         "epoch": int(dt.timestamp()),
         "date": dt.date().isoformat(),
     }
+    if normalized == "fail":
+        first_fail = _build_first_fail(first_fail_gate, first_fail_detail)
+        if first_fail:
+            record["first_fail"] = first_fail
     target = path or gate_ledger_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:
