@@ -538,7 +538,8 @@ export const de = {
     chipStep: "Schritt",
     chipTokensIn: "In-Tokens",
     chipTokensOut: "Out-Tokens",
-    chipTokensNoLive: "nur Hermes-Lanes liefern Live-Tokens",
+    chipTokensNoLive: "Tokens & Kosten: nach Abschluss",
+    chipTokensNoLiveTitle: "Live-Token-Zähler stehen für laufende Worker nicht zuverlässig bereit — echte Zahlen erscheinen nach Abschluss (Karte/Receipt).",
     chipNoValue: "—",
     // F2 Burn-Wächter
     chipBurnRate: (rate: string) => `Burn: ${rate} Tok/min`,

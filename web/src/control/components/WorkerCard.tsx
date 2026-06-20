@@ -433,8 +433,8 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
             </div>
           </>
         ) : (
-          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs hc-dim" title={de.worker.chipTokensNoLive}>
-            {de.worker.chipNoValue} <span className="text-[0.6rem]">{de.worker.chipTokensNoLive}</span>
+          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs hc-dim" title={de.worker.chipTokensNoLiveTitle}>
+            {de.worker.chipTokensNoLive}
           </div>
         )}
       </div>
@@ -466,13 +466,11 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
       ) : null}
       {problemText ? <ToneCallout tone={health.tone}><AlertTriangle className="mr-2 inline h-4 w-4" />{problemText}</ToneCallout> : null}
 
-      {/* F2: Burn-Wächter-Chip — nur aus echten Zahlen. */}
+      {/* F2: Burn-Wächter-Chip — nur aus echten Zahlen. Ohne Live-Tokens (Normalfall
+          für laufende Worker) wird KEIN leerer Chip gezeigt — der Token-Hinweis oben
+          sagt bereits, dass Zahlen erst nach Abschluss kommen. */}
       <div className="flex flex-wrap gap-2">
-        {burn.noData ? (
-          <div className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/5 px-2 py-0.5 text-xs hc-dim">
-            {de.worker.chipBurnNoData}
-          </div>
-        ) : burn.ratePerMin != null ? (
+        {burn.noData ? null : burn.ratePerMin != null ? (
           <div className={cn(
             "inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs",
             burnTone === "red" ? "border-red-500/30 bg-red-500/10 text-red-200" :
