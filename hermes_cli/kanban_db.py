@@ -4615,6 +4615,115 @@ def backfill_run_costs(
     return updated
 
 
+def _lane_provider_model_for_profile(
+    profile: Optional[str], *, board: Optional[str] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the active lane preset's billing provider/model for ``profile``.
+
+    This is intentionally narrow: frozen subscription repair has no
+    ``worker_session_id`` and ``task_runs`` has no model column, so the active
+    lane preset is the only auditable model source for old runs. Claude-CLI runs
+    are excluded by the repair path, but the profile default helper remains a
+    best-effort fallback for callers that explicitly ask about one.
+    """
+    if not profile:
+        return None, None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    try:
+        lane_entry = _active_lane_entry_for_profile(profile, board=board) or {}
+        provider = lane_entry.get("provider")
+        model = lane_entry.get("model")
+    except Exception:
+        provider = None
+        model = None
+    if not model and _is_claude_cli_runtime(profile):
+        try:
+            from hermes_cli.profiles import resolve_profile_env
+            model = _claude_profile_model(resolve_profile_env(profile))
+        except Exception:
+            model = None
+    return provider, model
+
+
+def repair_cost_equivalent_for_frozen_runs(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+    since_seconds: Optional[int] = None,
+    board: Optional[str] = None,
+) -> int:
+    """Opt-in repair for subscription runs frozen at ``cost_usd=0.0``.
+
+    This is deliberately separate from the steady-state ``backfill_run_costs``:
+    it never changes ``cost_usd`` and only setdefault-stamps
+    ``metadata.cost_usd_equivalent`` for bounded, closed, non-claude-cli runs
+    that already have token columns but no session/model evidence. Cache-token
+    columns do not exist on ``task_runs``; the equivalent is therefore a
+    documented underestimate based on input + output tokens only.
+    """
+    sql = (
+        "SELECT id, task_id, profile, input_tokens, output_tokens, metadata "
+        "FROM task_runs "
+        "WHERE cost_usd = 0.0 "
+        "AND json_extract(metadata, '$.cost_usd_equivalent') IS NULL "
+        "AND (COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0) "
+        "AND ended_at IS NOT NULL"
+    )
+    params: list[Any] = []
+    if since_seconds is not None:
+        sql += " AND ended_at >= ?"
+        params.append(int(time.time()) - int(since_seconds))
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+
+    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
+    updated = 0
+    for row in rows:
+        try:
+            profile = row["profile"]
+            if _run_is_claude_cli(profile, board=board):
+                continue
+            raw_meta = row["metadata"]
+            try:
+                metadata = json.loads(raw_meta) if raw_meta else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if metadata.get("cost_usd_equivalent") is not None:
+                continue
+            provider, model = _lane_provider_model_for_profile(profile, board=board)
+            equivalent = _equiv_from_tokens(
+                provider,
+                model,
+                row["input_tokens"],
+                row["output_tokens"],
+                cache=price_cache,
+            )
+            if equivalent is None:
+                continue
+            stamped = dict(metadata)
+            stamped.setdefault("cost_usd_equivalent", equivalent)
+            stamped.setdefault("cost_equivalent_model", model)
+            stamped.setdefault("cost_equivalent_provider", provider)
+            stamped.setdefault("billing_mode", "subscription_included")
+            stamped.setdefault("cost_equivalent_source", "repair_frozen_run_tokens")
+            stamped.setdefault(
+                "cost_equivalent_note",
+                "task_runs has no cache-token columns; equivalent uses input+output tokens only",
+            )
+            conn.execute(
+                "UPDATE task_runs SET metadata = ? WHERE id = ?",
+                (json.dumps(stamped, ensure_ascii=False), row["id"]),
+            )
+            updated += 1
+        except Exception:
+            continue
+    return updated
+
+
 # COST-VISIBILITY-WORKERS-S1: slop (seconds) around a run's [started_at,
 # ended_at] window when correlating a worker session by start time. Absorbs
 # the small claim→spawn / flush→close ordering gaps without widening the

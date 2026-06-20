@@ -1407,6 +1407,122 @@ def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypa
         assert meta["cost_usd_equivalent"] == pytest.approx(14.25)
 
 
+def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypatch):
+    """Opt-in repair: old subscription runs frozen at cost_usd=0.0 with
+    tokens but no worker_session_id can still get a bounded API-equivalent
+    from the active lane preset. The metered cost remains zero."""
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 30.0, 0.5, 6.25)
+        if (provider, model) == ("openai", "gpt-5.5") else None,
+    )
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="codex-subscription",
+            profiles={"coder": {
+                "worker_runtime": "hermes",
+                "provider": "openai",
+                "model": "gpt-5.5",
+            }},
+        )
+        kb.activate_lane(conn, lane["id"])
+        tid = kb.create_task(conn, title="old-codex", assignee="coder")
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', "
+                "1000, 100, 0.0, ?)",
+                (tid, json.dumps({"note": "frozen-subscription"})),
+            )
+            run_id = cur.lastrowid
+
+        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        meta = json.loads(row["metadata"])
+        assert row["cost_usd"] == pytest.approx(0.0)
+        assert meta["note"] == "frozen-subscription"
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.008)
+        assert meta["cost_equivalent_model"] == "gpt-5.5"
+        assert meta["cost_equivalent_provider"] == "openai"
+        assert meta["billing_mode"] == "subscription_included"
+
+        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 0
+
+
+def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 30.0, 0.5, 6.25)
+        if (provider, model) == ("openai", "gpt-5.5") else None,
+    )
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="mixed",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                },
+                "coder-claude": {
+                    "worker_runtime": "claude-cli",
+                    "model": "claude-fable-5",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+        metered = kb.create_task(conn, title="metered", assignee="coder")
+        claude = kb.create_task(conn, title="claude", assignee="coder-claude")
+        prestamped = kb.create_task(conn, title="prestamped", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', "
+                "1000, 100, 0.25, NULL)",
+                (metered,),
+            )
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'coder-claude', 'done', 1000, 1010, 'completed', "
+                "1000, 100, 0.0, NULL)",
+                (claude,),
+            )
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, outcome, "
+                "input_tokens, output_tokens, cost_usd, metadata) "
+                "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', "
+                "1000, 100, 0.0, ?)",
+                (prestamped, json.dumps({"cost_usd_equivalent": 123.0})),
+            )
+
+        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 0
+        rows = conn.execute(
+            "SELECT task_id, cost_usd, metadata FROM task_runs "
+            "ORDER BY task_id"
+        ).fetchall()
+        by_task = {row["task_id"]: row for row in rows}
+        assert by_task[metered]["cost_usd"] == pytest.approx(0.25)
+        assert by_task[metered]["metadata"] is None
+        assert by_task[claude]["cost_usd"] == pytest.approx(0.0)
+        assert by_task[claude]["metadata"] is None
+        assert json.loads(by_task[prestamped]["metadata"])["cost_usd_equivalent"] == 123.0
+
+
 def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_path, monkeypatch):
     """COST-VISIBILITY-WORKERS-S2 guardrail: when no price is resolvable the
     fallback returns None and NO cost_usd_equivalent is invented — honesty over
