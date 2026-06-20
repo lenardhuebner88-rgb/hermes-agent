@@ -111,6 +111,78 @@ def test_parse_binding_planspec_maps_reviewer_lane_to_review_kind(tmp_path: Path
     assert spec.children[1]["kind"] == "review"
 
 
+def test_subtask_review_tier_flows_into_child():
+    """B-T3: a subtask's review_tier is parsed and threaded into the child dict;
+    an unset review_tier leaves the key absent (byte-identical to today)."""
+    from hermes_cli.plan_compiler import taskgraph_hints_to_children
+
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "s1", "title": "migrate db", "lane": "coder", "review_tier": "critical"},
+                {"id": "s2", "title": "plain change", "lane": "coder"},
+            ],
+        }
+    )
+    assert children[0]["review_tier"] == "critical"
+    assert "review_tier" not in children[1]
+
+
+def test_valid_review_tiers_constant_exposed():
+    assert {"standard", "review", "critical"} <= planspecs.VALID_REVIEW_TIERS
+
+
+def test_invalid_review_tier_is_flagged(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            """    - id: B1-S1
+      title: "Document schema"
+      lane: coder
+      deps: []
+""",
+            """    - id: B1-S1
+      title: "Document schema"
+      lane: coder
+      deps: []
+      review_tier: bogus
+""",
+        ),
+        encoding="utf-8",
+    )
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+    findings = planspecs._collect_spec_rubric_findings(spec)
+    assert any("review_tier" in f and "B1-S1" in f for f in findings)
+
+
+def test_valid_review_tier_passes_rubric(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            """    - id: B1-S1
+      title: "Document schema"
+      lane: coder
+      deps: []
+""",
+            """    - id: B1-S1
+      title: "Document schema"
+      lane: coder
+      deps: []
+      review_tier: critical
+""",
+        ),
+        encoding="utf-8",
+    )
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+    findings = planspecs._collect_spec_rubric_findings(spec)
+    assert not any("review_tier" in f for f in findings)
+
+
 def test_list_planspecs_reports_binding_status(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)

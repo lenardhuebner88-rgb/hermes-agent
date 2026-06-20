@@ -34,6 +34,8 @@ PlanSpecScope = Literal["open", "all"]
 # The on-disk Hermes worker lanes a binding PlanSpec subtask may target. A lane
 # is mapped 1:1 to the Kanban child assignee, so an unknown lane mints a task no
 # roster profile can ever claim. Keep in sync with the lane roster on disk.
+VALID_REVIEW_TIERS = {"standard", "review", "critical"}
+
 VALID_PLANSPEC_LANES = {
     "coder",
     "coder-claude",
@@ -716,6 +718,11 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
             findings.append(f"CC-instrument as lane in {sid}: {subtask.lane}")
         elif lane_norm not in VALID_PLANSPEC_LANES:
             findings.append(f"unknown lane: {subtask.lane}")
+
+        # 4c) B: review_tier (if set) must be a known staged-review tier.
+        rt = (getattr(subtask, "review_tier", "") or "").strip().lower()
+        if rt and rt not in VALID_REVIEW_TIERS:
+            findings.append(f"unknown review_tier in {sid}: {subtask.review_tier}")
 
         # 4b) No CC instrument baked into a worker AC.
         for statement in ac_statements:

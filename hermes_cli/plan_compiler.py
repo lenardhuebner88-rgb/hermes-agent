@@ -55,6 +55,10 @@ class BindingSubtask(BaseModel):
     # Only the explicit value ``analysis`` is honoured as an override; any other
     # value falls back to lane-derivation, so this is strictly additive.
     kind: str = ""
+    # B: staged-review depth hint (standard | review | critical). Default ""
+    # ⇒ unset; threaded into the child only when non-empty, so unmarked subtasks
+    # stay byte-identical. Validated against VALID_REVIEW_TIERS in the rubric.
+    review_tier: str = ""
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -81,6 +85,8 @@ class BindingSubtask(BaseModel):
         data = handler(self)
         if not str(data.get("kind") or "").strip():
             data.pop("kind", None)
+        if not str(data.get("review_tier") or "").strip():
+            data.pop("review_tier", None)
         return data
 
 
@@ -504,6 +510,8 @@ def taskgraph_hints_to_children(
             ]
         if planspec_source is not None:
             child["planspec_source"] = planspec_source
+        if (task.review_tier or "").strip():
+            child["review_tier"] = task.review_tier.strip().lower()
         children.append(child)
     return children
 
