@@ -3,6 +3,13 @@
 > Design-Spec · 2026-06-19 · Status: signiert (Operator-OK)
 > Betrifft: Hermes-Kanban-Dispatch + `/control` Flow-Tab + Canon
 > Quelle der Live-Wahrheit bleibt `00-Canon/`; dieser Spec ist die Bauvorlage.
+>
+> **KLARSTELLUNG / FAKT (2026-06-20, Phase A implementiert):** Die kanonische Claude-Coder-Lane
+> heißt **`premium`** — NICHT `opus-coder` (das war ein Spec-Irrtum: ein neues Profil ist nie nötig,
+> `premium` existiert bereits als claude-cli/Opus-Lane auf der Claude Max-Subscription). Faktenstand:
+> **`coder` = Codex/GPT (gpt-5.5)**, **`premium` = der Claude-Coder (claude-cli/Opus)**;
+> **`coder-claude` ist ein deprecated, rückwärtskompatibler Alias → `premium`**. Wo unten noch
+> `opus-coder` steht, lies `premium`.
 
 ## Problem
 
@@ -62,17 +69,18 @@ sind zudem fast identisch (beide opus/claude-cli). `research` gilt fälschlich a
 
 | Lane | Modell/Runtime | Rolle |
 |---|---|---|
-| `coder` | gpt-5.5 / hermes | Default für normalen Code |
-| `opus-coder` | opus / claude-cli | reasoning-heavy / schwer; **verschmolzen aus `coder-claude` + `premium`** |
+| `coder` | gpt-5.5 / hermes | Default für normalen Code (Codex/GPT) |
+| `premium` | opus / claude-cli (Claude Max-Sub) | reasoning-heavy / schwer; **der Claude-Coder; `coder-claude` geht als Alias darin auf** |
 
 - **Default-Policy:** Decompose-LLM schlägt vor, `coder` bleibt Fallback. PlanSpec/Dashboard
   übersteuern den LLM.
-- **Konsolidierung:** kanonischer Name `opus-coder`. `coder-claude` und `premium` werden
-  **rückwärtskompatible Aliase** → auf `opus-coder` gemappt, damit in-flight-Tasks und bestehende
-  PlanSpecs nicht brechen. Physische Profil-Verzeichnisse bleiben zunächst als Alias bestehen,
-  werden nicht hart gelöscht.
-- Die bisherige „Hochrisiko"-Semantik von `premium` wandert vollständig in die Review-Achse
-  (`review_tier: critical`) — sie ist kein Build-Lane-Konzept mehr.
+- **Konsolidierung (FAKT 2026-06-20):** kanonischer Name **`premium`** (bestehende claude-cli/Opus-Lane).
+  `coder-claude` wird **rückwärtskompatibler Alias** → auf `premium` gemappt (`_LANE_ALIASES` in
+  `_canonical_assignee`), damit in-flight-Tasks und bestehende PlanSpecs nicht brechen. Das
+  `coder-claude`-Profilverzeichnis bleibt als Alias bestehen, wird nicht hart gelöscht. **Kein neues
+  Profil, kein `opus-coder`.**
+- Die bisherige „Hochrisiko"-Semantik von `premium` wandert in die Review-Achse
+  (`review_tier: critical`); als Build-Lane ist `premium` jetzt schlicht „der Claude-Coder".
 
 ### Achse 2 — Prep-Lane (Vorarbeit, opt-in)
 
@@ -151,10 +159,14 @@ plus Sichtbarkeit der laufenden Review-Stufe als Pill in der `ChainCard` (`FlowV
 - Canon `planspec-taskgraph.md`: Entscheidungstabelle (wann coder/opus-coder/critical/scout) +
   neue Felder `review_tier` dokumentieren.
 
-### Phase A — Build-Lane-Konsolidierung (Backend + Config)
-- `opus-coder`-Profil/Lane einführen; `coder-claude`/`premium` → Alias.
-- `code_roles`, Lane-Seeds, Decompose-Prompt, `VALID_PLANSPEC_LANES` anpassen.
-- Tief in Bestands-Code (`kanban_db.py`) → **Codex baut, Claude reviewt cross-family.**
+### Phase A — Build-Lane-Konsolidierung (Backend + Config) — ✅ IMPLEMENTIERT 2026-06-20
+- **Kanonische Claude-Lane = `premium`** (existierte schon); `coder-claude` → Alias auf `premium`
+  (`_LANE_ALIASES`). **Kein neues Profil, kein `opus-coder`.**
+- `premium` war bereits in `code_roles`, Lane-Seeds, `VALID_PLANSPEC_LANES`, `_WORKER_SCOPE_LANES`
+  und `AUTO_RETRY_ESCALATION_PROFILE` verdrahtet → nur verifiziert. Geändert: `_canonical_assignee`
+  (Alias), Decompose-Prompt-Lane-Tabelle, `_CODE_LANE_REASONS[premium]`; Follow-up: Conflict-Park-/
+  Funnel-Literale auf `premium` migriert.
+- Umgesetzt in-session (commits auf `worktree-bridge-cse`), Cross-Family-reviewer APPROVED, Gates grün.
 
 ### Phase B — Gestufter Review-Gate (Kern, `kanban_db.py`)
 - `review_tier`-Signal (3 Quellen, max-merge) inkl. `reviewer_gate_required()`-Einbindung in
