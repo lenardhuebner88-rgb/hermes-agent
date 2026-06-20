@@ -8837,6 +8837,16 @@ def release_freigabe_hold(
         if child is not None and child["status"] == "scheduled":
             unblock_task(conn, child_id)
     recompute_ready(conn)
+    # Phase-C-followup (a): the held chain is now LIVE (operator GO) — couple the
+    # scout to any released critical child (flag-gated, default off). This is the
+    # recoupling the decompose-time guard defers to: a held critical chain
+    # auto-scouts on RELEASE (post-approval), never before. Covers the bare
+    # operator-release path (CLI / dashboard freigabe endpoint), not just
+    # flow-release. Deduped (scout_predecessor_id + idempotency_key); outside txn.
+    _rg_cfg = _review_gate_config()
+    if _rg_cfg.get("auto_scout_on_critical", False):
+        for child_id in parent_ids(conn, task_id):
+            _maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
     return True
 
 
@@ -9525,8 +9535,10 @@ def decompose_triage_task(
     # Read the flag once; each child is deduped/guarded inside the helper.
     # Operator-held chains (freigabe:operator / ui-real → children created
     # 'scheduled') are EXCLUDED: auto-spawning a dispatchable scout before the
-    # operator releases the chain would bypass the hold. The flow-release path
-    # re-couples the scout post-approval (it re-stamps review_tier on release).
+    # operator releases the chain would bypass the hold. release_freigabe_hold
+    # re-couples the scout post-approval (covers the bare operator-release path),
+    # and flow-release re-couples via set_task_review_tier — so a held critical
+    # chain still gets its scout, just on RELEASE rather than at decompose.
     if initial_child_status != "scheduled":
         _rg_cfg = _review_gate_config()
         if _rg_cfg.get("auto_scout_on_critical", False):

@@ -624,6 +624,27 @@ def test_decompose_scheduled_held_child_defers_scout(kanban_home, auto_scout_on)
         assert kb.get_task(conn, kids[0]).status == "scheduled"  # still held
 
 
+def test_release_freigabe_hold_recouples_scout_for_critical_child(kanban_home, auto_scout_on):
+    """Closes the held-chain loop: the decompose-time guard DEFERS (no bypass), and
+    release_freigabe_hold RE-COUPLES the scout post-approval — so a held critical
+    chain released via the bare operator path still gets its scout, just on RELEASE."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True, freigabe="operator")
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            initial_child_status="scheduled", expected_root_status="triage",
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []            # deferred while held
+        # operator GO via the bare release path (not flow-release)
+        assert kb.release_freigabe_hold(conn, root) is True
+        assert len(_scout_parents(conn, kids[0])) == 1        # re-coupled on release
+        # idempotent: a second release does not spawn a second scout
+        kb.release_freigabe_hold(conn, root)
+        assert len(_scout_parents(conn, kids[0])) == 1
+
+
 # ---------------------------------------------------------------------------
 # Slice b: batch_active_review_stages — the live review stage per task, read from
 # the latest submitted_for_review event (powers the dashboard live-stage pill).
