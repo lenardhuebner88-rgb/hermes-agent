@@ -45,6 +45,9 @@ def gate_on(monkeypatch):
             "enabled": True,
             "code_roles": frozenset({"coder", "premium"}),
             "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
         },
     )
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
@@ -92,6 +95,24 @@ def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypat
         # explicit column still wins even with auto OFF
         t2 = kb.create_task(conn, title="x", assignee="coder", review_tier="critical")
         assert kb._effective_review_tier(conn, t2) == "critical"
+
+
+# ---------------------------------------------------------------------------
+# B-T6: ordered stage list per tier (missing profiles degrade gracefully)
+# ---------------------------------------------------------------------------
+
+def test_review_stages_for_tier(monkeypatch):
+    cfg = {"verifier_profile": "verifier", "review_profile": "reviewer", "critic_profile": "critic"}
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    assert kb._review_stages_for_tier("standard", cfg) == ["verifier"]
+    assert kb._review_stages_for_tier("review", cfg) == ["verifier", "reviewer"]
+    assert kb._review_stages_for_tier("critical", cfg) == ["verifier", "reviewer", "critic"]
+    # missing critic profile → critical degrades, never strands the task
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name != "critic")
+    assert kb._review_stages_for_tier("critical", cfg) == ["verifier", "reviewer"]
+    # unknown tier → single verifier stage (today's behavior)
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    assert kb._review_stages_for_tier("bogus", cfg) == ["verifier"]
 
 
 # ---------------------------------------------------------------------------

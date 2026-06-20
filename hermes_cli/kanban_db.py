@@ -6393,6 +6393,10 @@ class WorkerGateError(Exception):
 #     unchanged): they must not build on unverified work.
 _DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = ("coder", "coder-claude", "premium")
 _DEFAULT_VERIFIER_PROFILE = "verifier"
+# B (staged review gate): the reviewer/critic stages layered on top of verifier
+# for the ``review`` and ``critical`` tiers respectively.
+_DEFAULT_REVIEW_PROFILE = "reviewer"
+_DEFAULT_CRITIC_PROFILE = "critic"
 
 
 def _review_gate_config() -> dict:
@@ -6448,11 +6452,24 @@ def _review_gate_config() -> dict:
         if vp and str(vp).strip()
         else _DEFAULT_VERIFIER_PROFILE
     )
+    rp = rg.get("review_profile")
+    review_profile = (
+        str(rp).strip().lower() if rp and str(rp).strip() else _DEFAULT_REVIEW_PROFILE
+    )
+    cp = rg.get("critic_profile")
+    critic_profile = (
+        str(cp).strip().lower() if cp and str(cp).strip() else _DEFAULT_CRITIC_PROFILE
+    )
+    # B Grill-Entscheid 2: auto-risk classification is opt-in, default OFF.
+    auto_tier = bool(rg.get("auto_tier", False))
     return {
         "enabled": bool(rg.get("enabled", False)),
         "code_roles": code_roles,
         "acceptance_roles": acceptance_roles,
         "verifier_profile": verifier_profile,
+        "review_profile": review_profile,
+        "critic_profile": critic_profile,
+        "auto_tier": auto_tier,
     }
 
 
@@ -6494,6 +6511,30 @@ def _effective_review_tier(
         return classify_review_tier(_task_plan_spec(task))
     except Exception:
         return "standard"
+
+
+def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
+    """Ordered reviewer profiles for a tier; missing profiles dropped (never
+    strand a task on a profile that does not exist → graceful degrade).
+
+    standard = [verifier]; review = [verifier, reviewer];
+    critical = [verifier, reviewer, critic]. An unknown tier falls back to the
+    single verifier stage (today's behavior).
+    """
+    seq = {
+        "standard": [cfg["verifier_profile"]],
+        "review": [cfg["verifier_profile"], cfg["review_profile"]],
+        "critical": [
+            cfg["verifier_profile"],
+            cfg["review_profile"],
+            cfg["critic_profile"],
+        ],
+    }.get(tier, [cfg["verifier_profile"]])
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        return [seq[0]]
+    return [p for p in seq if p and profile_exists(p)] or [seq[0]]
 
 
 def _worker_gate_config() -> dict:
