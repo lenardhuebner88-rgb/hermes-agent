@@ -51,6 +51,26 @@ def test_task_kind_column_migration_is_idempotent(kanban_home):
     assert cols.count("kind") == 1
 
 
+def test_review_tier_column_exists_and_defaults_null(kanban_home):
+    """B-T1: additive review_tier column present on every board, default NULL."""
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "review_tier" in cols
+        tid = kb.create_task(conn, title="t", assignee="coder")
+        row = conn.execute(
+            "SELECT review_tier FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()
+        assert row["review_tier"] is None
+
+
+def test_review_tier_column_migration_is_idempotent(kanban_home):
+    with kb.connect() as conn:
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)")]
+    assert cols.count("review_tier") == 1
+
+
 _PLANSPEC_COLS = [
     "planspec_subtask_id",
     "planspec_source",

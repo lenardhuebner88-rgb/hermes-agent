@@ -1442,7 +1442,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 4
+_SCHEMA_GENERATION = 5  # B: tasks.review_tier added to the migration pass only
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -2209,6 +2209,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(
             conn, "tasks", "live_test_depth", "live_test_depth TEXT"
         )
+    if "review_tier" not in cols:
+        _add_column_if_missing(conn, "tasks", "review_tier", "review_tier TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
