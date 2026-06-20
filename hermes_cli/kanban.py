@@ -920,6 +920,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Max closed runs to scan (newest first; default 500)")
     p_bfcost.add_argument("--since-hours", type=int, default=None,
                           help="Only runs ended within the last H hours (default: all)")
+    p_bfcost.add_argument(
+        "--repair-frozen-equivalent",
+        action="store_true",
+        help=(
+            "Opt-in repair for closed non-claude-cli subscription runs frozen "
+            "at cost_usd=0.0: set metadata.cost_usd_equivalent from "
+            "input/output tokens and active lane model without changing cost_usd"
+        ),
+    )
 
     # --- notify subscribe / list / remove ---
     p_nsub = sub.add_parser(
@@ -3299,17 +3308,29 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 def _cmd_backfill_costs(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
+        since_seconds = args.since_hours * 3600 if args.since_hours else None
         n = kb.backfill_run_costs(
             conn,
             limit=args.limit,
-            since_seconds=(args.since_hours * 3600 if args.since_hours else None),
+            since_seconds=since_seconds,
         )
         # COST-VISIBILITY-WORKERS-S1: second pass correlates the runs the
         # worker_session_id / claude-log paths can't link (most kanban workers)
         # to their per-profile state.db sessions — proven token / subscription
         # consumption so the cost metric stops being blind.
         n_sess = kb.backfill_run_costs_from_sessions(conn, limit=args.limit)
-    print(f"backfilled cost on {n} runs (session-correlated: {n_sess})")
+        n_repair = 0
+        if getattr(args, "repair_frozen_equivalent", False):
+            n_repair = kb.repair_cost_equivalent_for_frozen_runs(
+                conn,
+                limit=args.limit,
+                since_seconds=since_seconds,
+            )
+    suffix = (
+        f", repaired frozen equivalents: {n_repair}"
+        if getattr(args, "repair_frozen_equivalent", False) else ""
+    )
+    print(f"backfilled cost on {n} runs (session-correlated: {n_sess}{suffix})")
     return 0
 
 
