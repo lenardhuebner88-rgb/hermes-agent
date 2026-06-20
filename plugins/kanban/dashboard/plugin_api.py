@@ -5903,9 +5903,14 @@ def _release_flow_gate(
     # never cycle; it demotes each ready entry child to todo (waiting on scout).
     scout_id: Optional[str] = None
     if inject_scout and released:
+        # Entry children = released children with no in-chain parent. Also skip any
+        # that ALREADY carry a scout predecessor — when auto_scout_on_critical is on
+        # and tier=critical, set_task_review_tier (above) injected a per-child scout;
+        # the explicit inject_scout must not add a SECOND scout to the same child.
         entry_children = [
             cid for cid in released
             if not (set(kanban_db.parent_ids(conn, cid)) & child_set)
+            and kanban_db.scout_predecessor_id(conn, cid) is None
         ]
         if entry_children:
             scout_id = kanban_db.create_task(

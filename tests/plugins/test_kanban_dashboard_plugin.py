@@ -4339,6 +4339,36 @@ def test_flow_release_injects_scout_predecessor(client):
         assert kb.parent_ids(conn, scout_id) == []
 
 
+def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeypatch):
+    """Combined lever (Phase-C-followup a): review_tier=critical + inject_scout with
+    auto_scout_on_critical ON must NOT give any child a SECOND scout. The per-child
+    auto-scout (from the chain-wide tier stamp) fires first; the explicit inject_scout
+    then dedups against it. Each released child ends with exactly one scout parent."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": False,
+            "auto_scout_on_critical": True,
+        },
+    )
+    root, child_ids = _setup_gated_root()
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "critical", "inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    with kb.connect() as conn:
+        for cid in child_ids:
+            scouts = [
+                p for p in kb.parent_ids(conn, cid)
+                if kb.get_task(conn, p).assignee == "scout"
+            ]
+            assert len(scouts) == 1, (cid, scouts)   # exactly one scout, never two
+
+
 def test_flow_release_clears_freigabe_operator_hold_at_root(client):
     """A freigabe:operator root released via the flow gate must leave the held
     state exactly like release_freigabe_hold does. Otherwise it stays

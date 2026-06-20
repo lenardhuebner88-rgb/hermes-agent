@@ -540,6 +540,12 @@ def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_s
         assert scout.assignee == "scout"
         assert kb.parent_ids(conn, scouts[0]) == []          # scout has no parents
         assert kb.get_task(conn, tid).status == "todo"        # demoted ready->todo, waits on scout
+        # Atomic dedup: the scout carries a per-task idempotency_key so two
+        # concurrent critical setters converge on ONE scout (no race-created 2nd).
+        key = conn.execute(
+            "SELECT idempotency_key FROM tasks WHERE id=?", (scouts[0],)
+        ).fetchone()[0]
+        assert key == f"auto-scout:{tid}"
 
 
 def test_non_critical_tier_does_not_inject_scout(kanban_home, auto_scout_on):
@@ -600,3 +606,19 @@ def test_decompose_critical_child_no_scout_when_flag_off(kanban_home):
         )
         assert kids is not None
         assert _scout_parents(conn, kids[0]) == []
+
+
+def test_decompose_scheduled_held_child_defers_scout(kanban_home, auto_scout_on):
+    """Operator-held chain (initial_child_status='scheduled'): no auto-scout before
+    release — spawning a dispatchable scout would bypass the operator hold. The
+    flow-release path re-couples the scout post-approval."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="held epic", triage=True)
+        kids = kb.decompose_triage_task(
+            conn, root, root_assignee="premium",
+            children=[{"title": "crit", "assignee": "coder", "review_tier": "critical"}],
+            initial_child_status="scheduled",
+        )
+        assert kids is not None
+        assert _scout_parents(conn, kids[0]) == []            # deferred, not bypassed
+        assert kb.get_task(conn, kids[0]).status == "scheduled"  # still held

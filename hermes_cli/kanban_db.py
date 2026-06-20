@@ -9523,10 +9523,15 @@ def decompose_triage_task(
     # Phase-C-followup (a): couple scout to any child stamped review_tier:critical
     # (flag-gated, default off → byte-identical). Outside the write_txn above.
     # Read the flag once; each child is deduped/guarded inside the helper.
-    _rg_cfg = _review_gate_config()
-    if _rg_cfg.get("auto_scout_on_critical", False):
-        for cid in child_ids:
-            _maybe_inject_critical_scout(conn, cid, cfg=_rg_cfg)
+    # Operator-held chains (freigabe:operator / ui-real → children created
+    # 'scheduled') are EXCLUDED: auto-spawning a dispatchable scout before the
+    # operator releases the chain would bypass the hold. The flow-release path
+    # re-couples the scout post-approval (it re-stamps review_tier on release).
+    if initial_child_status != "scheduled":
+        _rg_cfg = _review_gate_config()
+        if _rg_cfg.get("auto_scout_on_critical", False):
+            for cid in child_ids:
+                _maybe_inject_critical_scout(conn, cid, cfg=_rg_cfg)
     return child_ids
 
 
@@ -18738,6 +18743,21 @@ def set_task_model_override(
 _SCOUT_PREDECESSOR_PRERUN_STATUSES = frozenset({"scheduled", "todo", "ready"})
 
 
+def scout_predecessor_id(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Return the id of an existing read-only ``scout`` predecessor of
+    ``task_id`` (a parent task with ``assignee == 'scout'``), or ``None``.
+
+    Shared by :func:`ensure_scout_predecessor` (auto-coupling) and the
+    flow-release ``inject_scout`` path so a child never gets a SECOND scout when
+    both the operator's explicit lever and the auto-critical coupling fire.
+    """
+    for pid in parent_ids(conn, task_id):
+        parent = get_task(conn, pid)
+        if parent is not None and parent.assignee == "scout":
+            return pid
+    return None
+
+
 def ensure_scout_predecessor(
     conn: sqlite3.Connection, task_id: str,
 ) -> Optional[str]:
@@ -18753,16 +18773,21 @@ def ensure_scout_predecessor(
         predecessor onto a running/review/done task and bend a live chain.
     On success creates the scout and links it as parent, returning its id. A
     fresh scout has no links, so :func:`link_tasks` can never cycle.
+
+    Concurrency: the cheap parent-scan dedup is a fast path only. The hard
+    guarantee is the ``idempotency_key`` on ``create_task`` — two concurrent
+    critical setters that both observe no scout parent still converge on ONE
+    scout (the second create returns the first's id under ``BEGIN IMMEDIATE``),
+    and ``link_tasks`` is INSERT-OR-IGNORE, so the link is never duplicated.
     """
     task = get_task(conn, task_id)
     if task is None or task.assignee == "scout":
         return None
     if task.status not in _SCOUT_PREDECESSOR_PRERUN_STATUSES:
         return None
-    for pid in parent_ids(conn, task_id):
-        parent = get_task(conn, pid)
-        if parent is not None and parent.assignee == "scout":
-            return pid  # dedup: already scouted
+    existing = scout_predecessor_id(conn, task_id)
+    if existing is not None:
+        return existing  # dedup: already scouted
     scout_id = create_task(
         conn,
         title=f"Scout: {task.title}",
@@ -18775,6 +18800,7 @@ def ensure_scout_predecessor(
         created_by="auto-scout-critical",
         priority=task.priority,
         tenant=task.tenant,
+        idempotency_key=f"auto-scout:{task_id}",
     )
     link_tasks(conn, scout_id, task_id)
     return scout_id
