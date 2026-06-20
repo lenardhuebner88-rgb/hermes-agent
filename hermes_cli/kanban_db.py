@@ -10730,6 +10730,15 @@ def _heiler_classification_payload(
     reference). It is the idempotency key the safety-net sweep dedupes on, so
     every escalation-paired classification — inline or swept — carries it.
     Sub-threshold failures that classify but never escalate leave it None.
+
+    REALBUG-RECURRENCE-CLUSTER-S1: when the evidence carries an error
+    ``excerpt``, the same :func:`_error_fingerprint` already used to group
+    crashed-worker failures is stamped onto the payload as ``fingerprint`` — a
+    stable, host-noise-normalized grouping key. This lets the read side
+    (:func:`read_escalation_ledger`) cluster recurring failures by signature
+    without recomputation, and gives downstream consumers (Stratege, dashboard)
+    the key for free. Purely additive: ``class`` and ``evidence`` are untouched,
+    so the ``by_class`` / ``roots_by_class`` rollups are unaffected.
     """
     payload = {
         "class": heiler_class,
@@ -10737,6 +10746,9 @@ def _heiler_classification_payload(
         "source": source,
         "blocked": bool(blocked),
     }
+    excerpt = evidence.get("excerpt") if isinstance(evidence, dict) else None
+    if excerpt:
+        payload["fingerprint"] = _error_fingerprint(str(excerpt))
     if escalation_event_id is not None:
         payload["escalation_event_id"] = int(escalation_event_id)
     return payload
@@ -12152,6 +12164,13 @@ def _resolve_chain_root(
     return root
 
 
+# REALBUG-RECURRENCE-CLUSTER-S1: how many distinct chain roots to surface per
+# recurring-real-bug signature. The cluster ``count`` is the full event count;
+# ``example_roots`` is a bounded *sample* so a noisy signature can't blow up the
+# ledger payload — the name makes the truncation explicit.
+_REAL_BUG_CLUSTER_ROOT_SAMPLE = 10
+
+
 def read_escalation_ledger(
     conn: sqlite3.Connection,
     *,
@@ -12180,6 +12199,14 @@ def read_escalation_ledger(
         repeatedly is counted once, so it can no longer over-inflate its class
         even if some other write-path produces duplicate events. Defense in
         depth on the read side, complementary to write-path idempotence.
+
+    ``real_bug_signatures`` (REALBUG-RECURRENCE-CLUSTER-S1) is an additional,
+    purely observational rollup: the real-bug classifications grouped by error
+    signature (the stamped ``fingerprint``, or ``_error_fingerprint`` over
+    ``evidence.excerpt`` for legacy events), most-recurrent first. Each cluster
+    is ``{signature, count, example_roots, example_excerpt}`` — surfacing a
+    failure that keeps coming back under one head. It is no gate and changes no
+    dispatch; ``by_class`` / ``roots_by_class`` are unaffected by its presence.
 
     Filters (all optional):
       * ``since`` / ``until`` — inclusive ``created_at`` window (unix seconds)
@@ -12214,6 +12241,11 @@ def read_escalation_ledger(
 
     by_class: dict = {}
     roots_by_class: dict[Any, set] = {}
+    # REALBUG-RECURRENCE-CLUSTER-S1: recurring real-bug signatures, keyed by the
+    # normalized error fingerprint. Accumulated over the FULL filtered window
+    # (before the entry-list ``limit`` truncation) so the recurrence counts stay
+    # accurate even when entries are capped — same contract as by_class.
+    real_bug_clusters: dict[str, dict] = {}
     entries: list = []
     # Child adjacency (parent_id -> [child_id]) + memo, built once and only when
     # there is at least one classified event to resolve, so an empty ledger
@@ -12240,6 +12272,27 @@ def read_escalation_ledger(
                 children.setdefault(lr["parent_id"], []).append(lr["child_id"])
         root = _resolve_chain_root(r["task_id"], children, root_cache)
         roots_by_class.setdefault(cls, set()).add(root)
+        # Cluster recurring real-bugs by error signature. Prefer the stamped
+        # ``fingerprint`` (REALBUG-RECURRENCE-CLUSTER-S1 write side); fall back to
+        # recomputing it from ``evidence.excerpt`` so legacy events written before
+        # the stamp still cluster. Scoped to real-bug — the named target — so the
+        # other classes' rollups are untouched.
+        if cls == HEILER_CLASS_REAL_BUG:
+            ev = payload.get("evidence")
+            excerpt = ev.get("excerpt") if isinstance(ev, dict) else None
+            signature = payload.get("fingerprint") or (
+                _error_fingerprint(str(excerpt)) if excerpt else None
+            )
+            if signature:
+                bucket = real_bug_clusters.setdefault(
+                    signature,
+                    {"count": 0, "roots": [], "example_excerpt": None},
+                )
+                bucket["count"] += 1
+                if root is not None and root not in bucket["roots"]:
+                    bucket["roots"].append(root)
+                if bucket["example_excerpt"] is None and excerpt:
+                    bucket["example_excerpt"] = str(excerpt)
         entries.append({
             "event_id": r["id"],
             "task_id": r["task_id"],
@@ -12258,6 +12311,21 @@ def read_escalation_ledger(
     total = len(entries)
     roots_by_class_counts = {cls: len(roots) for cls, roots in roots_by_class.items()}
     root_total = len({root for roots in roots_by_class.values() for root in roots})
+    # Recurring-real-bug clusters, most-recurrent first (ties broken by signature
+    # for a stable order). ``count`` is the full event count; ``example_roots`` a
+    # bounded sample of the distinct chain roots that hit this signature.
+    real_bug_signatures = [
+        {
+            "signature": signature,
+            "count": bucket["count"],
+            "example_roots": bucket["roots"][:_REAL_BUG_CLUSTER_ROOT_SAMPLE],
+            "example_excerpt": bucket["example_excerpt"],
+        }
+        for signature, bucket in sorted(
+            real_bug_clusters.items(),
+            key=lambda kv: (-kv[1]["count"], kv[0]),
+        )
+    ]
     if limit is not None and int(limit) >= 0:
         entries = entries[: int(limit)]
 
@@ -12266,6 +12334,7 @@ def read_escalation_ledger(
         "by_class": by_class,
         "roots_by_class": roots_by_class_counts,
         "root_total": root_total,
+        "real_bug_signatures": real_bug_signatures,
         "entries": entries,
     }
 

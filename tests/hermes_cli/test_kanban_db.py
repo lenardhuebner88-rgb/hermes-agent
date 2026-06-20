@@ -10894,6 +10894,170 @@ def test_s4_ledger_by_class_counts_distinct_roots_not_raw_events(kanban_home):
 
 
 # ---------------------------------------------------------------------------
+# REALBUG-RECURRENCE-CLUSTER-S1: the existing _error_fingerprint is stamped into
+# the heiler_classification payload, and read_escalation_ledger groups recurring
+# real-bug escalations by that signature (observability rollup, no gate). The
+# raw by_class / roots_by_class rollups stay byte-for-byte unchanged.
+# ---------------------------------------------------------------------------
+
+def _emit_real_bug(conn, task_id, excerpt):
+    """Append a real-bug heiler_classification whose payload is built by the
+    production helper (so the fingerprint stamping is exercised, not faked)."""
+    payload = kb._heiler_classification_payload(
+        heiler_class=kb.HEILER_CLASS_REAL_BUG,
+        evidence={"matched": "default", "signal_source": "default",
+                  "excerpt": excerpt},
+        source="test", blocked=True,
+    )
+    kb.add_event(conn, task_id, kb.HEILER_CLASSIFICATION_EVENT, payload)
+
+
+def test_heiler_classification_payload_stamps_error_fingerprint():
+    """The heiler_classification payload carries a normalized error fingerprint
+    derived from evidence.excerpt via the existing _error_fingerprint. Two
+    excerpts that differ only in host-specific noise (pid / timestamp) collapse
+    onto one fingerprint; genuinely distinct excerpts differ; an excerpt-less
+    evidence carries no fingerprint. class/evidence are left untouched."""
+    ev_a = {"matched": "default", "signal_source": "default",
+            "excerpt": "pid 4242 AssertionError: total mismatch at 1718000000000"}
+    ev_b = {"matched": "default", "signal_source": "default",
+            "excerpt": "pid 9999 AssertionError: total mismatch at 1719999999999"}
+    ev_c = {"matched": "default", "signal_source": "default",
+            "excerpt": "TypeError: NoneType has no attribute foo"}
+
+    p_a = kb._heiler_classification_payload(
+        heiler_class=kb.HEILER_CLASS_REAL_BUG, evidence=ev_a,
+        source="test", blocked=True)
+    p_b = kb._heiler_classification_payload(
+        heiler_class=kb.HEILER_CLASS_REAL_BUG, evidence=ev_b,
+        source="test", blocked=True)
+    p_c = kb._heiler_classification_payload(
+        heiler_class=kb.HEILER_CLASS_REAL_BUG, evidence=ev_c,
+        source="test", blocked=True)
+
+    # Same root cause modulo pid/timestamp → one fingerprint.
+    assert p_a["fingerprint"] == p_b["fingerprint"]
+    assert p_a["fingerprint"] == kb._error_fingerprint(ev_a["excerpt"])
+    # Distinct root cause → distinct fingerprint.
+    assert p_a["fingerprint"] != p_c["fingerprint"]
+    # Additive only: the signal the Stratege already reads is unchanged.
+    assert p_a["class"] == kb.HEILER_CLASS_REAL_BUG
+    assert p_a["evidence"] is ev_a
+
+    # No excerpt → no fingerprint key (nothing to fingerprint).
+    p_none = kb._heiler_classification_payload(
+        heiler_class=kb.HEILER_CLASS_REAL_BUG,
+        evidence={"matched": "default", "signal_source": "default"},
+        source="test", blocked=True)
+    assert "fingerprint" not in p_none
+
+
+def test_s4_ledger_clusters_recurring_real_bugs_by_fingerprint(kanban_home):
+    """AC-1: read_escalation_ledger groups real-bug classifications by error
+    signature (the stamped _error_fingerprint over evidence.excerpt). Two
+    escalations with the same normalized error text form ONE cluster with
+    count=2; a distinct error text stays its own cluster. The cluster rollup is
+    scoped to real-bug and is additive: by_class / roots_by_class are unchanged
+    (AC-2 guardrail)."""
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="bug one a", assignee="coder")
+        t2 = kb.create_task(conn, title="bug one b", assignee="coder")
+        t3 = kb.create_task(conn, title="bug two", assignee="coder")
+        tt = kb.create_task(conn, title="transient noise", assignee="coder")
+        # Two distinct roots hit the SAME normalized error (pid/ts differ).
+        _emit_real_bug(
+            conn, t1, "pid 11 AssertionError: balance != expected at 1700000000001")
+        _emit_real_bug(
+            conn, t2, "pid 22 AssertionError: balance != expected at 1700000000002")
+        # A third task hits a genuinely different error.
+        _emit_real_bug(conn, t3, "TypeError: cannot read property 'id' of undefined")
+        # A transient classification WITH an excerpt must not enter the rollup.
+        kb.add_event(conn, tt, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_TRANSIENT,
+            "evidence": {"excerpt": "pid 5 dirty-overlap git lock contention"},
+        })
+        ledger = kb.read_escalation_ledger(conn)
+
+    clusters = ledger["real_bug_signatures"]
+    # Two real-bug signatures: the recurring one (count=2) and the distinct one.
+    assert len(clusters) == 2
+    # Most-recurrent first.
+    assert clusters[0]["count"] == 2
+    assert set(clusters[0]["example_roots"]) == {t1, t2}
+    distinct = [c for c in clusters if c["count"] == 1]
+    assert len(distinct) == 1
+    assert distinct[0]["example_roots"] == [t3]
+    # Cluster rollup is real-bug-only: the transient excerpt's signature is absent.
+    sigs = {c["signature"] for c in clusters}
+    assert kb._error_fingerprint("pid 5 dirty-overlap git lock contention") not in sigs
+
+    # Guardrail (AC-2): the existing rollups are unchanged by the addition.
+    assert ledger["by_class"] == {
+        kb.HEILER_CLASS_REAL_BUG: 3, kb.HEILER_CLASS_TRANSIENT: 1}
+    assert ledger["roots_by_class"] == {
+        kb.HEILER_CLASS_REAL_BUG: 3, kb.HEILER_CLASS_TRANSIENT: 1}
+    assert ledger["total"] == 4
+
+
+def test_s4_ledger_real_bug_clusters_no_false_collision(kanban_home):
+    """AC-2 cluster purity: a fixture of genuinely distinct error texts must NOT
+    be collapsed. Each distinct normalized signature stays its own cluster (zero
+    fingerprint collisions across the fixture), so distinct root causes are never
+    merged into one recurrence count."""
+    distinct_errors = [
+        "AssertionError: expected 200 got 500 in test_login",
+        "TypeError: cannot read property 'id' of undefined in cart",
+        "KeyError: 'profile' while building the dashboard payload",
+        "ValueError: invalid literal for int() with base 10: 'abc'",
+        "sqlite3.IntegrityError: UNIQUE constraint failed tasks.id",
+        "ModuleNotFoundError: No module named 'hermes_cli.flow'",
+        "tsc error TS2345: argument of type string is not assignable",
+        "lint error: 'x' is assigned a value but never used",
+        "RecursionError: maximum recursion depth exceeded in resolve",
+        "ZeroDivisionError: division by zero in cost-per-token rollup",
+    ]
+    # Sanity: the fixture itself has no two entries sharing a fingerprint.
+    assert len({kb._error_fingerprint(e) for e in distinct_errors}) == len(distinct_errors)
+
+    with kb.connect() as conn:
+        for i, err in enumerate(distinct_errors):
+            tid = kb.create_task(conn, title=f"bug {i}", assignee="coder")
+            _emit_real_bug(conn, tid, err)
+        ledger = kb.read_escalation_ledger(conn)
+
+    clusters = ledger["real_bug_signatures"]
+    # No false merges: one cluster per distinct error, each count=1.
+    assert len(clusters) == len(distinct_errors)
+    assert all(c["count"] == 1 for c in clusters)
+    assert ledger["by_class"] == {kb.HEILER_CLASS_REAL_BUG: len(distinct_errors)}
+
+
+def test_s4_ledger_clusters_recompute_fingerprint_for_unstamped_events(kanban_home):
+    """The signature rollup also covers legacy real-bug events written before the
+    fingerprint was stamped: the reader recomputes the signature from
+    evidence.excerpt, so two unstamped events with the same normalized error
+    still cluster together."""
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="legacy a", assignee="coder")
+        t2 = kb.create_task(conn, title="legacy b", assignee="coder")
+        # Raw payloads WITHOUT a stamped fingerprint (pre-S1 shape).
+        kb.add_event(conn, t1, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_REAL_BUG,
+            "evidence": {"excerpt": "pid 1 build failed: missing symbol at 1700000000000"},
+        })
+        kb.add_event(conn, t2, kb.HEILER_CLASSIFICATION_EVENT, {
+            "class": kb.HEILER_CLASS_REAL_BUG,
+            "evidence": {"excerpt": "pid 2 build failed: missing symbol at 1700000000009"},
+        })
+        ledger = kb.read_escalation_ledger(conn)
+
+    clusters = ledger["real_bug_signatures"]
+    assert len(clusters) == 1
+    assert clusters[0]["count"] == 2
+    assert set(clusters[0]["example_roots"]) == {t1, t2}
+
+
+# ---------------------------------------------------------------------------
 # HEILER-CLASSIFY-COVERAGE-S1: every operator_escalation must end up with a
 # paired heiler_classification (the Stratege's by_class input). The inline
 # failure/park paths classify atomically; classify_escalations_sweep is the
