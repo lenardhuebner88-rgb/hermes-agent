@@ -40,7 +40,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
             <Eyebrow>PlanSpec</Eyebrow>
             {/* Topics sind oft ganze Sätze — als Titel auf 3 Zeilen clampen
                 (der Volltext steht ungekürzt in der „Ziel"-Sektion unten). */}
-            <h2 title={item.topic} className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-white">{item.topic}</h2>
+            <h2 title={item.topic} className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-[var(--hc-text)]">{item.topic}</h2>
             <p className="mt-1 break-all hc-mono text-[0.72rem] hc-dim">{item.path}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5" aria-label="PlanSpec schließen">
@@ -88,7 +88,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, onClose }: 
                 <ol className="mt-2 grid gap-2">
                   {detail.subtasks.map((task, idx) => (
                     <li key={`${task.id}:${idx}`} className="rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-white"><span className="hc-mono text-[0.7rem] hc-dim">{idx + 1}</span><strong>{task.title || task.id}</strong></div>
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--hc-text)]"><span className="hc-mono text-[0.7rem] hc-dim">{idx + 1}</span><strong>{task.title || task.id}</strong></div>
                       <p className="mt-1 hc-type-label hc-dim">{task.id} · {task.lane || "ohne Lane"}{task.deps.length ? ` · deps: ${task.deps.join(", ")}` : ""}</p>
                     </li>
                   ))}

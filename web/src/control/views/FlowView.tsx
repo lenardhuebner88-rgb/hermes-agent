@@ -11,7 +11,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, FileText, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, FileText, HeartPulse, Loader2, Lock, MessageSquarePlus, Play, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
@@ -166,25 +166,30 @@ function RecoveryStrip() {
   }
 
   return (
-    <FleetPanel
-      eyebrow="Recovery"
-      meta={`Dispatcher · ${recoveryAgeLabel(dispatcher?.heartbeat_age_s)} · ${recoveryRows.length} offen`}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <StatusPill
-          tone={tone}
-          label={dispatcher?.detail || dispatcher?.status || "unbekannt"}
-          dot={dispatcher?.status === "healthy" ? "live" : dispatcher?.status === "degraded" ? "warn" : "error"}
-        />
-        {health.error ? <span className="text-xs text-amber-200">{health.error}</span> : null}
-        {decisions.error ? <span className="text-xs text-amber-200">{decisions.error}</span> : null}
+    <div className="rounded-[12px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-4 py-[11px] shadow-[inset_0_1px_0_#fff]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="hc-eyebrow">Recovery</span>
+          {dispatcher ? (
+            <StatusPill
+              tone={tone}
+              label={`Dispatcher · ${dispatcher.detail || dispatcher.status || "unbekannt"}`}
+              dot={dispatcher.status === "healthy" ? "live" : dispatcher.status === "degraded" ? "warn" : "error"}
+            />
+          ) : null}
+          {health.error ? <span className="text-xs text-amber-200">{health.error}</span> : null}
+          {decisions.error ? <span className="text-xs text-amber-200">{decisions.error}</span> : null}
+        </div>
+        <span className="hc-mono text-[11px] text-[var(--hc-text-dim)]">
+          {recoveryAgeLabel(dispatcher?.heartbeat_age_s)} · {recoveryRows.length} offen
+        </span>
       </div>
       {recoveryRows.length ? (
         <ul className="mt-3 grid max-h-72 gap-2 overflow-y-auto pr-1 lg:grid-cols-3">
           {recoveryRows.map((row) => {
             const meta = recoveryDecisionMeta(row.kind);
             return (
-              <li key={`${row.kind}:${row.task_id}`} className="rounded-lg border border-white/10 bg-white/[.03] px-3 py-2">
+              <li key={`${row.kind}:${row.task_id}`} className="rounded-[8px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-[11px] py-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="min-w-0 break-words text-xs font-semibold text-white">{row.title}</span>
                   <StatusPill tone={meta.tone} label={meta.label} dot={meta.dot} />
@@ -206,7 +211,7 @@ function RecoveryStrip() {
       ) : (
         <p className="mt-3 text-sm hc-dim">Keine Recovery-Parks.</p>
       )}
-    </FleetPanel>
+    </div>
   );
 }
 
@@ -305,17 +310,23 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   if (!plans.loading && !plans.error && items.length === 0 && !hasFilters) return null;
 
   return (
-    <FleetPanel eyebrow="Planspec-Hub" meta={`${validCount}/${items.length} offen · Vault`}>
-      <button
-        type="button"
-        aria-expanded={plansOpen}
-        onClick={() => setPlansOpen((value) => !value)}
-        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 py-2 text-left transition hover:border-[var(--hc-border-strong)]"
-      >
-        {plansOpen ? <ChevronDown className="h-4 w-4 shrink-0 hc-soft" /> : <ChevronRight className="h-4 w-4 shrink-0 hc-soft" />}
-        <span className="min-w-0 flex-1 break-words text-sm font-semibold text-white">Offene PlanSpecs</span>
-        <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
-      </button>
+    <div className="rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-[18px] py-4 shadow-[var(--hc-elev-1)]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="hc-eyebrow">Planspec-Hub</span>
+          <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{validCount}/{items.length} offen · Vault</span>
+        </div>
+        <button
+          type="button"
+          aria-expanded={plansOpen}
+          onClick={() => setPlansOpen((value) => !value)}
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-[var(--hc-border)] px-2.5 text-xs hc-soft transition hover:border-[var(--hc-border-strong)]"
+        >
+          {plansOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          <span className="min-w-0 break-words text-sm font-semibold text-white">Offene PlanSpecs</span>
+          <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
+        </button>
+      </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
         <label className="min-w-0" htmlFor="PlanSpecSearch">
           <span className="sr-only">PlanSpec-Suche</span>
@@ -325,7 +336,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
             value={planspecSearch}
             onChange={(event) => setPlanspecSearch(event.target.value)}
             placeholder="PlanSpecs suchen…"
-            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-black/20 px-3 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-[var(--hc-accent-border)]"
+            className="min-h-11 w-full rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-sm outline-none placeholder:text-[var(--hc-text-dim)] focus:border-[var(--hc-accent-border)]"
           />
         </label>
         <label className="inline-flex min-h-11 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 text-sm hc-soft">
@@ -351,7 +362,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const kanbanProgress = planSpecKanbanProgress(item);
           const kanbanTone = planSpecKanbanTone(item.kanban_state);
           return (
-            <div key={item.path} className="min-w-0 rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3">
+            <div key={item.path} className="min-w-0 rounded-[12px] border border-[var(--hc-border)] bg-[var(--hc-panel)] p-[14px]">
               <div className="flex min-w-0 flex-wrap items-start gap-2">
                 <FileText className="mt-0.5 h-4 w-4 shrink-0 text-[var(--hc-accent-text)]" />
                 <div className="min-w-0 flex-1">
@@ -361,12 +372,12 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "warn" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.freigabe || "ohne Freigabe"}</span>
-                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.live_test_depth || "smoke"}</span>
-                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{item.subtask_count} Subtasks</span>
-                {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
-                {kanbanProgress ? <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-soft">{kanbanProgress}</span> : null}
-                <span className="max-w-full rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-type-label hc-dim">{item.agent}</span>
+                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.freigabe || "ohne Freigabe"}</span>
+                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.live_test_depth || "smoke"}</span>
+                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.subtask_count} Subtasks</span>
+                {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
+                {kanbanProgress ? <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{kanbanProgress}</span> : null}
+                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-dim)]">{item.agent}</span>
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
               {rowError ? <p className="mt-2 break-words text-[0.75rem] text-red-300">{rowError}</p> : null}
@@ -428,7 +439,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           onClose={() => { setDetailItem(null); }}
         />
       ) : null}
-    </FleetPanel>
+    </div>
   );
 }
 
@@ -612,11 +623,14 @@ function flowCardPropsEqual(a: FlowRunCardProps, b: FlowRunCardProps): boolean {
 export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected, busy, error, now, dispatchChoice, manualReviewFallback, onSelect, onReleaseChain, onDispatchSingle, onCancelDispatchChoice, onAct }: FlowRunCardProps) {
   const role = roleChip(enriched.workerProfile ?? task.assignee, task.status === "review" ? "verification" : null);
   const isBlocked = task.status === "blocked";
+  const isRunning = task.status === "running";
   const isReview = task.status === "review";
   const isDone = task.status === "done";
   const verifierGate = reviewGateStatus(enriched);
   const resultArtifact = preferredResultArtifactLink(enriched.resultArtifactLinks);
   const ageSec = task.age?.created_age_seconds ?? null;
+  const hasProgress = task.progress != null && task.progress.total > 0;
+  const pct = hasProgress ? Math.round((task.progress!.done / task.progress!.total) * 100) : 0;
   // mobileOverflowGuard: all phone-width rows below need min-w-0 + wrapping or
   // long task ids / branch names can push the Flow tab off the right edge.
   return (
@@ -627,34 +641,83 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
       aria-pressed={selected}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(task.id); } }}
-      className={cn("min-w-0 max-w-full cursor-pointer overflow-hidden rounded-lg border p-2.5 transition", selected ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] bg-[var(--hc-panel)] hover:border-[var(--hc-border-strong)]", isBlocked && "border-red-500/40")}
+      className={cn(
+        "min-w-0 max-w-full cursor-pointer overflow-hidden rounded-[14px] border p-3 transition shadow-[var(--hc-elev-1)]",
+        selected
+          ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]"
+          : isRunning
+            ? "border-cyan-400/50 bg-[var(--hc-panel-card)]"
+            : "border-[var(--hc-border)] bg-[var(--hc-panel-card)] hover:border-[var(--hc-border-strong)]",
+        isBlocked && "border-red-500/40",
+      )}
     >
+      {/* Header: role-chip (left) + status-pill (right) */}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{task.id}</span>
-        <span className="ml-auto shrink-0"><RoleChip role={role} /></span>
+        <RoleChip role={role} />
+        <span className="ml-auto shrink-0">
+          <StatusPill
+            tone={isBlocked ? "red" : isDone ? "emerald" : isReview ? "amber" : isRunning ? "cyan" : "zinc"}
+            label={taskStatusLabel[task.status] ?? task.status}
+            dot={isRunning ? "live" : isBlocked ? "error" : isDone ? "ready" : isReview ? "warn" : "idle"}
+          />
+        </span>
       </div>
-      <p className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white">{task.title}</p>
-      <p className="mt-1 truncate hc-mono hc-type-label hc-dim">
-        {ageSec != null ? `⏱ vor ${fmtAge(now - ageSec, now)}` : ""}{task.branch_name ? ` · ${task.branch_name}` : ""}
-        {enriched.workerHeartbeat ? ` · ♥ ${fmtAge(enriched.workerHeartbeat, now)}` : ""}
+      {/* Task-ID + Titel */}
+      <span className="hc-mono mt-1.5 block min-w-0 max-w-full truncate hc-type-label hc-dim">{task.id}</span>
+      <p className="mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white">{task.title}</p>
+      {/* Meta-Zeile: Alter · Branch */}
+      <p className="mt-1 flex min-w-0 items-center truncate hc-mono hc-type-label hc-dim">
+        <span className="truncate">
+          {ageSec != null ? `vor ${fmtAge(now - ageSec, now)}` : ""}{task.branch_name ? ` · ${task.branch_name}` : ""}
+        </span>
+        {enriched.workerHeartbeat ? (
+          <span className="ml-1 inline-flex shrink-0 items-center gap-1 text-[var(--hc-emerald)]">
+            ·<HeartPulse className="h-3 w-3 motion-safe:animate-pulse" aria-hidden />
+            {fmtAge(enriched.workerHeartbeat, now)}
+          </span>
+        ) : null}
       </p>
+      {/* Fortschritts-Bar */}
+      {hasProgress ? (
+        <div className="mt-2 flex items-center gap-2">
+          <div className="hc-stage-rail min-w-0 flex-1">
+            <i style={{ width: `${pct}%` }} />
+          </div>
+          <span className="hc-mono shrink-0 text-[10px] text-[var(--hc-text-dim)]">{pct}%</span>
+        </div>
+      ) : null}
+      {/* Telemetrie-Chips */}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <StatusPill tone={isBlocked ? "red" : isDone ? "emerald" : isReview ? "amber" : task.status === "running" ? "cyan" : "zinc"} label={taskStatusLabel[task.status] ?? task.status} dot={task.status === "running" ? "live" : isBlocked ? "error" : isDone ? "ready" : isReview ? "warn" : "idle"} />
-        {task.priority >= 2 ? <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 hc-type-label text-rose-200">Hoch</span> : null}
-        {(task.auto_retry_count ?? 0) > 0 ? <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 hc-type-label text-amber-100">Auto-Retry {Math.min(task.auto_retry_count ?? 0, 2)}/2</span> : null}
-        {task.progress && task.progress.total > 0 ? <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 hc-type-label text-sky-100">{task.progress.done}/{task.progress.total} {de.flow.plan.subtasksHeading}</span> : null}
-        {enriched.verdict ? <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 hc-type-label text-cyan-100">{enriched.verdict}</span> : null}
-        {isIsolatedWorkspace(task) ? <span title={task.workspace_path ?? undefined} className="rounded-full border border-violet-400/30 bg-violet-400/10 px-2 py-0.5 hc-type-label text-violet-200">⧉ Worktree</span> : null}
-        {isDone && enriched.resultQualityLabel ? <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 hc-type-label text-emerald-100">{enriched.resultQualityLabel}</span> : null}
+        {task.priority >= 2 ? (
+          <span className="rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">Hoch</span>
+        ) : null}
+        {(task.auto_retry_count ?? 0) > 0 ? (
+          <span className="rounded-[7px] border border-amber-400/30 bg-amber-400/10 px-2 py-1 hc-mono text-[10px] text-amber-200">Retry {Math.min(task.auto_retry_count ?? 0, 2)}/2</span>
+        ) : null}
+        {hasProgress ? (
+          <span className="rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{task.progress!.done}/{task.progress!.total} {de.flow.plan.subtasksHeading}</span>
+        ) : null}
+        {enriched.verdict ? (
+          <span className="rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-200">{enriched.verdict}</span>
+        ) : null}
+        {isIsolatedWorkspace(task) ? (
+          <span title={task.workspace_path ?? undefined} className="rounded-[7px] border border-violet-400/30 bg-violet-400/10 px-2 py-1 hc-mono text-[10px] text-violet-200">⧉ Worktree</span>
+        ) : null}
+        {isDone && enriched.resultQualityLabel ? (
+          <span className="rounded-[7px] border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 hc-mono text-[10px] text-emerald-200">{enriched.resultQualityLabel}</span>
+        ) : null}
+        {enriched.deliverableCount ? (
+          <span className="rounded-[7px] border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 hc-mono text-[10px] text-emerald-200">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</span>
+        ) : null}
       </div>
       {task.latest_summary ? <p className="mt-2 line-clamp-2 text-xs hc-soft">{task.latest_summary}</p> : null}
+      {/* Blocked-Reason-Bar */}
       {isBlocked && enriched.blockedReason ? (
         <p className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 hc-type-label text-red-200"><Lock className="mt-0.5 h-3 w-3 shrink-0" />{enriched.blockedReason}</p>
       ) : null}
       {isReview ? (
         <p className="mt-2 flex items-center gap-1.5 hc-type-label hc-dim"><ShieldCheck className="h-3 w-3 text-cyan-300" />Verifier-Gate — {verifierGate ?? "wartet auf Verifier; Nacharbeit schickt zurück."}</p>
       ) : null}
-      {enriched.deliverableCount ? <p className="mt-1.5 hc-type-label text-emerald-300">{enriched.deliverableCount} Deliverable{enriched.deliverableCount === 1 ? "" : "s"}</p> : null}
       {resultArtifact ? (
         <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2 py-1.5">
           <span className="min-w-0 truncate hc-type-label text-emerald-100">Spec-Draft / RESULT · {resultArtifact.relative_path}</span>
@@ -766,7 +829,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
       </div>
 
       {gate.data ? (
-        <div className="mt-2.5 rounded-md border border-[var(--hc-border)] bg-black/10 p-2">
+        <div className="mt-2.5 rounded-[11px] border border-[var(--hc-border)] bg-[var(--hc-panel-2)] p-2 shadow-[var(--hc-elev-1)]">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Eyebrow>Freigabe</Eyebrow>
             {estimate ? (
@@ -786,7 +849,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
             </button>
           </div>
           {estimate?.warning ? (
-            <p className="mt-1.5 flex items-start gap-1.5 hc-type-label text-amber-200">
+            <p className="mt-1.5 flex items-start gap-1.5 hc-type-label text-[var(--hc-amber)]">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />Soft-Limit ${estimate.soft_limit_usd.toFixed(2)} überschritten.
             </p>
           ) : null}
@@ -831,7 +894,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                   {selected ? "x" : "+"}
                 </button>
                 <span className="hc-mono min-w-0 max-w-full truncate hc-type-label hc-dim">{c.id}</span>
-                <span className="min-w-0 flex-1 basis-36 truncate hc-type-label text-white">{c.title}</span>
+                <span className="min-w-0 flex-1 basis-36 truncate hc-type-label text-[var(--hc-text)]">{c.title}</span>
                 <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
                   {risk ? <StatusPill tone={riskTone} label={`Risiko ${risk.tone}`} /> : null}
                   <StatusPill tone={statusTone(c.status)} label={taskStatusLabel[c.status] ?? c.status} />
@@ -839,7 +902,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                     <select
                       value={assigneeOverrides[c.id] ?? gateChild?.assignee ?? c.assignee ?? ""}
                       onChange={(e) => setAssigneeOverrides((prev) => ({ ...prev, [c.id]: e.target.value }))}
-                      className="min-h-8 max-w-40 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-white"
+                      className="min-h-8 max-w-40 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 hc-type-label text-[var(--hc-text)]"
                     >
                       <option value="">Unassigned</option>
                       {profiles.map((profile) => <option key={profile} value={profile}>{profileLabel[profile] ?? profile}</option>)}
@@ -870,7 +933,7 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
               value={splitTitle}
               onChange={(e) => setSplitTitle(e.target.value)}
               placeholder="Split-Titel"
-              className="min-h-9 min-w-0 flex-1 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-white placeholder:text-zinc-500"
+              className="min-h-9 min-w-0 flex-1 rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 text-xs text-[var(--hc-text)] placeholder:text-[var(--hc-text-dim)]"
             />
             <button
               type="button"
@@ -897,9 +960,9 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
         </div>
       ) : null}
 
-      {released ? <p className="mt-1.5 hc-type-label text-emerald-300">{de.flow.plan.released(released)}</p> : null}
-      {gate.error ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{gate.error}</p> : null}
-      {releaseError ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-red-300"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
+      {released ? <p className="mt-1.5 hc-type-label text-[var(--hc-emerald)]">{de.flow.plan.released(released)}</p> : null}
+      {gate.error ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-[var(--hc-red)]"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{gate.error}</p> : null}
+      {releaseError ? <p className="mt-1.5 flex items-start gap-1 hc-type-label text-[var(--hc-red)]"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{releaseError}</p> : null}
     </div>
   );
 }
@@ -1072,7 +1135,7 @@ function TaskCommentComposer({ taskId, onPosted }: { taskId: string; onPosted?: 
         onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit(); }}
         rows={3}
         placeholder={COMMENT_STRINGS.placeholder}
-        className="mt-2 w-full resize-y rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2 text-sm text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+        className="mt-2 w-full resize-y rounded-md border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2.5 py-2 text-sm text-[var(--hc-text)] outline-none placeholder:text-[var(--hc-text-dim)] focus:border-[var(--hc-accent-border)]"
       />
       {error ? <p className="mt-1.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
       <div className="mt-2 flex items-center justify-end gap-2">
@@ -1117,7 +1180,7 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
         <p className="hc-mono hc-type-label hc-dim">{taskId}</p>
         {/* Root-Titel sind oft ganze PlanSpec-Sätze — auf 3 Zeilen clampen statt
             17-Zeilen-Wand (Sicht-Audit 2026-06-19 G); Volltext via title-Attribut. */}
-        <p title={detail?.task?.title ?? task?.title ?? ""} className="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-white">{detail?.task?.title ?? task?.title ?? ""}</p>
+        <p title={detail?.task?.title ?? task?.title ?? ""} className="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-[var(--hc-text)]">{detail?.task?.title ?? task?.title ?? ""}</p>
         {task ? (
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <RoleChip role={roleChip(task.assignee, task.status === "review" ? "verification" : null)} />
@@ -1159,7 +1222,7 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
               const role = roleChip(run.profile, run.run_role);
               const ok = run.outcome === "completed";
               return (
-                <div key={run.id} className="min-w-0 max-w-full overflow-hidden rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] p-2.5">
+                <div key={run.id} className="min-w-0 max-w-full overflow-hidden rounded-[14px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] p-2.5 shadow-[var(--hc-elev-1)]">
                   <div className="flex min-w-0 items-center gap-2">
                     <RoleChip role={role} />
                     <span className={cn("ml-auto inline-flex shrink-0 items-center gap-1 hc-type-label", ok ? "text-[var(--hc-emerald)]" : run.error ? "text-[var(--hc-red)]" : "hc-dim")}>
@@ -1167,8 +1230,8 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
                     </span>
                   </div>
                   <p className="mt-1 truncate hc-mono hc-type-label hc-dim">Run {run.id} · {run.run_role_label ?? profileLabel[run.profile ?? ""] ?? run.profile ?? "—"}{run.ended_at ? ` · vor ${fmtAge(run.ended_at, now)}` : run.started_at ? ` · seit ${fmtAge(run.started_at, now)}` : ""}</p>
-                  {run.summary ? <p className="mt-1 line-clamp-3 text-[0.78rem] text-zinc-100">{run.summary}</p> : null}
-                  {run.error ? <p className="mt-1 line-clamp-2 hc-type-label text-red-300">{run.error}</p> : null}
+                  {run.summary ? <p className="mt-1 line-clamp-3 text-[0.78rem] hc-soft">{run.summary}</p> : null}
+                  {run.error ? <p className="mt-1 line-clamp-2 hc-type-label text-[var(--hc-red)]">{run.error}</p> : null}
                 </div>
               );
             })}
@@ -1181,8 +1244,8 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
           <Eyebrow>Deliverables</Eyebrow>
           <ul className="mt-2 space-y-1.5">
             {deliverables.map((d) => (
-              <li key={d.relative_path} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5">
-                <span className="min-w-0 truncate text-[0.78rem] text-white">{d.relative_path}</span>
+              <li key={d.relative_path} className="flex items-center justify-between gap-2 rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-2.5 py-1.5 shadow-[var(--hc-elev-1)]">
+                <span className="min-w-0 truncate text-[0.78rem] hc-soft">{d.relative_path}</span>
                 <DeliverableOpenButton url={d.url} />
               </li>
             ))}
@@ -1195,8 +1258,8 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
           <Eyebrow>Spec-Draft / RESULT</Eyebrow>
           <ul className="mt-2 space-y-1.5">
             {artifactLinksOnly.map((d) => (
-              <li key={`${d.source}-${artifactKey(d)}`} className="flex items-center justify-between gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5">
-                <span className="min-w-0 truncate text-[0.78rem] text-white" title={d.path}>{d.relative_path || d.filename || d.path}</span>
+              <li key={`${d.source}-${artifactKey(d)}`} className="flex items-center justify-between gap-2 rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel-card)] px-2.5 py-1.5 shadow-[var(--hc-elev-1)]">
+                <span className="min-w-0 truncate text-[0.78rem] hc-soft" title={d.path}>{d.relative_path || d.filename || d.path}</span>
                 <DeliverableOpenButton url={d.url} label={/(^|\/)RESULT\.md$/i.test(d.relative_path) ? "RESULT öffnen" : "Artifact öffnen"} />
               </li>
             ))}
@@ -1210,9 +1273,9 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
           <div className="mt-2 space-y-2">
             {events.map((ev, i) => (
               <div key={ev.id} className="flex gap-2.5">
-                <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", i === 0 ? "bg-[var(--hc-emerald)]" : "bg-[var(--hc-border-strong)]", i === 0 && "animate-pulse")} />
+                <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", i === 0 ? "bg-[var(--hc-emerald)]" : "bg-[var(--hc-border-strong)]", i === 0 && "motion-safe:animate-pulse")} />
                 <div className="min-w-0">
-                  <p className="text-[0.82rem] text-white">{eventLabel(ev.kind)}</p>
+                  <p className="text-[0.82rem] text-[var(--hc-text)]">{eventLabel(ev.kind)}</p>
                   <p className="hc-type-label hc-dim">vor {fmtAge(ev.created_at, now)}</p>
                 </div>
               </div>

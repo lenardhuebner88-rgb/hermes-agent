@@ -795,5 +795,12 @@ export const de = {
     costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
     // Legende unterhalb der Lane-Tabelle
     chainCostsCostLegend: "$ = geschätzter API-Gegenwert; Abo-Arbeit kostet real $0, der Wert zeigt was es auf API gekostet hätte. Schätzwert nur für claude-cli/premium-Lanes gestempelt.",
+    // Kette-Summary (zwischen Selector und Pipeline)
+    summaryEyebrow: "Kette · Fortschritt",
+    summaryProgress: (done: number, total: number, running: number, waiting: number) =>
+      `${done} / ${total} Tasks fertig · ${running} läuft · ${waiting} wartend`,
+    summaryStatCost: "Kosten",
+    summaryStatTokens: "Tokens",
+    summaryStatRuns: "Runs",
   },
 } as const;

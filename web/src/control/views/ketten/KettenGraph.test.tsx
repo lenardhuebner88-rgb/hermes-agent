@@ -57,7 +57,9 @@ describe("KettenGraph", () => {
     const withProgress = [makeNode("p", "running", { progress: { done: 2, total: 4 } })];
     const html = renderToStaticMarkup(<KettenGraph nodes={withProgress} edges={[]} rootId="x" />);
     expect(html).toContain("width:50%");
-    expect(html).toContain("50% — 2 von 4 Subtasks");
+    // Daylight reskin: percent reads out beside the bar; subtask count is a chip.
+    expect(html).toContain("50%");
+    expect(html).toContain("2 von 4 Subtasks");
     expect(html).toContain('aria-label="Fortschritt"');
   });
 
@@ -80,7 +82,8 @@ describe("KettenGraph", () => {
     const html = renderToStaticMarkup(<KettenGraph nodes={nodes} edges={edges} rootId="a" />);
     expect(html).toContain("data-pipeline-line");
     expect(html).toContain("linear-gradient");
-    expect(html).toContain("#22d3ee");
+    // Gradient uses the hc-cyan token (daylight reskin replaced the hardcoded hex).
+    expect(html).toContain("var(--hc-cyan)");
   });
 
   it("contains no SVG/path elements (bézier edges removed)", () => {
