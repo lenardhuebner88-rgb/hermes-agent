@@ -311,7 +311,7 @@ def approve_draft(
     conn: sqlite3.Connection,
     task_id: str,
     *,
-    assignee_fallback: str = "coder-claude",
+    assignee_fallback: str = "premium",
 ) -> str:
     """Freigabe: Build-Task als verlinktes Kind des Draft-Roots anlegen.
 

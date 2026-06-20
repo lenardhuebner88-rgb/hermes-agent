@@ -719,7 +719,8 @@ def test_log_wish_creates_triage_task_for_family(kanban_home):
         task = kb.get_task(conn, out["task_id"])
         assert task.status == "triage"
         assert task.created_by == "family"
-        assert task.assignee == "coder-claude"
+        # Phase A: the coder-claude funnel default folds into the canonical premium lane.
+        assert task.assignee == "premium"
         assert "NICHT bauen" in (task.body or "")
         assert "Oskar abends" in (task.body or "")
     finally:

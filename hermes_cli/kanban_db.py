@@ -2673,13 +2673,27 @@ def _profile_author() -> str:
 # Task creation / mutation
 # ---------------------------------------------------------------------------
 
+# Phase A — Claude-coder consolidation. The legacy `coder-claude` lane folds into
+# the canonical Claude coder lane `premium` (both are claude-cli/Opus on the Claude
+# Max subscription). `coder-claude` stays a valid profile name for back-compat, but
+# its ROUTING target becomes `premium` at every DB write. No new `opus-coder` lane.
+_LANE_ALIASES: dict[str, str] = {
+    "coder-claude": "premium",
+}
+
+
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
-    """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity)."""
+    """Lowercase-assignee normalization + lane-alias mapping for Kanban rows.
+
+    Normalizes case (dashboard/CLI parity) then folds legacy lane names onto their
+    canonical target via :data:`_LANE_ALIASES` (Phase A: ``coder-claude`` -> ``premium``).
+    """
     if assignee is None:
         return None
     from hermes_cli.profiles import normalize_profile_name
 
-    return normalize_profile_name(assignee)
+    canon = normalize_profile_name(assignee)
+    return _LANE_ALIASES.get(canon, canon)
 
 
 _CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
@@ -2795,12 +2809,17 @@ CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
-    "coder": "default code implementation lane",
+    "coder": "default code implementation lane (OpenAI-Codex/GPT)",
+    # coder-claude folds into premium (Phase A); kept for any pre-canonicalization
+    # literal lookup. The canonical Claude coder reason lives on `premium`.
     "coder-claude": (
-        "reasoning-heavy or chain-critical Claude code lane; requires "
-        "cross-family review"
+        "Claude code lane (alias of premium): reasoning-heavy or chain-critical "
+        "work; requires cross-family review"
     ),
-    "premium": "operator-signed high-stakes or escalation-reserve code lane",
+    "premium": (
+        "the Claude code lane (claude-cli/Opus): reasoning-heavy, chain-critical, "
+        "or hard multi-file work; requires cross-family review"
+    ),
 }
 
 
@@ -11776,7 +11795,7 @@ def _create_conflict_park_fixer_subtask(
             conn,
             title=title,
             body=body,
-            assignee="coder-claude",
+            assignee="premium",
             created_by="orchestrator",
             workspace_kind="dir",
             workspace_path=str(wt),

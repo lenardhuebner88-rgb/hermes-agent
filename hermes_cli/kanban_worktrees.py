@@ -618,7 +618,7 @@ def _create_parked_release_gate_child(
 # nothing runs them. This executor processes such a child end to end: it runs
 # the gate in the LIVE checkout (the commands are hardcoded to that path), and
 # on green reports success to the board. On RED it spawns a BOUNDED fixer on
-# the ``coder-claude`` lane EXCLUSIVELY inside the chain worktree/branch — the
+# the ``premium`` lane EXCLUSIVELY inside the chain worktree/branch — the
 # fixer reads the gate error, fixes, and the gate is re-run. After the retry
 # budget (``kanban.release_gate_fixer_max_retries``, default 2) it escalates to
 # the operator. Hard boundary: the fixer never edits live-main; only the gate's
@@ -758,7 +758,7 @@ def _release_gate_fixer_prompt(
     commands = "\n".join(_RELEASE_GATE_COMMANDS)
     return (
         "You are a bounded Hermes release-gate fixer running headless on the "
-        "coder-claude lane. The dashboard release gate for chain "
+        "premium lane. The dashboard release gate for chain "
         f"`{root_id}` is RED (fixer attempt {attempt}).\n\n"
         "Gate commands (run in the live checkout — do NOT edit there):\n"
         f"{commands}\n\n"
@@ -777,7 +777,7 @@ def _release_gate_fixer_prompt(
 def _spawn_release_gate_fixer_process(
     *, worktree: Path, branch: str, prompt: str, task_id: str, root_id: str,
 ) -> None:
-    """Spawn the coder-claude fixer process, blocking until it finishes, with
+    """Spawn the premium fixer process, blocking until it finishes, with
     ``cwd`` pinned to the isolated *worktree*. Reuses the claude-CLI worker
     env contract (caged via ``HERMES_KANBAN_TASK``, no provider keys, web
     egress tools denied). Separated out so tests can assert isolation without
@@ -795,7 +795,7 @@ def _spawn_release_gate_fixer_process(
     try:
         from hermes_cli import kanban_db as kb
 
-        lane = kb._active_lane_entry_for_profile("coder-claude")
+        lane = kb._active_lane_entry_for_profile("premium")
         model = (lane or {}).get("model")
         if model:
             cmd.extend(["--model", model])
@@ -840,7 +840,7 @@ def _default_release_gate_fixer(
     repo_root: Optional[Path] = None,
 ) -> None:
     """Default fixer: (re)create the isolated chain worktree and spawn a
-    coder-claude fixer inside it. The chain worktree is removed after the
+    premium fixer inside it. The chain worktree is removed after the
     merge that created the release-gate child, so ``ensure_worktree`` recreates
     it (idempotent) on the chain branch. The live checkout is never modified
     here — only the gate's build/smoke run there, via the gate runner."""
@@ -888,7 +888,7 @@ def _record_release_gate_fix_attempt(
     payload = {
         "attempt": attempt,
         "root_id": root_id,
-        "lane": "coder-claude",
+        "lane": "premium",
         "worktree": worktree,
         "branch": branch,
         "gate_error_tail": (gate_error or "")[-2000:],
@@ -1028,7 +1028,7 @@ def execute_release_gate(
     """Process a parked release-gate child end to end.
 
     Runs the gate in the live checkout. On green: report success + mark the
-    child done. On red: spawn up to *max_retries* bounded coder-claude fixers
+    child done. On red: spawn up to *max_retries* bounded premium fixers
     inside the chain worktree/branch (never live-main), re-running the gate
     after each. Persistent red → ``operator_escalation`` and the child stays
     blocked.

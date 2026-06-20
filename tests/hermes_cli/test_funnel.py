@@ -253,7 +253,7 @@ def test_approve_draft_creates_linked_ready_child_with_inferred_contract(conn):
     child = kb.get_task(conn, new_id)
     assert child.status == "ready"
     assert child.created_by == "discord-idee"  # Bilanz zählt die Kette einmal
-    assert child.assignee == "coder-claude"    # Fallback, Wunsch hatte keinen
+    assert child.assignee == "premium"    # Fallback (Claude-Coder), Wunsch hatte keinen
     assert child.kind == "code"
     assert child.title.startswith("Umsetzen:")
     assert "Spec-Draft" in (child.body or "")

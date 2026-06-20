@@ -105,10 +105,11 @@ Rules:
     child tasks solely because a profile has good statistics; code lanes
     already have a structural review gate on the board.
   - Lane routing table for implementation work:
-      * coder: default code implementation lane for ordinary code tasks.
-      * coder-claude: reasoning-heavy or chain-critical Claude code lane;
-        use only when the roster explicitly contains this exact profile.
-      * premium: operator-signed high-stakes or escalation-reserve code lane.
+      * coder: default code implementation lane (OpenAI-Codex/GPT) for ordinary code tasks.
+      * premium: the Claude code lane (claude-cli on the Claude Max subscription):
+        reasoning-heavy, chain-critical, or hard multi-file work the coder lane
+        can't carry. Also the auto-retry escalation target.
+      * coder-claude: DEPRECATED alias of premium - accepted for back-compat, routes to premium.
       * reviewer and critic: verdict-only lanes; never assign them
         kind=code or build/implementation tasks.
       * research: research lane; never assign it kind=code or
