@@ -15,6 +15,7 @@ import {
   nutzerwert,
   reliabilityStatus,
   rosterProfiles,
+  subscriptionBurnBreakdown,
 } from "./statsBroadsheet";
 import { formatEffectiveCost } from "./derive";
 import { broadsheet } from "./broadsheetTokens";
@@ -400,6 +401,35 @@ describe("laneBurn", () => {
     });
     expect(eff.estimated).toBe(false);
     expect(eff.text).not.toContain("gesch.");
+  });
+});
+
+describe("subscriptionBurnBreakdown", () => {
+  it("sorts top lanes and raises non-user anti-pattern flags", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+      by_lane: [
+        { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200 },
+        { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800 },
+      ],
+      by_class: [
+        { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700 },
+        { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+      ],
+      daily: [],
+      buckets: [],
+    });
+
+    expect(breakdown.topLanes.map((row) => row.profile)).toEqual(["coder", "verifier"]);
+    expect(breakdown.classes.map((row) => row.value_class)).toEqual(["meta", "nutzer"]);
+    expect(breakdown.subscriptionCount).toBe(2);
+    expect(breakdown.flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "anti", title: "meta · codex" }),
+      expect.objectContaining({ kind: "top", title: "Coder · codex" }),
+    ]));
   });
 });
 
