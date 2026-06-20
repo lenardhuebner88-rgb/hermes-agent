@@ -298,16 +298,36 @@ export function EffizienzSection({
       {lanes.length === 0 ? (
         <Verdict tone="calm">{de.stats.burnEmpty}</Verdict>
       ) : (
-        lanes.map((l, i) => (
-          <LeaderRow
-            key={l.profile}
-            rank={i + 1}
-            name={l.label}
-            score={fmtTokens(l.tokens)}
-            status="neutral"
-            latency={de.stats.leaderRuns(l.runs)}
-          />
-        ))
+        lanes.map((l, i) => {
+          // Tokens bleiben die führende Zahl (score); der $-Gegenwert ist
+          // sekundär und steht neben der Run-Zahl. estimated → "gesch." +
+          // Tooltip, abgeleitet aus costUsd === 0 && costEquivalent > 0.
+          const cost = formatEffectiveCost({
+            cost_usd: l.costUsd ?? 0,
+            cost_effective_usd: l.costEquivalent ?? 0,
+            tokens: l.tokens,
+          });
+          return (
+            <LeaderRow
+              key={l.profile}
+              rank={i + 1}
+              name={l.label}
+              score={fmtTokens(l.tokens)}
+              status="neutral"
+              latency={
+                <>
+                  {cost.estimated ? (
+                    <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
+                  ) : (
+                    cost.text
+                  )}
+                  {" · "}
+                  {de.stats.leaderRuns(l.runs)}
+                </>
+              }
+            />
+          );
+        })
       )}
     </>
   );

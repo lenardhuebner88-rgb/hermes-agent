@@ -262,7 +262,7 @@ const ChainGraphNodeSchema = z.object({
   cost_usd: z.coerce.number().catch(0),
   input_tokens: z.coerce.number().catch(0),
   output_tokens: z.coerce.number().catch(0),
-  // Geschätzter API-Gegenwert für Abo-Runs (nur claude-cli/premium gestempelt).
+  // Geschätzter API-Gegenwert für Abo-Runs (alle Abo-Lanes: claude & Codex gestempelt).
   cost_usd_equivalent: z.coerce.number().catch(0),
   cost_effective_usd: z.coerce.number().catch(0),
 });

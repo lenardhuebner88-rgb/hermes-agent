@@ -256,7 +256,7 @@ export interface ChainGraphNode {
   cost_usd: number;
   input_tokens: number;
   output_tokens: number;
-  /** Geschätzter API-Gegenwert für Abo-Runs (nur claude-cli/premium gestempelt); 0 wenn nicht verfügbar. */
+  /** Geschätzter API-Gegenwert für Abo-Runs (alle Abo-Lanes: claude & Codex gestempelt); 0 wenn nicht verfügbar. */
   cost_usd_equivalent: number;
   /** Effektive Kosten: cost_usd + cost_usd_equivalent; 0 wenn nicht verfügbar. */
   cost_effective_usd: number;

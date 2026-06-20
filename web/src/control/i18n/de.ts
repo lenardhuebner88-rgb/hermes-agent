@@ -794,7 +794,7 @@ export const de = {
     // "gesch." marker tooltip — erscheint auf Abo-Schätzwert-Zellen
     costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
     // Legende unterhalb der Lane-Tabelle
-    chainCostsCostLegend: "$ = geschätzter API-Gegenwert; Abo-Arbeit kostet real $0, der Wert zeigt was es auf API gekostet hätte. Schätzwert nur für claude-cli/premium-Lanes gestempelt.",
+    chainCostsCostLegend: "$ = geschätzter API-Gegenwert; Abo-Arbeit (claude & Codex) kostet real 0 $ — der Wert zeigt, was dieselben Tokens auf der gemeteren API gekostet hätten (Tokens × models.dev-Preis bzw. Session-Schätzung). 'gesch.' markiert Abo-Schätzwerte.",
     // Kette-Summary (zwischen Selector und Pipeline)
     summaryEyebrow: "Kette · Fortschritt",
     summaryProgress: (done: number, total: number, running: number, waiting: number) =>

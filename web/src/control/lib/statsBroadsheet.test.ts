@@ -16,6 +16,7 @@ import {
   reliabilityStatus,
   rosterProfiles,
 } from "./statsBroadsheet";
+import { formatEffectiveCost } from "./derive";
 import { broadsheet } from "./broadsheetTokens";
 import type {
   AccountUsageProvider,
@@ -345,13 +346,60 @@ describe("laneBurn", () => {
     expect(rows.map((r) => r.profile)).toEqual(["verifier", "coder"]);
     expect(rows[0].tokens).toBe(700);
     expect(rows[0].costEquivalent).toBeCloseTo(0.3, 5);
+    expect(rows[0].costUsd).toBeCloseTo(0.2, 5); // metered raw component carried through
     expect(rows[0].label).toBe("Verifier");
     expect(rows[1].tokens).toBe(150);
     expect(rows[1].costEquivalent).toBeNull(); // unstamped
+    expect(rows[1].costUsd).toBeNull(); // unstamped → no raw component
   });
 
   it("is empty when nothing burned tokens", () => {
     expect(laneBurn([costRow({ profile: "coder", input_tokens: 0, output_tokens: 0 })])).toEqual([]);
+  });
+
+  // The renderer feeds the carried cost fields straight into formatEffectiveCost.
+  // This asserts that round-trip so the Lane row's $-value (and "gesch." marker)
+  // stay correct without re-deriving the equivalent in the view.
+  it("feeds subscription lanes into formatEffectiveCost with the 'gesch.' marker", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder-claude",
+        input_tokens: 200,
+        output_tokens: 100,
+        runs: 3,
+        cost_usd: 0, // honest zero (K17): subscription work bills nothing real
+        cost_usd_equivalent: 1.5,
+      }),
+    ]);
+    expect(lane.costEquivalent).toBeCloseTo(1.5, 5);
+    expect(lane.costUsd).toBe(0);
+    const eff = formatEffectiveCost({
+      cost_usd: lane.costUsd ?? 0,
+      cost_effective_usd: lane.costEquivalent ?? 0,
+      tokens: lane.tokens,
+    });
+    expect(eff.estimated).toBe(true);
+    expect(eff.text).toContain("gesch.");
+  });
+
+  it("feeds metered lanes into formatEffectiveCost as real (no 'gesch.')", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder",
+        input_tokens: 400,
+        output_tokens: 300,
+        runs: 9,
+        cost_usd: 0.2,
+        cost_usd_equivalent: 0.1,
+      }),
+    ]);
+    const eff = formatEffectiveCost({
+      cost_usd: lane.costUsd ?? 0,
+      cost_effective_usd: lane.costEquivalent ?? 0,
+      tokens: lane.tokens,
+    });
+    expect(eff.estimated).toBe(false);
+    expect(eff.text).not.toContain("gesch.");
   });
 });
 
