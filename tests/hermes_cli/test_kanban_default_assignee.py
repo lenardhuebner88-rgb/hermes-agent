@@ -152,3 +152,42 @@ def test_dispatch_result_has_auto_assigned_default_field():
     r = DispatchResult()
     assert hasattr(r, "auto_assigned_default")
     assert r.auto_assigned_default == []
+
+
+def test_canonical_assignee_aliases_coder_claude_to_premium():
+    """Phase A: coder-claude folds into the canonical Claude coder lane `premium`.
+
+    Every DB write routes assignee `coder-claude` -> `premium` (back-compat alias),
+    case-insensitively; `coder` (Codex/GPT) and `premium` are unchanged; None stays None.
+    """
+    from hermes_cli import kanban_db as kb
+    assert kb._canonical_assignee("coder-claude") == "premium"
+    assert kb._canonical_assignee("Coder-Claude") == "premium"
+    assert kb._canonical_assignee("premium") == "premium"
+    assert kb._canonical_assignee("coder") == "coder"
+    assert kb._canonical_assignee(None) is None
+    # No invented opus-coder lane.
+    assert "opus-coder" not in kb._LANE_ALIASES
+    assert kb._LANE_ALIASES.get("coder-claude") == "premium"
+
+
+def test_phase_a_premium_is_canonical_claude_lane_no_opus_coder():
+    """Phase A invariant guard: premium stays the canonical Claude coder lane,
+    is wired everywhere it needs to be, and no `opus-coder` lane is introduced."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import planspecs
+    from hermes_cli import kanban_decompose as kd
+    assert kb._LANE_SEED_API_STANDARD["premium"]["worker_runtime"] == "claude-cli"
+    assert kb._LANE_SEED_MAX_ABO["premium"]["worker_runtime"] == "claude-cli"
+    assert "premium" in kb._DEFAULT_REVIEW_CODE_ROLES
+    assert "premium" in planspecs.VALID_PLANSPEC_LANES
+    assert "premium" in kd._WORKER_SCOPE_LANES
+    assert kb.AUTO_RETRY_ESCALATION_PROFILE == "premium"
+    # coder-claude stays an accepted name for back-compat (its routing target is premium).
+    assert "coder-claude" in planspecs.VALID_PLANSPEC_LANES
+    assert "coder-claude" in kb._DEFAULT_REVIEW_CODE_ROLES
+    # Negative invariant: opus-coder must not exist anywhere.
+    assert "opus-coder" not in kb._LANE_SEED_API_STANDARD
+    assert "opus-coder" not in planspecs.VALID_PLANSPEC_LANES
+    assert "opus-coder" not in kd._WORKER_SCOPE_LANES
+    assert "opus-coder" not in kb._LANE_ALIASES.values()

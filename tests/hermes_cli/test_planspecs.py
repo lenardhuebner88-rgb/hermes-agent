@@ -245,7 +245,9 @@ def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path)
         assert child1.title == "Document schema"
         assert child1.assignee == "coder"
         assert child2 is not None and child2.status == "scheduled"
-        assert child2.assignee == "coder-claude"
+        # Phase A back-compat: a planspec naming lane `coder-claude` still ingests,
+        # and the child routes to the canonical Claude coder lane `premium`.
+        assert child2.assignee == "premium"
         assert kb.parent_ids(conn, child2.id) == [child1.id]
         assert set(kb.parent_ids(conn, root.id)) == {child1.id, child2.id}
 

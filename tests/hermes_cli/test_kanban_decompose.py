@@ -566,6 +566,17 @@ def test_decompose_prompt_documents_3a_lane_policy():
     assert "null if unsure" in prompt
 
 
+def test_decompose_prompt_separates_coder_and_claude_coder():
+    """Phase A: two clean coder families in the lane table —
+    coder = Codex/GPT default; premium = the Claude coder; coder-claude =
+    deprecated alias of premium; no invented opus-coder lane."""
+    prompt = decomp._SYSTEM_PROMPT
+    assert "OpenAI-Codex/GPT" in prompt
+    assert "premium: the Claude code lane" in prompt
+    assert "DEPRECATED alias of premium" in prompt
+    assert "opus-coder" not in prompt
+
+
 def test_decompose_prompt_frames_roster_stats_as_background():
     prompt = decomp._SYSTEM_PROMPT
     assert "stats:" in prompt

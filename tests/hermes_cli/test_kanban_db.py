@@ -6533,11 +6533,14 @@ def test_3a_coder_claude_contract_uses_canonical_lane_reason(
 
     assert task is not None
     assert task.body is not None
-    assert "Reason for lane: reasoning-heavy or chain-critical Claude code lane" in task.body
+    # Phase A: coder-claude folds into the canonical Claude coder lane `premium`.
+    assert task.assignee == "premium"
+    assert "Reason for lane: the Claude code lane (claude-cli/Opus)" in task.body
     contract = [e for e in events if e.kind == "code_task_contract_inferred"][-1]
     payload = contract.payload or {}
-    assert payload["assignee_lane"] == "coder-claude"
-    assert "chain-critical Claude code lane" in payload["reason_for_lane"]
+    assert payload["assignee_lane"] == "premium"
+    assert "chain-critical" in payload["reason_for_lane"]
+    assert "cross-family review" in payload["reason_for_lane"]
 
 
 def test_complete_task_records_self_verification_event(kanban_home):
@@ -7351,8 +7354,9 @@ def test_conflict_park_routes_bounded_fixer_not_escalation(
     assert summary["conflict_fixer_dispatched"] == [
         {"task_id": tid, "child_id": child_id, "attempt": 1}
     ]
-    # The fixer is a dispatchable coder-claude task pinned to the chain worktree.
-    assert child.assignee == "coder-claude"
+    # The fixer is a dispatchable Claude-coder task pinned to the chain worktree.
+    # Phase A: the coder-claude lane folds into premium (same claude-cli/Opus runtime).
+    assert child.assignee == "premium"
     assert child.status == "ready"
     assert child.workspace_kind == "dir"
     assert child.workspace_path == wt
