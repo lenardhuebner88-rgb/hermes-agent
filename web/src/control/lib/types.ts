@@ -193,6 +193,11 @@ export interface FlowGateResponse {
 
 export type ReviewTier = "standard" | "review" | "critical";
 
+// Live-Stage-Pill: the review profile currently running for a task in `review`
+// status (the staged gate's verifier→reviewer→critic). Distinct from the
+// CONFIGURED `ReviewTier` — this is the stage actually executing right now.
+export type ActiveReviewStage = "verifier" | "reviewer" | "critic";
+
 export interface FlowReleaseOptions {
   assignee_overrides?: Record<string, string | null>;
   release_level?: FlowGateReleaseLevel;

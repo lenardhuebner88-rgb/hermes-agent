@@ -622,3 +622,22 @@ def test_decompose_scheduled_held_child_defers_scout(kanban_home, auto_scout_on)
         assert kids is not None
         assert _scout_parents(conn, kids[0]) == []            # deferred, not bypassed
         assert kb.get_task(conn, kids[0]).status == "scheduled"  # still held
+
+
+# ---------------------------------------------------------------------------
+# Slice b: batch_active_review_stages — the live review stage per task, read from
+# the latest submitted_for_review event (powers the dashboard live-stage pill).
+# ---------------------------------------------------------------------------
+
+def test_batch_active_review_stages_latest_event_wins(kanban_home):
+    """Returns the target_profile of the LATEST submitted_for_review event; tasks
+    without such an event are omitted."""
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="reviewing", assignee="coder")
+        t2 = kb.create_task(conn, title="no review events", assignee="coder")
+        with kb.write_txn(conn):
+            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "verifier"})
+            kb._append_event(conn, t1, "submitted_for_review", {"target_profile": "reviewer"})
+        m = kb.batch_active_review_stages(conn, [t1, t2])
+        assert m == {t1: "reviewer"}   # latest event wins; t2 (no event) omitted
+        assert kb.batch_active_review_stages(conn, []) == {}

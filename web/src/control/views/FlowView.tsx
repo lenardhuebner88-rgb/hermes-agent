@@ -23,6 +23,7 @@ import {
   STAGE_META,
   buildChains,
   chainReviewTier,
+  chainActiveReviewStage,
   flowCounts,
   groupChainsByEpic,
   projectKey,
@@ -56,7 +57,7 @@ import {
 } from "../hooks/useControlData";
 import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
 import { planSpecKanbanTone, planSpecKanbanLabel } from "./flow/planSpecKanban";
-import type { BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
+import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
@@ -771,6 +772,9 @@ export const FlowRunCard = memo(function FlowRunCard({ task, enriched, selected,
 // in `scheduled`. This is the visible+operative proof — the same child ids run
 // on through Execute → Verify → Ship.
 const REVIEW_TIER_LABEL: Record<ReviewTier, string> = { standard: "Standard", review: "Review", critical: "Kritisch" };
+// Slice b: label for the LIVE review stage pill (the verifier→reviewer→critic
+// step currently running), distinct from the configured-tier pill above.
+const ACTIVE_STAGE_LABEL: Record<ActiveReviewStage, string> = { verifier: "Verifier", reviewer: "Reviewer", critic: "Critic" };
 // Phase C: the operator's chain-wide lane choices at start (canonical code lanes;
 // premium = the Claude Opus lane, coder = the default code lane).
 const FLOW_LANE_OPTIONS: ReadonlyArray<string> = ["coder", "premium"];
@@ -1458,6 +1462,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
   const doneMembers = chain.members.filter((m) => m.status === "done");
   const title = chain.root?.title ?? chain.members[0]?.title ?? chain.rootId;
   const reviewTier = chainReviewTier(chain.members);
+  const activeStage = chainActiveReviewStage(chain.members);
   return (
     <article id={flowChainDomId(chain.rootId)} className={cn("hc-surface-card min-w-0 max-w-full overflow-hidden scroll-mt-4 p-3", chain.blockedCount > 0 && "border-red-500/40")}>
       <div
@@ -1493,6 +1498,7 @@ function ChainCard({ chain, epicTitle, onEpicClick, openEpics, epicBusy, onAssig
           {chain.blockedCount > 0 ? <StatusPill tone="red" label={`${chain.blockedCount} blockiert`} dot="error" /> : null}
           {chain.runningCount > 0 ? <StatusPill tone="cyan" label={`${chain.runningCount} läuft`} dot="live" /> : null}
           {reviewTier ? <StatusPill tone="indigo" label={`Review: ${REVIEW_TIER_LABEL[reviewTier]}`} /> : null}
+          {activeStage ? <StatusPill tone="violet" label={`Stufe: ${ACTIVE_STAGE_LABEL[activeStage]}`} dot="live" /> : null}
         </div>
       </div>
       {expanded ? (

@@ -1423,6 +1423,11 @@ def get_board(
         # query (mirrors the chain-graph per-node aggregate). Tasks with no runs
         # are omitted, so their cards render no cost footer.
         cost_map = kanban_db.batch_task_costs(conn, [t.id for t in tasks])
+        # Slice b: the live review stage (verifier→reviewer→critic) currently
+        # targeted, for the chain card's stage pill. One batch query; only surfaced
+        # for tasks actually in ``review`` (below), so a done task that was once
+        # reviewed never shows a stale stage.
+        active_stage_map = kanban_db.batch_active_review_stages(conn, [t.id for t in tasks])
 
         for t in tasks:
             full = summary_map.get(t.id)
@@ -1451,6 +1456,12 @@ def get_board(
                 d["output_tokens"] = cost["output_tokens"]
                 d["cost_usd_equivalent"] = cost["cost_usd_equivalent"]
                 d["cost_effective_usd"] = cost["cost_effective_usd"]
+            # Slice b: live review-stage pill — only while the task is in review, so
+            # a done/blocked task never shows a stale stage. Absent key → schema null.
+            if t.status == "review":
+                stage = active_stage_map.get(t.id)
+                if stage is not None:
+                    d["active_review_stage"] = stage
             diags = diagnostics_per_task.get(t.id)
             if diags:
                 # The full list lets a drawer render without a second round-trip

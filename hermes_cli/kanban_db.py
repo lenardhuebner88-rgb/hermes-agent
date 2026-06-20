@@ -20008,6 +20008,47 @@ def batch_task_costs(
     return out
 
 
+def batch_active_review_stages(
+    conn: sqlite3.Connection, task_ids: Iterable[str]
+) -> dict[str, str]:
+    """Batch-fetch the *currently targeted* review stage per task — Slice b.
+
+    For each task, the ``target_profile`` of its LATEST ``submitted_for_review``
+    event (the staged-review stage the gate is on right now: verifier→reviewer→
+    critic). One batched window-function query (mirrors :func:`latest_summaries`)
+    so the board endpoint can render a live-stage pill without an N+1. Tasks with
+    no ``submitted_for_review`` event — or whose latest event carries no
+    ``target_profile`` — are omitted. The caller decides whether to surface it
+    (only meaningful while the task sits in ``review``). Fail-soft → ``{}``.
+    """
+    ids = [t for t in task_ids if t]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT task_id, json_extract(payload, '$.target_profile') AS target_profile
+            FROM (
+                SELECT task_id, payload,
+                       ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS rn
+                FROM task_events
+                WHERE task_id IN ({placeholders})
+                  AND kind = 'submitted_for_review'
+            ) WHERE rn = 1
+            """,
+            ids,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        tp = row["target_profile"]
+        if isinstance(tp, str) and tp.strip():
+            out[row["task_id"]] = tp.strip()
+    return out
+
+
 def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
     """Return token/cost aggregates for a Kanban chain, grouped by lane/profile.
 
