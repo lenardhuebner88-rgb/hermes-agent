@@ -231,7 +231,7 @@ def _autonomy_lever(gap: float) -> Lever:
     return Lever(
         key="AUTON-UPLIFT",
         title="Autonomie-Quote breit anheben",
-        lane="coder-claude",
+        lane="premium",
         target_metric=f"autonomy_pct Richtung {AUTONOMY_TARGET:.0f} Prozent anheben",
         roi="potenziell hoch, aber diffus: 'mehr Autonomie' ohne konkreten Mechanismus",
         counter_metric="Operator-Eskalations- und Fehlerrate darf nicht steigen",
@@ -248,7 +248,7 @@ def _gate_stability_lever(gap: float) -> Lever:
     return Lever(
         key="GATE-STABILITY",
         title="Gruene-Gate-Straehne stabilisieren (Flake-Quellen im Nacht-Gate schliessen)",
-        lane="coder-claude",
+        lane="premium",
         target_metric=f"green_gate_streak Richtung {GATE_STREAK_TARGET} aufeinanderfolgende gruene Naechte heben",
         roi="mittel-hoch: eine stabile Gate-Straehne ist die Vertrauensbasis fuer autonomen Push und Deploy",
         counter_metric="Gate-Laufzeit und Kosten duerfen nicht steigen",
@@ -284,7 +284,7 @@ def _gate_fix_lever(cause: dict[str, Any]) -> Lever:
     return Lever(
         key=key,
         title=f"Naechtlichen green-gate-Fehler am Gate '{gate}' beheben",
-        lane="coder-claude",
+        lane="premium",
         target_metric=(
             f"green_gate_streak wieder aufbauen, indem die seit mindestens "
             f"{GATE_FIX_MIN_NIGHTS} aufeinanderfolgenden Naechten am Gate '{gate}' "
@@ -341,7 +341,7 @@ def _cost_efficiency_lever(lane: str, burn: float, key: str) -> Lever:
     return Lever(
         key=key,
         title=f"Kosten-Effizienz: teuerste Lane '{lane}' entlasten",
-        lane="coder-claude",
+        lane="premium",
         target_metric=(
             f"cost_effective_usd der Lane '{lane}' (aktuell ~${burn:.0f} pro "
             f"{COST_WINDOW_DAYS}-Tage-Fenster, API-Aequivalent des Abo-Verbrauchs) "
@@ -496,7 +496,7 @@ def derive_levers(context: dict[str, Any]) -> list[Lever]:
             Lever(
                 key=template.key,
                 title=template.title,
-                lane="coder-claude",
+                lane="premium",
                 target_metric=template.target_metric,
                 roi=template.roi,
                 counter_metric=template.counter_metric,
@@ -736,7 +736,7 @@ def _levers_from_drafts(drafts: Iterable[dict[str, Any]]) -> list[Lever]:
             Lever(
                 key=key,
                 title=title,
-                lane=str(raw.get("lane") or "coder-claude").strip() or "coder-claude",
+                lane=str(raw.get("lane") or "premium").strip() or "premium",
                 target_metric=str(raw.get("target_metric") or "").strip(),
                 roi=str(raw.get("roi") or "").strip(),
                 counter_metric=str(raw.get("counter_metric") or "").strip(),
