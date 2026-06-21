@@ -332,6 +332,8 @@ def _planspec_kanban_state(path: Path, *, board: str | None = None) -> dict[str,
             statuses = [root.status, *child_statuses]
             if root.status == "done":
                 state = "completed"
+            elif root.status == "archived":
+                state = "archived"
             elif "blocked" in statuses:
                 state = "blocked"
             elif any(status in {"running", "review"} for status in statuses):
