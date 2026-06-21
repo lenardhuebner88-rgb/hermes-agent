@@ -19553,20 +19553,20 @@ def ensure_scout_predecessor(
 def _maybe_inject_critical_scout(
     conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None,
 ) -> Optional[str]:
-    """Phase-C-followup (a): couple ``scout`` to ``review_tier:critical``.
+    """Couple ``scout`` to a ``critical`` review tier — self-gating.
 
-    Gated by ``kanban.review_gate.auto_scout_on_critical`` (default OFF →
-    byte-identical to today). Fires only when the task's *explicit* review_tier
-    column is ``critical`` — exactly the two chokepoints that stamp it
-    (``set_task_review_tier`` and plan-ingest/decompose), not the submit-time
-    auto-classifier. Idempotent + guarded via :func:`ensure_scout_predecessor`.
-    Pass ``cfg`` to avoid re-reading the config in a per-child loop.
+    Gated by ``kanban.review_gate.auto_scout_on_critical``. Fires when the task's
+    *resolved* tier (``_effective_review_tier``) is ``critical`` — so it covers BOTH
+    an explicit ``review_tier:critical`` column AND a heuristic-critical task (no
+    column, ``auto_tier`` on). The resolver applies the safety floor, so a deliberate
+    acked downgrade out of critical correctly suppresses the scout. Idempotent +
+    guarded via :func:`ensure_scout_predecessor`. Pass ``cfg`` to avoid re-reading
+    the config in a per-child loop.
     """
     cfg = cfg if cfg is not None else _review_gate_config()
     if not cfg.get("auto_scout_on_critical", False):
         return None
-    task = get_task(conn, task_id)
-    if task is None or (task.review_tier or "").strip().lower() != "critical":
+    if _effective_review_tier(conn, task_id, cfg=cfg) != "critical":
         return None
     return ensure_scout_predecessor(conn, task_id)
 

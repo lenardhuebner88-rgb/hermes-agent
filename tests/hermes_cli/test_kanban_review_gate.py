@@ -569,6 +569,23 @@ def test_auto_scout_off_is_byte_identical(kanban_home):
         assert kb.get_task(conn, tid).status == "ready"   # not demoted
 
 
+def test_heuristic_critical_injects_scout_without_explicit_column(kanban_home, monkeypatch):
+    """Self-gating: a task the heuristic rates critical (NO explicit review_tier
+    column) gets the scout when auto_tier + auto_scout are on. The resolver
+    (_effective_review_tier), not the raw column, drives the coupling — and the
+    heuristic value is never stamped into the column (Landmine 1)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "auto_scout_on_critical": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="run database migration + deploy", assignee="coder")
+        assert kb.get_task(conn, tid).review_tier is None          # never stamped
+        assert kb._maybe_inject_critical_scout(conn, tid) is not None
+        assert kb.scout_predecessor_id(conn, tid) is not None
+
+
 def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_scout_on):
     """Flag on: set_task_review_tier(critical) ensures ONE read-only scout predecessor."""
     with kb.connect() as conn:
