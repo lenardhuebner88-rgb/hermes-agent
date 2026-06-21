@@ -3168,7 +3168,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
         spawned_any = bool(res.spawned)
         if ready_pending and not spawned_any:
-            total_held, hold_counts, dominant = kb.summarize_dispatch_holds([res])
+            total_held, hold_counts, _dominant = kb.summarize_dispatch_holds([res])
             now = int(time.time())
             # An expected hold (repo-serialized / respawn-guarded / budget /
             # role-fit / per-profile cap) is not a profile-health stuck. A task
@@ -3176,9 +3176,11 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             # path even when other tasks are merely held.
             if total_held > 0 and not res.skipped_unassigned:
                 health_state["bad_ticks"] = 0
-                if dominant == "respawn_guarded":
-                    # Canary: a respawn-guard hold that never clears smells like
-                    # a stuck guard — escalate past the guard success window.
+                rg_count = hold_counts.get("respawn_guarded", 0)
+                if rg_count > 0:
+                    # Canary: track persistence whenever ANY task is respawn-
+                    # guarded (not only when it dominates) so a stuck guard can't
+                    # be masked forever by a larger unrelated hold bucket.
                     if health_state["respawn_held_since"] == 0:
                         health_state["respawn_held_since"] = now
                     elif (
@@ -3187,7 +3189,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                         and now - health_state["last_warn_at"] >= 300
                     ):
                         print(
-                            f"[{_fmt_ts(now)}] WARN dispatcher: {total_held} "
+                            f"[{_fmt_ts(now)}] WARN dispatcher: {rg_count} "
                             f"ready task(s) respawn-guarded for "
                             f">{kb._RESPAWN_GUARD_SUCCESS_WINDOW}s and never "
                             f"cleared — possible stuck guard. holds={hold_counts}.",

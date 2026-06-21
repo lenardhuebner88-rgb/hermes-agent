@@ -2257,10 +2257,13 @@ class GatewayKanbanWatchersMixin:
                     if total_held > 0:
                         # Expected hold — reset the stuck counter, log quietly.
                         bad_ticks = 0
-                        if dominant == "respawn_guarded":
-                            # Canary: a respawn-guard hold that never clears
-                            # smells like a stuck guard (e.g. a parked run
-                            # mis-stamped as recent_success). Escalate if it
+                        rg_count = hold_counts.get("respawn_guarded", 0)
+                        if rg_count > 0:
+                            # Canary: track the respawn-guard hold's persistence
+                            # whenever ANY task is respawn-guarded — even when a
+                            # larger bucket dominates — so a stuck guard (e.g. a
+                            # parked run mis-stamped as recent_success) can't be
+                            # masked forever by an unrelated hold. Escalate if it
                             # persists past the guard success window.
                             if respawn_held_since == 0:
                                 respawn_held_since = now
@@ -2274,7 +2277,7 @@ class GatewayKanbanWatchersMixin:
                                     "respawn-guarded for >%ds and never cleared "
                                     "— possible stuck guard. holds=%s. Check "
                                     "`hermes kanban list --status ready`.",
-                                    total_held,
+                                    rg_count,
                                     _kb._RESPAWN_GUARD_SUCCESS_WINDOW,
                                     hold_counts,
                                 )
@@ -2283,8 +2286,8 @@ class GatewayKanbanWatchersMixin:
                             respawn_held_since = 0
                         logger.info(
                             "kanban dispatcher idle: %d ready task(s) held "
-                            "(%s) — expected, not stuck.",
-                            total_held, hold_counts,
+                            "(%s, dominant=%s) — expected, not stuck.",
+                            total_held, hold_counts, dominant,
                         )
                     else:
                         # Genuinely unexplained non-spawn → real stuck signal.

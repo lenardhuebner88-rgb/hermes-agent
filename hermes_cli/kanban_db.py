@@ -14293,7 +14293,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
             recent = conn.execute(
                 "SELECT ended_at FROM task_runs "
                 "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ? "
-                "ORDER BY ended_at DESC LIMIT 1",
+                "ORDER BY ended_at DESC, id DESC LIMIT 1",
                 (task_id, cutoff),
             ).fetchone()
             if recent is not None:
@@ -14305,6 +14305,17 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
                 # window. Covers ANY path that lands a completed run + ready +
                 # operator intervention, not just integration parks (whose runs
                 # are no longer ``completed`` after the relabel anyway).
+                #
+                # Anchored on the LATEST completed run (``id DESC`` breaks
+                # same-second ties deterministically) and exempts iff an
+                # ``unblocked`` event is at or after it (``>=``). Second-
+                # granularity is sound: a full worker run cannot start AND finish
+                # within the same wall-clock second following an unblock, so the
+                # only same-second pairing in practice is "run ends, THEN
+                # operator unblocks" — correctly exempted. ``>`` would instead
+                # re-introduce the stall for a same-second unblock; a genuine
+                # re-run that completes later re-arms the guard (its ended_at
+                # moves past the unblock).
                 unblocked_since = conn.execute(
                     "SELECT 1 FROM task_events "
                     "WHERE task_id = ? AND kind = 'unblocked' "
