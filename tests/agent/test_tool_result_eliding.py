@@ -1,10 +1,10 @@
 """Tests for the deterministic stale-tool-result eliding pass.
 
 Covers PlanSpec subtask WORKER-CONTEXT-DIET-ELIDE-S1:
-  * AC-1 mechanism: large old read_file/skill_view bodies are trimmed, with a
-    measurable before/after input-token reduction.
+  * AC-1 mechanism: large old read_file/skill_view/search_files/terminal bodies
+    are trimmed, with a measurable before/after input-token reduction.
   * AC-2 guardrail: pure (no input mutation), youngest N turns intact, only
-    read-type tools touched, pointer preserved, message schema preserved.
+    bounded tool classes touched, pointer preserved, message schema preserved.
 """
 from __future__ import annotations
 
@@ -75,6 +75,21 @@ def test_elides_old_skill_view():
     assert "deep-research" in out[1]["content"]
 
 
+def test_elides_old_search_files_and_terminal_by_default():
+    messages = (
+        _pair("c1", "search_files", '{"pattern":"DEFAULT_ELIDABLE_TOOLS"}', _BIG)
+        + _pair("c2", "terminal", '{"command":"scripts/run_tests.sh tests/agent/test_tool_result_eliding.py"}', _BIG)
+        + _padding(20)
+    )
+    out, elided, saved = elide_stale_tool_results(messages, protect_last_n=14)
+    assert elided == 2
+    assert saved > 10_000
+    assert "[search_files]" in out[1]["content"]
+    assert "DEFAULT_ELIDABLE_TOOLS" in out[1]["content"]
+    assert "[terminal]" in out[3]["content"]
+    assert "scripts/run_tests.sh" in out[3]["content"]
+
+
 def test_does_not_elide_recent_read_file_within_tail():
     # The read result sits inside the protected tail -> untouched.
     messages = _padding(5) + _pair("c1", "read_file", '{"path":"/repo/foo.py"}', _BIG)
@@ -92,12 +107,11 @@ def test_does_not_elide_small_old_read_file():
     assert out[1]["content"] == small
 
 
-def test_does_not_elide_non_read_tools():
-    # terminal / write_file / search_files must never be touched, even old+large.
+def test_does_not_elide_edit_tools_by_default():
+    # Mutating edit results stay verbatim even old+large.
     messages = (
-        _pair("c1", "terminal", '{"command":"npm test"}', _BIG)
-        + _pair("c2", "write_file", '{"path":"/x"}', _BIG)
-        + _pair("c3", "search_files", '{"pattern":"x"}', _BIG)
+        _pair("c1", "write_file", '{"path":"/x"}', _BIG)
+        + _pair("c2", "patch", '{"path":"/x"}', _BIG)
         + _padding(20)
     )
     out, elided, saved = elide_stale_tool_results(messages, protect_last_n=14)
@@ -105,7 +119,6 @@ def test_does_not_elide_non_read_tools():
     assert saved == 0
     assert out[1]["content"] == _BIG
     assert out[3]["content"] == _BIG
-    assert out[5]["content"] == _BIG
 
 
 def test_custom_elidable_tool_set():
@@ -220,6 +233,8 @@ def test_before_after_input_tokens_drop_substantially():
     history = []
     for i in range(12):
         history += _pair(f"c{i}", "read_file", f'{{"path":"/repo/mod_{i}.py"}}', "Y" * 8000)
+    history += _pair("c-search", "search_files", '{"pattern":"expensive"}', "S" * 8000)
+    history += _pair("c-term", "terminal", '{"command":"scripts/run-affected.sh"}', "T" * 8000)
     # A realistic recent working tail that must stay verbatim.
     tail = _padding(4) + _pair("clast", "read_file", '{"path":"/repo/active.py"}', "Z" * 8000)
     messages = history + tail
@@ -228,8 +243,8 @@ def test_before_after_input_tokens_drop_substantially():
     out, elided, saved = elide_stale_tool_results(messages, protect_last_n=14)
     after = estimate_messages_tokens_rough(out)
 
-    assert elided >= 10  # the 12 old reads (recent one protected)
-    assert saved > 50_000
+    assert elided >= 12  # old reads plus old search/terminal; recent one protected
+    assert saved > 65_000
     # Substantial reduction in carried input tokens.
     assert after < before * 0.5
     # The recent active read is preserved verbatim.
@@ -246,7 +261,7 @@ def test_config_defaults_enabled():
     assert cfg.enabled is True
     assert cfg.protect_last_n == 14
     assert cfg.min_elide_chars == DEFAULT_MIN_ELIDE_CHARS
-    assert "read_file" in cfg.elidable_tools and "skill_view" in cfg.elidable_tools
+    assert cfg.elidable_tools == frozenset({"read_file", "skill_view", "search_files", "terminal"})
 
 
 def test_config_kill_switch():
@@ -259,6 +274,13 @@ def test_config_env_tunables():
     cfg = tool_eliding_config(env={"HERMES_TOOL_ELIDE_PROTECT_N": "20", "HERMES_TOOL_ELIDE_MIN_CHARS": "3000"})
     assert cfg.protect_last_n == 20
     assert cfg.min_elide_chars == 3000
+
+
+def test_config_tool_allowlist_override_is_bounded():
+    cfg = tool_eliding_config(
+        env={"HERMES_TOOL_ELIDE_TOOLS": "read_file, skill_view, patch, session_search, unknown"}
+    )
+    assert cfg.elidable_tools == frozenset({"read_file", "skill_view", "session_search"})
 
 
 def test_config_bad_env_falls_back_to_defaults():
