@@ -6830,9 +6830,10 @@ def _effective_review_tier(
     up to the floor. No silent under-gating of risky work (Vision-Pushback
     2026-06-21; replaces the earlier 'explicit wins both ways' rule).
 
-    The heuristic runs only when ``auto_tier`` is enabled (default ON →
-    self-gating). With ``auto_tier`` OFF the floor is ``standard``, so every
-    explicit value wins — byte-identical to the pre-self-gating behavior.
+    The heuristic runs only when ``auto_tier`` is enabled. The code default stays
+    opt-in/False (back-compat); the live ``~/.hermes/config.yaml`` sets it ON for
+    self-gating. With ``auto_tier`` OFF the floor is ``standard``, so every explicit
+    value wins — byte-identical to the pre-self-gating behavior.
     """
     task = get_task(conn, task_id)
     if task is None:

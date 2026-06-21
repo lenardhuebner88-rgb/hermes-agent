@@ -5522,7 +5522,7 @@ class FlowCaptureBody(BaseModel):
     inject_scout: bool = False
     # Optional short description: stored as the root body so the risk heuristic has
     # substance (not just the title) when it auto-classifies the review tier. The
-    # capture sheet also feeds it to GET /tasks/flow-suggest-tier for the proposal.
+    # capture sheet also feeds it to GET /flow/suggest-tier for the proposal.
     description: Optional[ShortText] = None
 
 
