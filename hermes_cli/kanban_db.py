@@ -6809,11 +6809,23 @@ _TIER_ORDER = {"standard": 0, "review": 1, "critical": 2}
 
 
 def _task_plan_spec(task: "Task") -> dict:
-    """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads."""
+    """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads.
+
+    The body is truncated at the auto-injected coder-contract boilerplate
+    (``_CODE_TASK_CONTRACT_MARKER``): that scaffolding lists 'no deploy/migration/
+    secret' in its ANTI-scope, which the risk classifier would otherwise read as
+    risk markers and over-classify EVERY bodyless code task as critical (caught by
+    live dogfood 2026-06-21). Only the real user/orchestrator spec — which always
+    precedes the marker — feeds the heuristic.
+    """
+    body = task.body or ""
+    marker_at = body.find(_CODE_TASK_CONTRACT_MARKER)
+    if marker_at != -1:
+        body = body[:marker_at]
     return {
         "risk_class": (task.kind or ""),
         "objective": (task.title or ""),
-        "goal": (task.body or ""),
+        "goal": body.strip(),
     }
 
 

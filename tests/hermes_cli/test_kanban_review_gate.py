@@ -118,6 +118,26 @@ def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypat
         assert kb._effective_review_tier(conn, t2) == "critical"
 
 
+def test_effective_review_tier_ignores_coder_contract_boilerplate(kanban_home, monkeypatch):
+    """The auto-injected coder-contract body (anti-scope: 'no deploy/migration/secret')
+    must NOT drive the heuristic — else every bodyless code task would over-classify to
+    critical (caught by live dogfood 2026-06-21). Real intent (title/user-spec) decides."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "code_roles": frozenset({"coder", "premium"})},
+    )
+    with kb.connect() as conn:
+        # bodyless ordinary code task → create_task appends the coder contract whose
+        # anti-scope lists 'no deploy/migration/secret' → must STILL resolve standard
+        ordinary = kb.create_task(conn, title="reword a button label", assignee="coder")
+        assert kb._CODE_TASK_CONTRACT_MARKER in (kb.get_task(conn, ordinary).body or "")
+        assert kb._effective_review_tier(conn, ordinary) == "standard"
+        # a genuinely risky TITLE still classifies critical despite the same boilerplate
+        risky = kb.create_task(conn, title="run database migration and deploy", assignee="coder")
+        assert kb._effective_review_tier(conn, risky) == "critical"
+
+
 # ---------------------------------------------------------------------------
 # C-T1: operator setter set_task_review_tier (mirror of set_task_model_override)
 # ---------------------------------------------------------------------------
