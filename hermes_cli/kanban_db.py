@@ -2797,6 +2797,11 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
 
 
 _CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
+# Version-agnostic prefix: the classify-truncation (see ``_task_plan_spec``) must strip
+# ANY contract version (v1, v2, …), not only the exact current marker — otherwise a
+# future contract bump would slip its risky anti-scope text back into the heuristic and
+# re-open the over-classify false-green caught by dogfood 2026-06-21.
+_CODE_TASK_CONTRACT_MARKER_PREFIX = "## Hermes Coder Contract"
 _CODE_TASK_CONTRACT_EVENT = "code_task_contract_inferred"
 _NEEDS_CONTRACT_EVENT = "needs_contract"
 _NEEDS_CONTRACT_BLOCKED_EVENT = "needs_contract_blocked"
@@ -6834,14 +6839,14 @@ def _task_plan_spec(task: "Task") -> dict:
     """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads.
 
     The body is truncated at the auto-injected coder-contract boilerplate
-    (``_CODE_TASK_CONTRACT_MARKER``): that scaffolding lists 'no deploy/migration/
-    secret' in its ANTI-scope, which the risk classifier would otherwise read as
-    risk markers and over-classify EVERY bodyless code task as critical (caught by
-    live dogfood 2026-06-21). Only the real user/orchestrator spec — which always
-    precedes the marker — feeds the heuristic.
+    (matched on ``_CODE_TASK_CONTRACT_MARKER_PREFIX`` so ANY contract version is
+    stripped): that scaffolding lists 'no deploy/migration/secret' in its ANTI-scope,
+    which the risk classifier would otherwise read as risk markers and over-classify
+    EVERY bodyless code task as critical (caught by live dogfood 2026-06-21). Only the
+    real user/orchestrator spec — which always precedes the marker — feeds the heuristic.
     """
     body = task.body or ""
-    marker_at = body.find(_CODE_TASK_CONTRACT_MARKER)
+    marker_at = body.find(_CODE_TASK_CONTRACT_MARKER_PREFIX)
     if marker_at != -1:
         body = body[:marker_at]
     return {
@@ -6879,6 +6884,12 @@ def _effective_review_tier(
             from hermes_cli.control_plane_gate import classify_review_tier
             floor = classify_review_tier(_task_plan_spec(task))
         except Exception:
+            # Fail open to the standard floor, but never silently: a broken classifier
+            # would otherwise down-gate every task to 'standard' with no operator signal.
+            _log.warning(
+                "review-tier classify failed for task %s; falling back to 'standard' "
+                "floor (heuristic temporarily disabled)", task_id, exc_info=True,
+            )
             floor = "standard"
     explicit = (task.review_tier or "").strip().lower()
     if explicit not in _TIER_ORDER:
