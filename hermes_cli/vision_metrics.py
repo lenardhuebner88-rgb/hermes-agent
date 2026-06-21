@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -263,6 +264,154 @@ def derive_gate_streak(records: list[dict]) -> dict:
         "total_recorded_nights": len(per_date),
         "last_result": latest_result,
         "last_ts": latest_ts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recurring red-cause detection (GREEN-GATE-AUTOHEAL-LOOP-S1)
+#
+# The streak above answers "how many green nights in a row?". This answers the
+# complementary, actionable question the autoheal loop needs: "is the most
+# recent run red, AND has it been red for >= N consecutive recorded nights with
+# the SAME first_fail cause?". Only then is an operator-gated fix-PlanSpec worth
+# opening — a single red night is noise the nightly retry may clear; a repeated
+# *same-cause* red night is a real, stuck defect that would otherwise sit on
+# green_gate_streak=0 unnoticed until the weekly strategist run.
+# ---------------------------------------------------------------------------
+
+# Default: open a fix-PlanSpec only once the same cause has failed this many
+# consecutive recorded nights (AC-1 / AC-2: >= 2, never on a single red night).
+GATE_FIX_MIN_NIGHTS = 2
+
+
+def _record_epoch(rec: dict) -> Optional[int]:
+    """Best-effort unix epoch for a ledger record (``epoch`` then ``ts``)."""
+    epoch = rec.get("epoch")
+    if epoch is not None:
+        try:
+            return int(epoch)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(
+            _dt.datetime.fromisoformat(
+                str(rec.get("ts", "")).replace("Z", "+00:00")
+            ).timestamp()
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_cause_detail(detail: str) -> str:
+    """Normalize a first-failure detail tail into a STABLE cause token.
+
+    The on-disk ``first_fail.detail`` is a redacted stderr tail that varies
+    night to night even for the same root cause (line numbers, counts, paths,
+    timestamps). To group "same cause" reliably — and to keep the fingerprint
+    safe to embed in a PlanSpec (no YAML/markdown/rubric-tripping characters) —
+    everything except lowercase letters, underscore and spaces is dropped (so
+    digits, paths, ``<``/``>``/``...`` and quotes never survive), then runs of
+    whitespace collapse and the result is bounded. Two nights whose failing
+    test/error name matches therefore yield the identical token.
+    """
+    s = str(detail).lower()
+    s = re.sub(r"[^a-z_ ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:160]
+
+
+def _first_fail_cause(first_fail: Optional[dict]) -> Optional[dict]:
+    """Derive the stable ``{gate, fingerprint, detail}`` cause from a record's
+    ``first_fail`` payload, or ``None`` when there is no usable payload."""
+    if not isinstance(first_fail, dict) or not first_fail:
+        return None
+    gate = str(first_fail.get("gate") or "").strip().lower() or "unknown"
+    detail = str(first_fail.get("detail") or "")
+    norm = _normalize_cause_detail(detail)
+    fingerprint = f"{gate}|{norm}" if norm else gate
+    return {"gate": gate, "fingerprint": fingerprint, "detail": detail}
+
+
+def _night_cause(fails: list[tuple[Optional[int], Optional[dict]]]) -> Optional[dict]:
+    """Representative cause for one red night: the EARLIEST fail record's
+    ``first_fail`` (by epoch; records without an epoch sort last). A night that
+    failed with no first_fail payload at all returns ``None``."""
+    def _key(item: tuple[Optional[int], Optional[dict]]) -> tuple[bool, int]:
+        ep = item[0]
+        return (ep is None, ep if ep is not None else 0)
+
+    for _ep, ff in sorted(fails, key=_key):
+        cause = _first_fail_cause(ff)
+        if cause is not None:
+            return cause
+    return None
+
+
+def derive_consecutive_red_cause(
+    records: list[dict], *, min_nights: int = GATE_FIX_MIN_NIGHTS
+) -> Optional[dict]:
+    """Detect a recurring *same-cause* red streak at the head of the ledger.
+
+    A *night* (one UTC ``date``) is red if any record for that date is ``fail``
+    (mirrors :func:`derive_gate_streak`). Walking back from the most recent
+    recorded night, this returns the shared cause iff:
+
+    * the most recent recorded night is red, AND
+    * the last ``min_nights`` (>= the default 2) consecutive recorded nights are
+      ALL red with the SAME first_fail fingerprint.
+
+    The first green night, or the first red night with a *different* fingerprint,
+    ends the run. A red night that carries no first_fail payload is treated as
+    the sentinel fingerprint ``"unknown"`` (so repeated unattributed reds still
+    coalesce, but never merge with an attributed cause). Returns ``None`` when no
+    such recurring cause exists — the signal the autoheal loop reads as "nothing
+    to open" (idle is the correct, no-spam outcome).
+
+    The returned dict — ``{gate, fingerprint, detail, red_nights, dates}`` — is
+    pure detection; the volatile ``red_nights``/``detail`` are for logging only.
+    The stable ``gate`` + ``fingerprint`` are what the idempotent ingest keys on.
+    """
+    per_date: dict[str, dict] = {}
+    for rec in records:
+        date = str(rec.get("date") or "")
+        if not date:
+            continue
+        slot = per_date.setdefault(date, {"red": False, "fails": []})
+        if str(rec.get("result")).lower() != "pass":
+            slot["red"] = True
+            slot["fails"].append((_record_epoch(rec), rec.get("first_fail")))
+
+    if not per_date:
+        return None
+
+    dates_desc = sorted(per_date.keys(), reverse=True)
+    head = per_date[dates_desc[0]]
+    if not head["red"]:
+        return None  # gate is currently green at the head — nothing to heal
+
+    target_cause = _night_cause(head["fails"])
+    target_fp = target_cause["fingerprint"] if target_cause else "unknown"
+
+    matched: list[str] = []
+    for date in dates_desc:
+        slot = per_date[date]
+        if not slot["red"]:
+            break
+        cause = _night_cause(slot["fails"])
+        fp = cause["fingerprint"] if cause else "unknown"
+        if fp != target_fp:
+            break
+        matched.append(date)
+
+    if len(matched) < max(1, int(min_nights)):
+        return None
+
+    return {
+        "gate": target_cause["gate"] if target_cause else "unknown",
+        "fingerprint": target_fp,
+        "detail": target_cause["detail"] if target_cause else "",
+        "red_nights": len(matched),
+        "dates": matched,
     }
 
 

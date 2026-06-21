@@ -508,6 +508,142 @@ def test_streak_night_with_any_fail_is_red():
 
 
 # ---------------------------------------------------------------------------
+# Recurring same-cause red detection (GREEN-GATE-AUTOHEAL-LOOP-S1)
+# ---------------------------------------------------------------------------
+
+def _red(date, *, gate=None, detail=None, ts=None):
+    rec = {"date": date, "result": "fail", "ts": ts or f"{date}T03:00:00+00:00"}
+    ff = {}
+    if gate is not None:
+        ff["gate"] = gate
+    if detail is not None:
+        ff["detail"] = detail
+    if ff:
+        rec["first_fail"] = ff
+    return rec
+
+
+def test_red_cause_none_when_head_is_green():
+    records = [
+        _red("2026-06-18", gate="python", detail="boom"),
+        _red("2026-06-19", gate="python", detail="boom"),
+        _rec("2026-06-20", "pass"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_none_on_single_red_night():
+    records = [_rec("2026-06-19", "pass"), _red("2026-06-20", gate="python", detail="boom")]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_fires_on_two_consecutive_same_cause():
+    records = [
+        _red("2026-06-20", gate="python", detail="E assert foo == bar in test_x"),
+        _red("2026-06-21", gate="python", detail="E assert foo == bar in test_x"),
+    ]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause is not None
+    assert cause["gate"] == "python"
+    assert cause["red_nights"] == 2
+    assert cause["dates"] == ["2026-06-21", "2026-06-20"]
+    assert cause["fingerprint"].startswith("python|")
+
+
+def test_red_cause_fingerprint_stable_across_volatile_detail():
+    # same root cause but the tail varies (line numbers, counts, paths) night to
+    # night -> the normalized fingerprint must still match so the cause coalesces.
+    records = [
+        _red("2026-06-20", gate="python", detail="E assert 1 == 2 at /a/b/test_x.py:41"),
+        _red("2026-06-21", gate="python", detail="E assert 7 == 9 at /a/b/test_x.py:88"),
+    ]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause is not None
+    assert cause["red_nights"] == 2
+
+
+def test_red_cause_none_when_gates_differ():
+    records = [
+        _red("2026-06-20", gate="python", detail="boom"),
+        _red("2026-06-21", gate="vitest", detail="boom"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_none_when_normalized_detail_differs():
+    records = [
+        _red("2026-06-20", gate="python", detail="assertion error in test_alpha"),
+        _red("2026-06-21", gate="python", detail="import error in module_beta"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_counts_three_consecutive():
+    records = [
+        _red("2026-06-19", gate="build", detail="tsc error"),
+        _red("2026-06-20", gate="build", detail="tsc error"),
+        _red("2026-06-21", gate="build", detail="tsc error"),
+    ]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause["red_nights"] == 3
+
+
+def test_red_cause_stops_at_interrupting_green():
+    # red, green, red -> the head run is only one night long -> below threshold
+    records = [
+        _red("2026-06-19", gate="python", detail="boom"),
+        _rec("2026-06-20", "pass"),
+        _red("2026-06-21", gate="python", detail="boom"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_unattributed_reds_coalesce_as_unknown():
+    # two red nights with no first_fail payload still coalesce (sentinel cause),
+    # so a repeated unattributed failure is not silently ignored.
+    records = [_red("2026-06-20"), _red("2026-06-21")]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause is not None
+    assert cause["gate"] == "unknown"
+    assert cause["fingerprint"] == "unknown"
+
+
+def test_red_cause_unknown_does_not_merge_with_attributed():
+    records = [
+        _red("2026-06-20", gate="python", detail="boom"),
+        _red("2026-06-21"),  # head is unattributed -> different fingerprint
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_min_nights_override():
+    records = [
+        _red("2026-06-20", gate="python", detail="boom"),
+        _red("2026-06-21", gate="python", detail="boom"),
+    ]
+    # default (2) fires, but raising the bar to 3 does not
+    assert vm.derive_consecutive_red_cause(records, min_nights=3) is None
+    assert vm.derive_consecutive_red_cause(records, min_nights=2) is not None
+
+
+def test_red_cause_mixed_records_same_night_is_red():
+    # one pass + one fail on the same head date -> red night; the fail's cause is
+    # the representative, and the prior night matches -> fires.
+    records = [
+        _red("2026-06-20", gate="python", detail="boom"),
+        _rec("2026-06-21", "pass", ts="2026-06-21T02:00:00+00:00"),
+        _red("2026-06-21", gate="python", detail="boom", ts="2026-06-21T04:00:00+00:00"),
+    ]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause is not None
+    assert cause["red_nights"] == 2
+
+
+def test_red_cause_empty_ledger():
+    assert vm.derive_consecutive_red_cause([]) is None
+
+
+# ---------------------------------------------------------------------------
 # record-gate-result CLI logic
 # ---------------------------------------------------------------------------
 
@@ -719,3 +855,34 @@ def test_cli_record_gate_result_appends(tmp_path, monkeypatch, state_dir):
     rc = _run_cli(["vision", "record-gate-result", "pass"], monkeypatch, db_path)
     assert rc == 0
     assert len(vm.read_gate_records()) == 1
+
+
+def test_cli_gate_fix_check_dry_run(tmp_path, monkeypatch, state_dir, capsys):
+    # dry-run never writes/ingests, so it is safe to exercise the parser wiring
+    # without an isolated HERMES_HOME for the spec out_dir.
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="assert boom",
+    )
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="assert boom",
+    )
+    rc = _run_cli(["vision", "gate-fix-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is True
+    assert out["gate"] == "python"
+    assert out["red_nights"] == 2
+    assert out["ingested"]["dry_run"] is True
+
+
+def test_cli_gate_fix_check_idle_on_green_head(tmp_path, monkeypatch, state_dir, capsys):
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result("pass", ts="2026-06-21T03:00:00+00:00")
+    rc = _run_cli(["vision", "gate-fix-check", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is False
+    assert out["ingested"] is None

@@ -501,6 +501,149 @@ def test_general_ingest_path_unaffected_by_grounding_gate(board_home, tmp_path):
     assert result.get("subtask_count") == 1
 
 
+# --------------------------------------------------------------------------- #
+# GREEN-GATE-AUTOHEAL-LOOP-S1 — red nightly gate → HELD fix-PlanSpec
+# --------------------------------------------------------------------------- #
+def _gate_records(*nights):
+    """Build green-gate fail records: each night is (date, gate, detail)."""
+    return [
+        {
+            "date": date,
+            "result": "fail",
+            "ts": f"{date}T03:00:00+00:00",
+            "first_fail": {"gate": gate, "detail": detail},
+        }
+        for (date, gate, detail) in nights
+    ]
+
+
+def test_gate_fix_idle_on_single_red_night(board_home):
+    """AC-2: a single red night never opens a spec (idle is correct)."""
+    records = _gate_records(("2026-06-21", "python", "assert boom"))
+    out_dir = board_home / "specs"
+    result = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=records)
+    assert result["triggered"] is False
+    assert result["ingested"] is None
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_gate_fix_dry_run_detects_without_ingest(board_home):
+    records = _gate_records(
+        ("2026-06-20", "tsc", "type error in src/x"),
+        ("2026-06-21", "tsc", "type error in src/x"),
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose_gate_fix(
+        board=None, out_dir=out_dir, gate_records=records, do_ingest=False
+    )
+    assert result["triggered"] is True
+    assert result["ingested"]["dry_run"] is True
+    assert not out_dir.exists()  # nothing written on a dry run
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_gate_fix_opens_held_planspec_on_two_red_nights(board_home):
+    """AC-1: >=2 consecutive same-cause red nights ingest ONE held, operator-gated
+    fix-PlanSpec (build + review) with the autoheal provenance."""
+    records = _gate_records(
+        ("2026-06-20", "python", "E assert foo == bar in test_x"),
+        ("2026-06-21", "python", "E assert foo == bar in test_x"),
+    )
+    out_dir = board_home / "specs"
+    result = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=records)
+
+    assert result["triggered"] is True
+    assert result["gate"] == "python"
+    assert result["red_nights"] == 2
+    ing = result["ingested"]
+    assert ing["root_task_id"]
+    assert ing["already_ingested"] is False
+    assert ing["subtask_count"] == 2  # build + review
+    assert ing["freigabe"] == "operator"  # HELD / operator-gated, never auto-deploy
+
+    with kb.connect() as conn:
+        proposals = strategist_surface.held_operator_proposals(conn)
+    assert len(proposals) == 1
+    prop = proposals[0]
+    assert prop["created_by"] == strategist.GATE_FIX_AUTHOR
+    assert prop["target_metric"]
+    assert prop["counter_metric"]
+    # the held root is scheduled (not dispatchable) until an operator releases it
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id=?", (ing["root_task_id"],)
+        ).fetchone()
+    assert row["status"] == "scheduled"
+    assert row["freigabe"] == "operator"
+
+
+def test_gate_fix_is_idempotent_per_cause(board_home):
+    """AC-2: re-running while the SAME cause persists (a third red night, with a
+    volatile detail tail) dedups to the same chain — no PlanSpec spam."""
+    out_dir = board_home / "specs"
+    first = _gate_records(
+        ("2026-06-20", "python", "boom number 1"),
+        ("2026-06-21", "python", "boom number 2"),
+    )
+    r1 = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=first)
+
+    third = first + [
+        {
+            "date": "2026-06-22",
+            "result": "fail",
+            "ts": "2026-06-22T03:00:00+00:00",
+            "first_fail": {"gate": "python", "detail": "boom number 3"},
+        }
+    ]
+    r2 = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=third)
+
+    assert r1["ingested"]["already_ingested"] is False
+    assert r2["ingested"]["already_ingested"] is True
+    assert r2["red_nights"] == 3  # detection still sees the growing streak
+    assert r1["key"] == r2["key"]  # stable identity across volatile detail
+    assert r1["ingested"]["root_task_id"] == r2["ingested"]["root_task_id"]
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_gate_fix_distinct_cause_opens_second_chain(board_home):
+    """A genuinely different cause is a different chain (not a false dedup, not a
+    supersede-conflict)."""
+    out_dir = board_home / "specs"
+    py = _gate_records(
+        ("2026-06-20", "python", "assert alpha"),
+        ("2026-06-21", "python", "assert alpha"),
+    )
+    r1 = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=py)
+    build = _gate_records(
+        ("2026-06-22", "build", "tsc type error"),
+        ("2026-06-23", "build", "tsc type error"),
+    )
+    r2 = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=build)
+
+    assert r1["key"] != r2["key"]
+    assert r1["ingested"]["root_task_id"] != r2["ingested"]["root_task_id"]
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 2
+
+
+def test_gate_fix_chain_is_not_reflected_on(board_home, tmp_path):
+    """The autoheal author is distinct from STRATEGIST_AUTHOR, so reflect (which
+    scopes to the strategist) never tallies an autoheal hold."""
+    records = _gate_records(
+        ("2026-06-20", "python", "boom"),
+        ("2026-06-21", "python", "boom"),
+    )
+    strategist.propose_gate_fix(board=None, out_dir=board_home / "specs", gate_records=records)
+    notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
+    with kb.connect() as conn:
+        result = strategist.reflect(conn, since=0, notes_path=notes_path)
+    assert result["note"]["approved"] == 0
+    assert result["note"]["vetoed"] == 0
+
+
 def test_draft_path_still_applies_vetoed_dedup(board_home, monkeypatch, tmp_path):
     """(d) Non-regression: the vetoed_levers.json dedup still suppresses a draft
     even when that draft carries a grounding field (dedup runs alongside the

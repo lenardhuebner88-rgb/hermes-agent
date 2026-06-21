@@ -82,6 +82,44 @@ def build_vision_parser(subparsers) -> None:
         help="Derive + self-gate only; do not write or ingest",
     )
 
+    # --- gate-fix-check (GREEN-GATE-AUTOHEAL-LOOP-S1) ---
+    gatefix = sub.add_parser(
+        "gate-fix-check",
+        help=(
+            "Open a HELD fix-PlanSpec when the nightly green-gate has been red "
+            ">=2 consecutive nights with the same first_fail cause"
+        ),
+        description=(
+            "Bounded, idempotent self-heal loop for the nightly green-gate: when "
+            "the most recent recorded night is red AND >= --min-nights "
+            "consecutive recorded nights share the same first_fail cause, ingest "
+            "a single freigabe:operator (HELD) fix-PlanSpec so the recurring "
+            "cause is surfaced for operator triage instead of sitting on "
+            "green_gate_streak=0 unnoticed. Never auto-releases, never deploys; "
+            "re-running on the same cause dedups (no spam). Idle when nothing "
+            "recurs. Intended to run right after `record-gate-result` in the "
+            "nightly heartbeat."
+        ),
+    )
+    gatefix.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
+    gatefix.add_argument(
+        "--min-nights",
+        type=int,
+        default=strategist.GATE_FIX_MIN_NIGHTS,
+        help="Consecutive same-cause red nights required to open a fix-PlanSpec (default 2)",
+    )
+    gatefix.add_argument(
+        "--out-dir",
+        default=None,
+        help="Directory for the drafted fix-PlanSpec markdown (default: <hermes-home>/state/strategist/specs)",
+    )
+    gatefix.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Detect only; do not write or ingest a PlanSpec",
+    )
+    gatefix.add_argument("--json", action="store_true", help="Emit JSON output")
+
     # --- metrics-snapshot ---
     snapshot = sub.add_parser(
         "metrics-snapshot",
@@ -166,6 +204,34 @@ def vision_command(args: argparse.Namespace) -> int:
                 f"strategist reflect: {result['note']['approved']} approved, "
                 f"{result['note']['vetoed']} vetoed, {result['note']['shipped']} shipped "
                 f"(suppressed levers: {', '.join(result['note']['vetoed_levers']) or 'none'})"
+            )
+        return 0
+
+    if action == "gate-fix-check":
+        result = strategist.run_gate_fix(args)
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if not result.get("triggered"):
+            print(f"gate-fix-check: idle — {result.get('reason')}")
+            return 0
+        ingested = result.get("ingested") or {}
+        if ingested.get("dry_run"):
+            print(
+                f"gate-fix-check (dry-run): would open HELD fix-PlanSpec "
+                f"{result['key']} for gate '{result['gate']}' "
+                f"({result['red_nights']} red nights, fingerprint {result['fingerprint']})"
+            )
+        elif result.get("ingest_error"):
+            print(
+                f"gate-fix-check: detection fired for gate '{result['gate']}' but ingest "
+                f"was blocked — {'; '.join(result['ingest_error'].get('findings', []))}"
+            )
+        else:
+            verb = "already held (dedup)" if ingested.get("already_ingested") else "ingested HELD"
+            print(
+                f"gate-fix-check: gate '{result['gate']}' red {result['red_nights']} nights → "
+                f"{verb} fix-PlanSpec {ingested.get('key')} → root {ingested.get('root_task_id')}"
             )
         return 0
 

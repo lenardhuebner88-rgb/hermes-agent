@@ -42,6 +42,7 @@ delegates heavy code/receipt reads to Sonnet subagents — Opus only judges.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
+from hermes_cli import vision_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,16 @@ logger = logging.getLogger(__name__)
 # reflect *does* — it scopes its approved/vetoed tally to this author so it never
 # reflects on a human-ingested operator hold.
 STRATEGIST_AUTHOR = "strategist-cron"
+
+# GREEN-GATE-AUTOHEAL-LOOP-S1: a distinct author for the auto-opened nightly
+# gate-fix specs. Kept separate from STRATEGIST_AUTHOR so ``reflect`` (which
+# scopes its approved/vetoed tally to STRATEGIST_AUTHOR) never reflects on an
+# autoheal hold. Like the strategist, the held spec still surfaces on the G1
+# operator surface (which gates on freigabe:operator + scheduled, not author).
+GATE_FIX_AUTHOR = "green-gate-autoheal"
+
+# Re-export the default streak threshold so the CLI layer has one import site.
+GATE_FIX_MIN_NIGHTS = vision_metrics.GATE_FIX_MIN_NIGHTS
 
 # Self-gate budgets (cheap, deterministic). A lever passes iff it has a paired
 # counter-metric, a positive ROI score, and a guardrail risk within budget.
@@ -238,6 +250,65 @@ def _gate_stability_lever(gap: float) -> Lever:
         counter_risk=0.35,
         signal_strength=gap,
         source="metric",
+    )
+
+
+def _gate_fix_lever(cause: dict[str, Any]) -> Lever:
+    """Build the held fix-PlanSpec lever for a recurring red nightly gate.
+
+    Driven by :func:`vision_metrics.derive_consecutive_red_cause`. The lever's
+    identity (``key`` → PlanSpec ``slice`` → spec filename) is a pure function of
+    the STABLE cause (gate + first_fail fingerprint), so re-running on a third /
+    fourth red night of the same cause renders byte-identical markdown and the
+    ingest dedups (``already_ingested``) instead of spamming a second chain
+    (AC-2). A *different* cause produces a different key → a fresh chain. The
+    volatile night-count / raw detail are deliberately NOT rendered, so the
+    content hash that backs idempotency cannot drift while the streak grows.
+    """
+    gate = str(cause.get("gate") or "unknown").strip().lower() or "unknown"
+    fingerprint = str(cause.get("fingerprint") or gate)
+    token = _cost_lane_token(gate) or "UNKNOWN"
+    # Short, stable digest of the fingerprint so two distinct causes on the SAME
+    # gate get distinct keys (no false supersede-conflict) while an identical
+    # cause keys identically. Deterministic (sha1) — safe for idempotency.
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
+    key = f"GATE-FIX-{token}-{digest}"
+    return Lever(
+        key=key,
+        title=f"Naechtlichen green-gate-Fehler am Gate '{gate}' beheben",
+        lane="coder-claude",
+        target_metric=(
+            f"green_gate_streak wieder aufbauen, indem die seit mindestens "
+            f"{GATE_FIX_MIN_NIGHTS} aufeinanderfolgenden Naechten am Gate '{gate}' "
+            "wiederkehrende rote Ursache geschlossen wird, sodass der naechtliche "
+            "green-gate-Heartbeat wieder gruen laeuft"
+        ),
+        roi=(
+            "hoch: ein seit mehreren Naechten roter green-gate ist die "
+            "Vertrauensbasis fuer autonomen Push und Deploy; die wiederkehrende "
+            "Ursache gezielt zu fixen stellt die gruene Straehne wieder her"
+        ),
+        counter_metric=(
+            "kein neuer Flake und keine maskierte Regression: die Ursache muss "
+            "wirklich geschlossen sein (betroffenes Gate laeuft lokal gruen via "
+            "scripts/run-affected.sh), nicht das Symptom unterdrueckt oder ein "
+            "Test geskippt werden"
+        ),
+        rationale=(
+            f"Der naechtliche green-gate-Heartbeat ist an mindestens "
+            f"{GATE_FIX_MIN_NIGHTS} aufeinanderfolgenden Naechten am Gate '{gate}' "
+            f"mit derselben Ursache rot (first_fail-Fingerprint: {fingerprint}). "
+            "Diese HELD, operator-gated Fix-PlanSpec wurde automatisch eroeffnet, "
+            "damit die Ursache nicht unbemerkt auf green_gate_streak=0 stehen "
+            "bleibt, bis der woechentliche Strategen-Lauf sie aufgreift. Vorgehen: "
+            "die rote Ursache aus dem green-gate-ledger reproduzieren, den Defekt "
+            "beheben, und das betroffene Gate lokal gruen fahren."
+        ),
+        gain_weight=1.0,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=1.0,
+        source="gate-autoheal",
     )
 
 
@@ -814,6 +885,87 @@ def propose(
     }
 
 
+def propose_gate_fix(
+    *,
+    board: Optional[str] = None,
+    out_dir: Path,
+    gate_records: Optional[list[dict[str, Any]]] = None,
+    min_nights: int = GATE_FIX_MIN_NIGHTS,
+    do_ingest: bool = True,
+) -> dict[str, Any]:
+    """GREEN-GATE-AUTOHEAL-LOOP-S1 — open a HELD fix-PlanSpec for a stuck gate.
+
+    Bounded + idempotent: reads the green-gate ledger, and ONLY when the most
+    recent recorded night is red AND >= ``min_nights`` consecutive recorded
+    nights share the same first_fail cause (:func:`vision_metrics.derive_consecutive_red_cause`)
+    does it ingest a single ``freigabe:operator`` (HELD) fix-PlanSpec — never
+    auto-deploy, never auto-release (AC-1/AC-2). Re-running while the same cause
+    persists hits the ingest idempotency key and reports ``already_ingested``
+    instead of minting a second chain (no spam). When nothing recurs it is a
+    no-op (``triggered: False``) — idle is correct.
+
+    Mirrors :func:`propose`'s structure (write spec → ``ingest_planspec``) so the
+    same rubric + Sonnet judge + held-on-G1-surface rails apply uniformly; a
+    judge ``PlanSpecBlocked`` is captured, not raised, so the loop is safe to run
+    headless from the nightly heartbeat. Pass ``do_ingest=False`` for detection
+    only (no DB write). ``gate_records`` defaults to the on-disk ledger; tests
+    inject an explicit list.
+    """
+    if gate_records is None:
+        gate_records = vision_metrics.read_gate_records()
+    cause = vision_metrics.derive_consecutive_red_cause(
+        gate_records, min_nights=min_nights
+    )
+    if cause is None:
+        return {
+            "mode": "gate-fix",
+            "triggered": False,
+            "reason": (
+                f"kein wiederkehrender roter green-gate (Kopf gruen oder < "
+                f"{min_nights} aufeinanderfolgende Naechte gleicher Ursache)"
+            ),
+            "ingested": None,
+        }
+
+    lever = _gate_fix_lever(cause)
+    summary: dict[str, Any] = {
+        "mode": "gate-fix",
+        "triggered": True,
+        "gate": cause["gate"],
+        "fingerprint": cause["fingerprint"],
+        "red_nights": cause["red_nights"],
+        "dates": cause["dates"],
+        "key": lever.key,
+    }
+
+    if not do_ingest:
+        summary["ingested"] = {"key": lever.key, "title": lever.title, "dry_run": True}
+        return summary
+
+    spec_path = _write_spec(out_dir, lever)
+    try:
+        result = planspecs.ingest_planspec(
+            spec_path, board=board, author=GATE_FIX_AUTHOR, plans_root=Path(out_dir)
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        # The deterministic baseline body can be refused by the Sonnet judge in
+        # prod; record it and return rather than raise — the nightly heartbeat
+        # must never crash on a blocked ingest (it will retry next night).
+        summary["ingested"] = None
+        summary["ingest_error"] = {"key": lever.key, "findings": exc.findings}
+        return summary
+
+    summary["ingested"] = {
+        "key": lever.key,
+        "title": lever.title,
+        "root_task_id": result.get("root_task_id"),
+        "subtask_count": result.get("subtask_count"),
+        "freigabe": result.get("freigabe"),
+        "already_ingested": result.get("already_ingested", False),
+    }
+    return summary
+
+
 def _key_from_title(title: Optional[str]) -> Optional[str]:
     """Recover the lever key from a ``PlanSpec <KEY>: ...`` root title."""
     if not title:
@@ -946,6 +1098,18 @@ def run_propose(args) -> dict[str, Any]:
         provider=getattr(args, "budget_provider", BUDGET_PROVIDER),
         threshold=getattr(args, "budget_threshold", BUDGET_THRESHOLD),
         cap=getattr(args, "cap", CAP_MAX),
+        do_ingest=not getattr(args, "dry_run", False),
+    )
+
+
+def run_gate_fix(args) -> dict[str, Any]:
+    """CLI adapter: resolve defaults from the runtime layout, then gate-fix-check."""
+    state_dir = default_state_dir()
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
+    return propose_gate_fix(
+        board=getattr(args, "board", None),
+        out_dir=out_dir,
+        min_nights=getattr(args, "min_nights", GATE_FIX_MIN_NIGHTS),
         do_ingest=not getattr(args, "dry_run", False),
     )
 
