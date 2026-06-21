@@ -58,6 +58,18 @@ def build_plan_parser(subparsers) -> None:
     list_parser.add_argument("--json", action="store_true", help="Emit JSON output")
     list_parser.add_argument("--all", action="store_true", help="Include closed, invalid, and diagnostic PlanSpecs")
 
+    shipped = sub.add_parser("shipped", help="Mark a completed PlanSpec as shipped")
+    shipped.add_argument("path", help="PlanSpec path or filename")
+    shipped.add_argument("--author", default="cli", help="closed_by value (default: cli)")
+    shipped.add_argument(
+        "--kanban-state",
+        help="Terminal Kanban root state evidence (e.g. completed or archived)",
+    )
+    shipped.add_argument("--receipt", help="Receipt path/URL proving the shipped closeout")
+    shipped.add_argument("--release-evidence", help="Release or deployment evidence")
+    shipped.add_argument("--kanban-root-task-id", help="Root Kanban task id to persist")
+    shipped.add_argument("--json", action="store_true", help="Emit JSON output")
+
 
 def plan_command(args: argparse.Namespace) -> int:
     action = getattr(args, "plan_action", None)
@@ -139,6 +151,21 @@ def plan_command(args: argparse.Namespace) -> int:
                 print(json.dumps(result, ensure_ascii=False))
             else:
                 print(result["prompt"])
+            return 0
+        if action == "shipped":
+            result = planspecs.mark_planspec_shipped(
+                args.path,
+                plans_root=getattr(args, "plans_root", planspecs.DEFAULT_PLANS_ROOT),
+                author=args.author,
+                kanban_state=getattr(args, "kanban_state", None),
+                receipt=getattr(args, "receipt", None),
+                release_evidence=getattr(args, "release_evidence", None),
+                kanban_root_task_id=getattr(args, "kanban_root_task_id", None),
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"marked shipped: {result['path']}")
             return 0
     except planspecs.PlanSpecBlocked as exc:
         if getattr(args, "json", False):

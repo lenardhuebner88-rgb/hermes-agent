@@ -643,12 +643,13 @@ export function useBoard() {
 
 export interface PlanSpecQueryOptions {
   limit?: number;
+  scope?: "open" | "all";
   valid?: boolean | null;
   search?: string;
 }
 
 function planSpecsUrl(options: PlanSpecQueryOptions = {}) {
-  const params = new URLSearchParams({ scope: "open" });
+  const params = new URLSearchParams({ scope: options.scope ?? "open" });
   if (options.limit && options.limit > 0) params.set("limit", String(options.limit));
   if (options.valid != null) params.set("valid", String(options.valid));
   const query = options.search?.trim();
@@ -657,7 +658,7 @@ function planSpecsUrl(options: PlanSpecQueryOptions = {}) {
 }
 
 export function usePlanSpecs(options: PlanSpecQueryOptions = {}) {
-  const key = `kanban/planspecs:${options.limit ?? "all"}:${options.valid ?? "any"}:${options.search?.trim() ?? ""}`;
+  const key = `kanban/planspecs:${options.scope ?? "open"}:${options.limit ?? "all"}:${options.valid ?? "any"}:${options.search?.trim() ?? ""}`;
   return usePolling<PlanSpecsResponse>(
     key,
     async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options)), "kanban/planspecs"),
