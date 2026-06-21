@@ -6820,29 +6820,62 @@ def _task_plan_spec(task: "Task") -> dict:
 def _effective_review_tier(
     conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None
 ) -> str:
-    """Resolve a task's effective staged-review tier.
+    """Resolve a task's effective staged-review tier with a safety FLOOR.
 
-    An explicitly set ``tasks.review_tier`` column is authoritative in BOTH
-    directions (operator/PlanSpec override — up AND down; 'Spalte gesetzt =
-    bewusster Override', Grill-Entscheid 2). When the column is NULL the
-    auto-risk classifier decides ONLY if ``auto_tier`` is enabled in the
-    review-gate config; otherwise the tier is ``standard`` — byte-identical to
-    today's single-verifier behavior.
+    The deterministic risk heuristic (``classify_review_tier``) is a *floor* on the
+    hard-risk markers (migration/deploy/secret/auth/…): an operator/PlanSpec may
+    RAISE the tier freely via the explicit ``tasks.review_tier`` column, but a
+    downgrade BELOW the heuristic floor only takes effect when a deliberate
+    ``review_tier_downgrade_ack`` event is logged — otherwise the value snaps back
+    up to the floor. No silent under-gating of risky work (Vision-Pushback
+    2026-06-21; replaces the earlier 'explicit wins both ways' rule).
+
+    The heuristic runs only when ``auto_tier`` is enabled (default ON →
+    self-gating). With ``auto_tier`` OFF the floor is ``standard``, so every
+    explicit value wins — byte-identical to the pre-self-gating behavior.
     """
     task = get_task(conn, task_id)
     if task is None:
         return "standard"
-    explicit = (task.review_tier or "").strip().lower()
-    if explicit in _TIER_ORDER:
-        return explicit  # authoritative override, up AND down — always wins
     cfg = cfg if cfg is not None else _review_gate_config()
-    if not cfg.get("auto_tier"):
-        return "standard"  # opt-in OFF (default) → no auto-escalation
+    floor = "standard"
+    if cfg.get("auto_tier"):
+        try:
+            from hermes_cli.control_plane_gate import classify_review_tier
+            floor = classify_review_tier(_task_plan_spec(task))
+        except Exception:
+            floor = "standard"
+    explicit = (task.review_tier or "").strip().lower()
+    if explicit not in _TIER_ORDER:
+        return floor  # NULL/unknown column → heuristic self-classification
+    if _TIER_ORDER[explicit] >= _TIER_ORDER.get(floor, 0):
+        return explicit  # operator/PlanSpec may always raise (or match the floor)
+    if _review_tier_downgrade_acked(conn, task_id, explicit):
+        return explicit  # deliberate, audit-logged downgrade below the floor
+    return floor  # snap up — never silently under-gate a hard-risk task
+
+
+def _review_tier_downgrade_acked(
+    conn: sqlite3.Connection, task_id: str, target_tier: str
+) -> bool:
+    """True when the most recent ``review_tier_downgrade_ack`` event acknowledges
+    exactly ``target_tier`` — the audit-trailed permission for an explicit
+    below-floor downgrade. No event / mismatch → False (floor holds)."""
     try:
-        from hermes_cli.control_plane_gate import classify_review_tier
-        return classify_review_tier(_task_plan_spec(task))
-    except Exception:
-        return "standard"
+        row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'review_tier_downgrade_ack' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None or not row["payload"]:
+        return False
+    try:
+        data = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and str(data.get("to_tier", "")).strip().lower() == target_tier
 
 
 def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:

@@ -58,28 +58,49 @@ def gate_on(monkeypatch):
 # B-T5: effective review tier (explicit column wins; NULL → auto only if opt-in)
 # ---------------------------------------------------------------------------
 
-def test_effective_review_tier_explicit_wins_both_ways(kanban_home, monkeypatch):
-    """Explicit review_tier is authoritative up AND down; NULL → auto (auto_tier ON)."""
+def test_effective_review_tier_floor_explicit_raises_freely(kanban_home, monkeypatch):
+    """Auto-floor (2026-06-21 Vision-Pushback, ersetzt 'explizit gewinnt beide Wege'):
+    explicit may RAISE freely; a downgrade BELOW the hard-marker heuristic floor snaps
+    back up unless a deliberate ack is logged. NULL → heuristic self-classifies."""
     monkeypatch.setattr(
         kb, "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": True},
     )
     with kb.connect() as conn:
-        # explicit UPGRADES a trivial task
+        # explicit UPGRADES a trivial task (above the standard floor) → wins
         t1 = kb.create_task(conn, title="trivial", assignee="coder", review_tier="critical")
         assert kb._effective_review_tier(conn, t1) == "critical"
-        # explicit DOWNGRADES an auto-critical task (operator override, both ways)
+        # explicit DOWNGRADE below the critical floor, NO ack → snaps up to the floor
         t2 = kb.create_task(conn, title="db change",
                             body="run a database migration and deploy",
                             assignee="coder", review_tier="standard")
-        assert kb._effective_review_tier(conn, t2) == "standard"
-        # NULL + auto_tier ON → auto decides (critical marker in body)
+        assert kb._effective_review_tier(conn, t2) == "critical"
+        # NULL + auto_tier ON → heuristic decides (critical marker in body)
         t3 = kb.create_task(conn, title="db change",
                             body="run a database migration", assignee="coder")
         assert kb._effective_review_tier(conn, t3) == "critical"
         # NULL, no markers → standard
         t4 = kb.create_task(conn, title="tweak copy", body="reword a label", assignee="coder")
         assert kb._effective_review_tier(conn, t4) == "standard"
+
+
+def test_effective_review_tier_floor_allows_acked_downgrade(kanban_home, monkeypatch):
+    """A logged review_tier_downgrade_ack lets an explicit below-floor value through —
+    the deliberate, audit-trailed operator decision."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="db change",
+                             body="run a database migration and deploy",
+                             assignee="coder", review_tier="standard")
+        # without ack: floor holds
+        assert kb._effective_review_tier(conn, tid) == "critical"
+        # log a deliberate downgrade ack → explicit standard now wins
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "review_tier_downgrade_ack", {"to_tier": "standard"})
+        assert kb._effective_review_tier(conn, tid) == "standard"
 
 
 def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypatch):
