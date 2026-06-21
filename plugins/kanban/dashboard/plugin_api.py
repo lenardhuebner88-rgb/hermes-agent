@@ -1777,6 +1777,10 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
             model_override=payload.model_override,
+            # P1-S3: standalone operator create couples a scout to a resolved-critical
+            # task (flag/tier-gated, idempotent). Skip when this create will be parked
+            # below — a held task defers its scout to release (no held-scout deadlock).
+            auto_scout=not bool(payload.park),
         )
         if payload.park:
             _park_task_for_operator(
@@ -6335,6 +6339,7 @@ def _release_flow_gate(
                 created_by="flow-gate",
                 priority=root.priority,
                 tenant=root.tenant,
+                max_runtime_seconds=kanban_db._scout_max_runtime_seconds(),
             )
             for cid in entry_children:
                 kanban_db.link_tasks(conn, scout_id, cid)

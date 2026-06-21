@@ -1804,6 +1804,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
             epic_id=getattr(args, "epic_id", None),
             kind=getattr(args, "kind", None),
+            # P1-S3: a standalone `kanban create` couples a scout to a resolved-critical
+            # task (flag/tier-gated, idempotent; held/triage statuses defer inside).
+            auto_scout=True,
         )
         # Subscribe-on-create: route this task's terminal-state notifications
         # to every configured home channel (same target as the dashboard

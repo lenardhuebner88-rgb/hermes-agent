@@ -671,6 +671,120 @@ def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_s
         assert key == f"auto-scout:{tid}"
 
 
+def test_scout_predecessor_gets_bounded_runtime_cap(kanban_home, monkeypatch):
+    """P1-S1: a scout task carries a non-null, bounded max_runtime_seconds so a
+    wedged read-only recon is reaped by enforce_max_runtime (which only acts on
+    tasks with a non-null cap) — without it a stuck scout silently blocks its
+    whole chain forever (auto_scout_on_critical is live)."""
+    monkeypatch.setattr(kb, "_review_gate_config",
+                        lambda: {"verifier_profile": "verifier"})
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="risky build", assignee="coder")
+        scout_id = kb.ensure_scout_predecessor(conn, tid)
+        assert scout_id is not None
+        cap = kb.get_task(conn, scout_id).max_runtime_seconds
+        assert cap == kb._SCOUT_MAX_RUNTIME_SECONDS
+        assert cap > 0
+
+
+def test_scout_runtime_cap_respects_config_override(kanban_home, monkeypatch):
+    """P1-S1: the scout TTL is tunable via kanban.review_gate.scout_max_runtime_seconds."""
+    monkeypatch.setattr(kb, "_review_gate_config",
+                        lambda: {"verifier_profile": "verifier",
+                                 "scout_max_runtime_seconds": 600})
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+        scout_id = kb.ensure_scout_predecessor(conn, tid)
+        assert kb.get_task(conn, scout_id).max_runtime_seconds == 600
+
+
+def test_blocked_scout_escalation_names_the_gated_chain(kanban_home):
+    """P1-S2: a settled-blocked scout that gates downstream children produces an
+    operator_escalation NAMING the blocked chain (not just a generic block), so a
+    wedged read-only scout is actionable (unblock/complete) instead of silently
+    deadlocking its chain forever — recompute_ready needs all parents done."""
+    import json as _json
+    with kb.connect() as conn:
+        child = kb.create_task(conn, title="implement the slice", assignee="coder")
+        scout_id = kb.ensure_scout_predecessor(conn, child)
+        assert scout_id is not None
+        assert kb.get_task(conn, child).status == "todo"      # gated on the scout
+        # scout wedges → worker/operator blocks it (sticky → never auto-recovers)
+        assert kb.block_task(conn, scout_id, reason="recon stuck") is True
+        summary = kb.escalate_blocking_scouts_sweep(conn)
+        assert scout_id in [e["task_id"] for e in summary["escalated"]]
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind=? "
+            "ORDER BY id DESC LIMIT 1",
+            (scout_id, kb.OPERATOR_ESCALATION_EVENT),
+        ).fetchone()
+        payload = _json.loads(ev["payload"])
+        gated_ids = [c["id"] for c in payload.get("blocking_chain", [])]
+        assert child in gated_ids
+        # the recommended action points the operator at the scout-frees-chain fix
+        assert "scout" in payload.get("recommended_human_action", "").lower()
+        # idempotent: a second sweep on the same block episode does not re-escalate
+        assert kb.escalate_blocking_scouts_sweep(conn)["escalated"] == []
+
+
+def test_transient_blocked_scout_not_escalated_by_blocking_sweep(kanban_home):
+    """P1-S2: only STICKY-blocked scouts (never auto-recover) are surfaced. A scout
+    with no sticky-block event is left to the runtime cap + self-healing lane."""
+    with kb.connect() as conn:
+        child = kb.create_task(conn, title="impl", assignee="coder")
+        scout_id = kb.ensure_scout_predecessor(conn, child)
+        # raw circuit-breaker style flip (no 'blocked' event) → not sticky
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (scout_id,))
+        assert kb.escalate_blocking_scouts_sweep(conn)["escalated"] == []
+
+
+@pytest.fixture
+def _heuristic_critical_cfg(monkeypatch):
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "auto_scout_on_critical": True,
+                 "code_roles": frozenset({"coder", "premium"})},
+    )
+
+
+def test_create_task_auto_scout_injects_for_heuristic_critical(kanban_home, _heuristic_critical_cfg):
+    """P1-S3: a standalone heuristic-critical task created with auto_scout=True gets
+    the SAME scout predecessor as the decompose/release paths (closes the create-path
+    gap; _maybe_inject_critical_scout was never called from create_task)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="run database migration and deploy",
+                             assignee="coder", auto_scout=True)
+        assert kb.scout_predecessor_id(conn, tid) is not None
+
+
+def test_create_task_auto_scout_off_by_default(kanban_home, _heuristic_critical_cfg):
+    """P1-S3: default (no auto_scout) is byte-identical — no scout. Decompose and
+    internal callers are unaffected; only standalone entry points opt in."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="run database migration and deploy",
+                             assignee="coder")
+        assert kb.scout_predecessor_id(conn, tid) is None
+
+
+def test_create_task_auto_scout_defers_for_held_task(kanban_home, _heuristic_critical_cfg):
+    """P1-S3: a held (blocked) standalone task does NOT get a scout even with
+    auto_scout — held tasks defer their scout to release (no held-scout deadlock)."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="run database migration and deploy",
+                             assignee="coder", auto_scout=True, initial_status="blocked")
+        assert kb.scout_predecessor_id(conn, tid) is None
+
+
+def test_create_task_auto_scout_noop_for_non_critical(kanban_home, _heuristic_critical_cfg):
+    """P1-S3: auto_scout only couples on resolved-critical — a benign task gets none."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="reword a button label",
+                             assignee="coder", auto_scout=True)
+        assert kb.scout_predecessor_id(conn, tid) is None
+
+
 def test_non_critical_tier_does_not_inject_scout(kanban_home, auto_scout_on):
     """Flag on but tier=review: no scout — only critical couples."""
     with kb.connect() as conn:

@@ -1958,6 +1958,18 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: silent-block escalation sweep "
                         "failed on board %s", slug, exc_info=True,
                     )
+                # P1-S2: a sticky-blocked read-only scout never auto-recovers and
+                # permanently deadlocks every task that depends on it (live since
+                # auto_scout_on_critical). Surface it NAMING the gated chain so the
+                # operator can unblock/complete it. Runs before the classification
+                # sweep so the new escalation is classified this same tick.
+                try:
+                    _kb.escalate_blocking_scouts_sweep(conn)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: blocking-scout escalation sweep "
+                        "failed on board %s", slug, exc_info=True,
+                    )
                 # Safety net: guarantee every operator_escalation gets a paired
                 # heiler_classification within one tick (the Stratege's by_class
                 # input). Independently guarded so a sweep failure never breaks

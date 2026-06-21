@@ -3313,6 +3313,7 @@ def create_task(
     freigabe: Optional[str] = None,
     live_test_depth: Optional[str] = None,
     review_tier: Optional[str] = None,
+    auto_scout: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3501,6 +3502,11 @@ def create_task(
                         (idempotency_key,),
                     ).fetchone()
                     if row:
+                        # P1-S3 review note: an idempotent hit returns the EXISTING
+                        # task and intentionally does not re-run the auto_scout coupling
+                        # — the scout (if applicable) was injected at first creation, and
+                        # ensure_scout_predecessor is idempotent anyway, so a duplicate
+                        # create never needs to re-couple.
                         return row["id"]
 
                 # Determine task status from parent status, unless the caller
@@ -3626,6 +3632,18 @@ def create_task(
                             _append_event(
                                 conn, task_id, _NEEDS_CONTRACT_EVENT, payload,
                             )
+            # P1-S3: close the standalone-create scout gap. The decompose and
+            # set_task_review_tier paths auto-couple a scout to a resolved-critical
+            # task, but a task born here (CLI `kanban create`, dashboard create) never
+            # did — so a heuristic-critical standalone task silently ran without the
+            # recon the operator's policy asks for. Opt-in (callers pass auto_scout) so
+            # decompose/internal create stays byte-identical. Only when immediately
+            # actionable (ready/todo) — a held (blocked/triage) task defers its scout to
+            # release, exactly like the decompose held-child guard, so we never create a
+            # held-scout deadlock. OUTSIDE the write_txn above: ensure_scout_predecessor
+            # opens its own BEGIN IMMEDIATE (not re-entrant). Flag/tier-gated + idempotent.
+            if auto_scout and task_status in ("ready", "todo"):
+                _maybe_inject_critical_scout(conn, task_id)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -6838,6 +6856,7 @@ def _review_gate_config() -> dict:
         "critic_profile": critic_profile,
         "auto_tier": auto_tier,
         "auto_scout_on_critical": auto_scout_on_critical,
+        "scout_max_runtime_seconds": rg.get("scout_max_runtime_seconds"),
     }
 
 
@@ -13965,6 +13984,100 @@ def escalate_silent_blocks_sweep(
     return summary
 
 
+def _scout_blocking_children(conn: sqlite3.Connection, scout_id: str) -> list[dict]:
+    """Still-waiting tasks a scout predecessor is gating (it is their parent;
+    :func:`recompute_ready` only promotes a child when ALL parents are ``done``).
+    Used to NAME the deadlocked chain in the operator escalation (P1-S2)."""
+    rows = conn.execute(
+        "SELECT t.id, t.title FROM tasks t "
+        "JOIN task_links l ON l.child_id = t.id "
+        "WHERE l.parent_id = ? "
+        "  AND t.status NOT IN ('done', 'cancelled', 'archived')",
+        (scout_id,),
+    ).fetchall()
+    return [{"id": r["id"], "title": r["title"]} for r in rows]
+
+
+def _has_unresolved_scout_block_escalation(
+    conn: sqlite3.Connection, scout_id: str,
+) -> bool:
+    """True when an ``operator_escalation`` was already emitted AFTER the scout's
+    most recent ``blocked`` event — so :func:`escalate_blocking_scouts_sweep` emits
+    exactly ONE escalation per block episode (idempotent), re-arming only if the
+    scout is unblocked and blocks again."""
+    blocked = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+        (scout_id,),
+    ).fetchone()
+    if not blocked or blocked["m"] is None:
+        return False
+    esc = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events WHERE task_id = ? AND kind = ?",
+        (scout_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchone()
+    return bool(esc and esc["m"] is not None and esc["m"] > blocked["m"])
+
+
+def escalate_blocking_scouts_sweep(
+    conn: sqlite3.Connection, *, now: Optional[int] = None,
+) -> dict:
+    """Surface STICKY-blocked scout predecessors that are deadlocking a chain (P1-S2).
+
+    A read-only scout is linked as a PARENT of its entry children; :func:`recompute_ready`
+    promotes a child only when all parents are ``done`` and NEVER auto-recovers a sticky
+    (worker/operator) block. So a sticky-blocked scout permanently deadlocks every task
+    that depends on it — and with ``auto_scout_on_critical`` live, every critical task
+    gets such a scout, so this is a live deadlock surface. This deterministic, idempotent
+    sweep emits ONE ``operator_escalation`` per such scout NAMING the gated chain, so the
+    operator can unblock/complete it (it does no edits) to free the chain.
+
+    Scoped narrowly on purpose: only *sticky*-blocked scouts (which provably never
+    auto-recover) are surfaced. Transient / circuit-breaker scout blocks are left alone —
+    the runtime cap (P1-S1) re-spawns those and the generic silent-block sweep covers the
+    settled remainder. Operator holds are untouched (this only WRITES an escalation event;
+    it never promotes/unblocks). Independently guarded by its caller so a failure here
+    never breaks dispatch.
+    """
+    ts = int(time.time()) if now is None else int(now)
+    summary: dict = {"checked_at": ts, "escalated": []}
+    scouts = conn.execute(
+        "SELECT id, title, status, assignee, body, auto_retry_count "
+        "FROM tasks WHERE status = 'blocked' AND assignee = 'scout'"
+    ).fetchall()
+    if not scouts:
+        return summary
+    with write_txn(conn):
+        for row in scouts:
+            sid = row["id"]
+            cur = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (sid,),
+            ).fetchone()
+            if cur is None or cur["status"] != "blocked":
+                continue  # unblocked between the scan and this txn
+            if not _has_sticky_block(conn, sid):
+                continue  # transient/breaker block — may still self-heal
+            gated = _scout_blocking_children(conn, sid)
+            if not gated:
+                continue  # not gating anything → no deadlock
+            if _has_unresolved_scout_block_escalation(conn, sid):
+                continue  # idempotent: this block episode already surfaced
+            esc_payload = _silent_block_escalation_payload(
+                row=row,
+                reason="read-only scout is sticky-blocked and gating its chain",
+                blocked_kind="operator_question",
+                trigger_outcome="scout_blocking_chain",
+            )
+            esc_payload["blocking_chain"] = gated
+            esc_payload["recommended_human_action"] = (
+                f"this read-only scout is blocking {len(gated)} downstream task(s) "
+                "that cannot start until it resolves — unblock or complete the scout "
+                "(it does no edits) to free the chain"
+            )
+            _append_event(conn, sid, OPERATOR_ESCALATION_EVENT, esc_payload)
+            summary["escalated"].append({"task_id": sid, "gated": len(gated)})
+    return summary
+
+
 def record_classification_correction(
     conn: sqlite3.Connection,
     escalation_event_id: int,
@@ -20150,6 +20263,24 @@ def set_task_model_override(
 
 _SCOUT_PREDECESSOR_PRERUN_STATUSES = frozenset({"scheduled", "todo", "ready"})
 
+# P1-S1: read-only scout recon is short by nature; give it a bounded TTL so
+# enforce_max_runtime (which ignores tasks with a NULL cap) can reap a wedged scout
+# instead of letting it silently block its whole chain forever. With
+# auto_scout_on_critical live, every critical task gets such a scout — so an uncapped
+# wedged scout is a live deadlock surface. Tunable via review_gate config.
+_SCOUT_MAX_RUNTIME_SECONDS = 1800
+
+
+def _scout_max_runtime_seconds(cfg: Optional[dict] = None) -> int:
+    """Bounded TTL (seconds) for an auto-injected scout recon task. Reads
+    ``kanban.review_gate.scout_max_runtime_seconds`` when set, else the sane default."""
+    cfg = cfg if cfg is not None else _review_gate_config()
+    try:
+        val = int(cfg.get("scout_max_runtime_seconds") or _SCOUT_MAX_RUNTIME_SECONDS)
+    except (TypeError, ValueError):
+        val = _SCOUT_MAX_RUNTIME_SECONDS
+    return val if val > 0 else _SCOUT_MAX_RUNTIME_SECONDS
+
 
 def scout_predecessor_id(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """Return the id of an existing read-only ``scout`` predecessor of
@@ -20209,6 +20340,7 @@ def ensure_scout_predecessor(
         priority=task.priority,
         tenant=task.tenant,
         idempotency_key=f"auto-scout:{task_id}",
+        max_runtime_seconds=_scout_max_runtime_seconds(),
     )
     link_tasks(conn, scout_id, task_id)
     return scout_id
