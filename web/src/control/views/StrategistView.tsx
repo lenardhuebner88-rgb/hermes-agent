@@ -36,7 +36,7 @@ const t = {
   targetLabel: "Ziel",
   roiLabel: "ROI",
   counterLabel: "Gegen-Metrik",
-  groundingLabel: "Grounding-Beleg",
+  groundingLabel: "Beleg anzeigen",
   unannotated: "ohne Annotation",
   subtasks: (n: number) => `${n} ${n === 1 ? "Teilaufgabe" : "Teilaufgaben"}`,
   approve: "Freigeben → bauen",
@@ -220,8 +220,7 @@ export function ProposalList({
               <details className="mt-1.5 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5 text-[0.74rem] hc-soft">
                 <summary className="flex cursor-pointer items-center gap-1.5 list-none">
                   <ScrollText className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
-                  <span className="hc-eyebrow mr-1.5">{t.groundingLabel}</span>
-                  <span className="hc-dim">Beleg anzeigen</span>
+                  <span className="hc-dim">{t.groundingLabel}</span>
                 </summary>
                 <p className="mt-1.5">{p.grounding}</p>
               </details>

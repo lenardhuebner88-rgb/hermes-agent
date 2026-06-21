@@ -44,7 +44,7 @@ describe("ProposalList", () => {
         onPending={() => {}}
       />,
     );
-    expect(html).toContain("Grounding-Beleg");
+    expect(html).toContain("Beleg anzeigen");
     expect(html).toContain("git log + grep belegen");
   });
 
