@@ -14,10 +14,10 @@ input tokens on every cache-miss turn (observed: single Codex turns >900K /
 What this pass does
 -------------------
 ``elide_stale_tool_results`` is a *pure* transform that walks an API message
-copy and replaces the body of **old, large, read-type** tool results with a
-deterministic one-line summary (path / offset / size), reusing the same
-summary format the context compressor already uses. It returns a new list and
-never mutates its input.
+copy and replaces the body of **old, large, re-readable or low-context** tool
+results with a deterministic one-line summary (path / offset / size), reusing
+the same summary format the context compressor already uses. It returns a new
+list and never mutates its input.
 
 Correctness contract (the counter-metric guardrail)
 ---------------------------------------------------
@@ -26,10 +26,11 @@ Correctness contract (the counter-metric guardrail)
   ``messages`` every turn — never on the persisted transcript. So a worker
   never *loses* a tool result from its real history; only the bytes sent to
   the model on the current turn are trimmed. This is the master guarantee.
-* **Read-only tools only.** Default set is ``{read_file, skill_view}`` —
-  idempotent, side-effect-free reads whose old verbatim body can always be
-  re-fetched. ``terminal`` / ``write_file`` / ``patch`` / ``search_files`` etc.
-  are never touched.
+* **Bounded tool allowlist only.** Default set is
+  ``{read_file, skill_view, search_files, terminal}``: idempotent reads plus
+  stale command output, which dominates coder-lane bloat but is protected while
+  recent. Mutating edit tools such as ``write_file`` / ``patch`` are never
+  touched by default.
 * **Youngest turns intact.** The last ``protect_last_n`` messages (the active
   working set + the current AC context) are never elided.
 * **Pointer preserved.** The replacement is an informative summary
@@ -59,9 +60,27 @@ from agent.context_compressor import (
 )
 from utils import is_truthy_value
 
-# Only these read-type tools are ever elided: idempotent, side-effect-free,
-# re-fetchable. Deliberately conservative — anything not here is left verbatim.
-DEFAULT_ELIDABLE_TOOLS: FrozenSet[str] = frozenset({"read_file", "skill_view"})
+# Only these tools are elided by default. The set is deliberately bounded to
+# high-volume sources observed in coder-lane cost attribution: idempotent reads
+# plus stale terminal output (build/test logs). Mutating edit results are left
+# verbatim unless an operator explicitly opts in via HERMES_TOOL_ELIDE_TOOLS.
+DEFAULT_ELIDABLE_TOOLS: FrozenSet[str] = frozenset(
+    {"read_file", "skill_view", "search_files", "terminal"}
+)
+
+# Tools an operator may opt into with HERMES_TOOL_ELIDE_TOOLS. Keep this allowlist
+# narrow: it is a safety rail around the config knob, not a general arbitrary
+# tool-name passthrough.
+ALLOWED_ELIDABLE_TOOLS: FrozenSet[str] = frozenset(
+    {
+        "read_file",
+        "skill_view",
+        "search_files",
+        "terminal",
+        "session_search",
+        "kanban_show",
+    }
+)
 
 # Protect the youngest N messages (active working set + current AC) verbatim.
 DEFAULT_PROTECT_LAST_N = 14
@@ -94,20 +113,30 @@ def _int_env(env: Mapping[str, str], key: str, default: int) -> int:
     return val if val >= 0 else default
 
 
+def _tool_set_env(env: Mapping[str, str], key: str, default: FrozenSet[str]) -> FrozenSet[str]:
+    """Parse a comma-separated tool allowlist, bounded to known safe tools."""
+    raw = (env.get(key) or "").strip()
+    if not raw:
+        return default
+    requested = {part.strip() for part in raw.split(",") if part.strip()}
+    return frozenset(name for name in requested if name in ALLOWED_ELIDABLE_TOOLS)
+
+
 def tool_eliding_config(env: Optional[Mapping[str, str]] = None) -> ElideConfig:
     """Resolve the eliding configuration from the environment.
 
     Default is **enabled** with the conservative defaults above. A kill-switch
     (``HERMES_TOOL_ELIDE_DISABLED=1``) turns it off instantly without a code
     change — prudent given the pass sits on the runtime agent loop. The protect
-    count and min-chars threshold are tunable via env for live calibration.
+    count, min-chars threshold, and bounded tool allowlist are tunable via env
+    for live calibration.
     """
     env = os.environ if env is None else env
     return ElideConfig(
         enabled=not is_truthy_value(env.get("HERMES_TOOL_ELIDE_DISABLED")),
         protect_last_n=_int_env(env, "HERMES_TOOL_ELIDE_PROTECT_N", DEFAULT_PROTECT_LAST_N),
         min_elide_chars=_int_env(env, "HERMES_TOOL_ELIDE_MIN_CHARS", DEFAULT_MIN_ELIDE_CHARS),
-        elidable_tools=DEFAULT_ELIDABLE_TOOLS,
+        elidable_tools=_tool_set_env(env, "HERMES_TOOL_ELIDE_TOOLS", DEFAULT_ELIDABLE_TOOLS),
     )
 
 
@@ -143,7 +172,8 @@ def elide_stale_tool_results(
     A tool-result message is elided iff **all** hold:
 
     * ``role == "tool"`` with plain-string content,
-    * its tool name is in ``elidable_tools`` (default read_file / skill_view),
+    * its tool name is in ``elidable_tools`` (default read_file / skill_view /
+      search_files / terminal),
     * it sits **before** the protected tail (outside the last
       ``protect_last_n`` messages),
     * its body is longer than ``min_elide_chars``.
