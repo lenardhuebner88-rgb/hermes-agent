@@ -295,6 +295,55 @@ def test_veto_operator_escalation_archives_and_records_via_real_path(reconcile_e
         assert veto_events == 1
 
 
+def test_escalations_coalesce_by_signal(reconcile_env):
+    """Many findings sharing a signal collapse into ONE operator escalation —
+    the operator vetoes the signal, not each finding. Prevents a backlog drain
+    from flooding the decision-queue (41 silent-except findings → 1 decision)."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    for i in range(5):
+        _proposal(
+            f"dl-{i}", mode="skill", diff_before_after="", new_text="",
+            category="silent_except", theme="silent-except", subsystem="auth",
+            severity="medium", finding_id=f"F-{i}",
+        )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        esc_tasks = conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE kind = 'ops'"
+        ).fetchone()["n"]
+        esc_events = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_events WHERE kind = ?",
+            (kb.OPERATOR_ESCALATION_EVENT,),
+        ).fetchone()["n"]
+        queue = kb.decision_queue(conn)
+
+    assert summary["escalated"] == 5      # all 5 findings routed to the escalation lane
+    assert esc_tasks == 1                 # but ONE escalation task (coalesced by signal)
+    assert esc_events == 1                # and one operator_escalation event
+    assert queue["count"] == 1            # one decision-queue row, not five
+    ids = {_load(f"dl-{i}")["escalation_task_id"] for i in range(5)}
+    assert len(ids) == 1                  # all findings point at the shared escalation
+
+
+def test_distinct_signals_do_not_coalesce(reconcile_env):
+    """Findings with different signals stay separate escalations — coalescing
+    is per-signal, not a blanket cap."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal("a", mode="skill", diff_before_after="", new_text="", category="silent_except",
+              theme="silent-except", subsystem="auth", severity="medium", finding_id="FA")
+    _proposal("b", mode="skill", diff_before_after="", new_text="", category="bare_except",
+              theme="bare-except", subsystem="auth", severity="medium", finding_id="FB")
+
+    with kb.connect() as conn:
+        reconcile.reconcile_proposals(conn=conn)
+        esc_tasks = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE kind = 'ops'").fetchone()["n"]
+
+    assert esc_tasks == 2
+
+
 def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
     """--dry-run reports how the backlog WOULD route — no apply, no tasks, no
     proposal-status writes. Lets the operator preview the drain before it runs."""

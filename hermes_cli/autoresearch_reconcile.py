@@ -151,11 +151,18 @@ def _escalation_payload(conn, task_id: str, proposal: dict[str, Any], reason: st
 
 
 def _escalate(conn, proposal: dict[str, Any], reason: str) -> str:
-    idem = "autoresearch-escalation:" + _finding_id(proposal)
+    # Coalesce by signal, NOT by finding: many findings sharing a signal (e.g. 41
+    # silent-except hits) collapse into ONE operator decision. The operator vetoes
+    # the *signal* (→ reflect suppresses it), so one decision-queue row per signal
+    # matches the suppression granularity and keeps a backlog drain from flooding
+    # the queue. Findings without a real signal fall back to a finding-unique key.
+    signal = _signal_key(proposal)
+    idem = "autoresearch-escalation:" + signal
+    existing = _task_for_idempotency(conn, idem)
     task_id = kb.create_task(
         conn,
-        title=str(proposal.get("title") or f"Autoresearch escalation {_finding_id(proposal)}"),
-        body=f"{reason}\n\nProposal: {proposal.get('id')}\nSignal: {_signal_key(proposal)}",
+        title=str(proposal.get("title") or f"Autoresearch escalation: {signal}"),
+        body=f"{reason}\n\nProposal: {proposal.get('id')}\nSignal: {signal}",
         assignee=None,
         created_by=CREATED_BY,
         idempotency_key=idem,
@@ -163,9 +170,12 @@ def _escalate(conn, proposal: dict[str, Any], reason: str) -> str:
         initial_status="blocked",
         kind="ops",
     )
-    payload = _escalation_payload(conn, task_id, proposal, reason)
-    with kb.write_txn(conn):
-        kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
+    # Only the first finding of a signal emits the escalation event; later ones
+    # reuse the same blocked task (idempotency) without re-raising a duplicate.
+    if existing is None:
+        payload = _escalation_payload(conn, task_id, proposal, reason)
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
     return task_id
 
 
