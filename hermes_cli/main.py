@@ -549,6 +549,13 @@ try:
                 _early_redact = _early_sec_cfg.get("redact_secrets")
                 if _early_redact is not None:
                     os.environ["HERMES_REDACT_SECRETS"] = str(_early_redact).lower()
+                    _redact_mod = sys.modules.get("agent.redact")
+                    if _redact_mod is not None:
+                        setattr(
+                            _redact_mod,
+                            "_REDACT_ENABLED",
+                            str(_early_redact).lower() in {"1", "true", "yes", "on"},
+                        )
         _early_net_cfg = _early_cfg_raw.get("network", {})
         if isinstance(_early_net_cfg, dict) and _early_net_cfg.get("force_ipv4"):
             _FORCE_IPV4_EARLY = True
@@ -11099,7 +11106,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "plan", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skills", "slack", "status", "tools", "uninstall", "update", "vision",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an

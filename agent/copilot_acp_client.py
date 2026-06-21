@@ -95,10 +95,15 @@ def _resolve_home_dir() -> str:
 
 def _build_subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
-    home = _resolve_home_dir()
-    env["HOME"] = home
-    from hermes_constants import apply_subprocess_home_env
+    from hermes_constants import apply_subprocess_home_env, get_real_home
+
     apply_subprocess_home_env(env)
+    real_home = get_real_home(env)
+    if real_home:
+        env["HOME"] = real_home
+        env["HERMES_REAL_HOME"] = real_home
+    else:
+        env["HOME"] = _resolve_home_dir()
     return env
 
 
