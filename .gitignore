@@ -68,6 +68,10 @@ ignored/
 .worktrees/
 environments/benchmarks/evals/
 
+# Python setuptools build output (e.g. `python setup.py build` → build/lib/...).
+# Untracked artifacts here otherwise park the kanban integrator (dirty worktree).
+/build/
+
 # Web UI build output
 hermes_cli/web_dist/
 apps/desktop/build/
