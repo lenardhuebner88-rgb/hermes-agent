@@ -104,6 +104,7 @@ BUDGET_PROVIDER = "anthropic"  # the strategist runs on the Opus subscription la
 HARVEST_WINDOW_FALLBACK_SECONDS = 48 * 3600
 HARVEST_MAX_RECEIPTS = 30
 HARVEST_MIN_RECEIPT_CHARS = 200
+HARVEST_RECEIPT_MAX_CHARS = 12000
 HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
 
 
@@ -1115,7 +1116,7 @@ def gather_recent_receipts(
     ).fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
-        excerpt = funnel.draft_text(conn, r["id"], max_chars=2000)
+        excerpt = funnel.draft_text(conn, r["id"], max_chars=HARVEST_RECEIPT_MAX_CHARS)
         if not excerpt or len(excerpt) < min_chars:
             continue
         out.append(
@@ -1304,9 +1305,7 @@ FOLLOWUP_MARKERS = (
     "anschließend",
     "nächster schritt",
     "next step",
-    "todo",
     "sollte noch",
-    "should be",
 )
 
 
