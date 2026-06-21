@@ -809,27 +809,53 @@ def run_conversation(
         # loses a result it still needs; only the bytes sent to the model on
         # this turn shrink, and the model keeps a precise re-read pointer.
         #
-        # Skipped when Anthropic prompt caching is active (Claude lanes): there
-        # the stable-prefix cache already delivers larger input savings, and
-        # eliding would move the cache-divergence point earlier. The
-        # token-heaviest lane this targets (Codex / `coder`) does not use that
-        # caching path and gets the full benefit. Kill-switch + tunables live
-        # in `tool_eliding_config` (HERMES_TOOL_ELIDE_* env).
+        # Two branches by lane (both kill-switchable via HERMES_TOOL_ELIDE_* env):
+        #
+        # * Non-cache lanes (Codex / `coder`): aggressive end-relative eliding.
+        #   No prompt cache to protect, so trim everything past the recent tail.
+        #
+        # * Prompt-cached Claude lanes (coder-claude / premium): the *cache-aware*
+        #   branch. These are the token-heaviest equivalent burners, so skipping
+        #   them entirely (the old behaviour) left the most expensive lane with
+        #   zero context reduction. Naively eliding from the cached prefix would
+        #   break the Anthropic stable-prefix cache (cache-read 0.1x flips to
+        #   cache-write 1.25x) and could RAISE cost — so this branch quantizes the
+        #   elidable boundary (snapped to a multiple of `cache_quantize_step`) so
+        #   the elided prefix stays byte-identical across consecutive turns: the
+        #   cache keeps hitting, only the carried deep-history payload shrinks.
+        #   Runs after `apply_anthropic_cache_control`; eliding only replaces
+        #   content of tool messages that sit well before the last-3 cache
+        #   breakpoints (never deletes a message), so breakpoint placement is
+        #   untouched. Disable with HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED=1.
         _elide_cfg = tool_eliding_config()
-        if _elide_cfg.enabled and not agent._use_prompt_caching:
-            api_messages, _elided_n, _elided_chars = elide_stale_tool_results(
-                api_messages,
-                protect_last_n=_elide_cfg.protect_last_n,
-                min_elide_chars=_elide_cfg.min_elide_chars,
-                elidable_tools=_elide_cfg.elidable_tools,
-            )
-            if _elided_n:
-                request_logger.info(
-                    "Elided %s stale tool result(s) (~%s chars) from API copy (session=%s)",
-                    _elided_n,
-                    f"{_elided_chars:,}",
-                    agent.session_id or "-",
+        _elided_n = _elided_chars = 0
+        _elide_mode: Optional[str] = None
+        if _elide_cfg.enabled:
+            if not agent._use_prompt_caching:
+                api_messages, _elided_n, _elided_chars = elide_stale_tool_results(
+                    api_messages,
+                    protect_last_n=_elide_cfg.protect_last_n,
+                    min_elide_chars=_elide_cfg.min_elide_chars,
+                    elidable_tools=_elide_cfg.elidable_tools,
                 )
+                _elide_mode = "uncached"
+            elif _elide_cfg.cache_aware_enabled:
+                api_messages, _elided_n, _elided_chars = elide_stale_tool_results(
+                    api_messages,
+                    protect_last_n=_elide_cfg.protect_last_n,
+                    min_elide_chars=_elide_cfg.min_elide_chars,
+                    elidable_tools=_elide_cfg.elidable_tools,
+                    quantize_step=_elide_cfg.cache_quantize_step,
+                )
+                _elide_mode = "cache_aware"
+        if _elided_n:
+            request_logger.info(
+                "Elided %s stale tool result(s) (~%s chars, mode=%s) from API copy (session=%s)",
+                _elided_n,
+                f"{_elided_chars:,}",
+                _elide_mode,
+                agent.session_id or "-",
+            )
 
         # Drop thinking-only assistant turns (reasoning but no visible
         # output and no tool_calls) and merge any adjacent user messages

@@ -14,8 +14,10 @@ import pytest
 
 from agent.model_metadata import estimate_messages_tokens_rough
 from agent.tool_result_eliding import (
+    DEFAULT_CACHE_QUANTIZE_STEP,
     DEFAULT_MIN_ELIDE_CHARS,
     ElideConfig,
+    cache_stable_boundary,
     elide_stale_tool_results,
     tool_eliding_config,
 )
@@ -287,6 +289,166 @@ def test_config_bad_env_falls_back_to_defaults():
     cfg = tool_eliding_config(env={"HERMES_TOOL_ELIDE_PROTECT_N": "abc", "HERMES_TOOL_ELIDE_MIN_CHARS": "-1"})
     assert cfg.protect_last_n == 14
     assert cfg.min_elide_chars == DEFAULT_MIN_ELIDE_CHARS
+
+
+# --------------------------------------------------------------------------
+# Cache-aware eliding for prompt-cached Claude lanes
+# (PlanSpec subtask CLAUDE-LANE-CACHEAWARE-ELIDE-S1)
+#
+# The danger the quantized boundary defends against: the end-relative boundary
+# (n - protect_last_n) slides forward ~2 messages every turn, so naive eliding
+# mutates a NEW tool body deep inside the Anthropic stable cache prefix on every
+# turn -> the cache diverges at that byte each turn (cache-read 0.1x -> cache-
+# write 1.25x), which can RAISE real cost. Snapping the boundary down to a
+# multiple of `step` keeps the elided prefix byte-identical across consecutive
+# turns, so the cache keeps hitting and only the carried payload shrinks.
+# --------------------------------------------------------------------------
+
+
+def test_cache_stable_boundary_quantizes_down_to_step_multiple():
+    # raw = 40 - 14 = 26 -> snapped down to nearest multiple of 8 = 24.
+    assert cache_stable_boundary(40, protect_last_n=14, quantize_step=8) == 24
+
+
+def test_cache_stable_boundary_is_stable_across_a_turn_append():
+    # The core cache-safety property: appending messages within the same step
+    # block must NOT move the boundary (so the elided prefix stays byte-stable).
+    b40 = cache_stable_boundary(40, protect_last_n=14, quantize_step=8)
+    b41 = cache_stable_boundary(41, protect_last_n=14, quantize_step=8)
+    b42 = cache_stable_boundary(42, protect_last_n=14, quantize_step=8)
+    assert b40 == b41 == b42 == 24
+
+
+def test_cache_stable_boundary_advances_by_one_block_per_step():
+    # raw crosses 32 at n=46 -> boundary jumps from 24 to 32 (exactly one block).
+    assert cache_stable_boundary(45, protect_last_n=14, quantize_step=8) == 24
+    assert cache_stable_boundary(46, protect_last_n=14, quantize_step=8) == 32
+
+
+def test_cache_stable_boundary_short_convo_elides_nothing():
+    # raw = 20 - 14 = 6 < step -> 0: short conversations elide nothing at all
+    # (exactly when naive eliding would be net-negative on a cache lane).
+    assert cache_stable_boundary(20, protect_last_n=14, quantize_step=8) == 0
+
+
+def test_cache_stable_boundary_step_zero_is_raw_boundary():
+    # Backward-compat: step 0 (or 1) reproduces the plain end-relative boundary.
+    assert cache_stable_boundary(40, protect_last_n=14, quantize_step=0) == 26
+    assert cache_stable_boundary(40, protect_last_n=14, quantize_step=1) == 26
+
+
+def test_cache_stable_boundary_clamps_negative_protect():
+    # A garbage negative protect knob is clamped to 0, never widened.
+    assert cache_stable_boundary(40, protect_last_n=-5, quantize_step=8) == 40
+
+
+def test_quantize_never_exceeds_naive_elided_set():
+    # The quantized elided set must always be a SUBSET of the naive one: it never
+    # touches a message the naive pass would protect, so the protected tail and
+    # everything newer than the snapped boundary stay verbatim.
+    messages = _convo_reads(20) + _padding(7)  # 40 + 14 = 54 messages
+    naive, naive_n, _ = elide_stale_tool_results(messages, protect_last_n=14, quantize_step=0)
+    quant, quant_n, _ = elide_stale_tool_results(messages, protect_last_n=14, quantize_step=8)
+    assert quant_n <= naive_n
+    # Every index quantize elided is also elided by naive (subset, identical bytes).
+    for idx, (qm, nm) in enumerate(zip(quant, naive)):
+        if qm.get("role") == "tool" and qm.get("content") != messages[idx].get("content"):
+            assert nm.get("content") == qm.get("content"), idx
+
+
+def test_quantized_elided_prefix_is_byte_stable_across_append():
+    # AC-2 cache guarantee: eliding the same conversation at length L and L+2
+    # (an extra turn appended, same step block) yields a byte-IDENTICAL elided
+    # prefix -> the Anthropic stable-prefix cache keeps hitting.
+    base = _convo_reads(20)                    # 40 messages, boundary snaps to 24
+    later = base + _pair("cN", "read_file", '{"path":"/repo/new.py"}', _BIG)  # +2 -> 42
+    out_base, _, _ = elide_stale_tool_results(base, protect_last_n=14, quantize_step=8)
+    out_later, _, _ = elide_stale_tool_results(later, protect_last_n=14, quantize_step=8)
+    boundary = cache_stable_boundary(len(base), protect_last_n=14, quantize_step=8)
+    assert boundary == 24
+    # The elided prefix [0, boundary) is identical in both turns, byte-for-byte.
+    for idx in range(boundary):
+        assert out_base[idx] == out_later[idx], idx
+
+
+def test_quantize_protects_partial_trailing_block():
+    # _convo_reads puts the assistant tool_call at even indices and the read
+    # RESULT (tool message) at odd indices. With raw boundary 26 and step 8 the
+    # snapped boundary is 24, so the read result at index 25 sits in the partial
+    # trailing block [24, 26) that naive WOULD elide but quantize protects.
+    messages = _convo_reads(20)  # 40 messages; tool results at odd indices 1..39
+    naive, _, _ = elide_stale_tool_results(messages, protect_last_n=14, quantize_step=0)
+    out, _, _ = elide_stale_tool_results(messages, protect_last_n=14, quantize_step=8)
+    # Naive elides the read result at index 25; quantize keeps it verbatim.
+    assert naive[25]["content"] != _BIG
+    assert out[25]["content"] == _BIG
+    # A read result inside the [0, 24) block is elided under quantization.
+    assert out[23]["content"] != _BIG
+    assert "[read_file]" in out[23]["content"]
+
+
+def test_quantize_step_does_not_mutate_input():
+    messages = _convo_reads(20)
+    snapshot = copy.deepcopy(messages)
+    elide_stale_tool_results(messages, protect_last_n=14, quantize_step=8)
+    assert messages == snapshot
+
+
+def test_cache_aware_token_reduction_meets_ac1_target():
+    """AC-1 mechanism on a cache lane: a long Claude-style history's carried
+    tokens must drop by >=20% even under the cache-stable quantized boundary."""
+    history = []
+    for i in range(24):
+        history += _pair(f"c{i}", "read_file", f'{{"path":"/repo/mod_{i}.py"}}', "Y" * 8000)
+    tail = _padding(4) + _pair("clast", "read_file", '{"path":"/repo/active.py"}', "Z" * 8000)
+    messages = history + tail  # 48 + 8 + 2 = 58 messages
+
+    before = estimate_messages_tokens_rough(messages)
+    out, elided, saved = elide_stale_tool_results(
+        messages, protect_last_n=14, quantize_step=8
+    )
+    after = estimate_messages_tokens_rough(out)
+
+    assert elided >= 10
+    # >= 20% reduction in carried input tokens (AC-1 "mindestens 20%").
+    assert after <= before * 0.80
+    # Recent active read preserved verbatim (cache-protected working tail).
+    assert out[-1]["content"] == "Z" * 8000
+
+
+# --------------------------------------------------------------------------
+# Cache-aware config (extends the existing HERMES_TOOL_ELIDE_* schema)
+# --------------------------------------------------------------------------
+
+
+def test_config_cache_aware_defaults_enabled():
+    cfg = tool_eliding_config(env={})
+    assert cfg.cache_aware_enabled is True
+    assert cfg.cache_quantize_step == DEFAULT_CACHE_QUANTIZE_STEP
+
+
+def test_config_cache_aware_kill_switch():
+    assert tool_eliding_config(env={"HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED": "1"}).cache_aware_enabled is False
+    assert tool_eliding_config(env={"HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED": "true"}).cache_aware_enabled is False
+    assert tool_eliding_config(env={"HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED": "0"}).cache_aware_enabled is True
+
+
+def test_config_cache_step_tunable():
+    cfg = tool_eliding_config(env={"HERMES_TOOL_ELIDE_CACHE_STEP": "16"})
+    assert cfg.cache_quantize_step == 16
+
+
+def test_config_cache_step_bad_env_falls_back():
+    cfg = tool_eliding_config(env={"HERMES_TOOL_ELIDE_CACHE_STEP": "garbage"})
+    assert cfg.cache_quantize_step == DEFAULT_CACHE_QUANTIZE_STEP
+
+
+def _convo_reads(num_pairs):
+    """num_pairs assistant->read_file pairs of big bodies (2 messages each)."""
+    out = []
+    for i in range(num_pairs):
+        out += _pair(f"c{i}", "read_file", f'{{"path":"/repo/mod_{i}.py"}}', _BIG)
+    return out
 
 
 if __name__ == "__main__":  # pragma: no cover
