@@ -15,9 +15,14 @@ import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
 import { useCaptureTask } from "../../hooks/useControlData";
-import { usesFlowCaptureEndpoint, type CaptureMethod } from "../../lib/fleet";
+import { usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../../lib/fleet";
+import type { ReviewTier } from "../../lib/types";
 import { Overlay } from "../Overlay";
 import { hasFinePointer } from "../../lib/pointer";
+
+// Mirror of FlowView's FlowPlanPanel labels so the capture-step levers read
+// identically to the "Kette starten"-Panel the operator already knows.
+const REVIEW_TIER_LABEL: Record<ReviewTier, string> = { standard: "Standard", review: "Review", critical: "Kritisch" };
 
 function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSelect: () => void; title: string; hint: string }) {
   return (
@@ -71,10 +76,62 @@ function GateToggle({ gate, onChange }: { gate: boolean; onChange: (g: boolean) 
   );
 }
 
+// Phase-C levers (Review-Tier + Scout-Vorlauf) at the capture step, mirroring
+// FlowPlanPanel. Shown only for gate/park (see CaptureSheet.showLevers). Tier is
+// always selectable here; Scout is meaningful only for a gated CHAIN — a single
+// parked task has no build-children to precede — so it disables (+ hint) on park.
+function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChange, scoutEnabled }: {
+  reviewTier: ReviewTier | "";
+  onTierChange: (tier: ReviewTier | "") => void;
+  injectScout: boolean;
+  onScoutChange: (on: boolean) => void;
+  scoutEnabled: boolean;
+}) {
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--hc-border)] p-2.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="inline-flex items-center gap-1">
+          <span className="hc-type-label hc-soft">{de.flow.capture.reviewTierLabel}</span>
+          {(["standard", "review", "critical"] as ReviewTier[]).map((tier) => (
+            <button
+              key={tier}
+              type="button"
+              aria-pressed={reviewTier === tier}
+              onClick={() => onTierChange(reviewTier === tier ? "" : tier)}
+              className={cn(
+                "inline-flex min-h-8 items-center rounded-full border px-2.5 hc-type-label transition",
+                reviewTier === tier
+                  ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+                  : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
+              )}
+            >
+              {REVIEW_TIER_LABEL[tier]}
+            </button>
+          ))}
+        </div>
+        <label className={cn("inline-flex items-center gap-1.5 hc-type-label hc-soft", !scoutEnabled && "opacity-40")}>
+          <input
+            type="checkbox"
+            checked={scoutEnabled && injectScout}
+            disabled={!scoutEnabled}
+            onChange={(e) => onScoutChange(e.target.checked)}
+            className="h-3.5 w-3.5 accent-[var(--hc-accent)]"
+          />
+          {de.flow.capture.scoutLabel}
+        </label>
+      </div>
+      <p className="mt-1.5 hc-type-label hc-dim">{de.flow.capture.reviewTierHint}</p>
+      <p className="mt-1 hc-type-label hc-dim">{scoutEnabled ? de.flow.capture.scoutHint : de.flow.capture.scoutParkHint}</p>
+    </div>
+  );
+}
+
 function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?: (taskId: string) => void }) {
   const [title, setTitle] = useState("");
   const [method, setMethod] = useState<CaptureMethod>("lean");
   const [gate, setGate] = useState(false);
+  const [reviewTier, setReviewTier] = useState<ReviewTier | "">("");
+  const [injectScout, setInjectScout] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { state, error, capture, reset } = useCaptureTask(onCreated);
 
@@ -84,11 +141,22 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   // park is operator-held already; the gate switch only applies to the two
   // decomposing methods. Park always behaves as "auto" (effective gate=false).
   const effectiveGate = method === "park" ? false : gate;
+  // The levers surface exactly where the operator looked for them: a gated chain
+  // or a parked task. Auto (lean+auto) stays untouched — no autonomous-decompose
+  // intent carrier. Scout is enabled only for a real gated chain.
+  const showLevers = method === "park" || gate;
+  const scoutEnabled = method !== "park" && gate;
   // The backend-driven path plans synchronously (LLM) — show a "planning" label.
   const planning = busy && usesFlowCaptureEndpoint(method, effectiveGate);
   const doneLabel = method === "park" ? de.flow.capture.donePark : method === "document" ? de.flow.capture.doneDocument : de.flow.capture.doneLean;
   const submit = async () => {
-    const res = await capture(title, method, effectiveGate);
+    // Only carry levers the current mode actually applies → a lever-less capture
+    // is byte-identical to today (scout dropped on park, both dropped on auto).
+    const levers: CaptureLevers = {
+      reviewTier: showLevers ? reviewTier : "",
+      injectScout: scoutEnabled && injectScout,
+    };
+    const res = await capture(title, method, effectiveGate, levers);
     if (res.ok) {
       // brief "done" flash, then close so the operator sees the new card land
       window.setTimeout(onClose, 650);
@@ -118,6 +186,16 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
       </div>
 
       {method !== "park" ? <GateToggle gate={gate} onChange={setGate} /> : null}
+
+      {showLevers ? (
+        <TierScoutControls
+          reviewTier={reviewTier}
+          onTierChange={setReviewTier}
+          injectScout={injectScout}
+          onScoutChange={setInjectScout}
+          scoutEnabled={scoutEnabled}
+        />
+      ) : null}
 
       {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
 

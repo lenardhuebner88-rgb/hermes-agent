@@ -1006,7 +1006,10 @@ function FlowPlanPanel({ rootId, detail, boardTasks, now, onRelease, releaseBusy
                       {profiles.map((profile) => <option key={profile} value={profile}>{profileLabel[profile] ?? profile}</option>)}
                     </select>
                   ) : null}
-                  <span className={cn("max-w-full hc-type-label hc-dim sm:max-w-[13rem] sm:text-right", c.status === "blocked" && "text-red-200")} title={statusExplanation}>
+                  {/* truncate + title: a long status sentence (blocked/running/
+                      "Repair nötig") otherwise has no width cap and pushes the
+                      subtask row past the 340px detail column / off-screen. */}
+                  <span className={cn("max-w-full truncate hc-type-label hc-dim sm:max-w-[13rem] sm:text-right", c.status === "blocked" && "text-red-200")} title={statusExplanation}>
                     {statusExplanation}
                   </span>
                 </div>
@@ -1305,7 +1308,7 @@ export function FlowReceiptRail({ taskId, task, detail, enriched = EMPTY_ENRICHE
 }) {
   if (!taskId) {
     return (
-      <aside className="hc-surface-card h-fit p-4 xl:sticky xl:top-4">
+      <aside className="hc-surface-card min-w-0 overflow-hidden h-fit p-4 xl:sticky xl:top-4">
         <Eyebrow>{de.flow.selectedChain}</Eyebrow>
         <p className="mt-3 text-sm hc-soft">{de.flow.noSelection}</p>
       </aside>
@@ -1755,7 +1758,7 @@ function FlowDetailSheet({ taskId, taskTitle, onClose, children }: { taskId: str
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{children}</div>
       </div>
     </div>
     </div>,

@@ -256,6 +256,14 @@ export const de = {
       gateAutoHint: "Subtasks laufen sofort (wie bisher).",
       gateGate: "Gate",
       gateGateHint: "Subtasks werden gehalten, bis du „Kette starten“ klickst.",
+      // Phase-C-Hebel am Erfassen-Schritt (Spiegel von „Kette starten“): nur
+      // sichtbar bei Gate/Parken. Tier greift sofort (Pill an der Kette), Scout
+      // ist nur für Gate-Ketten sinnvoll.
+      reviewTierLabel: "Review",
+      reviewTierHint: "Standard: ein Verifier-Lauf · Review: zwei Stufen · Kritisch: tiefere Prüfung mit Cross-Family-Lens",
+      scoutLabel: "Scout-Vorlauf",
+      scoutHint: "Stellt einen read-only Recon-Schritt voran, der den Code sichtet bevor gebaut wird",
+      scoutParkHint: "Nur für Gate-Ketten — ein Recon-Vorlauf braucht nachfolgende Bau-Subtasks.",
       submit: "Erfassen",
       submitting: "Erfasse …",
       planning: "Plane …",
