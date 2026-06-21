@@ -83,4 +83,32 @@ describe("ProposalList", () => {
     expect(html).toContain("1 Teilaufgabe");
     expect(html).not.toContain("1 Teilaufgaben");
   });
+
+  it("manual variant marks the origin and suppresses the strategist annotation scaffold", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        variant="manual"
+        proposals={[proposal({
+          created_by: "Hermes Orchestrator / Piet GO ingest only",
+          source: "metric",
+          target_metric: null,
+          roi: null,
+          counter_metric: null,
+        })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    // Honest provenance badge instead of the misleading "Aus Kennzahl".
+    expect(html).toContain("Manuell ingestiert");
+    expect(html).not.toContain("Aus Kennzahl");
+    // The empty Ziel/ROI/Gegen-Metrik grid (and its "ohne Annotation" note) is gone.
+    expect(html).not.toContain("Gegen-Metrik");
+    expect(html).not.toContain("ohne Annotation");
+    // Operator can still release or veto.
+    expect(html).toContain("Freigeben");
+    expect(html).toContain("Verwerfen");
+  });
 });

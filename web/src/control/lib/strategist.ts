@@ -131,3 +131,34 @@ export function sourceLabel(source: string | null | undefined): string {
     default:        return "Stratege";
   }
 }
+
+// `created_by` values authored by the strategist control-plane: the propose-cron
+// (`strategist-cron`, incl. ledger-harvested ROI levers) and the gate self-heal
+// (`green-gate-autoheal`). The held `freigabe:operator` surface is shared by ANY
+// hand-ingested PlanSpec too (freigabe:operator is the generic operator gate, not
+// a strategist marker) — those carry a different author and are NOT strategist
+// proposals, so we split them out instead of letting them masquerade as one.
+export const STRATEGIST_AUTHORS = new Set(["strategist-cron", "green-gate-autoheal"]);
+
+/** True when a proposal's `created_by` is one of the strategist control-plane authors. */
+export function isStrategistAuthored(createdBy: string | null | undefined): boolean {
+  return !!createdBy && STRATEGIST_AUTHORS.has(createdBy.trim());
+}
+
+export interface PartitionedProposals {
+  /** The strategist's own self-gated drafts (the real "Stratege-Ergebnis"). */
+  strategist: StrategistProposal[];
+  /** Hand-ingested operator-held PlanSpecs that merely share this surface. */
+  manual: StrategistProposal[];
+}
+
+/** Split held `freigabe:operator` proposals by true provenance (`created_by`),
+ *  preserving input order within each group. */
+export function partitionProposals(proposals: StrategistProposal[]): PartitionedProposals {
+  const strategist: StrategistProposal[] = [];
+  const manual: StrategistProposal[] = [];
+  for (const p of proposals) {
+    (isStrategistAuthored(p.created_by) ? strategist : manual).push(p);
+  }
+  return { strategist, manual };
+}

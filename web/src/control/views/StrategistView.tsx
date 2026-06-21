@@ -9,6 +9,7 @@ import type { Density } from "../hooks/useDensity";
 import { useStrategistLastRuns } from "../hooks/useControlData";
 import {
   metricSnapshotRows,
+  partitionProposals,
   runSummaryText,
   sourceLabel,
   type StrategistProposal,
@@ -34,6 +35,12 @@ const t = {
   listMeta: "Vorschläge des Strategen — du gibst frei oder verwirfst",
   empty: "Keine Vorschläge warten auf Freigabe.",
   emptyDesc: "Der Stratege läuft 2×/Tag und reiht nur ROI-positive, self-gated Specs hier ein.",
+  // Zwei Untergruppen derselben freigabe:operator-Fläche, getrennt nach echter Herkunft.
+  groupStrategistTitle: "Vom Strategen vorgeschlagen",
+  groupStrategistDesc: "Self-gated, ROI-annotiert — das eigentliche Strategen-Ergebnis (propose-Lauf).",
+  groupManualTitle: "Manuell ingestiert · wartet auf GO",
+  groupManualDesc: "Von Hand via plan ingest eingereihte PlanSpecs (freigabe:operator) — kein Strategen-Vorschlag, teilt sich nur diese Freigabe-Fläche.",
+  manualBadge: "Manuell ingestiert",
   loadError: "Vorschläge konnten nicht geladen werden.",
   targetLabel: "Ziel",
   roiLabel: "ROI",
@@ -123,6 +130,7 @@ export function StrategistView({ density }: { density: Density }) {
   }, [load]);
 
   const proposals = data?.proposals ?? [];
+  const { strategist: strategistProposals, manual: manualProposals } = partitionProposals(proposals);
   const rows = metricSnapshotRows(data?.metrics);
 
   return (
@@ -166,33 +174,99 @@ export function StrategistView({ density }: { density: Density }) {
         ) : proposals.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} ok />
         ) : (
-          <ProposalList
-            proposals={proposals}
-            pending={pending}
-            busy={busy}
-            onAct={(p, kind) => void act(p, kind)}
-            onPending={setPending}
-          />
+          <div className="space-y-4">
+            {strategistProposals.length > 0 ? (
+              <ProposalGroup
+                title={t.groupStrategistTitle}
+                desc={t.groupStrategistDesc}
+                count={strategistProposals.length}
+                accent="violet"
+              >
+                <ProposalList
+                  proposals={strategistProposals}
+                  variant="strategist"
+                  pending={pending}
+                  busy={busy}
+                  onAct={(p, kind) => void act(p, kind)}
+                  onPending={setPending}
+                />
+              </ProposalGroup>
+            ) : null}
+            {manualProposals.length > 0 ? (
+              <ProposalGroup
+                title={t.groupManualTitle}
+                desc={t.groupManualDesc}
+                count={manualProposals.length}
+                accent="slate"
+              >
+                <ProposalList
+                  proposals={manualProposals}
+                  variant="manual"
+                  pending={pending}
+                  busy={busy}
+                  onAct={(p, kind) => void act(p, kind)}
+                  onPending={setPending}
+                />
+              </ProposalGroup>
+            ) : null}
+          </div>
         )}
       </FleetPanel>
     </div>
   );
 }
 
+// Eine betitelte Untergruppe innerhalb der Freigabe-Fläche. Trennt die echten
+// Strategen-Vorschläge sichtbar von den manuell ingesteten Hold-PlanSpecs, die
+// sich nur dieselbe freigabe:operator-Fläche teilen.
+function ProposalGroup({
+  title,
+  desc,
+  count,
+  accent,
+  children,
+}: {
+  title: string;
+  desc: string;
+  count: number;
+  accent: "violet" | "slate";
+  children: React.ReactNode;
+}) {
+  const titleClass = accent === "violet" ? "hc-type-label text-violet-200" : "hc-type-label hc-soft";
+  return (
+    <section className="space-y-1.5">
+      <div>
+        <p className={titleClass}>
+          {title} <span className="hc-mono hc-dim">· {count}</span>
+        </p>
+        <p className="mt-0.5 text-[0.72rem] hc-dim">{desc}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
 // Pure list render — separately exported for the static render test (no polling).
+// `variant` controls provenance display: "strategist" shows the ROI annotation
+// scaffold (Ziel/ROI/Gegen-Metrik + grounding); "manual" is a hand-ingested
+// Hold-PlanSpec that never carries those, so we show an honest origin badge and
+// drop the empty annotation grid instead of mislabelling it "Aus Kennzahl".
 export function ProposalList({
   proposals,
   pending,
   busy,
   onAct,
   onPending,
+  variant = "strategist",
 }: {
   proposals: StrategistProposal[];
   pending: PendingAction;
   busy: boolean;
   onAct: (p: StrategistProposal, kind: "approve" | "veto") => void;
   onPending: (p: PendingAction) => void;
+  variant?: "strategist" | "manual";
 }) {
+  const isManual = variant === "manual";
   return (
     <ul className="space-y-1.5">
       {proposals.map((p) => {
@@ -204,7 +278,7 @@ export function ProposalList({
               <Lightbulb className="h-3.5 w-3.5 shrink-0 text-violet-200" />
               <span className="min-w-0 flex-1 basis-56 truncate text-[0.85rem] font-medium text-white">{p.display_title || p.title}</span>
               <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
-                {sourceLabel(p.source)}
+                {isManual ? t.manualBadge : sourceLabel(p.source)}
               </span>
               <span className="hc-mono shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[0.68rem] hc-soft">
                 {t.subtasks(p.subtask_count)}
@@ -212,24 +286,28 @@ export function ProposalList({
               <span className="hc-mono shrink-0 text-[0.72rem] hc-dim">{fmtClock(p.created_at)}</span>
             </div>
 
-            <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
-              <AnnotationCell icon={<Target className="h-3 w-3" />} label={t.targetLabel} value={p.target_metric} />
-              <AnnotationCell icon={<TrendingUp className="h-3 w-3" />} label={t.roiLabel} value={p.roi} />
-              <AnnotationCell icon={<ShieldAlert className="h-3 w-3" />} label={t.counterLabel} value={p.counter_metric} />
-            </div>
-            {p.origin ? (
-              <p className="mt-1 text-[0.72rem] hc-dim">Entstanden aus: {p.origin}</p>
-            ) : null}
-            {p.grounding ? (
-              <details className="mt-1.5 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5 text-[0.74rem] hc-soft">
-                <summary className="flex cursor-pointer items-center gap-1.5 list-none">
-                  <ScrollText className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
-                  <span className="hc-dim">{t.groundingLabel}</span>
-                </summary>
-                <p className="mt-1.5">{p.grounding}</p>
-              </details>
-            ) : null}
-            {!annotated ? <p className="mt-1 text-[0.72rem] hc-dim">{t.unannotated}</p> : null}
+            {isManual ? null : (
+              <>
+                <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
+                  <AnnotationCell icon={<Target className="h-3 w-3" />} label={t.targetLabel} value={p.target_metric} />
+                  <AnnotationCell icon={<TrendingUp className="h-3 w-3" />} label={t.roiLabel} value={p.roi} />
+                  <AnnotationCell icon={<ShieldAlert className="h-3 w-3" />} label={t.counterLabel} value={p.counter_metric} />
+                </div>
+                {p.origin ? (
+                  <p className="mt-1 text-[0.72rem] hc-dim">Entstanden aus: {p.origin}</p>
+                ) : null}
+                {p.grounding ? (
+                  <details className="mt-1.5 rounded-md border border-emerald-400/20 bg-emerald-500/[.06] px-2.5 py-1.5 text-[0.74rem] hc-soft">
+                    <summary className="flex cursor-pointer items-center gap-1.5 list-none">
+                      <ScrollText className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                      <span className="hc-dim">{t.groundingLabel}</span>
+                    </summary>
+                    <p className="mt-1.5">{p.grounding}</p>
+                  </details>
+                ) : null}
+                {!annotated ? <p className="mt-1 text-[0.72rem] hc-dim">{t.unannotated}</p> : null}
+              </>
+            )}
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {isPending ? (

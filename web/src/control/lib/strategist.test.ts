@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   humanizeMetricKey,
+  isStrategistAuthored,
   metricSnapshotRows,
+  partitionProposals,
   proposalSource,
   runSummaryText,
   sourceLabel,
+  type StrategistProposal,
 } from "./strategist";
 
 // Realistic nested snapshot shape matching the live vision-metrics.json envelope.
@@ -111,6 +114,65 @@ describe("runSummaryText", () => {
   });
   it("handles null", () => {
     expect(runSummaryText("harvest", null)).toBe("noch nicht gelaufen");
+  });
+});
+
+describe("isStrategistAuthored", () => {
+  it("recognises the strategist control-plane authors", () => {
+    expect(isStrategistAuthored("strategist-cron")).toBe(true);
+    expect(isStrategistAuthored("green-gate-autoheal")).toBe(true);
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    expect(isStrategistAuthored("  strategist-cron  ")).toBe(true);
+  });
+
+  it("treats a hand-ingested operator author as NOT strategist", () => {
+    expect(isStrategistAuthored("Hermes Orchestrator / Piet GO ingest only")).toBe(false);
+    expect(isStrategistAuthored("operator-disposition")).toBe(false);
+  });
+
+  it("treats null/empty as NOT strategist", () => {
+    expect(isStrategistAuthored(null)).toBe(false);
+    expect(isStrategistAuthored(undefined)).toBe(false);
+    expect(isStrategistAuthored("")).toBe(false);
+  });
+});
+
+describe("partitionProposals", () => {
+  const mk = (id: string, created_by: string | null): StrategistProposal => ({
+    id,
+    title: `PlanSpec ${id}: x`,
+    created_by,
+    created_at: 1,
+    subtask_count: 0,
+    target_metric: null,
+    roi: null,
+    counter_metric: null,
+    grounding: null,
+  });
+
+  it("splits strategist-authored from hand-ingested proposals", () => {
+    const { strategist, manual } = partitionProposals([
+      mk("a", "strategist-cron"),
+      mk("b", "Hermes Orchestrator / Piet GO ingest only"),
+      mk("c", "green-gate-autoheal"),
+      mk("d", null),
+    ]);
+    expect(strategist.map((p) => p.id)).toEqual(["a", "c"]);
+    expect(manual.map((p) => p.id)).toEqual(["b", "d"]);
+  });
+
+  it("preserves input order within each group", () => {
+    const { manual } = partitionProposals([
+      mk("first", "operator-x"),
+      mk("second", "operator-y"),
+    ]);
+    expect(manual.map((p) => p.id)).toEqual(["first", "second"]);
+  });
+
+  it("returns two empty groups for an empty input", () => {
+    expect(partitionProposals([])).toEqual({ strategist: [], manual: [] });
   });
 });
 
