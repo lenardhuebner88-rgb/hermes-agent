@@ -342,6 +342,7 @@ def test_polled_handlers_are_threadpool_sync_not_async(client):
         "/api/autoresearch/deep-audit/findings",
         "/api/autoresearch/test-foundry/status",
         "/api/autoresearch/test-foundry/targets",
+        "/api/autoresearch/reconcile-summary",
     }
     seen = set()
     for route in app.routes:
@@ -354,3 +355,30 @@ def test_polled_handlers_are_threadpool_sync_not_async(client):
                 "make it a plain def (FastAPI threadpool)."
             )
     assert seen == must_be_sync, f"routes missing from app: {must_be_sync - seen}"
+
+
+# --------------------------------------------------------------------------
+# Reconcile summary — "what the loop did" for the tab
+# --------------------------------------------------------------------------
+def test_reconcile_summary_returns_persisted_record(client):
+    cl, _view = client
+    from hermes_cli import autoresearch_reconcile as reconcile
+    p = reconcile._last_reconcile_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "generated_at": "2026-06-22T00:00:00Z",
+        "summary": {"seen": 77, "applied": 27, "routed_to_kanban": 5, "escalated": 4},
+        "themes": [{"subsystem": "auth", "theme": "silent-except", "count": 12}],
+    }), encoding="utf-8")
+    resp = cl.get("/api/autoresearch/reconcile-summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["reconcile"]["summary"]["applied"] == 27
+    assert body["reconcile"]["themes"][0]["theme"] == "silent-except"
+
+
+def test_reconcile_summary_empty_envelope_when_never_run(client):
+    cl, _view = client
+    resp = cl.get("/api/autoresearch/reconcile-summary")
+    assert resp.status_code == 200
+    assert resp.json()["reconcile"] is None

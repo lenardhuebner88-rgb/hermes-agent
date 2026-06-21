@@ -242,6 +242,35 @@ def _write_digest(processed: list[dict[str, Any]]) -> None:
     path = _digest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(digest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return digest
+
+
+def _last_reconcile_path() -> Path:
+    override = os.environ.get("HERMES_AUTORESEARCH_RECONCILE_SUMMARY_PATH", "").strip()
+    if override:
+        return Path(override)
+    return get_hermes_home() / "state" / "strategist" / "autoresearch-last-reconcile.json"
+
+
+def load_last_reconcile() -> dict[str, Any] | None:
+    """The outcome of the most recent real reconcile run — what the tab shows as
+    'what the loop did'. ``None`` if it has never run."""
+    try:
+        data = json.loads(_last_reconcile_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_last_reconcile(summary: dict[str, Any], digest: dict[str, Any]) -> None:
+    record = {
+        "generated_at": digest.get("generated_at") or _utc_now(),
+        "summary": summary,
+        "themes": digest.get("themes", []),
+    }
+    path = _last_reconcile_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def reconcile_proposals(
@@ -379,7 +408,8 @@ def reconcile_proposals(
                 proposal["reconcile_error"] = f"{type(exc).__name__}: {exc}"
                 proposals.save_proposal(proposal)
         if not dry_run:
-            _write_digest(processed)
+            digest = _write_digest(processed)
+            _write_last_reconcile(summary, digest)
         return summary
     finally:
         if own_conn:

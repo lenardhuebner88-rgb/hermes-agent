@@ -295,6 +295,34 @@ def test_veto_operator_escalation_archives_and_records_via_real_path(reconcile_e
         assert veto_events == 1
 
 
+def test_reconcile_persists_last_summary_for_the_tab(reconcile_env, monkeypatch):
+    """A real reconcile run records its outcome so the tab can show 'what the
+    loop did last night'. Dry-run must NOT overwrite that record."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal("s1")  # one skill-doc-with-diff
+    monkeypatch.setattr(
+        reconcile.proposals, "apply_proposal",
+        lambda pid, **k: {"ok": True, "status": "applied", "id": pid},
+    )
+
+    with kb.connect() as conn:
+        reconcile.reconcile_proposals(conn=conn)
+
+    rec = reconcile.load_last_reconcile()
+    assert rec is not None
+    assert rec["summary"]["applied"] == 1
+    assert rec["summary"]["seen"] == 1
+    assert isinstance(rec.get("generated_at"), str) and rec["generated_at"]
+    assert isinstance(rec.get("themes"), list)
+
+    # a later dry-run preview must not clobber the real record
+    before = reconcile.load_last_reconcile()
+    with kb.connect() as conn:
+        reconcile.reconcile_proposals(conn=conn, dry_run=True)
+    assert reconcile.load_last_reconcile() == before
+
+
 def test_escalations_coalesce_by_signal(reconcile_env):
     """Many findings sharing a signal collapse into ONE operator escalation —
     the operator vetoes the signal, not each finding. Prevents a backlog drain
