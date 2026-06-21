@@ -4255,6 +4255,105 @@ def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
     assert len(heilers) == 1
 
 
+def test_silent_block_sweep_carries_real_run_outcome(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """HEILER-SILENTBLOCK-REASON-FIDELITY-S1: a block settled via a non-blocked
+    path (budget exhaustion) has NO blocked run, so the old payload sent
+    trigger_outcome='blocked' + an empty error -> real-bug default. The sweep now
+    carries the genuine last *ended* run outcome + message, so the operator sees
+    the real reason and the classifier lands it honestly (capacity, not the
+    real-bug default)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="budget", assignee="alice")
+        kb.claim_task(conn, t)
+        # close the run as budget-exhausted (NOT 'blocked') then flip to blocked,
+        # mirroring the iteration-budget park: no blocked run for the lane.
+        with kb.write_txn(conn):
+            kb._end_run(
+                conn, t, outcome="iteration_budget_exhausted",
+                status="iteration_budget_exhausted",
+                summary="iteration budget exhausted; continuation limit "
+                        "exhausted (60/60)",
+            )
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        esc = _escalation_event(conn, t)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert esc.payload["evidence"]["trigger_outcome"] == "iteration_budget_exhausted"
+    assert "iteration_budget_exhausted" in esc.payload["why_now"]
+    # the real run message is carried, not the old empty string
+    assert "iteration budget exhausted" in esc.payload["evidence"]["last_error"]
+    assert heiler.payload["class"] == kb.HEILER_CLASS_CAPACITY
+
+
+def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A settled block whose reason is a spec gap classifies bad-spec, not the
+    real-bug default — the dominant live silent-block mislabel: a real
+    block-error IS carried, the classifier just lacked the spec-gap signal."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="vague", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t,
+            reason="No actionable implementation spec: title is too vague",
+        )
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        kb.escalate_silent_blocks_sweep(conn, now=base)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert heiler.payload["class"] == kb.HEILER_CLASS_BAD_SPEC
+
+
+def test_silent_block_sweep_carves_out_strategist_meta_task(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """STRATEGIST-META-CARVEOUT: a blocked strategist-cron task (the loop's own
+    output) is NOT swept — so the self-improvement loop never reads its own
+    parked proposal back as a real-bug product-defect signal. A real code task
+    blocked the same way IS still surfaced (AC-2: carve-out strictly scoped to
+    created_by=strategist-cron, not real code tasks)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect() as conn:
+        meta = kb.create_task(
+            conn, title="strategist proposal", assignee="alice",
+            created_by=kb.STRATEGIST_CREATED_BY,
+        )
+        kb.claim_task(conn, meta)
+        kb.block_task(conn, meta, reason="Which lever should I pull?")
+        real = kb.create_task(
+            conn, title="real code task", assignee="bob", created_by="user",
+        )
+        kb.claim_task(conn, real)
+        kb.block_task(conn, real, reason="Which credential should I use?")
+
+        ids = kb.silent_block_task_ids(conn, now=base)
+        assert meta not in ids
+        assert real in ids
+
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+
+    assert meta not in [e["task_id"] for e in res["escalated"]]
+    assert _operator_escalations(conn, meta) == []
+    assert _heiler_events(conn, meta) == []
+    # the real code task is untouched by the carve-out — still surfaced
+    assert len(_operator_escalations(conn, real)) == 1
+
+
 def test_dispatch_max_spawn_counts_existing_running_tasks(
     kanban_home, all_assignees_spawnable
 ):
@@ -11376,6 +11475,45 @@ def test_s4_crashed_reclassify_stays_bounded(kanban_home):
     assert all(e.payload["class"] == kb.HEILER_CLASS_TRANSIENT for e in heilers)
     assert task.status == "blocked"
     assert len(escalations) == 1
+
+
+def test_s4_classify_failure_structural_resource_outcomes_do_not_default_real_bug():
+    """REASON-FIDELITY-S1: terminal run outcomes that are operational/resource
+    limits — not product defects — map structurally, so a settled block carrying
+    one as its real trigger_outcome stops defaulting to real-bug."""
+    cls, ev = kb._classify_failure(outcome="iteration_budget_exhausted")
+    assert cls == kb.HEILER_CLASS_CAPACITY
+    assert ev["signal_source"] == "outcome_fallback"
+
+    for outcome in ("timed_out", "reclaimed"):
+        cls, ev = kb._classify_failure(outcome=outcome)
+        assert cls == kb.HEILER_CLASS_TRANSIENT, outcome
+        assert ev["signal_source"] == "outcome"
+
+
+def test_s4_classify_failure_budget_text_capacity_and_protocol_text_transient():
+    """Free-text budget exhaustion -> capacity, while worker-protocol signals
+    remain transient harness faults. This covers gave_up budget paths that keep
+    their 'gave_up' outcome but carry the budget message."""
+    cls, _ = kb._classify_failure(
+        error="iteration budget exhausted; continuation limit exhausted (60/60)")
+    assert cls == kb.HEILER_CLASS_CAPACITY
+    cls, _ = kb._classify_failure(
+        error="worker exited cleanly (rc=0) without calling kanban_complete "
+              "or kanban_block — protocol violation")
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+
+
+def test_s4_classify_failure_missing_spec_bad_spec():
+    """A park reason describing a spec gap -> bad-spec, not the real-bug default
+    (the true class of the live silent-block real-bug cluster)."""
+    cls, _ = kb._classify_failure(
+        error="No actionable implementation spec (3rd run, auto-retry 2/2 "
+              "exhausted): title is too vague")
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
+    cls, _ = kb._classify_failure(
+        error="Missing task spec: the card body does not describe what to change")
+    assert cls == kb.HEILER_CLASS_BAD_SPEC
 
 
 def test_s4_record_task_failure_writes_heiler_classification(kanban_home):

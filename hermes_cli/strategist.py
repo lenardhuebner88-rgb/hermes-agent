@@ -60,8 +60,10 @@ logger = logging.getLogger(__name__)
 # Audit author stamped on every drafted root. The G1 surface does not filter on
 # created_by (the freigabe:operator + scheduled filter is the root-guard), but
 # reflect *does* — it scopes its approved/vetoed tally to this author so it never
-# reflects on a human-ingested operator hold.
-STRATEGIST_AUTHOR = "strategist-cron"
+# reflects on a human-ingested operator hold. Single source of truth lives in
+# kanban_db (the silent-block strategist carve-out reads the same constant) so
+# the writer and the carve-out can never drift apart.
+STRATEGIST_AUTHOR = kanban_db.STRATEGIST_CREATED_BY
 
 # GREEN-GATE-AUTOHEAL-LOOP-S1: a distinct author for the auto-opened nightly
 # gate-fix specs. Kept separate from STRATEGIST_AUTHOR so ``reflect`` (which
