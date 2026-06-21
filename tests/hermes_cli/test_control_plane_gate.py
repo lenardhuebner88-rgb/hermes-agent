@@ -72,6 +72,60 @@ def test_reviewer_verdict_metadata_requires_gate_fields():
     ]
 
 
+# --- FRD Phase 1b: flag-gated disposition enforcement (scope_contract_version >= 3) ---
+
+def test_disposition_not_required_below_v3():
+    """A complete v2 verdict without a disposition block stays valid (backward-compat)."""
+    md = dict(APPROVED_VERDICT)  # scope_contract_version == 2, no disposition key
+    missing = validate_reviewer_verdict_metadata(md, expected_workflow_id=WORKFLOW_ID)
+    assert missing == []
+
+
+def test_disposition_required_at_v3_when_absent():
+    """At scope_contract_version >= 3 a missing disposition block is flagged."""
+    md = dict(APPROVED_VERDICT)
+    md["scope_contract_version"] = 3
+    missing = validate_reviewer_verdict_metadata(md, expected_workflow_id=WORKFLOW_ID)
+    assert any("disposition" in m for m in missing)
+
+
+def test_disposition_empty_items_is_valid_at_v3():
+    """An explicit empty items=[] is the legitimate 'nothing open' outcome — not flagged."""
+    md = dict(APPROVED_VERDICT)
+    md["scope_contract_version"] = 3
+    md["disposition"] = {"items": []}
+    missing = validate_reviewer_verdict_metadata(md, expected_workflow_id=WORKFLOW_ID)
+    assert missing == []
+
+
+def test_disposition_valid_items_pass_at_v3():
+    """A well-formed disposition item passes the gate at v3."""
+    md = dict(APPROVED_VERDICT)
+    md["scope_contract_version"] = 3
+    md["disposition"] = {
+        "items": [
+            {
+                "typ": "risk",
+                "disposition": "defer",
+                "next_action": "harden severity validation",
+                "severity": "real-risk",
+                "evidence": "control_plane_gate.py:215",
+            }
+        ]
+    }
+    missing = validate_reviewer_verdict_metadata(md, expected_workflow_id=WORKFLOW_ID)
+    assert missing == []
+
+
+def test_disposition_refusal_marker_flagged_at_v3():
+    """A disposition block carrying an llm-refusal/truncation marker fails at v3."""
+    md = dict(APPROVED_VERDICT)
+    md["scope_contract_version"] = 3
+    md["disposition"] = {"__llm_refusal__": True, "items": []}
+    missing = validate_reviewer_verdict_metadata(md, expected_workflow_id=WORKFLOW_ID)
+    assert any("disposition" in m for m in missing)
+
+
 def test_low_risk_docs_orchestrator_plan_does_not_require_reviewer_or_coordinator():
     assert reviewer_gate_required(ORCHESTRATOR_DOCS_PLAN) is False
 

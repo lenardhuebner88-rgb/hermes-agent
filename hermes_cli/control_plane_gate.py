@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from hermes_cli import disposition as _disposition_mod
+
 
 VERDICTS = {"APPROVED", "NEEDS_REVISION", "BLOCKED"}
 _REVIEW_REQUIRED_MARKERS = {
@@ -221,6 +223,17 @@ def validate_reviewer_verdict_metadata(
         missing.append("forbidden_actions_taken = 0")
     elif forbidden != 0:
         missing.append("forbidden_actions_taken must be 0")
+
+    # FRD Phase 1b: at scope_contract_version >= 3 the verdict must carry a
+    # typed disposition block (follow-up/risk capture). An explicit empty
+    # ``items=[]`` is the legitimate "nothing open" outcome and passes; a
+    # missing or malformed block — including llm-refusal/truncation markers —
+    # fails. Flag-gated on the contract version so existing v2 verdicts stay
+    # backward-compatible until the operator raises the default (Phase 4).
+    if version is not None and version >= 3:
+        ok, disp_missing = _disposition_mod.validate_disposition(metadata)
+        if not ok:
+            missing.extend(f"disposition: {item}" for item in disp_missing)
 
     return missing
 
