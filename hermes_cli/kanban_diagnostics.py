@@ -1078,8 +1078,12 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
             consecutive += 1
             if last_err is None:
                 last_err = _task_field(r, "error")
-        elif outcome in {"completed", "reclaimed"}:
-            # A success (or manual reclaim) breaks the streak.
+        elif outcome in {"completed", "reclaimed", "integration_parked"}:
+            # A success, a manual reclaim, or an integration park (the worker
+            # ran to completion; only the merge was parked — see
+            # INTEGRATION_PARKED_OUTCOME) breaks the crash streak. Keeping
+            # 'integration_parked' here preserves the pre-relabel behavior, when
+            # a park was stamped 'completed'.
             break
         else:
             # Other outcomes (timed_out, blocked, spawn_failed, gave_up)

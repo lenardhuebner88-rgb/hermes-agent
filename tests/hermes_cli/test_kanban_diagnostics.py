@@ -265,6 +265,19 @@ def test_repeated_crashes_breaks_on_recent_success():
     assert kd.compute_task_diagnostics(task, [], runs) == []
 
 
+def test_repeated_crashes_breaks_on_integration_park():
+    """Regression: a parked integration (the worker ran to completion; only the
+    merge parked) breaks the crash streak — preserving the pre-relabel behavior
+    when a park was stamped 'completed'."""
+    task = _task(status="ready", assignee="fixed")
+    runs = [
+        _run(outcome="crashed", run_id=1),
+        _run(outcome="crashed", run_id=2),
+        _run(outcome="integration_parked", run_id=3),
+    ]
+    assert kd.compute_task_diagnostics(task, [], runs) == []
+
+
 def test_repeated_crashes_escalates_on_many_crashes():
     task = _task(status="ready", assignee="x")
     runs = [_run(outcome="crashed", run_id=i) for i in range(1, 6)]  # 5 in a row
