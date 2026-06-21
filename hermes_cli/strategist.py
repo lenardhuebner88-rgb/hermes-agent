@@ -86,6 +86,12 @@ COST_SIGNAL_CAP = 3.0
 BUDGET_THRESHOLD = 80.0
 BUDGET_PROVIDER = "anthropic"  # the strategist runs on the Opus subscription lane
 
+# RECEIPT-HARVEST (separater --mode harvest): Fenster/Caps für die Receipt-Ernte.
+HARVEST_WINDOW_FALLBACK_SECONDS = 48 * 3600
+HARVEST_MAX_RECEIPTS = 30
+HARVEST_MIN_RECEIPT_CHARS = 200
+HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
+
 
 # --------------------------------------------------------------------------- #
 # Lever model + deterministic catalogue
@@ -918,6 +924,47 @@ def reflect(
         "suppressed_levers": suppressed_now,
         "notes_path": str(notes_path) if notes_path is not None else None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Receipt-Harvest: deterministic gatherer + filter
+# --------------------------------------------------------------------------- #
+def gather_recent_receipts(
+    conn,
+    *,
+    since_ts: int,
+    max_tasks: int = HARVEST_MAX_RECEIPTS,
+    min_chars: int = HARVEST_MIN_RECEIPT_CHARS,
+) -> list[dict[str, Any]]:
+    """Kürzlich abgeschlossene Tasks mit substanziellem Receipt (≥ ``min_chars``).
+
+    Schließt den eigenen ``strategist-cron``-Autor aus (Anti-Rekursion) und liest
+    pro Task den kanonischen Receipt-Kommentar via :func:`funnel.draft_text`.
+    """
+    from hermes_cli import funnel
+
+    rows = conn.execute(
+        "SELECT id, title, assignee, completed_at FROM tasks "
+        "WHERE status = 'done' AND completed_at IS NOT NULL AND completed_at >= ? "
+        "AND (created_by IS NULL OR created_by <> ?) "
+        "ORDER BY completed_at DESC LIMIT ?",
+        (int(since_ts), STRATEGIST_AUTHOR, int(max_tasks)),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        excerpt = funnel.draft_text(conn, r["id"], max_chars=2000)
+        if not excerpt or len(excerpt) < min_chars:
+            continue
+        out.append(
+            {
+                "task_id": r["id"],
+                "title": r["title"],
+                "assignee": r["assignee"],
+                "completed_at": r["completed_at"],
+                "excerpt": excerpt,
+            }
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
