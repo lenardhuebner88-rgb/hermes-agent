@@ -4435,6 +4435,38 @@ def _patch_planner(monkeypatch, *, gate):
     monkeypatch.setattr("hermes_cli.kanban_decompose.plan_and_document", _fake)
 
 
+def test_flow_suggest_tier_classifies_title_and_description(client):
+    """GET flow-suggest-tier runs the deterministic risk heuristic over
+    title+description so the capture sheet can pre-fill the tier proposal."""
+    r = client.get(
+        "/api/plugins/kanban/flow/suggest-tier",
+        params={"title": "tweak label", "description": "reword a button"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["tier"] == "standard"
+    r2 = client.get(
+        "/api/plugins/kanban/flow/suggest-tier",
+        params={"title": "ship it", "description": "run a database migration and deploy"},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["tier"] == "critical"
+
+
+def test_flow_capture_persists_description_into_body(client, monkeypatch):
+    """A capture description is stored as the root body so the risk heuristic has
+    substance to classify at gate/resolve time (not just the title)."""
+    _patch_planner(monkeypatch, gate=True)
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-capture",
+        json={"title": "Baue X", "method": "lean", "gate": True,
+              "description": "run a database migration and deploy"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task_id"]
+    with kb.connect() as conn:
+        assert "database migration" in (kb.get_task(conn, tid).body or "")
+
+
 def test_flow_capture_stamps_root_tier_and_records_intent(client, monkeypatch):
     """Phase C: the capture sheet's tier+scout ride along to /flow-capture — the
     root is tier-stamped at once (so the chain Review-pill shows) and the intent
