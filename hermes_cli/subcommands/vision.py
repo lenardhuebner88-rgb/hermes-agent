@@ -19,7 +19,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+from typing import Optional
 
+from hermes_cli import gate_leaker
 from hermes_cli import strategist
 from hermes_cli import vision_metrics as vm
 
@@ -163,7 +166,85 @@ def build_vision_parser(subparsers) -> None:
             "ignored for a pass."
         ),
     )
+    record.add_argument(
+        "--leakers-json",
+        default=None,
+        help=(
+            "On a fail: JSON array of demoted leaker entries (\"<gate>: "
+            "<file>\" — failing files that passed alone in the isolation "
+            "rerun). Stored bounded/redacted for operator visibility, never as "
+            "a cause; ignored for a pass."
+        ),
+    )
+    record.add_argument(
+        "--leaker-only",
+        action="store_true",
+        help=(
+            "On a fail: every reported fail was a test-isolation leaker -> "
+            "record the night red with NO product cause (first_fail "
+            "suppressed). The red verdict / streak is unchanged."
+        ),
+    )
     record.add_argument("--json", action="store_true", help="Emit JSON output")
+
+    # --- isolate-fails (GREEN-GATE-LEAKER-CAUSE-PURITY-S1) ---
+    isolate = sub.add_parser(
+        "isolate-fails",
+        help=(
+            "Re-run a red gate's reported failing files in isolation and emit "
+            "the cleaned first_fail cause + the demoted leaker list"
+        ),
+        description=(
+            "Cause-purity step for the nightly green-gate: given the failing "
+            "gate logs, re-run each reported failing FILE once in isolation "
+            "(bounded on count + time). Files that pass alone are demoted as "
+            "test-isolation leakers; the first IN-ISOLATION reproducible failure "
+            "(in gate order) becomes first_fail. Emits JSON the heartbeat feeds "
+            "to record-gate-result so a leaker never becomes the canonical "
+            "red-cause (nor a gate-fix-check cause). Never changes the red "
+            "verdict — only the cause attribution."
+        ),
+    )
+    isolate.add_argument(
+        "--repo",
+        default=None,
+        help="Repo root for the isolation reruns (default: current directory)",
+    )
+    isolate.add_argument(
+        "--gate-log",
+        action="append",
+        default=[],
+        metavar="GATE=PATH",
+        help=(
+            "A failing gate and its full log file, e.g. "
+            "'python=/logs/python.log' (repeatable; only failing gates)"
+        ),
+    )
+    isolate.add_argument(
+        "--max-files",
+        type=int,
+        default=gate_leaker.ISOLATION_MAX_FILES,
+        help=f"Cap on files re-run in isolation (default {gate_leaker.ISOLATION_MAX_FILES})",
+    )
+    isolate.add_argument(
+        "--max-seconds",
+        type=float,
+        default=gate_leaker.ISOLATION_MAX_SECONDS,
+        help=(
+            "Cap on total wall time for the isolation reruns "
+            f"(default {gate_leaker.ISOLATION_MAX_SECONDS:.0f}s)"
+        ),
+    )
+    isolate.add_argument(
+        "--per-file-timeout",
+        type=float,
+        default=gate_leaker.ISOLATION_PER_FILE_TIMEOUT,
+        help=(
+            "Per-file wall-clock cap for one isolation rerun "
+            f"(default {gate_leaker.ISOLATION_PER_FILE_TIMEOUT:.0f}s)"
+        ),
+    )
+    isolate.add_argument("--json", action="store_true", help="Emit JSON output")
 
 
 def vision_command(args: argparse.Namespace) -> int:
@@ -248,22 +329,119 @@ def vision_command(args: argparse.Namespace) -> int:
         return 0
 
     if action == "record-gate-result":
+        leakers = _parse_leakers_json(getattr(args, "leakers_json", None))
         record = vm.record_gate_result(
             args.result,
             ts=getattr(args, "ts", None),
             first_fail_gate=getattr(args, "first_fail_gate", None),
             first_fail_detail=getattr(args, "first_fail_detail", None),
+            leakers=leakers,
+            leaker_only=getattr(args, "leaker_only", False),
         )
         if getattr(args, "json", False):
             print(json.dumps(record, ensure_ascii=False))
         else:
+            note = ""
+            if record.get("leaker_only"):
+                note = " (leaker-only: no product cause)"
+            elif record.get("leakers"):
+                note = f" ({len(record['leakers'])} leaker(s) demoted)"
             print(
                 f"recorded green-gate {record['result']} "
-                f"for {record['date']} → {vm.gate_ledger_path()}"
+                f"for {record['date']}{note} → {vm.gate_ledger_path()}"
             )
+        return 0
+
+    if action == "isolate-fails":
+        result = run_isolate_fails(args)
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            ff = result.get("first_fail_gate")
+            if result.get("leaker_only"):
+                print(
+                    f"isolate-fails: leaker-only — all {result['leaker_total']} "
+                    f"reported fail(s) passed alone (no product cause)"
+                )
+            elif ff:
+                print(
+                    f"isolate-fails: first_fail gate '{ff}' "
+                    f"({result['reproduced_total']} reproduced, "
+                    f"{result['leaker_total']} leaker(s) demoted"
+                    f"{', CAPPED' if result.get('capped') else ''})"
+                )
+            else:
+                print("isolate-fails: nothing to isolate (no failing gate logs)")
         return 0
 
     parser = getattr(args, "_vision_parser", None)
     if parser is not None:
         parser.print_help()
     return 0
+
+
+def _parse_leakers_json(raw: Optional[str]) -> Optional[list]:
+    """Parse the ``--leakers-json`` value into a list of strings (or None)."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return [str(x) for x in parsed]
+
+
+def _read_log(path: str) -> str:
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def run_isolate_fails(args) -> dict:
+    """Drive :func:`gate_leaker.isolate_from_logs` for the ``isolate-fails`` CLI.
+
+    Reads each ``--gate-log GATE=PATH``, runs the bounded isolation rerun via the
+    real subprocess runner, and flattens the result into the fields the heartbeat
+    consumes (``first_fail_gate`` / ``first_fail_detail`` / ``leakers`` /
+    ``leaker_only``). Never raises on a missing log — a best-effort empty string
+    is used so the heartbeat can always fall back to the raw cause.
+    """
+    repo = Path(getattr(args, "repo", None) or ".").expanduser()
+    gate_logs: list[tuple[str, str]] = []
+    for spec in getattr(args, "gate_log", None) or []:
+        if "=" not in spec:
+            continue
+        gate, _, path = spec.partition("=")
+        gate = gate.strip().lower()
+        if gate:
+            gate_logs.append((gate, _read_log(path.strip())))
+
+    def factory(gate: str):
+        return gate_leaker.build_runner(
+            gate,
+            repo,
+            per_file_timeout=getattr(
+                args, "per_file_timeout", gate_leaker.ISOLATION_PER_FILE_TIMEOUT
+            ),
+        )
+
+    result = gate_leaker.isolate_from_logs(
+        gate_logs,
+        runner_factory=factory,
+        max_files=getattr(args, "max_files", gate_leaker.ISOLATION_MAX_FILES),
+        max_seconds=getattr(args, "max_seconds", gate_leaker.ISOLATION_MAX_SECONDS),
+    )
+    ff = result.get("first_fail")
+    return {
+        "first_fail_gate": (ff or {}).get("gate"),
+        "first_fail_detail": gate_leaker.format_first_fail_detail(ff),
+        "leakers": result.get("leakers", []),
+        "leaker_only": result.get("leaker_only", False),
+        "checked": result.get("checked", 0),
+        "leaker_total": result.get("leaker_total", 0),
+        "reproduced_total": result.get("reproduced_total", 0),
+        "capped": result.get("capped", False),
+    }
