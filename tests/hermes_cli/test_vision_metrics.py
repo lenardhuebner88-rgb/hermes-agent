@@ -886,3 +886,114 @@ def test_cli_gate_fix_check_idle_on_green_head(tmp_path, monkeypatch, state_dir,
     out = json.loads(capsys.readouterr().out.strip())
     assert out["triggered"] is False
     assert out["ingested"] is None
+
+
+# ---------------------------------------------------------------------------
+# Leaker cause-purity (GREEN-GATE-LEAKER-CAUSE-PURITY-S1)
+#
+# A red gate's first_fail must name a real (in-isolation reproducible) failure,
+# never a test-isolation leaker. The ledger entry carries the demoted leaker
+# list for operator visibility (AC-2) and a `leaker_only` flag when the whole
+# night was harness noise — and the autoheal walk must NOT open a fix for it.
+# ---------------------------------------------------------------------------
+
+def test_fail_record_stores_leaker_list(state_dir):
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python",
+        first_fail_detail="isolated tests/b.py: FAILED",
+        leakers=["python: tests/a.py", "python: tests/flaky.py"],
+    )
+    assert rec["leakers"] == ["python: tests/a.py", "python: tests/flaky.py"]
+    # the real (reproduced) cause is still attached as first_fail
+    assert rec["first_fail"]["gate"] == "python"
+    loaded = vm.read_gate_records()[-1]
+    assert loaded["leakers"] == ["python: tests/a.py", "python: tests/flaky.py"]
+
+
+def test_fail_record_leaker_only_omits_first_fail(state_dir):
+    # every reported fail passed alone -> there is no product cause; the night
+    # stays red (result=fail) but carries no first_fail and is flagged.
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="should be ignored",
+        leakers=["python: tests/a.py"], leaker_only=True,
+    )
+    assert rec["result"] == "fail"
+    assert "first_fail" not in rec
+    assert rec["leaker_only"] is True
+    assert rec["leakers"] == ["python: tests/a.py"]
+
+
+def test_fail_record_leakers_redacted_and_capped(state_dir):
+    secret = "python: tests/a.py token=sk-ABCDEF1234567890SECRETVALUE"
+    rec = vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="boom",
+        leakers=[secret] + [f"python: tests/t{i}.py" for i in range(100)],
+    )
+    # secret never reaches the on-disk ledger
+    assert "sk-ABCDEF1234567890SECRETVALUE" not in json.dumps(rec)
+    # list is capped so a pathological run can't balloon the ledger entry
+    assert len(rec["leakers"]) <= vm.GATE_LEAKERS_MAX
+
+
+def test_pass_record_ignores_leakers(state_dir):
+    rec = vm.record_gate_result(
+        "pass", ts="2026-06-21T03:00:00+00:00",
+        leakers=["python: tests/a.py"], leaker_only=True,
+    )
+    assert "leakers" not in rec
+    assert "leaker_only" not in rec
+
+
+def _red_leaker_only(date, *, ts=None):
+    return {
+        "date": date, "result": "fail", "ts": ts or f"{date}T03:00:00+00:00",
+        "leaker_only": True, "leakers": [f"python: tests/{date}.py"],
+    }
+
+
+def test_red_cause_skips_leaker_only_head():
+    # head night is red but pure harness noise (every fail was a leaker) -> the
+    # autoheal loop must NOT open a fix; there is no product cause to heal.
+    records = [
+        _red("2026-06-20", gate="python", detail="real boom"),
+        _red_leaker_only("2026-06-21"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_leaker_only_night_breaks_run():
+    # a real recurring cause is interrupted by a leaker-only night -> the head
+    # run is too short to fire (the leaker night is not "the same cause").
+    records = [
+        _red("2026-06-19", gate="python", detail="real boom"),
+        _red_leaker_only("2026-06-20"),
+        _red("2026-06-21", gate="python", detail="real boom"),
+    ]
+    assert vm.derive_consecutive_red_cause(records) is None
+
+
+def test_red_cause_fires_when_real_cause_also_carries_leakers():
+    # leakers demoted on the side must not stop a genuine same-cause streak.
+    records = [
+        {"date": "2026-06-20", "result": "fail", "ts": "2026-06-20T03:00:00+00:00",
+         "first_fail": {"gate": "python", "detail": "assert 1 == 2 in test_real"},
+         "leakers": ["python: tests/flaky.py"]},
+        {"date": "2026-06-21", "result": "fail", "ts": "2026-06-21T03:00:00+00:00",
+         "first_fail": {"gate": "python", "detail": "assert 7 == 9 in test_real"},
+         "leakers": ["python: tests/other_flaky.py"]},
+    ]
+    cause = vm.derive_consecutive_red_cause(records)
+    assert cause is not None
+    assert cause["gate"] == "python"
+    assert cause["red_nights"] == 2
+
+
+def test_red_cause_leaker_only_does_not_coalesce_as_unknown():
+    # two consecutive leaker-only nights are NOT a recurring product cause (this
+    # is the whole point: harness noise must never mint a fix-PlanSpec), unlike
+    # genuinely unattributed reds which still coalesce as "unknown".
+    records = [_red_leaker_only("2026-06-20"), _red_leaker_only("2026-06-21")]
+    assert vm.derive_consecutive_red_cause(records) is None

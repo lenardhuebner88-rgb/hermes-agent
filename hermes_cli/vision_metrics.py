@@ -55,6 +55,12 @@ GATE_NAMES = ("python", "tsc", "vitest", "build")
 # pathological log balloon the append-only ledger.
 GATE_FIRST_FAIL_MAX_BYTES = 2048
 
+# Bound the demoted-leaker list stored on a red ledger entry (operator
+# visibility, AC-2) so a pathological red night can't balloon the append-only
+# ledger: at most this many entries, each a single redacted/length-capped line.
+GATE_LEAKERS_MAX = 25
+GATE_LEAKER_ENTRY_MAX = 200
+
 # Heiler classes that indicate a *real* problem was detected (not a transient
 # blip). A task counted "autonomous" that nonetheless carries one of these is
 # the autonomy metric's skeptic counter: the system saw something real and
@@ -144,6 +150,28 @@ def _build_first_fail(gate: Optional[str], detail: Optional[str]) -> dict:
     return first_fail
 
 
+def _build_leakers(leakers: Optional[list]) -> list[str]:
+    """Redact + bound the demoted-leaker list for a red ledger entry.
+
+    Each entry (``"<gate>: <file>"``) is run through the same forced redaction
+    as the first-failure detail (the ledger persists to disk), flattened to one
+    line, length-capped, and the list itself is capped to :data:`GATE_LEAKERS_MAX`
+    so the operator still sees *which* files were demoted without the entry
+    ballooning the append-only ledger.
+    """
+    if not leakers:
+        return []
+    out: list[str] = []
+    for item in list(leakers)[:GATE_LEAKERS_MAX]:
+        redacted = redact_sensitive_text(str(item), force=True)
+        redacted = " ".join(redacted.split())  # flatten newlines / runs
+        if len(redacted) > GATE_LEAKER_ENTRY_MAX:
+            redacted = redacted[:GATE_LEAKER_ENTRY_MAX]
+        if redacted:
+            out.append(redacted)
+    return out
+
+
 def record_gate_result(
     result: str,
     *,
@@ -152,6 +180,8 @@ def record_gate_result(
     path: Optional[Path] = None,
     first_fail_gate: Optional[str] = None,
     first_fail_detail: Optional[str] = None,
+    leakers: Optional[list] = None,
+    leaker_only: bool = False,
 ) -> dict:
     """Append one structured green-gate record to the ledger.
 
@@ -162,10 +192,20 @@ def record_gate_result(
     On a ``fail`` an optional first-failure payload (``first_fail_gate`` +
     ``first_fail_detail``) is attached as a ``first_fail`` field so each red
     entry carries a machine-readable cause (which gate, a redacted/capped
-    stderr tail) the strategist / StrategistView can surface. ``pass`` records
-    never carry it — pass behaviour is unchanged — and a ``fail`` without a
-    payload is also unchanged (backward-compatible). Returns the record that
-    was written.
+    stderr tail) the strategist / StrategistView can surface.
+
+    Cause-purity (GREEN-GATE-LEAKER-CAUSE-PURITY-S1): ``leakers`` is the list of
+    failing files the isolation rerun demoted (they passed alone) — stored as a
+    bounded, redacted ``leakers`` field for operator visibility, never as a
+    cause. ``leaker_only`` (every reported fail was a leaker) is recorded as a
+    flag and SUPPRESSES the ``first_fail`` cause: the night stays red (result is
+    still ``fail``, the streak still 0) but carries no product cause for the
+    autoheal loop to act on. The red *verdict* is never suppressed — only the
+    cause attribution is cleaned (AC-2).
+
+    ``pass`` records never carry ``first_fail``/``leakers``/``leaker_only`` —
+    pass behaviour is unchanged — and a ``fail`` without any payload is also
+    unchanged (backward-compatible). Returns the record that was written.
     """
     normalized = str(result).strip().lower()
     if normalized not in GATE_RESULTS:
@@ -180,9 +220,16 @@ def record_gate_result(
         "date": dt.date().isoformat(),
     }
     if normalized == "fail":
-        first_fail = _build_first_fail(first_fail_gate, first_fail_detail)
-        if first_fail:
-            record["first_fail"] = first_fail
+        if leaker_only:
+            # whole night was harness noise -> red, but no product cause
+            record["leaker_only"] = True
+        else:
+            first_fail = _build_first_fail(first_fail_gate, first_fail_detail)
+            if first_fail:
+                record["first_fail"] = first_fail
+        cleaned_leakers = _build_leakers(leakers)
+        if cleaned_leakers:
+            record["leakers"] = cleaned_leakers
     target = path or gate_ledger_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:
@@ -336,15 +383,38 @@ def _night_cause(fails: list[tuple[Optional[int], Optional[dict]]]) -> Optional[
     """Representative cause for one red night: the EARLIEST fail record's
     ``first_fail`` (by epoch; records without an epoch sort last). A night that
     failed with no first_fail payload at all returns ``None``."""
-    def _key(item: tuple[Optional[int], Optional[dict]]) -> tuple[bool, int]:
-        ep = item[0]
-        return (ep is None, ep if ep is not None else 0)
-
-    for _ep, ff in sorted(fails, key=_key):
+    for _ep, ff, _leaker_only in sorted(fails, key=_night_sort_key):
         cause = _first_fail_cause(ff)
         if cause is not None:
             return cause
     return None
+
+
+def _night_sort_key(
+    item: tuple[Optional[int], Optional[dict], bool]
+) -> tuple[bool, int]:
+    ep = item[0]
+    return (ep is None, ep if ep is not None else 0)
+
+
+def _night_cause_and_purity(
+    fails: list[tuple[Optional[int], Optional[dict], bool]]
+) -> tuple[Optional[dict], bool]:
+    """Cause + ``pure_leaker`` flag for one red night.
+
+    ``pure_leaker`` is ``True`` when the night has fail records, none yields a
+    product ``first_fail`` cause, and at least one was flagged ``leaker_only``
+    (every reported fail passed alone — harness noise). Such a night must never
+    contribute a healable cause: it is red (the streak stays 0) but there is
+    nothing for the autoheal loop to fix. A genuinely *unattributed* red (no
+    payload, not leaker-flagged) is NOT pure_leaker — it still coalesces as the
+    ``"unknown"`` sentinel cause, preserving the existing behaviour.
+    """
+    cause = _night_cause(fails)
+    if cause is not None:
+        return cause, False
+    has_leaker_only = any(flag for _ep, _ff, flag in fails)
+    return None, (len(fails) > 0 and has_leaker_only)
 
 
 def derive_consecutive_red_cause(
@@ -379,7 +449,9 @@ def derive_consecutive_red_cause(
         slot = per_date.setdefault(date, {"red": False, "fails": []})
         if str(rec.get("result")).lower() != "pass":
             slot["red"] = True
-            slot["fails"].append((_record_epoch(rec), rec.get("first_fail")))
+            slot["fails"].append(
+                (_record_epoch(rec), rec.get("first_fail"), bool(rec.get("leaker_only")))
+            )
 
     if not per_date:
         return None
@@ -389,7 +461,11 @@ def derive_consecutive_red_cause(
     if not head["red"]:
         return None  # gate is currently green at the head — nothing to heal
 
-    target_cause = _night_cause(head["fails"])
+    target_cause, head_pure_leaker = _night_cause_and_purity(head["fails"])
+    if head_pure_leaker:
+        # head night is red but pure test-isolation noise — nothing to heal
+        # (the whole point: a leaker must never mint a fix-PlanSpec).
+        return None
     target_fp = target_cause["fingerprint"] if target_cause else "unknown"
 
     matched: list[str] = []
@@ -397,7 +473,9 @@ def derive_consecutive_red_cause(
         slot = per_date[date]
         if not slot["red"]:
             break
-        cause = _night_cause(slot["fails"])
+        cause, pure_leaker = _night_cause_and_purity(slot["fails"])
+        if pure_leaker:
+            break  # a harness-noise night is not part of a real recurring cause
         fp = cause["fingerprint"] if cause else "unknown"
         if fp != target_fp:
             break
