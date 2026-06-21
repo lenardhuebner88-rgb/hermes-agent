@@ -1867,10 +1867,23 @@ def _strip_quotes(command: str) -> str:
 
     This prevents false positives when keywords like 'nohup' or 'setsid' appear
     in commit messages, Python -c code, echo arguments, or PR body text.
-    Also strips backtick-quoted content and heredoc-style inline text.
+    Also strips backtick-quoted content and heredoc bodies (<<DELIM ... DELIM).
     """
+    # Remove heredoc bodies: <<DELIM ... DELIM, <<-'DELIM' ... DELIM, etc.
+    # Strips the body so patterns like "systemctl restart hermes" mentioned
+    # inside a heredoc don't trigger the gateway-lifecycle guard.
+    # The closing delimiter must sit on its own line (optionally indented
+    # for <<- form); anchoring to end-of-line avoids eating the next command.
+    # Must run BEFORE the single-quote strip below, otherwise <<'EOF' loses
+    # its quotes and the heredoc marker no longer matches.
+    result = re.sub(
+        r"<<-?\s*['\"]?\w+['\"]?\n.*?\n[ \t]*\w+[ \t]*(?=\n|$)",
+        "",
+        command,
+        flags=re.DOTALL,
+    )
     # Remove single-quoted strings (no escaping inside single quotes in shell)
-    result = re.sub(r"'[^']*'", "''", command)
+    result = re.sub(r"'[^']*'", "''", result)
     # Remove double-quoted strings (handle escaped quotes)
     result = re.sub(r'"(?:[^"\\]|\\.)*"', '""', result)
     # Remove backtick-quoted strings
@@ -2216,7 +2229,7 @@ def terminal_tool(
         # but applies unconditionally (force=True cannot help here).
         if os.environ.get("_HERMES_GATEWAY") == "1":
             from hermes_cli.cron import _contains_gateway_lifecycle_command
-            if _contains_gateway_lifecycle_command(command):
+            if _contains_gateway_lifecycle_command(_strip_quotes(command)):
                 return json.dumps({
                     "output": "",
                     "exit_code": 1,
