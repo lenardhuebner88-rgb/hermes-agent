@@ -86,7 +86,7 @@ import threading
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -19880,6 +19880,97 @@ def set_disposition_status(
         if cur.rowcount == 0:
             return None
     return get_disposition_item(conn, item_id)
+
+
+def dismiss_disposition_item(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    reason: str = "",
+    decided_by: str = "operator",
+) -> Optional[dict]:
+    """Dismiss a disposition-ledger item.
+
+    Sets ``status='dismissed'`` via :func:`set_disposition_status` and, when
+    *reason* is non-empty, appends a comment to the source task (best-effort:
+    a failure to write the comment does NOT roll back the dismiss).
+
+    Returns the updated item dict, or ``None`` if *item_id* does not exist.
+    """
+    item = get_disposition_item(conn, item_id)
+    if item is None:
+        return None
+    updated = set_disposition_status(
+        conn, item_id, status="dismissed", decided_by=decided_by
+    )
+    if reason.strip():
+        try:
+            add_comment(
+                conn,
+                item["source_task_id"],
+                author=decided_by,
+                body=f"[Disposition {item_id} verworfen] {reason.strip()}",
+            )
+        except Exception:
+            pass  # best-effort: dismiss is already stamped
+    return updated
+
+
+def create_fix_task_from_disposition(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    created_by: str = "operator-disposition",
+) -> Optional[dict]:
+    """Create a parked fix-task from an open disposition-ledger item.
+
+    * Fetches the item; returns ``None`` if it does not exist.
+    * Raises ``ValueError`` if the item is not in ``open`` status.
+    * Creates a geparkte (``triage``) fix-task — no auto-dispatch.
+    * Idempotent: ``idempotency_key=f"disposition-fix:{item_id}"`` means a
+      second call returns the same task id from ``create_task`` without
+      inserting a duplicate, and re-stamps item to ``task_created``.
+    * Sets item ``status='task_created'``.
+
+    Returns ``{"fix_task": <task dict>, "item": <updated item dict>}``.
+    """
+    item = get_disposition_item(conn, item_id)
+    if item is None:
+        return None
+    if item["status"] != "open":
+        raise ValueError(
+            f"disposition item {item_id!r} is not open "
+            f"(current status: {item['status']!r}); "
+            "only open items can generate a fix-task"
+        )
+    next_action: str = (item.get("next_action") or "").strip()
+    evidence: str = (item.get("evidence") or "").strip()
+    disposition: str = (item.get("disposition") or "").strip()
+    source_label = next_action or evidence or disposition or item_id
+    title = f"Fix: {source_label[:80]}"
+    body_lines = []
+    if next_action:
+        body_lines.append(f"Nächste Aktion: {next_action}")
+    if evidence:
+        body_lines.append(f"Evidenz: {evidence}")
+    body_lines.append(
+        f"\nAus Disposition-Item {item_id}, "
+        f"Quell-Task {item['source_task_id']}, "
+        f"typ={item.get('typ')}, severity={item.get('severity')}"
+    )
+    body = "\n".join(body_lines)
+    fix_task_id = create_task(
+        conn,
+        title=title,
+        body=body,
+        created_by=created_by,
+        triage=True,
+        idempotency_key=f"disposition-fix:{item_id}",
+    )
+    updated = set_disposition_status(conn, item_id, status="task_created", decided_by=created_by)
+    task_obj = get_task(conn, fix_task_id)
+    fix_task_dict = asdict(task_obj) if task_obj is not None else {"id": fix_task_id}
+    return {"fix_task": fix_task_dict, "item": updated}
 
 
 def supersede_disposition_item(
