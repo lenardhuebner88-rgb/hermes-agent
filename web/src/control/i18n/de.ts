@@ -244,6 +244,7 @@ export const de = {
       fabAria: "Neue Aufgabe erfassen",
       sheetTitle: "Aufgabe erfassen",
       titlePlaceholder: "Was soll erledigt werden?",
+      descriptionPlaceholder: "Kurz: worum geht's? (optional) — schärft den Review-Tier-Vorschlag",
       methodLabel: "Plan-Methode",
       methodPark: "Parken (selbst dispatchen)",
       methodParkHint: "Landet geparkt in „Plan“. Es startet kein Worker von selbst — du klickst danach „Dispatch“.",

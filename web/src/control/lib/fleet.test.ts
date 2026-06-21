@@ -277,6 +277,14 @@ describe("flowCaptureRequest", () => {
     expect("inject_scout" in off).toBe(false);
     expect("review_tier" in off).toBe(false);
   });
+  it("carries description (trimmed) so the heuristic has substance; omits when blank", () => {
+    const r = flowCaptureRequest("Baue X", "lean", true, { description: "  run a database migration  " });
+    expect(r.description).toBe("run a database migration");
+    const bare = flowCaptureRequest("Baue X", "lean", true);
+    expect("description" in bare).toBe(false);
+    const blank = flowCaptureRequest("Baue X", "lean", true, { description: "   " });
+    expect("description" in blank).toBe(false);
+  });
 });
 
 describe("usesFlowCaptureEndpoint", () => {

@@ -297,6 +297,10 @@ export interface CaptureLevers {
   /** Prepend a read-only scout recon task before the entry children. Gated
    *  chains only (a single parked task has no build-children to precede). */
   injectScout?: boolean;
+  /** Optional short description: stored as the root body so the creation-time
+   *  risk heuristic has substance to auto-classify the tier (not just the title).
+   *  Only carried on the flow-capture endpoint; "" / undefined = not sent. */
+  description?: string;
 }
 
 export interface CaptureRequest {
@@ -342,6 +346,8 @@ export interface FlowCaptureRequest {
   review_tier?: ReviewTier;
   /** Persisted as a root intent the release path honours. Only present when on. */
   inject_scout?: boolean;
+  /** Stored as the root body so the risk heuristic can auto-classify. Only set. */
+  description?: string;
 }
 
 /** POST /tasks/flow-capture body for the backend-driven captures (document*,
@@ -359,6 +365,7 @@ export function flowCaptureRequest(title: string, method: CaptureMethod, gate: b
   };
   if (levers?.reviewTier) req.review_tier = levers.reviewTier;
   if (levers?.injectScout) req.inject_scout = true;
+  if (levers?.description?.trim()) req.description = levers.description.trim();
   return req;
 }
 
