@@ -2794,12 +2794,20 @@ HEILER_CLASS_FLAKY = "flaky"
 HEILER_CLASS_REAL_BUG = "real-bug"
 HEILER_CLASS_BAD_SPEC = "bad-spec"
 HEILER_CLASS_CONFLICT = "conflict"
+# HEILER-OUTCOME-RECLASSIFY-S1: a worker that exhausts its iteration/continuation
+# budget without a content defect is neither a transient infra blip nor a real
+# bug — it is a capacity signal. Its own class so the Stratege can observe/route
+# it distinctly (e.g. budget tuning) WITHOUT it driving an auto-extend lever
+# (kein Token-Runaway): capacity intentionally has no _LEDGER_TEMPLATES entry and
+# is NOT in vision_metrics._NON_TRANSIENT_HEILER_CLASSES (pure observability).
+HEILER_CLASS_CAPACITY = "capacity"
 HEILER_CLASSES = (
     HEILER_CLASS_TRANSIENT,
     HEILER_CLASS_FLAKY,
     HEILER_CLASS_REAL_BUG,
     HEILER_CLASS_BAD_SPEC,
     HEILER_CLASS_CONFLICT,
+    HEILER_CLASS_CAPACITY,
 )
 NO_SILENT_STALL_DEFAULT_MIN_AGE_SECONDS = 3600
 NO_SILENT_STALL_DECOMPOSE_FAILURE_LIMIT = 3
@@ -11204,6 +11212,27 @@ _HEILER_STALL_CLASS = {
     "review_without_verifier": HEILER_CLASS_BAD_SPEC,
     "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
 }
+# HEILER-OUTCOME-RECLASSIFY-S1: WEAKER structural mappings, evaluated only AFTER
+# the free-text signals (unlike the STRONG tables above, which win over text).
+# ``crashed`` (dead pid: 'pid N exited' / 'pid N not alive') and
+# ``iteration_budget_exhausted`` are structurally infra/capacity, so a *bare*
+# occurrence reclassifies off the real-bug default. But — unlike spawn_retry /
+# rate_limited, which are infra no matter what — a crash or budget-exhaustion
+# whose error text reveals a GENUINE defect (red gate, reviewer findings,
+# assertion) must stay real-bug and remain triagierbar (AC-2). Sitting below the
+# text signals gives exactly that: the real-defect text wins, the bare infra
+# case falls through to here. Keyed by both outcome and stall_class so the signal
+# lands whichever carrier it arrives on. crashed->transient composes with the
+# already-shipped bounded transient-retry budget (HEILER-TRANSIENT-RETRY-BUDGET):
+# the relabel alone makes dead pids self-healing, with boundedness still enforced
+# by the unchanged consecutive-failure breaker (no new retry mechanic).
+_HEILER_OUTCOME_FALLBACK_CLASS = {
+    "crashed": HEILER_CLASS_TRANSIENT,
+    "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
+}
+_HEILER_STALL_FALLBACK_CLASS = {
+    "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
+}
 
 
 def _classify_failure(
@@ -11223,11 +11252,16 @@ def _classify_failure(
 
     Precedence (first match wins):
       1. unambiguous merge-conflict markers -> conflict
-      2. structural ``stall_class`` mapping (config/spec/transient by
+      2. STRONG structural ``stall_class`` mapping (config/spec/transient by
          construction)
-      3. structural ``outcome`` mapping (provisioning / quota = transient)
+      3. STRONG structural ``outcome`` mapping (provisioning / quota = transient)
       4. free-text signals: bad-spec, flaky, real-bug, transient
-      5. default -> real-bug (a failure that reached this path with no
+      5. WEAK structural fallbacks (HEILER-OUTCOME-RECLASSIFY-S1): crashed ->
+         transient, iteration_budget_exhausted -> capacity. Below the text
+         signals on purpose, so a crash / budget-exhaustion whose error text
+         reveals a genuine defect stays real-bug (triagierbar, AC-2); only a
+         *bare* infra/capacity occurrence reclassifies off the default.
+      6. default -> real-bug (a failure that reached this path with no
          transient / spec / flaky signal is most likely a genuine defect:
          a red gate or reviewer findings)
     """
@@ -11261,6 +11295,21 @@ def _classify_failure(
         for sub in subs:
             if sub in haystack:
                 return cls, _ev(sub, "text")
+
+    # Weak structural fallbacks: only reached when no text signal fired, so a
+    # real-defect crash / budget-exhaustion has already been classified above and
+    # stays triagierbar (AC-2). A bare infra/capacity occurrence lands here.
+    if stall_class and stall_class in _HEILER_STALL_FALLBACK_CLASS:
+        return (
+            _HEILER_STALL_FALLBACK_CLASS[stall_class],
+            _ev(stall_class, "stall_fallback"),
+        )
+
+    if outcome and outcome in _HEILER_OUTCOME_FALLBACK_CLASS:
+        return (
+            _HEILER_OUTCOME_FALLBACK_CLASS[outcome],
+            _ev(outcome, "outcome_fallback"),
+        )
 
     return HEILER_CLASS_REAL_BUG, _ev("default", "default")
 

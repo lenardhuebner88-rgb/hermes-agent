@@ -11262,6 +11262,122 @@ def test_s4_classify_failure_conflict_wins_over_stall_class():
     assert cls == kb.HEILER_CLASS_CONFLICT
 
 
+# HEILER-OUTCOME-RECLASSIFY-S1 ------------------------------------------------
+
+def test_capacity_class_registered():
+    """The capacity class exists and is a valid Heiler class, but is NOT counted
+    as a non-transient 'real problem' (it is pure observability/routing)."""
+    assert kb.HEILER_CLASS_CAPACITY == "capacity"
+    assert kb.HEILER_CLASS_CAPACITY in kb.HEILER_CLASSES
+    from hermes_cli import vision_metrics as vm
+    assert kb.HEILER_CLASS_CAPACITY not in vm._NON_TRANSIENT_HEILER_CLASSES
+
+
+def test_s4_classify_crashed_worker_is_transient():
+    """A bare crashed-worker outcome (dead pid, no content defect) reclassifies
+    from the real-bug default to transient, so it flows into the bounded
+    transient-retry budget and self-heals (HEILER-OUTCOME-RECLASSIFY-S1 AC-1).
+    Reclassification is a fallback: it only fires when no real-bug/flaky/bad-spec
+    signal is present in the error text."""
+    for err in (
+        "pid 12345 exited with code 1",
+        "pid 999 not alive",
+        "pid 7 killed by signal 9",
+    ):
+        cls, ev = kb._classify_failure(outcome="crashed", error=err)
+        assert cls == kb.HEILER_CLASS_TRANSIENT, err
+        assert ev["signal_source"] == "outcome_fallback"
+        assert ev["matched"] == "crashed"
+
+
+def test_s4_classify_crashed_with_real_defect_text_stays_triagierbar():
+    """AC-2: a crash whose error text reveals a genuine defect (red gate /
+    reviewer findings) is NOT masked as transient — the real-bug text signal
+    wins over the crashed->transient fallback, so it stays triagierbar."""
+    cls, _ = kb._classify_failure(
+        outcome="crashed", error="gate failed: pytest reported 2 tests failed",
+    )
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+    cls, _ = kb._classify_failure(
+        outcome="crashed", error="reviewer findings: REQUEST_CHANGES",
+    )
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_s4_classify_iteration_budget_exhausted_is_capacity():
+    """iteration_budget_exhausted reclassifies from the real-bug default into a
+    distinct capacity class (AC-1), whether the signal arrives as a stall_class
+    or as a run outcome (robust to the carrier)."""
+    cls, ev = kb._classify_failure(stall_class="iteration_budget_exhausted")
+    assert cls == kb.HEILER_CLASS_CAPACITY
+    assert ev["signal_source"] == "stall_fallback"
+    assert ev["matched"] == "iteration_budget_exhausted"
+
+    cls, ev = kb._classify_failure(outcome="iteration_budget_exhausted")
+    assert cls == kb.HEILER_CLASS_CAPACITY
+    assert ev["signal_source"] == "outcome_fallback"
+
+
+def test_s4_classify_iteration_budget_real_defect_stays_triagierbar():
+    """AC-2: a task that exhausts its iteration budget BECAUSE of a real defect
+    (a red gate / reviewer finding surfaced in the text) stays a real-bug — the
+    capacity reclassification is a fallback that text signals override, so the
+    genuinely broken task remains triagierbar instead of hidden as capacity."""
+    cls, _ = kb._classify_failure(
+        outcome="iteration_budget_exhausted",
+        error="gate failed: assertion failed in test_loop",
+    )
+    assert cls == kb.HEILER_CLASS_REAL_BUG
+
+
+def test_s4_strong_outcome_mapping_still_wins_over_text():
+    """Regression guard: the pre-existing STRONG outcome mappings (spawn_retry /
+    spawn_failed / rate_limited) still win over error text — only the new
+    crashed/iteration_budget fallbacks sit below the text signals."""
+    cls, ev = kb._classify_failure(
+        outcome="spawn_retry", error="gate failed: 3 tests failed",
+    )
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+    assert ev["signal_source"] == "outcome"
+
+
+def test_s4_crashed_reclassify_stays_bounded(kanban_home):
+    """AC-2: crashed->transient is a relabel only — repeated crashes of the same
+    task still trip the consecutive-failure breaker and escalate (the bounded
+    retry limit is untouched), so there is no unbounded retry storm."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="flapping worker", assignee="coder")
+        # First crash: below the DEFAULT_FAILURE_LIMIT=2 breaker -> requeued.
+        assert kb.claim_task(conn, tid) is not None
+        blocked1 = kb._record_task_failure(
+            conn, tid, "pid 111 not alive",
+            outcome="crashed", release_claim=True, end_run=True,
+        )
+        assert blocked1 is False
+        # Second crash at the same root: breaker trips -> blocked + escalated.
+        assert kb.claim_task(conn, tid) is not None
+        blocked2 = kb._record_task_failure(
+            conn, tid, "pid 222 not alive",
+            outcome="crashed", release_claim=True, end_run=True,
+        )
+        assert blocked2 is True
+
+        events = kb.list_events(conn, tid)
+        heilers = [e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
+        escalations = [
+            e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        task = kb.get_task(conn, tid)
+
+    # Every crash classified transient (not real-bug), yet the breaker still
+    # blocked the task and raised exactly one operator escalation.
+    assert heilers, "expected heiler_classification events"
+    assert all(e.payload["class"] == kb.HEILER_CLASS_TRANSIENT for e in heilers)
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+
+
 def test_s4_record_task_failure_writes_heiler_classification(kanban_home):
     """A simulated transient block and a red-gate block each write a
     heiler_classification ledger event with the right class + evidence."""
