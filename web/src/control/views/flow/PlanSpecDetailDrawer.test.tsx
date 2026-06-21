@@ -67,6 +67,9 @@ describe("PlanSpecDetailDrawer", () => {
     expect(html).toContain("Dashboard zeigt Testergebnisse live.");
     // AC id
     expect(html).toContain("AC1");
+    // AC-ID und Statement stehen in getrennten Elementen, damit lange IDs den Text nicht einzeilig quetschen.
+    expect(html).toContain("<span");
+    expect(html).toContain("<p class=\"whitespace-pre-wrap break-words leading-relaxed\">Dashboard zeigt Testergebnisse live.</p>");
     // Anti-Scope
     expect(html).toContain("Kein manueller Upload erforderlich");
     // Subtask-Titel
@@ -74,6 +77,23 @@ describe("PlanSpecDetailDrawer", () => {
     expect(html).toContain("Frontend-Karte rendern");
     // Ziel
     expect(html).toContain("Automatisch Testergebnisse sammeln und anzeigen.");
+  });
+
+  it("macht lange Pfade kopierbar und behält den vollständigen Pfad zugänglich", () => {
+    const longPath = "vault/03-Agents/Hermes/plans/2026-06-21-dashboard-planspec-display-polish-with-a-very-long-name.md";
+    const html = renderToStaticMarkup(
+      <PlanSpecDetailDrawer
+        item={{ ...baseItem, path: longPath }}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    expect(html).toContain('aria-label="PlanSpec-Pfad kopieren"');
+    expect(html).toContain(`title="${longPath}"`);
+    expect(html).toContain("…");
   });
 
   it("rendert Lade-Skeleton wenn loading=true und kein Detail vorhanden", () => {

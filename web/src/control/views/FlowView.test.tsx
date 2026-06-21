@@ -216,9 +216,11 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/plansOpen \? <div className="mt-3 grid gap-2">/);
     expect(src).toMatch(/\/api\/plugins\/kanban\/planspecs\/not-needed/);
     expect(src).toMatch(/Wird nicht benötigt/);
-    expect(src).toMatch(/break-words text-sm font-semibold leading-snug text-white/);
-    expect(src).toMatch(/mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal/);
-    expect(src).toMatch(/min-h-11 items-center gap-1.5 rounded-full/);
+    expect(src).toMatch(/line-clamp-3 break-words text-sm font-semibold leading-snug text-white sm:line-clamp-2/);
+    expect(src).toMatch(/mt-1 line-clamp-1 break-all hc-mono hc-type-label hc-dim/);
+    expect(src).toMatch(/grid grid-cols-2 gap-2 sm:flex/);
+    expect(src).toMatch(/min-h-10 items-center justify-center gap-1.5 rounded-full/);
+    expect(src).toMatch(/aria-label=\{`Details für PlanSpec \$\{item\.topic\} öffnen`\}/);
   });
 
   it("keeps the PlanSpec hub at the bottom of the Flow tab", () => {

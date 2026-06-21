@@ -406,31 +406,34 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const kanbanProgress = planSpecKanbanProgress(item);
           const kanbanTone = planSpecKanbanTone(item.kanban_state);
           return (
-            <div key={item.path} className="min-w-0 rounded-[12px] border border-[var(--hc-border)] bg-[var(--hc-panel)] p-[14px]">
-              <div className="flex min-w-0 flex-wrap items-start gap-2">
+            <div key={item.path} className="min-w-0 rounded-[12px] border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3 sm:p-[14px]">
+              <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
                 <FileText className="mt-0.5 h-4 w-4 shrink-0 text-[var(--hc-accent-text)]" />
-                <div className="min-w-0 flex-1">
-                  <p className="break-words text-sm font-semibold leading-snug text-white">{item.topic}</p>
-                  <p className="mt-1 break-all hc-mono hc-type-label hc-dim sm:line-clamp-1 sm:break-normal">{item.path}</p>
+                <div className="min-w-0">
+                  <p title={item.topic} className="line-clamp-3 break-words text-sm font-semibold leading-snug text-white sm:line-clamp-2">{item.topic}</p>
+                  <p title={item.path} className="mt-1 line-clamp-1 break-all hc-mono hc-type-label hc-dim">{item.path}</p>
                 </div>
-                <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "warn" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
+                <div className="col-span-2 sm:col-span-1 sm:col-start-3">
+                  <StatusPill tone={kanbanTone} label={kanbanLabel} dot={item.kanban_state === "running" ? "warn" : item.kanban_state === "completed" ? "live" : item.valid ? "live" : "warn"} />
+                </div>
               </div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.freigabe || "ohne Freigabe"}</span>
-                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.live_test_depth || "smoke"}</span>
-                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.subtask_count} Subtasks</span>
-                {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
-                {kanbanProgress ? <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{kanbanProgress}</span> : null}
-                <span className="max-w-full rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-dim)]">{item.agent}</span>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 overflow-hidden">
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.freigabe || "ohne Freigabe"}</span>
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.live_test_depth || "smoke"}</span>
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.subtask_count} Subtasks</span>
+                {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full truncate rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
+                {kanbanProgress ? <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{kanbanProgress}</span> : null}
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-dim)]">{item.agent}</span>
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
               {rowError ? <p className="mt-2 break-words text-[0.75rem] text-red-300">{rowError}</p> : null}
-              <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
                 <button
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void ingest(item)}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9"
+                  className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9 sm:justify-start"
+                  aria-label={`PlanSpec ${item.topic} in Kanban umsetzen`}
                 >
                   {ingestBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
                   Kanban
@@ -439,7 +442,8 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => { setDetailItem(item); }}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9"
+                  className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9 sm:justify-start"
+                  aria-label={`Details für PlanSpec ${item.topic} öffnen`}
                 >
                   <FileText className="h-3.5 w-3.5" />
                   Details
@@ -448,7 +452,8 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void buildPrompt(item)}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9"
+                  className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9 sm:justify-start"
+                  aria-label={`Sprint-Prompt für PlanSpec ${item.topic} kopieren`}
                 >
                   {promptBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
                   Sprint-Prompt
@@ -457,7 +462,8 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   type="button"
                   disabled={ingestBusy || promptBusy || closeBusy}
                   onClick={() => void markNotNeeded(item)}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-red-300/30 px-3 text-sm text-red-200 transition hover:bg-red-500/10 disabled:opacity-40 sm:min-h-9"
+                  className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-red-300/30 px-3 text-sm text-red-200 transition hover:bg-red-500/10 disabled:opacity-40 sm:min-h-9 sm:justify-start"
+                  aria-label={`PlanSpec ${item.topic} als nicht benötigt markieren`}
                 >
                   {closeBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
                   Wird nicht benötigt
