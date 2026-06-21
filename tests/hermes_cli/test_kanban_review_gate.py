@@ -156,6 +156,26 @@ def test_set_task_review_tier_roundtrip(kanban_home):
         assert kb.set_task_review_tier(conn, "t_doesnotexist", "review") is False
 
 
+def test_set_tier_below_floor_with_ack_records_event(kanban_home, monkeypatch):
+    """acknowledge_downgrade=True logs a review_tier_downgrade_ack so an explicit
+    below-floor tier actually takes effect; without it the safety floor holds."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="db change",
+                             body="run a database migration and deploy", assignee="coder")
+        # plain downgrade (no ack) → floor holds, downgrade has no effect
+        assert kb.set_task_review_tier(conn, tid, "standard") is True
+        assert kb._effective_review_tier(conn, tid) == "critical"
+        # acknowledged downgrade → standard now wins + ack event recorded
+        assert kb.set_task_review_tier(conn, tid, "standard", acknowledge_downgrade=True) is True
+        assert kb._effective_review_tier(conn, tid) == "standard"
+        acks = [e for e in kb.list_events(conn, tid) if e.kind == "review_tier_downgrade_ack"]
+        assert acks and acks[-1].payload["to_tier"] == "standard"
+
+
 # ---------------------------------------------------------------------------
 # B-T6: ordered stage list per tier (missing profiles degrade gracefully)
 # ---------------------------------------------------------------------------

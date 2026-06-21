@@ -19573,14 +19573,19 @@ def _maybe_inject_critical_scout(
 
 def set_task_review_tier(
     conn: sqlite3.Connection, task_id: str, tier: Optional[str],
+    *, acknowledge_downgrade: bool = False,
 ) -> bool:
-    """Phase C: set/clear ``tasks.review_tier`` — the operator override the
-    staged-review resolver treats as authoritative in both directions
-    (``_effective_review_tier``). ``tier=None``/leer löscht den Override (the
-    auto-risk classifier decides again). A non-empty value is normalised to the
-    canonical lowercase token and validated against ``_TIER_ORDER``; an unknown
-    tier raises ``ValueError`` rather than silently storing garbage. Greift ab
-    dem nächsten Submit; eine bereits eingefrorene Review-Kette bleibt unberührt.
+    """Set/clear ``tasks.review_tier`` — the operator override the staged-review
+    resolver reads. The resolver applies a safety FLOOR (``_effective_review_tier``):
+    a value below the hard-marker heuristic floor only takes effect when the operator
+    deliberately acknowledges the downgrade. Pass ``acknowledge_downgrade=True`` to
+    log a ``review_tier_downgrade_ack`` event (the audit-trailed permission); without
+    it a below-floor value is stored but the floor snaps the effective tier back up.
+
+    ``tier=None``/leer löscht den Override (auto-risk classifier decides again). A
+    non-empty value is normalised to the canonical lowercase token and validated
+    against ``_TIER_ORDER``; an unknown tier raises ``ValueError``. Greift ab dem
+    nächsten Submit; eine bereits eingefrorene Review-Kette bleibt unberührt.
 
     Returns False if the task doesn't exist.
     """
@@ -19597,6 +19602,8 @@ def set_task_review_tier(
         if cur.rowcount != 1:
             return False
         _append_event(conn, task_id, "review_tier_set", {"review_tier": value})
+        if value is not None and acknowledge_downgrade:
+            _append_event(conn, task_id, "review_tier_downgrade_ack", {"to_tier": value})
     # Phase-C-followup (a): couple scout to critical (flag-gated, default off →
     # byte-identical). Outside the write_txn — the scout's own create_task /
     # link_tasks open their own BEGIN IMMEDIATE, which is not re-entrant.
