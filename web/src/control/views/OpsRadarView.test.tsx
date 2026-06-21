@@ -26,7 +26,7 @@ const inventory: OperatorInventoryResponse = {
     { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "def456", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
   ],
   actors: [
-    { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: 0, rss_mb: 0, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
+    { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
     { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 120, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
     { role: "claude_code", label: "Claude Code", count: 1, cpu_percent: 4, rss_mb: 256, oldest_age_seconds: 90, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
   ],
@@ -51,6 +51,8 @@ describe("OpsRadarContent", () => {
     expect(html).not.toContain("/home/");
     expect(html).not.toContain(".worktrees/");
     expect(html.toLowerCase()).not.toContain("cmdline");
+    expect(html).toContain("CPU</p><p class=\"hc-mono truncate text-sm font-semibold text-white\">-</p>");
+    expect(html).toContain("RAM</p><p class=\"hc-mono truncate text-sm font-semibold text-white\">-</p>");
     expect(html.toLowerCase()).not.toContain("stop");
     expect(html.toLowerCase()).not.toContain("kill");
     expect(html.toLowerCase()).not.toContain("update");

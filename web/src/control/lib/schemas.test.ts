@@ -187,7 +187,7 @@ describe("OperatorInventoryResponseSchema", () => {
         { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "abc123", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
       ],
       actors: [
-        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: 0, rss_mb: 0, oldest_age_seconds: 120, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
+        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: null, rss_mb: null, oldest_age_seconds: 120, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
         { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 60, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
       ],
       errors: [],
@@ -198,6 +198,8 @@ describe("OperatorInventoryResponseSchema", () => {
     expect(parsed.worktrees[0].path_label).toBe("kanban:t_123");
     expect(parsed.actors[0].source).toBe("canonical");
     expect(JSON.stringify(parsed)).not.toContain("/home/");
+    expect(parsed.actors[0].cpu_percent).toBeNull();
+    expect(parsed.actors[0].rss_mb).toBeNull();
     expect(JSON.stringify(parsed)).not.toContain(".worktrees/");
     expect(JSON.stringify(parsed).toLowerCase()).not.toContain("cmdline");
   });

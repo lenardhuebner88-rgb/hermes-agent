@@ -123,6 +123,13 @@ def _project_root() -> Path:
 
 
 
+def _readonly_git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+
 def _git_common_root(cwd: Path) -> Path:
     try:
         completed = subprocess.run(
@@ -132,6 +139,7 @@ def _git_common_root(cwd: Path) -> Path:
             capture_output=True,
             text=True,
             timeout=_GIT_LIST_TIMEOUT_SECONDS,
+            env=_readonly_git_env(),
         )
         common = (completed.stdout or "").strip()
         if completed.returncode == 0 and common:
@@ -153,6 +161,7 @@ def _run_git(args: list[str], *, cwd: Path, timeout: float) -> subprocess.Comple
         check=False,
         capture_output=True,
         text=True,
+        env=_readonly_git_env(),
         timeout=timeout,
     )
 
@@ -225,12 +234,12 @@ def _worktree_label(path_value: object, repo_root: Path) -> str:
         if not tail:
             return "worktree"
         if tail[0] == "kanban" and len(tail) > 1:
-            return f"kanban:{tail[1]}"
+            return _scrub(f"kanban:{tail[1]}")
         leaf = tail[0]
         if leaf.startswith("codex-"):
-            return f"codex:{leaf.removeprefix('codex-') or 'worktree'}"
-        return f"worktree:{leaf}"
-    return f"external:{path.name}" if path.name else "external:worktree"
+            return _scrub(f"codex:{leaf.removeprefix('codex-') or 'worktree'}")
+        return _scrub(f"worktree:{leaf}")
+    return _scrub(f"external:{path.name}" if path.name else "external:worktree")
 
 
 
@@ -277,11 +286,12 @@ def _status_counts(path_value: object, deadline: float) -> dict[str, Any]:
     try:
         path = Path(str(path_value))
         completed = subprocess.run(
-            ["git", "-C", str(path), "status", "--porcelain=v1", "--branch"],
+            ["git", "--no-optional-locks", "-C", str(path), "status", "--porcelain=v1", "--branch"],
             check=False,
             capture_output=True,
             text=True,
             timeout=_WORKTREE_STATUS_TIMEOUT_SECONDS,
+            env=_readonly_git_env(),
         )
         if completed.returncode != 0:
             return {"status_checked": False, "dirty_count": None, "untracked_count": None}
@@ -504,8 +514,8 @@ def _collect_kanban_worker_group(errors: list[str]) -> tuple[list[dict[str, Any]
             "role": "kanban_worker",
             "label": _ROLE_LABELS["kanban_worker"],
             "count": len(workers),
-            "cpu_percent": 0.0,
-            "rss_mb": 0.0,
+            "cpu_percent": None,
+            "rss_mb": None,
             "oldest_age_seconds": oldest_age,
             "source": "canonical",
             "confidence": "high",
@@ -526,12 +536,14 @@ def _collect_actor_groups(errors: list[str]) -> tuple[list[dict[str, Any]], set[
 def _normalize_actor(actor: dict[str, Any]) -> dict[str, Any]:
     role = str(actor.get("role") or "unknown")
     source = str(actor.get("source") or "process")
+    cpu_percent = actor.get("cpu_percent")
+    rss_mb = actor.get("rss_mb")
     return {
         "role": role,
         "label": _scrub(actor.get("label") or _ROLE_LABELS.get(role, role.replace("_", " ").title())),
         "count": _safe_int(actor.get("count"), 0),
-        "cpu_percent": round(_safe_float(actor.get("cpu_percent")), 1),
-        "rss_mb": round(_safe_float(actor.get("rss_mb")), 1),
+        "cpu_percent": None if cpu_percent is None else round(_safe_float(cpu_percent), 1),
+        "rss_mb": None if rss_mb is None else round(_safe_float(rss_mb), 1),
         "oldest_age_seconds": actor.get("oldest_age_seconds"),
         "source": source if source in {"canonical", "process"} else "process",
         "confidence": str(actor.get("confidence") or ("high" if source == "canonical" else "medium")),

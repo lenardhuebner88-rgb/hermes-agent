@@ -208,3 +208,97 @@ def test_collect_kanban_worker_group_reads_existing_db_read_only(monkeypatch, tm
     assert groups[0]["source"] == "canonical"
     assert groups[0]["count"] == 1
     assert groups[0]["stale_count"] == 0
+    assert groups[0]["cpu_percent"] is None
+    assert groups[0]["rss_mb"] is None
+
+
+def test_operator_inventory_scrubs_secret_markers_from_worktree_labels_and_ids():
+    from hermes_cli.operator_inventory import build_operator_inventory
+
+    payload = build_operator_inventory(
+        {
+            "checked_at": 1782070000,
+            "worktrees": [
+                {
+                    "path": "/home/piet/.hermes/hermes-agent/.worktrees/codex-sk-live-token.env",
+                    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "branch": "codex/sk-live-token.env",
+                    "locked": False,
+                    "prunable": False,
+                    "detached": False,
+                    "dirty_count": 0,
+                    "untracked_count": 0,
+                    "status_checked": True,
+                },
+            ],
+            "actor_groups": [],
+            "active_worker_task_ids": [],
+            "errors": [],
+        },
+        repo_root=Path("/home/piet/.hermes/hermes-agent"),
+    )
+
+    item = payload["worktrees"][0]
+    assert item["path_label"] == "redacted"
+    assert item["id"] == "codex:redacted"
+    text = _json_text(payload).lower()
+    assert "sk-" not in text
+    assert ".env" not in text
+    assert "token" not in text
+
+
+def test_status_counts_uses_git_optional_locks_off(monkeypatch):
+    from hermes_cli import operator_inventory
+
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+
+        class Completed:
+            returncode = 0
+            stdout = "## main\n M file.py\n?? scratch.txt\n"
+
+        return Completed()
+
+    monkeypatch.setattr(operator_inventory.subprocess, "run", fake_run)
+    monkeypatch.setattr(operator_inventory.time, "monotonic", lambda: 0.0)
+
+    result = operator_inventory._status_counts("/tmp/repo", deadline=1.0)
+
+    assert captured["args"][:2] == ["git", "--no-optional-locks"]
+    assert captured["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+    assert result["dirty_count"] == 2
+    assert result["untracked_count"] == 1
+
+
+def test_snapshot_reuses_cached_inventory(monkeypatch):
+    from hermes_cli import operator_inventory
+
+    operator_inventory._CACHE = None
+    calls = {"actors": 0, "worktrees": 0}
+    ticks = iter([100.0, 110.0])
+
+    def collect_actors(errors):
+        calls["actors"] += 1
+        return [], set()
+
+    def collect_worktrees(repo_root, errors):
+        calls["worktrees"] += 1
+        return []
+
+    monkeypatch.setattr(operator_inventory, "_git_common_root", lambda root: Path("/tmp/hermes"))
+    monkeypatch.setattr(operator_inventory, "_project_root", lambda: Path("/tmp/hermes"))
+    monkeypatch.setattr(operator_inventory, "_collect_actor_groups", collect_actors)
+    monkeypatch.setattr(operator_inventory, "_collect_worktrees", collect_worktrees)
+    monkeypatch.setattr(operator_inventory.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(operator_inventory.time, "time", lambda: 1782070000)
+
+    first = operator_inventory.snapshot(force=True)
+    first["summary"]["worktrees_total"] = 999
+    second = operator_inventory.snapshot()
+
+    assert calls == {"actors": 1, "worktrees": 1}
+    assert second["summary"]["worktrees_total"] == 0
+    operator_inventory._CACHE = None

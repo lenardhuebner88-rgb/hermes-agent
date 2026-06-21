@@ -710,8 +710,8 @@ export interface OperatorInventoryActor {
   role: string;
   label: string;
   count: number;
-  cpu_percent: number;
-  rss_mb: number;
+  cpu_percent: number | null;
+  rss_mb: number | null;
   oldest_age_seconds: number | null;
   source: "canonical" | "process";
   confidence: string;
