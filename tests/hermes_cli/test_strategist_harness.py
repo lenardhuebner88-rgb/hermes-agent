@@ -629,6 +629,101 @@ def test_gate_fix_distinct_cause_opens_second_chain(board_home):
         assert len(strategist_surface.held_operator_proposals(conn)) == 2
 
 
+# --------------------------------------------------------------------------- #
+# GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1 — log-backfill a legacy un-attributed
+# predecessor so the live 06-20/06-21 red series self-heals
+# --------------------------------------------------------------------------- #
+def _unattributed_red(date):
+    """A red ledger night that predates the first_fail format (no payload)."""
+    return {"date": date, "result": "fail", "ts": f"{date}T03:00:00+00:00"}
+
+
+_LIVE_HEAD_DETAIL = (
+    "Python (run_tests.sh):\n\n"
+    "=== 6 files with test failures (9 tests failed) ===\n"
+    "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+    "  tests/agent/transports/test_codex_transport.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_dashboard_admin_endpoints.py  (3 tests failed)\n"
+    "  tests/hermes_cli/test_redact_config_bridge.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_startup_plugin_gating.py  (1 test failed)\n"
+    "  tests/tools/test_voice_mode.py  (2 tests failed)\n"
+    "Volles Log: /x/20260621-052029/python.log"
+)
+# the 06-20 night's python.log: 5 of the head's 6 failing files (a subset).
+_LIVE_PREV_LOG = (
+    "=== 5 files with test failures (8 tests failed) ===\n"
+    "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+    "  tests/agent/transports/test_codex_transport.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_dashboard_admin_endpoints.py  (3 tests failed)\n"
+    "  tests/hermes_cli/test_startup_plugin_gating.py  (1 test failed)\n"
+    "  tests/tools/test_voice_mode.py  (2 tests failed)\n"
+)
+
+
+def test_gate_fix_heals_live_legacy_predecessor_via_log_backfill(board_home):
+    """AC-1 (live 06-20/06-21): the older red night is un-attributed (predates the
+    first_fail format) and the head is attributed. Reading the predecessor's gate
+    log proves the SAME failing-file signature, so EXACTLY ONE held, operator-gated
+    fix-PlanSpec opens instead of staying idle."""
+    records = [
+        _unattributed_red("2026-06-20"),
+        *_gate_records(("2026-06-21", "python", _LIVE_HEAD_DETAIL)),
+    ]
+    reader = lambda date, fails: _LIVE_PREV_LOG if date == "2026-06-20" else None
+    out_dir = board_home / "specs"
+    result = strategist.propose_gate_fix(
+        board=None, out_dir=out_dir, gate_records=records, night_log_reader=reader
+    )
+    assert result["triggered"] is True
+    assert result["gate"] == "python"
+    assert result["red_nights"] == 2
+    assert result["dates"] == ["2026-06-21", "2026-06-20"]
+    ing = result["ingested"]
+    assert ing["root_task_id"]
+    assert ing["already_ingested"] is False
+    assert ing["freigabe"] == "operator"  # HELD, never auto-deploy
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_gate_fix_idle_when_predecessor_log_shows_different_cause(board_home):
+    """AC-2 counter: the predecessor's log shows a demonstrably DIFFERENT failure
+    domain — the two reds are NOT merged into one series, so nothing opens (no
+    HELD spam, no false merge of two genuinely different causes)."""
+    records = [
+        _unattributed_red("2026-06-20"),
+        *_gate_records(("2026-06-21", "python", _LIVE_HEAD_DETAIL)),
+    ]
+    different = (
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/other/test_unrelated.py  (1 test failed)\n"
+    )
+    reader = lambda date, fails: different if date == "2026-06-20" else None
+    out_dir = board_home / "specs"
+    result = strategist.propose_gate_fix(
+        board=None, out_dir=out_dir, gate_records=records, night_log_reader=reader
+    )
+    assert result["triggered"] is False
+    assert result["ingested"] is None
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_gate_fix_idle_when_predecessor_log_unavailable(board_home):
+    """AC-2: with no reader (or a reader that can't find the log) the legacy case
+    stays idle — the regression we are fixing must not become a guessed heal."""
+    records = [
+        _unattributed_red("2026-06-20"),
+        *_gate_records(("2026-06-21", "python", _LIVE_HEAD_DETAIL)),
+    ]
+    out_dir = board_home / "specs"
+    # default reader (None) -> pure ledger -> idle (the pre-fix behaviour)
+    result = strategist.propose_gate_fix(board=None, out_dir=out_dir, gate_records=records)
+    assert result["triggered"] is False
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
 def test_gate_fix_chain_is_not_reflected_on(board_home, tmp_path):
     """The autoheal author is distinct from STRATEGIST_AUTHOR, so reflect (which
     scopes to the strategist) never tallies an autoheal hold."""
