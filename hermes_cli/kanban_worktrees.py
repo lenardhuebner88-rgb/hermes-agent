@@ -68,6 +68,15 @@ _IGNORED_DIRTY_PATHS = (
 # snapshots, and any screenshot written there): a UI-verification run inside
 # the worktree drops `.playwright-mcp/console-*.log` + `page-*.yml`, which
 # parked chain t_7567c379 on 2026-06-17 — same byproduct class as __pycache__.
+#
+# NOTE (belt-and-suspenders): `dirty_files()` runs `git status --porcelain`
+# WITHOUT `--ignored`, so anything the repo gitignores is already invisible
+# here. Every entry below is also in this repo's `.gitignore`, so the list only
+# does real work for paths a repo does NOT gitignore. The residual gap is a NEW
+# tool whose scratch dir isn't gitignored yet — that still parks a chain until
+# the `.gitignore` (and, optionally, this list) catches up. A hard pre-submit
+# "clean worktree" gate is deliberately NOT used: it would also block a worker
+# that legitimately left genuine untracked work, which SHOULD park for review.
 _IGNORED_DIRTY_DIR_PARTS = frozenset({
     "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv",
     ".playwright-mcp",
