@@ -56,7 +56,7 @@ import {
   useTaskDetail,
 } from "../hooks/useControlData";
 import { PlanSpecDetailDrawer } from "./flow/PlanSpecDetailDrawer";
-import { planSpecKanbanTone, planSpecKanbanLabel } from "./flow/planSpecKanban";
+import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel, planSpecKanbanTone } from "./flow/planSpecKanban";
 import type { ActiveReviewStage, BoardTask, FlowGateReleaseLevel, FlowReleaseOptions, PlanSpecCloseResponse, PlanSpecIngestResponse, PlanSpecPromptResponse, PlanSpecRecord, ReviewTier, TaskArtifactLink, TaskDeliverable, TaskStatus, ToneName } from "../lib/types";
 import { isIsolatedWorkspace } from "../lib/types";
 import type { Epic, TaskDetailResponse } from "../lib/schemas";
@@ -271,7 +271,7 @@ function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
   const [planspecSearch, setPlanspecSearch] = useState("");
   const [validOnly, setValidOnly] = useState(false);
-  const plans = usePlanSpecs({ limit: 8, valid: validOnly ? true : null, search: planspecSearch });
+  const plans = usePlanSpecs({ scope: "all", limit: 8, valid: validOnly ? true : null, search: planspecSearch });
   const [plansOpen, setPlansOpen] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
@@ -279,7 +279,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   const [detailItem, setDetailItem] = useState<PlanSpecRecord | null>(null);
   const detail = usePlanSpecDetail(detailItem?.path ?? null);
   const items = plans.data?.planspecs ?? [];
-  const validCount = items.filter((item) => item.valid).length;
+  const openCount = items.filter((item) => item.open).length;
   const hasFilters = Boolean(planspecSearch.trim()) || validOnly;
 
   const setRowError = useCallback((path: string, message: string | null) => {
@@ -358,7 +358,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="hc-eyebrow">Planspec-Hub</span>
-          <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{validCount}/{items.length} offen · Vault</span>
+          <span className="hc-mono rounded-full border border-[var(--hc-border)] bg-[rgba(26,29,40,.05)] px-2 py-0.5 hc-type-label hc-soft">{openCount}/{items.length} offen · Vault</span>
         </div>
         <button
           type="button"
@@ -367,7 +367,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-[var(--hc-border)] px-2.5 text-xs hc-soft transition hover:border-[var(--hc-border-strong)]"
         >
           {plansOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-          <span className="min-w-0 break-words text-sm font-semibold text-white">Offene PlanSpecs</span>
+          <span className="min-w-0 break-words text-sm font-semibold text-white">PlanSpecs</span>
           <span className="shrink-0 rounded-full border border-[var(--hc-border)] px-2 py-0.5 hc-mono hc-type-label hc-soft">{items.length}</span>
         </button>
       </div>
@@ -402,6 +402,8 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const closeBusy = busyPath === `${item.path}:close`;
           const rowError = errorByPath[item.path];
           const prompt = promptByPath[item.path];
+          const closed = planSpecIsClosed(item);
+          const closedDisposition = planSpecClosedDispositionLabel(item);
           const kanbanLabel = planSpecKanbanLabel(item);
           const kanbanProgress = planSpecKanbanProgress(item);
           const kanbanTone = planSpecKanbanTone(item.kanban_state);
@@ -423,6 +425,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{item.subtask_count} Subtasks</span>
                 {item.kanban_root_task_id ? <Link to={`/control/ketten?root=${encodeURIComponent(item.kanban_root_task_id)}`} className="max-w-full truncate rounded-[7px] border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 hc-mono text-[10px] text-cyan-100 hover:brightness-110">Root {item.kanban_root_task_id}</Link> : null}
                 {kanbanProgress ? <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{kanbanProgress}</span> : null}
+                <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-soft)]">{closedDisposition}</span>
                 <span className="max-w-full truncate rounded-[7px] border border-[var(--hc-border)] bg-[var(--hc-panel)] px-2 py-1 hc-mono text-[10px] text-[var(--hc-text-dim)]">{item.agent}</span>
               </div>
               {item.errors.length ? <p className="mt-2 break-words text-[0.75rem] text-amber-200">{item.errors.join(" · ")}</p> : null}
@@ -430,7 +433,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
               <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
                 <button
                   type="button"
-                  disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
+                  disabled={closed || !item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void ingest(item)}
                   className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9 sm:justify-start"
                   aria-label={`PlanSpec ${item.topic} in Kanban umsetzen`}
@@ -450,7 +453,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 </button>
                 <button
                   type="button"
-                  disabled={!item.valid || ingestBusy || promptBusy || closeBusy}
+                  disabled={closed || !item.valid || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void buildPrompt(item)}
                   className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-border-strong)] px-3 text-sm hc-soft transition hover:bg-white/5 disabled:opacity-40 sm:min-h-9 sm:justify-start"
                   aria-label={`Sprint-Prompt für PlanSpec ${item.topic} kopieren`}
@@ -460,7 +463,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                 </button>
                 <button
                   type="button"
-                  disabled={ingestBusy || promptBusy || closeBusy}
+                  disabled={closed || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void markNotNeeded(item)}
                   className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-red-300/30 px-3 text-sm text-red-200 transition hover:bg-red-500/10 disabled:opacity-40 sm:min-h-9 sm:justify-start"
                   aria-label={`PlanSpec ${item.topic} als nicht benötigt markieren`}
