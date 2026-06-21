@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_cli.profiles as profiles_mod
 from hermes_cli import kanban_db as kb
 
 
@@ -46,6 +47,25 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
+
+
+@pytest.fixture()
+def review_gate_on(monkeypatch):
+    """Enable the code-task review gate with an available verifier profile."""
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +242,72 @@ def test_complete_task_without_disposition_is_backward_compat(kanban_home):
         rows = kb.list_disposition_items(conn, source_task_id=tid)
 
     assert rows == []
+
+
+def test_review_gate_verified_done_records_coder_disposition(
+    kanban_home, review_gate_on
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="review-gated task", assignee="coder")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(
+            conn,
+            tid,
+            result="implementation done",
+            summary="impl ready for verifier",
+            metadata=_TWO_ITEMS_METADATA,
+            review_gate=True,
+        )
+        assert ok is True
+        assert kb.get_task(conn, tid).status == "review"
+        # The ledger is filled when the review-gated task reaches verified done,
+        # not when the implementer merely parks it in review.
+        assert kb.list_disposition_items(conn, source_task_id=tid) == []
+
+        claimed = kb.claim_review_task(conn, tid)
+        assert claimed is not None and claimed.status == "running"
+        ok = kb.complete_task(
+            conn,
+            tid,
+            result="APPROVED",
+            summary="verifier approved",
+            metadata=_NO_DISPOSITION_METADATA,
+            review_gate=True,
+        )
+        assert ok is True
+        assert kb.get_task(conn, tid).status == "done"
+        rows = kb.list_disposition_items(conn, source_task_id=tid)
+
+    assert len(rows) == 2
+    assert {r["typ"] for r in rows} == {"risk", "follow_up"}
+
+
+def test_workflow_step_completion_records_disposition(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="workflow task", assignee="planner")
+        kb.claim_task(conn, tid)
+        current_run_id = kb.get_task(conn, tid).current_run_id
+
+        ok = kb._advance_workflow_step(
+            conn,
+            tid,
+            next_step_key="review",
+            next_assignee="reviewer",
+            result="planner step complete",
+            summary="handoff to reviewer",
+            metadata=_TWO_ITEMS_METADATA,
+            verified_cards=[],
+            expected_run_id=current_run_id,
+        )
+        assert ok is True
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.current_step_key == "review"
+        rows = kb.list_disposition_items(conn, source_task_id=tid)
+
+        # A retried/advisory replay of the same metadata must stay idempotent.
+        kb._record_disposition_items(conn, tid, _TWO_ITEMS_METADATA)
+        assert len(kb.list_disposition_items(conn, source_task_id=tid)) == 2
+
+    assert len(rows) == 2
+    assert {r["typ"] for r in rows} == {"risk", "follow_up"}
