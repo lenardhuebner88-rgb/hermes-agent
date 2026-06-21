@@ -98,6 +98,12 @@ COST_SIGNAL_CAP = 3.0
 BUDGET_THRESHOLD = 80.0
 BUDGET_PROVIDER = "anthropic"  # the strategist runs on the Opus subscription lane
 
+# RECEIPT-HARVEST (separater --mode harvest): Fenster/Caps für die Receipt-Ernte.
+HARVEST_WINDOW_FALLBACK_SECONDS = 48 * 3600
+HARVEST_MAX_RECEIPTS = 30
+HARVEST_MIN_RECEIPT_CHARS = 200
+HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
+
 
 # --------------------------------------------------------------------------- #
 # Lever model + deterministic catalogue
@@ -1073,6 +1079,57 @@ def reflect(
 
 
 # --------------------------------------------------------------------------- #
+# Receipt-Harvest: deterministic gatherer + filter
+# --------------------------------------------------------------------------- #
+def gather_recent_receipts(
+    conn,
+    *,
+    since_ts: int,
+    max_tasks: int = HARVEST_MAX_RECEIPTS,
+    min_chars: int = HARVEST_MIN_RECEIPT_CHARS,
+) -> list[dict[str, Any]]:
+    """Kürzlich abgeschlossene Tasks mit substanziellem Receipt (≥ ``min_chars``).
+
+    Schließt den eigenen ``strategist-cron``-Autor aus (Anti-Rekursion) und liest
+    pro Task den kanonischen Receipt-Kommentar via :func:`funnel.draft_text`.
+    """
+    from hermes_cli import funnel
+
+    rows = conn.execute(
+        "SELECT id, title, assignee, completed_at FROM tasks "
+        "WHERE status = 'done' AND completed_at IS NOT NULL AND completed_at >= ? "
+        "AND (created_by IS NULL OR created_by <> ?) "
+        "ORDER BY completed_at DESC LIMIT ?",
+        (int(since_ts), STRATEGIST_AUTHOR, int(max_tasks)),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        excerpt = funnel.draft_text(conn, r["id"], max_chars=2000)
+        if not excerpt or len(excerpt) < min_chars:
+            continue
+        out.append(
+            {
+                "task_id": r["id"],
+                "title": r["title"],
+                "assignee": r["assignee"],
+                "completed_at": r["completed_at"],
+                "excerpt": excerpt,
+            }
+        )
+    return out
+
+
+def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Nur Receipts mit Follow-up-Marker; ergänzt einen stabilen ``suggested_key``."""
+    kept: list[dict[str, Any]] = []
+    for rc in receipts:
+        low = (rc.get("excerpt") or "").lower()
+        if any(marker in low for marker in FOLLOWUP_MARKERS):
+            kept.append({**rc, "suggested_key": f"receipt-{rc['task_id']}"})
+    return kept
+
+
+# --------------------------------------------------------------------------- #
 # Default runtime paths (CLI fills these; tests inject explicit paths)
 # --------------------------------------------------------------------------- #
 def default_state_dir() -> Path:
@@ -1123,3 +1180,72 @@ def run_reflect(args) -> dict[str, Any]:
         return reflect(conn, notes_path=notes_path)
     finally:
         conn.close()
+
+
+# Marker, die im Receipt-Text auf unerledigte Out-of-Scope-Arbeit hindeuten.
+FOLLOWUP_MARKERS = (
+    "outside scope",
+    "out of scope",
+    "nicht im scope",
+    "ausser scope",
+    "remaining",
+    "verbleib",
+    "separat",
+    "follow-up",
+    "followup",
+    "folge-task",
+    "anschließend",
+    "nächster schritt",
+    "next step",
+    "todo",
+    "sollte noch",
+    "should be",
+)
+
+
+def _read_harvest_since(marker_path: Path, *, now: int) -> int:
+    """Letzter Harvest-Lauf aus dem Marker, sonst Fenster-Fallback (now-48h)."""
+    try:
+        ts = int(json.loads(Path(marker_path).read_text(encoding="utf-8"))["ts"])
+        return ts
+    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        return now - HARVEST_WINDOW_FALLBACK_SECONDS
+
+
+def run_harvest(args) -> dict[str, Any]:
+    """CLI-Adapter: Receipts sammeln + vorfiltern → Kandidaten-Datei + Marker.
+
+    KEIN LLM-Call und KEIN Ingest hier — rein deterministisch. Die Destillation
+    der Kandidaten zu Lever-Drafts und der Ingest passieren im billigen
+    ``claude -p``-Wrapper über den bestehenden ``--mode propose``-Pfad.
+    """
+    state_dir = default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    marker = state_dir / "harvest_last_run.json"
+    now = int(time.time())
+    since_ts = _read_harvest_since(marker, now=now)
+
+    conn = kanban_db.connect(board=getattr(args, "board", None))
+    try:
+        receipts = gather_recent_receipts(conn, since_ts=since_ts)
+    finally:
+        conn.close()
+    candidates = filter_followup_candidates(receipts)
+
+    cand_path = state_dir / "harvest_candidates.json"
+    cand_path.write_text(
+        json.dumps(
+            {"generated_ts": now, "since_ts": since_ts, "candidates": candidates},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    marker.write_text(json.dumps({"ts": now}), encoding="utf-8")
+    return {
+        "mode": "harvest",
+        "since_ts": since_ts,
+        "receipts": len(receipts),
+        "candidates": len(candidates),
+        "candidates_path": str(cand_path),
+    }

@@ -48,7 +48,10 @@ def build_vision_parser(subparsers) -> None:
         ),
     )
     strat.add_argument(
-        "--mode", choices=["propose", "reflect"], required=True, help="propose or reflect"
+        "--mode",
+        choices=["propose", "reflect", "harvest"],
+        required=True,
+        help="propose, reflect oder harvest",
     )
     strat.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
     strat.add_argument("--json", action="store_true", help="Emit JSON output")
@@ -173,6 +176,8 @@ def vision_command(args: argparse.Namespace) -> int:
         try:
             if args.mode == "propose":
                 result = strategist.run_propose(args)
+            elif args.mode == "harvest":
+                result = strategist.run_harvest(args)
             else:
                 result = strategist.run_reflect(args)
         except FileNotFoundError as exc:
@@ -199,6 +204,11 @@ def vision_command(args: argparse.Namespace) -> int:
                 )
                 for item in result["ingested"]:
                     print(f"  - {item['key']}: {item['title']} → root {item.get('root_task_id')}")
+        elif result["mode"] == "harvest":
+            print(
+                f"strategist harvest: {result['receipts']} receipt(s), "
+                f"{result['candidates']} candidate(s) → {result['candidates_path']}"
+            )
         else:
             print(
                 f"strategist reflect: {result['note']['approved']} approved, "
