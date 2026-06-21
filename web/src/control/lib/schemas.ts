@@ -1275,6 +1275,14 @@ export const PlanSpecDetailResponseSchema = z.object({
 export type PlanSpecDetailResponse = z.infer<typeof PlanSpecDetailResponseSchema>;
 export type PlanSpecDetailSubtask = z.infer<typeof PlanSpecDetailSubtaskSchema>;
 
+export const StrategistCountSchema = z.object({ count: z.number() }).passthrough();
+
+export const StrategistLastRunsSchema = z.object({
+  harvest: z.object({ ts: z.number(), receipts: z.number().optional(), candidates: z.number().optional() }).passthrough().nullable(),
+  propose: z.object({ ts: z.number(), candidates: z.number().optional(), ingested: z.number().optional() }).passthrough().nullable(),
+});
+export type StrategistLastRuns = z.infer<typeof StrategistLastRunsSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

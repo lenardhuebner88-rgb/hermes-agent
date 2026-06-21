@@ -24,6 +24,7 @@ const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: st
   { id: "ketten", label: "Ketten", mobileLabel: "DAG", path: "/control/ketten", icon: GitBranch },
   { id: "statistik", label: de.tabs.statistik, mobileLabel: "Stats", path: "/control/statistik", icon: ChartSpline },
   { id: "bibliothek", label: "Bibliothek", mobileLabel: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
+  { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
@@ -44,9 +45,6 @@ const moreTabs = [
   { label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
   // Prompt-Schmiede: Copy-Paste-Generator für Agent-Steuerbefehle (kein Dispatch).
   { label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
-  // Stratege (Vision-Flywheel G1): held freigabe:operator-Vorschläge triagieren.
-  // Label literal (kein Edit an i18n/de.ts paralleler Sessions).
-  { label: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
 
 const secondaryNav = [
@@ -70,6 +68,8 @@ interface Props {
   inboxTone: ToneName;
   /** Neue Bibliothek-Einträge seit dem letzten Besuch — badged den Lesesaal-Tab. */
   libraryUnread?: number;
+  /** Offene Strategen-Vorschläge — badged den Stratege-Tab. */
+  strategistCount?: number;
   health: {
     data: SystemHealthResponse | null;
     error: string | null;
@@ -90,7 +90,7 @@ interface BadgeInfo { count: number; cls: string }
 // "needs me" total (tone-coloured), Autoresearch keeps its open-proposal count
 // (relevant, falls es je in die Haupt-Nav zurückkehrt), die Bibliothek zählt
 // ungelesene Lesesaal-Einträge.
-function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName, libraryUnread: number): BadgeInfo | null {
+function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName, libraryUnread: number, strategistCount: number): BadgeInfo | null {
   if (tab === "inbox" && inboxTotal > 0) {
     const cls = inboxTone === "red" || inboxTone === "rose" ? "hc-badge-red" : inboxTone === "amber" ? "hc-badge-amber" : "hc-badge-accent";
     return { count: inboxTotal, cls };
@@ -101,6 +101,9 @@ function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, in
   if (tab === "bibliothek" && libraryUnread > 0) {
     return { count: libraryUnread, cls: "hc-badge-accent" };
   }
+  if (tab === "stratege" && strategistCount > 0) {
+    return { count: strategistCount, cls: "hc-badge-accent" };
+  }
   return null;
 }
 
@@ -108,7 +111,7 @@ export function ControlShell(props: Props) {
   return props.density === "compact" ? <ShellCompact {...props} /> : <ShellAiry {...props} />;
 }
 
-function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   // "Mehr" lebt auf Mobile als 5. Bottom-Tab + Bottom-Sheet (Audit 2026-06-11,
   // M3 Variante A) — das Header-Dropdown ist dort zu hoch und schloss sich beim
   // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
@@ -119,12 +122,12 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="hc-eyebrow">Operator Dashboard</p><h1 className="mt-1 text-2xl font-semibold tracking-normal text-white">Hermes Control</h1></div>
         <div className="flex flex-wrap items-center justify-end gap-2"><NotificationBridge inbox={inbox} /><CommandButton buttonRef={commandButtonRef} onOpen={onOpenCommand} /><MoreNav /><div className="flex flex-wrap items-center justify-end gap-2"><StatusDots health={health} /></div></div>
-        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} onNavigate={onNavigate} onPrefetch={onPrefetch} />
+        <DesktopTabs active={active} openProposals={openProposals} inboxTotal={inboxTotal} inboxTone={inboxTone} libraryUnread={libraryUnread} strategistCount={strategistCount ?? 0} onNavigate={onNavigate} onPrefetch={onPrefetch} />
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
         <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length + 1}, minmax(0, 1fr))` }}>
-          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button type="button" onClick={() => setMoreOpen(true)} aria-label="Mehr" aria-expanded={moreOpen} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", moreActive && "text-[var(--hc-accent-text)]")}>
             <MoreHorizontal className="h-5 w-5" />
             <span className="max-w-full truncate px-0.5">Mehr</span>
@@ -153,13 +156,13 @@ function MoreSheet({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
+function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, health, onNavigate, onPrefetch, commandButtonRef, onOpenCommand }: Props) {
   return (
     <div className="hc-page grid min-h-0 grid-cols-[72px_1fr] gap-0">
       <aside className="sticky top-0 flex h-[calc(100dvh-5rem)] flex-col items-center justify-between border-r border-[var(--hc-border)] bg-[var(--hc-rail)] px-2 py-4">
         <div className="flex flex-col gap-2">
           <div className="mb-2 grid h-11 w-11 place-items-center rounded-lg border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"><Sparkles className="h-5 w-5" /></div>
-          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+          {tabs.map((tab) => <RailButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button ref={commandButtonRef} type="button" title="Command Palette" aria-label="Command Palette" onClick={onOpenCommand} className="grid h-11 w-11 place-items-center rounded-lg border border-transparent hc-soft hover:border-[var(--hc-accent-border)] hover:bg-[var(--hc-accent-wash)]"><Command className="h-5 w-5" /></button>
           <RailMoreNav />
         </div>
@@ -177,12 +180,12 @@ function ShellCompact({ active, children, inbox, openProposals, inboxTotal, inbo
 }
 
 
-function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, libraryUnread, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; libraryUnread?: number; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
+function DesktopTabs({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch }: { active: ControlTab; openProposals: number; inboxTotal: number; inboxTone: ToneName; libraryUnread?: number; strategistCount?: number; onNavigate: (tab: ControlTab) => void; onPrefetch?: (tab: ControlTab) => void }) {
   return (
     <nav className="hidden w-full flex-wrap gap-2 lg:flex">
       {tabs.map((tab) => {
         const Icon = tab.icon;
-        const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0);
+        const badge = tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0);
         return (
           <button key={tab.id} type="button" onClick={() => onNavigate(tab.id)} onMouseEnter={() => onPrefetch?.(tab.id)} onFocus={() => onPrefetch?.(tab.id)} className={cn("relative inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm hc-soft transition", active === tab.id && "hc-nav-active border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]")}>
             <Icon className="h-4 w-4" />{tab.label}

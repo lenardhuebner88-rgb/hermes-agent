@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Gauge, Lightbulb, Loader2, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
+import { Gauge, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
 import { fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
+import { useStrategistLastRuns } from "../hooks/useControlData";
 import {
   metricSnapshotRows,
+  runSummaryText,
   sourceLabel,
   type StrategistProposal,
   type StrategistProposalsResponse,
@@ -137,6 +139,8 @@ export function StrategistView({ density }: { density: Density }) {
       {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
       {notice ? <ToneCallout tone="emerald">{notice}</ToneCallout> : null}
 
+      <LastRunsStrip />
+
       <TriggerPanel onRan={() => void load()} />
 
       <FleetPanel eyebrow={t.metricsEyebrow} meta={t.metricsMeta}>
@@ -234,20 +238,20 @@ export function ProposalList({
                     type="button"
                     disabled={busy}
                     onClick={() => onAct(p, isPending.kind)}
-                    className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
                   >
                     {isPending.kind === "approve" ? <Rocket className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
                     {isPending.kind === "approve" ? t.approve : t.veto} · {t.confirm}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => onPending(null)} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
+                  <button type="button" disabled={busy} onClick={() => onPending(null)} className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft">{t.cancel}</button>
                   <span className="text-[0.72rem] hc-dim">{isPending.kind === "approve" ? t.approveHint : t.vetoHint}</span>
                 </>
               ) : (
                 <>
-                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "approve" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
+                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "approve" })} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-emerald-500/30 px-3 py-1 text-[0.78rem] text-emerald-200 hover:bg-emerald-500/10">
                     <Rocket className="h-3.5 w-3.5" />{t.approve}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "veto" })} className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-red-500/25 px-3 py-1 text-[0.78rem] text-red-200 hover:bg-red-500/10">
+                  <button type="button" disabled={busy} onClick={() => onPending({ id: p.id, kind: "veto" })} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-red-500/25 px-3 py-1 text-[0.78rem] text-red-200 hover:bg-red-500/10">
                     <Trash2 className="h-3.5 w-3.5" />{t.veto}
                   </button>
                 </>
@@ -257,6 +261,35 @@ export function ProposalList({
         );
       })}
     </ul>
+  );
+}
+
+/** Letzte-Läufe-Leiste: zeigt den jüngsten Harvest- und Propose-Lauf. */
+function LastRunsStrip() {
+  const { data } = useStrategistLastRuns();
+  const harvest = data?.harvest ?? null;
+  const propose = data?.propose ?? null;
+  return (
+    <FleetPanel eyebrow="Letzte Läufe" meta="Harvest + Stratege-Vorschlag on-demand oder via Cron">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Moon className="h-3.5 w-3.5 shrink-0 hc-dim" />
+            <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">Harvest</span>
+            {harvest ? <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(harvest.ts)}</span> : null}
+          </div>
+          <p className="mt-1 text-[0.78rem] hc-soft">{runSummaryText("harvest", harvest)}</p>
+        </div>
+        <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Lightbulb className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+            <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">Stratege</span>
+            {propose ? <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">{fmtClock(propose.ts)}</span> : null}
+          </div>
+          <p className="mt-1 text-[0.78rem] hc-soft">{runSummaryText("propose", propose)}</p>
+        </div>
+      </div>
+    </FleetPanel>
   );
 }
 
@@ -363,19 +396,19 @@ function TriggerRow({ label, hint, job, which, pending, busy, onPending, onFire 
           <>
             <button
               type="button" disabled={busy || running} onClick={() => onFire(which)}
-              className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
             >
               <Play className="h-3.5 w-3.5" />{t.confirm}
             </button>
             <button
               type="button" disabled={busy} onClick={() => onPending(null)}
-              className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft"
+              className="inline-flex min-h-11 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft"
             >{t.cancel}</button>
           </>
         ) : (
           <button
             type="button" disabled={busy || running} onClick={() => onPending(which)}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-cyan-500/30 px-3 py-1 text-[0.78rem] text-cyan-100 hover:bg-cyan-500/10 disabled:opacity-50"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-cyan-500/30 px-3 py-1 text-[0.78rem] text-cyan-100 hover:bg-cyan-500/10 disabled:opacity-50"
           >
             <Play className="h-3.5 w-3.5" />{label}
           </button>

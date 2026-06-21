@@ -3,6 +3,7 @@ import {
   humanizeMetricKey,
   metricSnapshotRows,
   proposalSource,
+  runSummaryText,
   sourceLabel,
 } from "./strategist";
 
@@ -98,6 +99,18 @@ describe("proposalSource (legacy)", () => {
     expect(proposalSource("strategist-cron")).toBe("Stratege");
     expect(proposalSource(null)).toBe("Stratege");
     expect(proposalSource("someone-else")).toBe("someone-else");
+  });
+});
+
+describe("runSummaryText", () => {
+  it("formats a harvest run", () => {
+    expect(runSummaryText("harvest", { ts: 1, receipts: 5, candidates: 2 })).toBe("5 Receipts → 2 Vorschläge");
+  });
+  it("formats a propose run", () => {
+    expect(runSummaryText("propose", { ts: 1, candidates: 4, ingested: 1 })).toBe("1 Vorschlag");
+  });
+  it("handles null", () => {
+    expect(runSummaryText("harvest", null)).toBe("noch nicht gelaufen");
   });
 });
 

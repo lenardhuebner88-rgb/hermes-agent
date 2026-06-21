@@ -1140,6 +1140,38 @@ def default_state_dir() -> Path:
     return get_hermes_home() / "state" / "strategist"
 
 
+def append_run_history(state_dir: Path, entry: dict[str, Any]) -> None:
+    """Append one run-summary line to ``<state_dir>/run-history.jsonl`` (best-effort)."""
+    try:
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        with (Path(state_dir) / "run-history.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.warning("append_run_history failed", exc_info=True)
+
+
+def read_last_runs(state_dir: Path) -> dict[str, Any]:
+    """Most-recent run-history entry per mode (harvest/propose), or None each."""
+    out: dict[str, Any] = {"harvest": None, "propose": None}
+    path = Path(state_dir) / "run-history.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        mode = entry.get("mode")
+        if mode in out:
+            out[mode] = entry  # later lines win → most recent
+    return out
+
+
 def run_propose(args) -> dict[str, Any]:
     """CLI adapter: resolve defaults from the runtime layout, then propose."""
     state_dir = default_state_dir()
@@ -1149,7 +1181,7 @@ def run_propose(args) -> dict[str, Any]:
     if drafts_file:
         loaded = json.loads(Path(drafts_file).read_text(encoding="utf-8"))
         drafts = loaded.get("levers", loaded) if isinstance(loaded, dict) else loaded
-    return propose(
+    result = propose(
         board=getattr(args, "board", None),
         out_dir=out_dir,
         notes_dir=state_dir,
@@ -1159,6 +1191,16 @@ def run_propose(args) -> dict[str, Any]:
         cap=getattr(args, "cap", CAP_MAX),
         do_ingest=not getattr(args, "dry_run", False),
     )
+    append_run_history(
+        default_state_dir(),
+        {
+            "ts": int(time.time()),
+            "mode": "propose",
+            "candidates": int(result.get("candidates", 0) or 0),
+            "ingested": len(result.get("ingested", []) or []),
+        },
+    )
+    return result
 
 
 def run_gate_fix(args) -> dict[str, Any]:
@@ -1244,6 +1286,7 @@ def run_harvest(args) -> dict[str, Any]:
         encoding="utf-8",
     )
     marker.write_text(json.dumps({"ts": now}), encoding="utf-8")
+    append_run_history(state_dir, {"ts": now, "mode": "harvest", "receipts": len(receipts), "candidates": len(candidates)})
     return {
         "mode": "harvest",
         "since_ts": since_ts,

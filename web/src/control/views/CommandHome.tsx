@@ -25,6 +25,7 @@ import {
   useHermesRunsDaily,
   useHermesTodayDigest,
   useHermesWorkers,
+  useStrategistCount,
   useSystemHealth,
 } from "../hooks/useControlData";
 import type { Density } from "../hooks/useDensity";
@@ -147,6 +148,9 @@ export function CommandHome({ density }: { density: Density }) {
 
       {/* ── STATISTIK-PULS ──────────────────────────────────────────────────── */}
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
+
+      {/* ── STRATEGEN-VORSCHLÄGE ────────────────────────────────────────────── */}
+      <StrategistSignalTile onOpen={() => navigate("/control/stratege")} />
 
       {/* ── ABO-LIMITS ──────────────────────────────────────────────────────── */}
       <AccountUsageTile usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} />
@@ -470,6 +474,27 @@ function StatsPulse({ onOpen }: { onOpen: () => void }) {
           <Sparkline points={series.map((p) => ({ label: p.date.slice(5), value: p.output_tokens ?? 0 }))} stroke="var(--hc-accent-2)" valueFmt={fmtTokens} />
         </div>
       </div> : null}
+    </section>
+  );
+}
+
+/** Signal-Kachel: Strategen-Vorschläge warten auf Entscheidung.
+ *  Nur sichtbar wenn count > 0. Muster: StatsPulse (Zeilen 448-475). */
+function StrategistSignalTile({ onOpen }: { onOpen: () => void }) {
+  const strat = useStrategistCount();
+  const count = strat.data?.count ?? 0;
+  if (count === 0) return null;
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          <Eyebrow>Strategen-Vorschläge</Eyebrow>
+        </div>
+        <button type="button" onClick={onOpen} className="inline-flex items-center gap-1 text-xs text-[var(--hc-accent-text)] hover:brightness-110">Stratege öffnen<ChevronRight className="h-3.5 w-3.5" /></button>
+      </div>
+      <div className="hc-surface-card p-3">
+        <p className="text-sm hc-soft">{count} {count === 1 ? "wartet" : "warten"} auf deine Entscheidung</p>
+      </div>
     </section>
   );
 }

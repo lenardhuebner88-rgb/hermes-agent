@@ -3995,6 +3995,14 @@ def strategist_run_status():
     }
 
 
+@router.get("/strategist/last-runs")
+def strategist_last_runs() -> dict:
+    """Jüngster Harvest- und Propose-Lauf aus der run-history.jsonl."""
+    from hermes_cli import strategist
+
+    return strategist.read_last_runs(strategist.default_state_dir())
+
+
 @router.get("/runs/daily")
 def get_runs_daily(
     days: int = Query(30, ge=1, le=365),

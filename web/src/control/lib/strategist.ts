@@ -108,6 +108,20 @@ export function proposalSource(createdBy: string | null): string {
   return SOURCE_LABELS[createdBy] ?? createdBy;
 }
 
+/** Human-readable one-liner for a harvest or propose run. */
+export function runSummaryText(
+  kind: "harvest" | "propose",
+  run: { ts?: number; receipts?: number; candidates?: number; ingested?: number } | null,
+): string {
+  if (!run) return "noch nicht gelaufen";
+  if (kind === "harvest") {
+    const r = run.receipts ?? 0, c = run.candidates ?? 0;
+    return `${r} Receipt${r === 1 ? "" : "s"} → ${c} ${c === 1 ? "Vorschlag" : "Vorschläge"}`;
+  }
+  const i = run.ingested ?? 0;
+  return `${i} ${i === 1 ? "Vorschlag" : "Vorschläge"}`;
+}
+
 /** Human label for the provenance `source` field. */
 export function sourceLabel(source: string | null | undefined): string {
   switch (source) {

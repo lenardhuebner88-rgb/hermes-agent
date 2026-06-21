@@ -43,8 +43,11 @@ import {
   WorkersResponseSchema,
   WorkerActivityResponseSchema,
   VaultProvenanceResponseSchema,
+  StrategistCountSchema,
+  StrategistLastRunsSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import type { StrategistLastRuns } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
@@ -1974,4 +1977,20 @@ export function usePlanSpecDetail(path: string | null): { data: PlanSpecDetailRe
   }, [load]);
 
   return { data, loading, error };
+}
+
+export function useStrategistCount() {
+  return usePolling(
+    "strategist/count",
+    async () => parseOrThrow(StrategistCountSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/proposals"), "strategist-count"),
+    5000,
+  );
+}
+
+export function useStrategistLastRuns() {
+  return usePolling<StrategistLastRuns>(
+    "strategist/last-runs",
+    async () => parseOrThrow(StrategistLastRunsSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/last-runs"), "strategist-last-runs"),
+    15000,
+  );
 }
