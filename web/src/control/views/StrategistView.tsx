@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Gauge, Lightbulb, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
+import { Gauge, Lightbulb, Loader2, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
 import { ToneCallout } from "../components/atoms";
@@ -47,9 +47,23 @@ const t = {
   cancel: "Abbrechen",
   approved: (id: string) => `Freigegeben — Kette ${id} ist eingereiht.`,
   vetoed: (id: string) => `${id} verworfen und archiviert.`,
+  // Manuelle Trigger (G1.5): Stratege/Bewerter on-demand starten.
+  triggerEyebrow: "Manuell auslösen",
+  triggerMeta: "Stratege + Bewerter on-demand starten",
+  runStrategist: "Strategen jetzt laufen",
+  runStrategistHint: "fährt den propose-Lauf (wie 06:00) — schlägt neue PlanSpecs vor",
+  runGutachter: "Bewerter jetzt laufen",
+  runGutachterHint: "bewertet die offenen Vorschläge — Kommentar + Discord, kein Dispatch",
+  running: "läuft…",
+  lastRun: (s: string) => `zuletzt: ${s}`,
+  neverRun: "noch nicht gelaufen",
+  triggerStarted: "Lauf gestartet — das Ergebnis erscheint, sobald er durch ist.",
 };
 
 type PendingAction = { id: string; kind: "approve" | "veto" } | null;
+type JobStatus = { running: boolean; exit_code: number | null; last_modified: number | null; tail: string[] };
+type RunStatus = { propose: JobStatus; gutachter: JobStatus };
+type TriggerWhich = "propose" | "gutachter";
 
 export function StrategistView({ density }: { density: Density }) {
   const [data, setData] = useState<StrategistProposalsResponse | null>(null);
@@ -122,6 +136,8 @@ export function StrategistView({ density }: { density: Density }) {
 
       {error ? <ToneCallout tone="red">{error}</ToneCallout> : null}
       {notice ? <ToneCallout tone="emerald">{notice}</ToneCallout> : null}
+
+      <TriggerPanel onRan={() => void load()} />
 
       <FleetPanel eyebrow={t.metricsEyebrow} meta={t.metricsMeta}>
         {rows.length === 0 ? (
@@ -243,6 +259,123 @@ function AnnotationCell({ icon, label, value }: { icon: React.ReactNode; label: 
     <div className="rounded-md border border-white/10 bg-black/15 px-2.5 py-1.5">
       <div className="hc-type-label hc-dim flex items-center gap-1">{icon}{label}</div>
       <div className={value ? "mt-0.5 text-[0.8rem] text-white" : "mt-0.5 text-[0.8rem] hc-dim"}>{value ?? "—"}</div>
+    </div>
+  );
+}
+
+// Manuelle Trigger für Stratege (propose) + Bewerter (stratege-gutachter). Pollt
+// /strategist/run-status alle 3s; nach einem abgeschlossenen Lauf refetcht es die
+// Vorschlagsliste (onRan). Zwei-Schritt-Confirm wie approve/veto.
+export function TriggerPanel({ onRan }: { onRan: () => void }) {
+  const [status, setStatus] = useState<RunStatus | null>(null);
+  const [pending, setPending] = useState<TriggerWhich | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const wasRunning = useRef(false);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const poll = useCallback(async () => {
+    try {
+      const s = await fetchJSON<RunStatus>("/api/plugins/kanban/strategist/run-status");
+      if (!aliveRef.current) return;
+      setStatus(s);
+      const running = s.propose.running || s.gutachter.running;
+      if (wasRunning.current && !running) onRan(); // ein Lauf wurde gerade fertig → Liste neu laden
+      wasRunning.current = running;
+    } catch {
+      /* Status ist best-effort */
+    }
+  }, [onRan]);
+
+  useEffect(() => {
+    void poll();
+    const timer = window.setInterval(() => { if (!document.hidden) void poll(); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [poll]);
+
+  const fire = useCallback(async (which: TriggerWhich) => {
+    setBusy(true); setErr(null); setNotice(null);
+    const path = which === "propose" ? "run-propose" : "run-gutachter";
+    try {
+      const res = await fetchJSON<{ ok: boolean; detail?: string }>(
+        `/api/plugins/kanban/strategist/${path}`, { method: "POST" });
+      if (res.ok) setNotice(t.triggerStarted);
+      else if (res.detail) setErr(res.detail);
+      void poll();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false); setPending(null);
+    }
+  }, [poll]);
+
+  return (
+    <FleetPanel eyebrow={t.triggerEyebrow} meta={t.triggerMeta}>
+      {err ? <ToneCallout tone="red">{err}</ToneCallout> : null}
+      {notice ? <ToneCallout tone="cyan">{notice}</ToneCallout> : null}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <TriggerRow
+          label={t.runStrategist} hint={t.runStrategistHint}
+          job={status?.propose} which="propose"
+          pending={pending} busy={busy} onPending={setPending} onFire={(w) => void fire(w)}
+        />
+        <TriggerRow
+          label={t.runGutachter} hint={t.runGutachterHint}
+          job={status?.gutachter} which="gutachter"
+          pending={pending} busy={busy} onPending={setPending} onFire={(w) => void fire(w)}
+        />
+      </div>
+    </FleetPanel>
+  );
+}
+
+function TriggerRow({ label, hint, job, which, pending, busy, onPending, onFire }: {
+  label: string; hint: string; job: JobStatus | undefined; which: TriggerWhich;
+  pending: TriggerWhich | null; busy: boolean;
+  onPending: (p: TriggerWhich | null) => void; onFire: (w: TriggerWhich) => void;
+}) {
+  const running = job?.running ?? false;
+  const isPending = pending === which;
+  return (
+    <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[0.85rem] font-medium text-white">{label}</span>
+        {running ? (
+          <span className="hc-mono inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan-400/30 px-2 py-0.5 text-[0.68rem] text-cyan-200">
+            <Loader2 className="h-3 w-3 animate-spin" />{t.running}
+          </span>
+        ) : (
+          <span className="hc-mono shrink-0 text-[0.7rem] hc-dim">
+            {job?.last_modified ? t.lastRun(fmtClock(job.last_modified)) : t.neverRun}
+          </span>
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {isPending ? (
+          <>
+            <button
+              type="button" disabled={busy || running} onClick={() => onFire(which)}
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 py-1 text-[0.78rem] font-medium text-[var(--hc-accent-text)] disabled:opacity-50"
+            >
+              <Play className="h-3.5 w-3.5" />{t.confirm}
+            </button>
+            <button
+              type="button" disabled={busy} onClick={() => onPending(null)}
+              className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 py-1 text-[0.78rem] hc-soft"
+            >{t.cancel}</button>
+          </>
+        ) : (
+          <button
+            type="button" disabled={busy || running} onClick={() => onPending(which)}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-cyan-500/30 px-3 py-1 text-[0.78rem] text-cyan-100 hover:bg-cyan-500/10 disabled:opacity-50"
+          >
+            <Play className="h-3.5 w-3.5" />{label}
+          </button>
+        )}
+        <span className="text-[0.72rem] hc-dim">{hint}</span>
+      </div>
     </div>
   );
 }

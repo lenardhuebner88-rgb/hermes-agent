@@ -190,3 +190,105 @@ def test_veto_already_released_chain_is_rejected(client):
     r = client.post(f"{PREFIX}/strategist/proposals/{root_id}/veto")
     assert r.status_code == 409
     assert _status(root_id) == "todo"
+
+
+# ---------------------------------------------------------------------------
+# POST run-propose / run-gutachter + GET run-status (manuelle Trigger, G1.5)
+# Der echte _spawn_trigger wird gemockt, damit der Test KEINEN echten Strategen-/
+# Gutachter-Lauf startet und nicht ins echte $HOME schreibt.
+# ---------------------------------------------------------------------------
+
+
+def _load_plugin_module():
+    repo_root = Path(__file__).resolve().parents[2]
+    plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location(
+        "hermes_dashboard_plugin_kanban_trigger_test", plugin_file,
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FakeRunningProc:
+    def __init__(self, pid: int = 4242):
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self):  # None = läuft noch
+        return None
+
+
+@pytest.fixture
+def trigger_ctx(kanban_home):
+    mod = _load_plugin_module()
+    calls: list[str] = []
+
+    def _fake_spawn(name: str):
+        calls.append(name)
+        proc = mod._TRIGGER_PROCS.get(name)
+        if proc is not None and proc.poll() is None:
+            return None  # echter Guard: läuft schon
+        p = _FakeRunningProc()
+        mod._TRIGGER_PROCS[name] = p
+        return p
+
+    mod._spawn_trigger = _fake_spawn
+    app = FastAPI()
+    app.include_router(mod.router, prefix=PREFIX)
+    return mod, TestClient(app), calls
+
+
+def test_run_propose_triggers_and_returns_pid(trigger_ctx):
+    _mod, client, calls = trigger_ctx
+    r = client.post(f"{PREFIX}/strategist/run-propose")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["pid"] == 4242 and body["name"] == "strategist-propose"
+    assert calls == ["strategist-propose"]
+
+
+def test_run_gutachter_triggers(trigger_ctx):
+    _mod, client, _calls = trigger_ctx
+    r = client.post(f"{PREFIX}/strategist/run-gutachter")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True and r.json()["name"] == "gutachter"
+
+
+def test_double_trigger_is_guarded(trigger_ctx):
+    _mod, client, _calls = trigger_ctx
+    assert client.post(f"{PREFIX}/strategist/run-propose").json()["ok"] is True
+    r2 = client.post(f"{PREFIX}/strategist/run-propose").json()
+    assert r2["ok"] is False and r2["running"] is True
+
+
+def test_run_status_shape(trigger_ctx):
+    _mod, client, _calls = trigger_ctx
+    data = client.get(f"{PREFIX}/strategist/run-status").json()
+    for key in ("propose", "gutachter"):
+        assert key in data
+        assert set(data[key]) == {"running", "exit_code", "last_modified", "tail"}
+        assert data[key]["running"] is False  # noch nichts gespawnt
+
+
+def test_trigger_specs_argv_and_env(trigger_ctx):
+    mod, _client, _calls = trigger_ctx
+    pspec = mod._TRIGGER_SPECS["strategist-propose"]
+    assert pspec["argv"][0] == "bash" and pspec["argv"][-1] == "propose"
+    assert "strategist-cron.sh" in pspec["argv"][1]
+    gspec = mod._TRIGGER_SPECS["gutachter"]
+    assert gspec["argv"][-1].endswith("run.sh")
+    assert gspec["env"]["DELIVER_MODE"] == "live"  # Phase-A live (Kommentar+Discord)
+    # PATH wird angereichert, damit hermes/claude auflösen
+    env = mod._trigger_env({})
+    assert any(p.endswith("/.local/bin") for p in env["PATH"].split(":"))
+
+
+def test_real_spawn_trigger_guard_blocks_when_running(kanban_home):
+    """Der ECHTE _spawn_trigger (nicht gemockt) gibt None zurück, wenn schon ein
+    Lauf aktiv ist — der Guard greift VOR jedem Popen, also ohne Seiteneffekt."""
+    mod = _load_plugin_module()
+    mod._TRIGGER_PROCS["gutachter"] = _FakeRunningProc()
+    assert mod._spawn_trigger("gutachter") is None

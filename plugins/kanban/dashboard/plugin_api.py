@@ -3894,6 +3894,107 @@ def veto_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
+# ── Manuelle Trigger: Stratege (propose) + Gutachter (Bewerter) ──────────────
+# Zwei operator-getriggerte Jobs für die /control-Buttons. Auth läuft über die
+# globale ``auth_middleware`` (Worker ohne Session-Token können NICHT triggern).
+# Detached gespawnt (Haus-Muster ``autoresearch_view._spawn_runner``); die
+# Wrapper-Skripte sind flock-geschützt, sodass manuell+Timer sauber kollidieren.
+_TRIGGER_LOG_DIR = os.path.expanduser("~/.hermes/logs/manual-triggers")
+_TRIGGER_SPECS: dict[str, dict[str, Any]] = {
+    "strategist-propose": {
+        "argv": ["bash", os.path.expanduser("~/.hermes/scripts/strategist-cron.sh"), "propose"],
+        "log": os.path.join(_TRIGGER_LOG_DIR, "strategist-propose.log"),
+        "env": {},
+    },
+    "gutachter": {
+        # Phase-A live: kommentiert am Vorschlag + Discord, KEIN dispatchbarer Task.
+        "argv": ["bash", os.path.expanduser("~/agents/stratege-gutachter/run.sh")],
+        "log": os.path.join(_TRIGGER_LOG_DIR, "gutachter.log"),
+        "env": {"DELIVER_MODE": "live"},
+    },
+}
+_TRIGGER_PROCS: dict[str, Any] = {}
+
+
+def _trigger_env(extra: dict[str, str]) -> dict[str, str]:
+    """Inherit the server env but guarantee hermes/claude/bash resolve on PATH
+    (the dashboard service's PATH may be minimal vs. the cron unit's)."""
+    env = os.environ.copy()
+    prefix = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.hermes/hermes-agent/venv/bin"),
+        "/usr/local/bin", "/usr/bin", "/bin",
+    ]
+    env["PATH"] = ":".join(prefix + ([env["PATH"]] if env.get("PATH") else []))
+    env.update(extra)
+    return env
+
+
+def _spawn_trigger(name: str):
+    """Spawn a trigger job detached → its Popen, or None if one already runs."""
+    import subprocess
+
+    spec = _TRIGGER_SPECS[name]
+    proc = _TRIGGER_PROCS.get(name)
+    if proc is not None and proc.poll() is None:
+        return None
+    os.makedirs(_TRIGGER_LOG_DIR, exist_ok=True)
+    logf = open(spec["log"], "ab", buffering=0)  # noqa: SIM115 (lebt für die Laufzeit des Jobs)
+    p = subprocess.Popen(
+        spec["argv"],
+        stdout=logf,
+        stderr=logf,
+        start_new_session=True,
+        env=_trigger_env(spec.get("env") or {}),
+    )
+    _TRIGGER_PROCS[name] = p
+    return p
+
+
+def _trigger_status(name: str) -> dict[str, Any]:
+    proc = _TRIGGER_PROCS.get(name)
+    running = proc is not None and proc.poll() is None
+    exit_code = None if (proc is None or running) else proc.returncode
+    log = _TRIGGER_SPECS[name]["log"]
+    tail: list[str] = []
+    last_modified: Optional[int] = None
+    try:
+        last_modified = int(os.path.getmtime(log))
+        with open(log, "r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.read().splitlines()[-12:]
+    except OSError:
+        pass
+    return {"running": running, "exit_code": exit_code,
+            "last_modified": last_modified, "tail": tail}
+
+
+@router.post("/strategist/run-propose")
+def run_strategist_propose():
+    """Stratege-propose manuell anstoßen (derselbe Wrapper wie der 06:00-Timer)."""
+    p = _spawn_trigger("strategist-propose")
+    if p is None:
+        return {"ok": False, "running": True, "detail": "Strategen-Lauf läuft bereits"}
+    return {"ok": True, "name": "strategist-propose", "pid": p.pid}
+
+
+@router.post("/strategist/run-gutachter")
+def run_gutachter():
+    """Bewerter (stratege-gutachter) manuell anstoßen — Phase-A live (Kommentar+Discord)."""
+    p = _spawn_trigger("gutachter")
+    if p is None:
+        return {"ok": False, "running": True, "detail": "Gutachter-Lauf läuft bereits"}
+    return {"ok": True, "name": "gutachter", "pid": p.pid}
+
+
+@router.get("/strategist/run-status")
+def strategist_run_status():
+    """Running / letzter-Lauf-Status der zwei manuellen Trigger (Button-Feedback)."""
+    return {
+        "propose": _trigger_status("strategist-propose"),
+        "gutachter": _trigger_status("gutachter"),
+    }
+
+
 @router.get("/runs/daily")
 def get_runs_daily(
     days: int = Query(30, ge=1, le=365),
