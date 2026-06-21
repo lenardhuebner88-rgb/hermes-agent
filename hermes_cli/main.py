@@ -356,6 +356,21 @@ def _apply_profile_override() -> None:
             return False
         return True
 
+    def _is_command_owned_profile_flag(index: int) -> bool:
+        """Return True for ``--profile`` flags owned by a subcommand parser.
+
+        The early profile pre-parser is intentionally broad for the historical
+        ``hermes chat -p coder`` contract, but concrete subcommands may also
+        expose their own ``--profile`` option. Keep those flags visible to
+        argparse instead of treating their values as Hermes profile names.
+        """
+        try:
+            memory_index = argv.index("memory", 0, index)
+            argv.index("digest", memory_index + 1, index)
+        except ValueError:
+            return False
+        return True
+
     def _resolve_sudo_user_profile_env(name: str) -> str | None:
         """Resolve `sudo hermes -p <name>` against the invoking user's home.
 
@@ -407,11 +422,17 @@ def _apply_profile_override() -> None:
         if arg == "--args" and _inside_mcp_add_args(i):
             break
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
+            if _is_command_owned_profile_flag(i):
+                i += 2
+                continue
             profile_name = argv[i + 1]
             consume = 2
             profile_index = i
             break
         if arg.startswith("--profile="):
+            if _is_command_owned_profile_flag(i):
+                i += 1
+                continue
             profile_name = arg.split("=", 1)[1]
             consume = 1
             profile_index = i
@@ -11423,6 +11444,10 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def cmd_memory(args):
     sub = getattr(args, "memory_command", None)
+    if sub == "digest":
+        from hermes_cli.memory_digest import cmd_memory_digest
+
+        return cmd_memory_digest(args)
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 

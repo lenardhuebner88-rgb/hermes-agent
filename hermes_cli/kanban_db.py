@@ -7973,6 +7973,18 @@ def complete_task(
     """
     now = int(time.time())
 
+    # Receipt-first extraction (t_dbc95124): normalise the durable decision
+    # schema (decisions[]/operator_followup/supersedes[]) once, here at the top,
+    # so every downstream completion path — workflow-step advance, review
+    # submit, staged-review chain, and the direct done/synthesize path below —
+    # persists canonical records that ``hermes memory digest`` can read back. A
+    # no-op for metadata without those keys; every unrelated handoff field
+    # (changed_files, tests_run, commit, usage, …) is preserved verbatim.
+    if isinstance(metadata, dict):
+        from hermes_cli.memory_digest import normalize_completion_metadata
+
+        metadata = normalize_completion_metadata(metadata)
+
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
