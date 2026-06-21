@@ -240,15 +240,24 @@ def reconcile_proposals(
     max_new_tasks: int | None = None,
     min_task_severity: str = DEFAULT_MIN_TASK_SEVERITY,
     once: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Route every currently proposed proposal into one flywheel lane."""
+    """Route every currently proposed proposal into one flywheel lane.
+
+    With ``dry_run=True`` nothing is mutated — no apply, no task/escalation
+    creation, no proposal-status writes, no digest written. The summary instead
+    reports how the current backlog WOULD route, so the operator can preview the
+    drain before triggering it for real.
+    """
     own_conn = conn is None
     if conn is None:
         conn = kb.connect()
     max_new = DEFAULT_MAX_NEW_TASKS if max_new_tasks is None else max(0, int(max_new_tasks))
+    dry_seen: set[str] = set()
     summary = {
         "ok": True,
         "once": bool(once),
+        "dry_run": bool(dry_run),
         "seen": 0,
         "applied": 0,
         "routed_to_kanban": 0,
@@ -268,6 +277,28 @@ def reconcile_proposals(
             pid = str(proposal.get("id"))
             try:
                 signal_key = _signal_key(proposal)
+                if dry_run:
+                    # Pure classification — mirror the routing decisions below
+                    # without any side effect. The skill-doc lane is counted as
+                    # "applied" intent (the eval gate is NOT run in a dry pass).
+                    if signal_key in suppressed_signals:
+                        summary["suppressed"] += 1
+                    elif _skill_doc_has_diff(proposal) and not _is_code_or_test(proposal):
+                        summary["applied"] += 1
+                    elif _is_code_or_test(proposal) and _meets_min_severity(proposal, min_task_severity):
+                        fkey = "autoresearch:" + _finding_id(proposal)
+                        if fkey in dry_seen:
+                            summary["routed_to_kanban"] += 1
+                        elif summary["new_tasks"] >= max_new:
+                            summary["pooled"] += 1
+                        else:
+                            dry_seen.add(fkey)
+                            summary["routed_to_kanban"] += 1
+                            summary["new_tasks"] += 1
+                    else:
+                        summary["escalated"] += 1
+                    continue
+
                 if signal_key in suppressed_signals:
                     proposal.update({
                         "status": "skipped",
@@ -337,7 +368,8 @@ def reconcile_proposals(
                 summary["errors"] += 1
                 proposal["reconcile_error"] = f"{type(exc).__name__}: {exc}"
                 proposals.save_proposal(proposal)
-        _write_digest(processed)
+        if not dry_run:
+            _write_digest(processed)
         return summary
     finally:
         if own_conn:
@@ -349,11 +381,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="Run one explicit backlog-drain/reconcile pass.")
     parser.add_argument("--max-new-tasks", type=int, default=DEFAULT_MAX_NEW_TASKS)
     parser.add_argument("--min-task-severity", default=DEFAULT_MIN_TASK_SEVERITY)
+    parser.add_argument("--dry-run", action="store_true", help="Classify the backlog without any side effect (preview the drain).")
     args = parser.parse_args(argv)
     summary = reconcile_proposals(
         once=args.once,
         max_new_tasks=args.max_new_tasks,
         min_task_severity=args.min_task_severity,
+        dry_run=args.dry_run,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0 if summary.get("ok") else 1

@@ -295,6 +295,45 @@ def test_veto_operator_escalation_archives_and_records_via_real_path(reconcile_e
         assert veto_events == 1
 
 
+def test_dry_run_classifies_without_side_effects(reconcile_env, monkeypatch):
+    """--dry-run reports how the backlog WOULD route — no apply, no tasks, no
+    proposal-status writes. Lets the operator preview the drain before it runs."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal("skill-x")  # skill-doc with diff → would apply
+    _proposal(
+        "code-x", mode="code", finding_id="F-X", target="hermes_cli/a.py",
+        target_path="hermes_cli/a.py", category="bug_risk", theme="silent-except",
+        subsystem="auth",
+    )  # code finding → would route to kanban
+    _proposal(
+        "diffless-x", mode="skill", diff_before_after="", new_text="",
+        category="silent_except", theme="t", subsystem="auth", severity="medium",
+        finding_id="F-D",
+    )  # no actionable diff → would escalate
+
+    called: list[int] = []
+    monkeypatch.setattr(reconcile.proposals, "apply_proposal", lambda *a, **k: called.append(1))
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn, dry_run=True)
+        task_count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+
+    assert called == []           # apply_proposal never touched
+    assert task_count == 0        # no kanban tasks / escalations created
+    assert summary["dry_run"] is True
+    assert summary["seen"] == 3
+    assert summary["applied"] == 1
+    assert summary["routed_to_kanban"] == 1
+    assert summary["escalated"] == 1
+    # proposals untouched on disk
+    assert _load("skill-x")["status"] == "proposed"
+    assert _load("code-x")["status"] == "proposed"
+    assert _load("diffless-x")["status"] == "proposed"
+    # no digest written in dry-run
+    assert not reconcile_env["digest"].exists()
+
+
 def test_veto_operator_escalation_rejects_non_autoresearch_task(reconcile_env):
     """A plain blocked task (no Autoresearch escalation event) must NOT be
     dismissible via this path — a stalled-worker block is not a vetoable signal."""
