@@ -1,6 +1,7 @@
 """Tests für den Strategist Receipt-Harvest (--mode harvest)."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,9 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-def _done_task(conn, *, title, body, created_by="coder", completed_at=1000):
+def _done_task(conn, *, title, body, created_by="coder", completed_at=None):
+    if completed_at is None:
+        completed_at = int(time.time())
     tid = kb.create_task(conn, title=title, assignee="coder", created_by=created_by)
     kb.add_comment(conn, tid, "coder", body)
     with kb.write_txn(conn):

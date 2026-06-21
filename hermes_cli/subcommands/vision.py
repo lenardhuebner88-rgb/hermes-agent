@@ -166,6 +166,11 @@ def vision_command(args: argparse.Namespace) -> int:
                 )
                 for item in result["ingested"]:
                     print(f"  - {item['key']}: {item['title']} → root {item.get('root_task_id')}")
+        elif result["mode"] == "harvest":
+            print(
+                f"strategist harvest: {result['receipts']} receipt(s), "
+                f"{result['candidates']} candidate(s) → {result['candidates_path']}"
+            )
         else:
             print(
                 f"strategist reflect: {result['note']['approved']} approved, "
