@@ -9474,6 +9474,60 @@ def dismiss_freigabe_hold(
     return True
 
 
+def veto_operator_escalation(
+    conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
+) -> bool:
+    """Veto an Autoresearch operator-escalation → archive it and record the
+    veto so the strategist's ``reflect`` learns to suppress the signal.
+
+    This is the escalation sibling of :func:`dismiss_freigabe_hold`. Where that
+    vetoes a held ``freigabe: operator`` PlanSpec root, this vetoes a *blocked*
+    Autoresearch escalation — a task carrying an ``operator_escalation`` event
+    whose payload has ``source="autoresearch"``. It writes the SAME
+    ``freigabe_vetoed`` learning event that ``strategist._autoresearch_vetoes``
+    joins on, closing Naht 3 of the flywheel via a real Dashboard/API path
+    (NOT a raw event injection).
+
+    Source-guard: only an Autoresearch escalation is actionable. A non-blocked
+    task, an unknown id, or an ``operator_escalation`` from another source (e.g.
+    a stalled-worker block) returns ``False`` and touches nothing — those are
+    real blocks to resolve, not signals to dismiss.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None or row["status"] != "blocked":
+            return False
+        esc = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (task_id, OPERATOR_ESCALATION_EVENT),
+        ).fetchone()
+        if esc is None:
+            return False
+        try:
+            payload = json.loads(esc["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("source") != "autoresearch":
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'blocked'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn, task_id, "freigabe_vetoed",
+            {"author": author, "via": "autoresearch_escalation",
+             "signal_key": payload.get("signal_key")},
+        )
+    return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 

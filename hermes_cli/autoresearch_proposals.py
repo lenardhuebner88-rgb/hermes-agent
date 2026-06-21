@@ -61,7 +61,7 @@ _VALID_MODES = {"skill", "code"}
 # "testing" = a code proposal is live-written and the full test-suite gate (A3)
 # is running in a detached worker; it resolves to "applied" (green) or back to
 # "proposed" (red / crashed, auto-reverted).
-_VALID_STATUS = {"proposed", "testing", "applied", "skipped"}
+_VALID_STATUS = {"proposed", "testing", "applied", "skipped", "routed_to_kanban", "pooled", "escalated"}
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # A code proposal may never edit the gate's own harness — otherwise a proposal
@@ -311,7 +311,7 @@ def list_proposals() -> list[dict[str, Any]]:
     # skipped. Pre-AR2 proposals lack rank_score → treated as 0, order unchanged.
     out.sort(key=lambda p: str(p.get("created_at") or ""), reverse=True)
     out.sort(key=lambda p: float(p.get("rank_score") or 0.0), reverse=True)
-    status_rank = {"proposed": 0, "applied": 1, "skipped": 2}
+    status_rank = {"proposed": 0, "testing": 1, "routed_to_kanban": 2, "pooled": 3, "escalated": 4, "applied": 5, "skipped": 6}
     out.sort(key=lambda p: status_rank.get(p.get("status"), 3))
     return out
 

@@ -1483,22 +1483,21 @@ DEFAULT_CONFIG = {
             "timeout": 600,
             "extra_body": {},
         },
-        # Default to a chat.completions model (MiniMax): both lanes run an
-        # agentic tool-loop that sends role="tool" result messages, which the
-        # Responses API (gpt-5.5 via 'auto') rejects with a 400. The operator can
-        # switch the model per lane in the dashboard, but the default must be
-        # tool-capable so the loops work out of the box.
+        # Code-audit lanes run agentic tool loops; concrete NeuralWatt routing is
+        # written into runtime config.yaml (or via the lane-model endpoint), while
+        # repository defaults stay auto/empty so generic config writers do not
+        # materialize provider secrets or URLs.
         "code_audit": {
-            "provider": "minimax",
-            "model": "MiniMax-M2.7",
+            "provider": "auto",
+            "model": "",
             "base_url": "",
             "api_key": "",
             "timeout": 120,
             "extra_body": {},
         },
         "test_hardening": {
-            "provider": "minimax",
-            "model": "MiniMax-M2.7",
+            "provider": "auto",
+            "model": "",
             "base_url": "",
             "api_key": "",
             "timeout": 120,

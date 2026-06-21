@@ -193,6 +193,49 @@ def test_veto_already_released_chain_is_rejected(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /tasks/{id}/veto-escalation — Autoresearch escalation veto (Naht 3)
+# ---------------------------------------------------------------------------
+
+
+def _make_autoresearch_escalation() -> str:
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        return reconcile._escalate(
+            conn,
+            {
+                "id": "p-esc",
+                "finding_id": "p-esc",
+                "title": "Autoresearch silent except",
+                "mode": "code",
+                "severity": "high",
+                "subsystem": "auth",
+                "theme": "silent-except",
+                "status": "proposed",
+            },
+            reason="no diff, manual review",
+        )
+
+
+def test_veto_escalation_archives_and_returns_vetoed(client):
+    task_id = _make_autoresearch_escalation()
+    r = client.post(f"{PREFIX}/tasks/{task_id}/veto-escalation")
+    assert r.status_code == 200, r.text
+    assert r.json()["vetoed"] is True
+    assert _status(task_id) == "archived"
+
+
+def test_veto_escalation_on_plain_block_is_rejected(client):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn, title="plain", assignee=None, initial_status="blocked", kind="ops"
+        )
+    r = client.post(f"{PREFIX}/tasks/{task_id}/veto-escalation")
+    assert r.status_code == 409
+    assert _status(task_id) == "blocked"
+
+
+# ---------------------------------------------------------------------------
 # POST run-propose / run-gutachter + GET run-status (manuelle Trigger, G1.5)
 # Der echte _spawn_trigger wird gemockt, damit der Test KEINEN echten Strategen-/
 # Gutachter-Lauf startet und nicht ins echte $HOME schreibt.

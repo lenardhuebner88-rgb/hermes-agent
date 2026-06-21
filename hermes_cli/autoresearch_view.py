@@ -51,6 +51,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ValidationError
 
 # Sprint A1: persistent proposal store + apply-by-id (the One-Click flow).
+from hermes_cli import autoresearch_lane_models as _lane_models
 from hermes_cli import autoresearch_proposals as _proposals
 from hermes_cli import autoresearch_runs as _runs
 from hermes_cli import deep_audit as _deep_audit
@@ -494,6 +495,11 @@ class TestFoundryBody(BaseModel):
     target: str | None = None
     max_mutants: int = 30
     apply: bool = False
+
+
+class LaneModelBody(BaseModel):
+    lane: str
+    model_key: str
 
 
 class ApplyProposalBody(BaseModel):
@@ -1213,6 +1219,16 @@ def register_autoresearch_routes(app: Any) -> None:
     @app.get("/api/autoresearch/selftest")
     def autoresearch_selftest() -> dict[str, Any]:
         return self_test()
+
+    @app.post("/api/autoresearch/lane-model")
+    def autoresearch_lane_model(request: Request, body: LaneModelBody) -> Any:
+        denied = _mutation_token_denied(request)
+        if denied is not None:
+            return denied
+        result = _lane_models.apply_lane_model_config(lane=body.lane, model_key=body.model_key)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=str(result.get("detail") or "could not set lane model"))
+        return result
 
     @app.get("/api/autoresearch/worklist")
     def autoresearch_worklist() -> dict[str, Any]:

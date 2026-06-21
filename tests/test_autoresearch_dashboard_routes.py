@@ -139,6 +139,27 @@ def test_selftest_route_configured(client):
     assert body["route_status"] == "configured"
 
 
+def test_lane_model_route_persists_autoresearch_aux_profile(client):
+    cl, view = client
+    resp = cl.post("/api/autoresearch/lane-model", json={"lane": "code_audit", "model_key": "kimi-k2.7-code"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["lane"] == "code_audit"
+    assert body["after"]["base_url"] == "https://api.neuralwatt.com/v1"
+    text = (view._home_test / "config.yaml").read_text(encoding="utf-8")
+    assert "code_audit:" in text
+    assert "model: kimi-k2.7-code" in text
+    assert "${NEURALWATT_API_KEY}" in text
+
+
+def test_lane_model_route_rejects_unknown_model(client):
+    cl, _view = client
+    resp = cl.post("/api/autoresearch/lane-model", json={"lane": "skills_hub", "model_key": "unknown"})
+    assert resp.status_code == 400
+    assert "unknown autoresearch model" in resp.json()["detail"]
+
+
 def test_trigger_dry_run_spawns_without_apply(client, spawned):
     cl, view = client
     resp = cl.post("/api/autoresearch/trigger", json={"area": "all", "mode": "dry-run", "max_iterations": 2})

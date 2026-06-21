@@ -562,6 +562,8 @@ const OperatorEscalationTaskSchema = z.object({
 
 export const OperatorEscalationPayloadSchema = z.object({
   task: OperatorEscalationTaskSchema.catch({ id: "" }),
+  source: z.string().nullable().catch(null).optional(),
+  signal_key: z.string().nullable().catch(null).optional(),
   why_now: z.string().catch(""),
   attempts_already_made: z.coerce.number().catch(0),
   evidence: z.record(z.string(), z.unknown()).catch({}),

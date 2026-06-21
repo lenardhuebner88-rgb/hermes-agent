@@ -106,6 +106,7 @@ HARVEST_MAX_RECEIPTS = 30
 HARVEST_MIN_RECEIPT_CHARS = 200
 HARVEST_RECEIPT_MAX_CHARS = 12000
 HARVEST_MAX_LEVERS = 3  # Sub-Cap: höchstens so viele Follow-ups pro Lauf
+AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 
 
 # --------------------------------------------------------------------------- #
@@ -1016,6 +1017,52 @@ def _update_vetoed_set(path: Path, new_keys: Iterable[str]) -> list[str]:
     return merged
 
 
+def _event_payload(raw: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _autoresearch_vetoes(conn, since: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT t.id, t.title, t.status, esc.payload "
+        "FROM tasks t "
+        "JOIN task_events veto ON veto.task_id = t.id AND veto.kind = 'freigabe_vetoed' "
+        "JOIN task_events esc ON esc.task_id = t.id AND esc.kind = ? "
+        "WHERE veto.created_at >= ? "
+        "ORDER BY esc.id DESC",
+        (kanban_db.OPERATOR_ESCALATION_EVENT, int(since)),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        task_id = row["id"]
+        if task_id in seen:
+            continue
+        payload = _event_payload(row["payload"])
+        if payload.get("source") != "autoresearch":
+            continue
+        signal = str(
+            payload.get("signal_key")
+            or ((payload.get("evidence") or {}).get("context") or {}).get("theme")
+            or ""
+        ).strip()
+        if not signal:
+            continue
+        seen.add(task_id)
+        out.append({
+            "id": task_id,
+            "key": f"{AUTORESEARCH_VETO_PREFIX}{signal}",
+            "signal_key": signal,
+            "source": "autoresearch",
+            "title": row["title"],
+            "status": row["status"],
+        })
+    return out
+
+
 def reflect(
     conn,
     *,
@@ -1062,8 +1109,12 @@ def reflect(
             if row["status"] == "done":
                 shipped.append(rec)
 
+    autoresearch_vetoed = _autoresearch_vetoes(conn, int(since))
+    vetoed.extend(autoresearch_vetoed)
+
     vetoed_keys = sorted({r["key"] for r in vetoed if r["key"]})
     approved_keys = sorted({r["key"] for r in approved if r["key"]})
+    autoresearch_signals = sorted({r["signal_key"] for r in autoresearch_vetoed if r.get("signal_key")})
     note = {
         "ts": int(time.time() if now is None else now),
         "since": int(since),
@@ -1072,6 +1123,7 @@ def reflect(
         "shipped": len(shipped),
         "approved_levers": approved_keys,
         "vetoed_levers": vetoed_keys,
+        "vetoed_autoresearch_signals": autoresearch_signals,
     }
     suppressed_now: list[str] = []
     if notes_path is not None:
