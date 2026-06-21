@@ -677,8 +677,38 @@ def test_note_dirty_worktree_comments_only_when_dirty(kanban_home, repo):
         ).fetchall()
     assert len(rows) == 1
     assert rows[0]["author"] == "integrator"
+    assert "DIRTY_WORKTREE" in rows[0]["body"]
     assert "leftover.py" in rows[0]["body"]
-    assert "REQUEST_CHANGES" in rows[0]["body"]
+    assert "Recovery: commit intentional source changes" in rows[0]["body"]
+    assert "worker contract" not in rows[0]["body"]
+
+
+def test_note_dirty_worktree_classifies_artifact_leftovers(kanban_home, repo):
+    info = kwt.ensure_worktree(repo, "t_dirty_artifact")
+    wt = info["path"]
+    (wt / "playwright-report").mkdir()
+    (wt / "playwright-report" / "index.html").write_text("<html></html>\n")
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="t", assignee="coder",
+            workspace_kind="dir", workspace_path=str(wt),
+        )
+        kwt.note_dirty_worktree(conn, tid, str(wt))
+        body = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ?", (tid,)
+        ).fetchone()["body"]
+    assert "PRESERVABLE_ARTIFACTS" in body
+    assert "playwright-report/index.html" in body
+    assert "integrator can preserve" in body
+    assert "worker contract" not in body
+
+
+def test_artifact_policy_missing_message_names_recovery():
+    dirty_class = kwt._classify_dirty_paths(["coverage/index.html"])
+    assert dirty_class == kwt.ARTIFACT_POLICY_MISSING_CLASS
+    recovery = kwt._dirty_recovery_instruction(dirty_class)
+    assert "approved preserve prefixes" in recovery
+    assert "extend the artifact policy" in recovery
 
 
 # ---------------------------------------------------------------------------
@@ -1042,7 +1072,22 @@ def test_dirty_chain_worktree_parks(repo):
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
                               gate_runner=_ok_gate)
     assert out["action"] == "parked"
+    assert out["park_class"] == "DIRTY_WORKTREE"
+    assert "DIRTY_WORKTREE" in out["reason"]
     assert "uncommitted" in out["reason"]
+
+
+def test_artifact_policy_missing_chain_worktree_parks_with_recovery(repo):
+    info = _provisioned_chain(repo, "t_artifact_policy")
+    wt = info["path"]
+    (wt / "coverage").mkdir()
+    (wt / "coverage" / "index.html").write_text("<html></html>\n")
+    out = kwt.integrate_chain(repo, wt, info["branch"], "main",
+                              gate_runner=_ok_gate)
+    assert out["action"] == "parked"
+    assert out["park_class"] == "ARTIFACT_POLICY_MISSING"
+    assert "ARTIFACT_POLICY_MISSING" in out["reason"]
+    assert "extend the artifact policy" in out["reason"]
 
 
 def test_deliverable_md_alone_does_not_block_clean_close(repo):

@@ -89,9 +89,32 @@ _PRESERVABLE_ARTIFACT_PREFIXES = (
     "visual-qa/",
     "artifacts/",
 )
+_ARTIFACT_LIKE_PREFIXES = _PRESERVABLE_ARTIFACT_PREFIXES + (
+    "blob-report/",
+    "coverage/",
+    "htmlcov/",
+    "screenshots/",
+)
+_ARTIFACT_LIKE_SUFFIXES = (
+    ".gif",
+    ".html",
+    ".jpg",
+    ".jpeg",
+    ".json",
+    ".log",
+    ".png",
+    ".svg",
+    ".txt",
+    ".webm",
+    ".zip",
+)
 _ARTIFACT_RECEIPTS_ROOT = Path(
     "/home/piet/vault/03-Agents/Hermes/receipts/artifacts"
 )
+
+DIRTY_WORKTREE_CLASS = "DIRTY_WORKTREE"
+PRESERVABLE_ARTIFACTS_CLASS = "PRESERVABLE_ARTIFACTS"
+ARTIFACT_POLICY_MISSING_CLASS = "ARTIFACT_POLICY_MISSING"
 
 
 def _is_ignorable_dirty_path(path: str) -> bool:
@@ -412,11 +435,57 @@ def _artifact_receipt_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _normalize_dirty_path(path: str) -> str:
+    return path.strip().lstrip("/")
+
+
 def _is_preservable_artifact_path(path: str) -> bool:
-    normalized = path.strip().lstrip("/")
+    normalized = _normalize_dirty_path(path)
     if not normalized or ".." in Path(normalized).parts:
         return False
     return any(normalized.startswith(prefix) for prefix in _PRESERVABLE_ARTIFACT_PREFIXES)
+
+
+def _looks_like_artifact_path(path: str) -> bool:
+    normalized = _normalize_dirty_path(path)
+    if not normalized or ".." in Path(normalized).parts:
+        return False
+    if _is_preservable_artifact_path(normalized):
+        return True
+    if any(normalized.startswith(prefix) for prefix in _ARTIFACT_LIKE_PREFIXES):
+        return True
+    return normalized.lower().endswith(_ARTIFACT_LIKE_SUFFIXES)
+
+
+def _classify_dirty_paths(paths: Sequence[str]) -> str:
+    dirty_paths = [path for path in paths if path]
+    if dirty_paths and all(_is_preservable_artifact_path(path) for path in dirty_paths):
+        return PRESERVABLE_ARTIFACTS_CLASS
+    if dirty_paths and all(_looks_like_artifact_path(path) for path in dirty_paths):
+        return ARTIFACT_POLICY_MISSING_CLASS
+    return DIRTY_WORKTREE_CLASS
+
+
+def _dirty_recovery_instruction(dirty_class: str) -> str:
+    if dirty_class == PRESERVABLE_ARTIFACTS_CLASS:
+        return (
+            "Recovery: keep these visual/test artifacts under the approved "
+            "artifact prefixes so the integrator can preserve them to the "
+            "Vault receipt, or delete them before re-submitting if they are "
+            "disposable."
+        )
+    if dirty_class == ARTIFACT_POLICY_MISSING_CLASS:
+        prefixes = ", ".join(_PRESERVABLE_ARTIFACT_PREFIXES)
+        return (
+            "Recovery: artifact-like files are present outside the approved "
+            f"preserve prefixes ({prefixes}). Move them under an approved "
+            "prefix, extend the artifact policy in code/tests if this output "
+            "type should be preserved, or delete them if disposable."
+        )
+    return (
+        "Recovery: commit intentional source changes on the task branch or "
+        "remove accidental leftovers, then re-submit the task."
+    )
 
 
 def _preserve_artifact_files(worktree: Path, task_id: str, paths: Sequence[str]) -> dict:
@@ -1351,15 +1420,16 @@ def note_dirty_worktree(conn: sqlite3.Connection, task_id: str, workspace) -> No
             return
         from hermes_cli import kanban_db as kb
 
-        listing = ", ".join(sorted(leftovers)[:15])
-        if len(leftovers) > 15:
-            listing += f", … ({len(leftovers)} total)"
+        leftovers_sorted = sorted(leftovers)
+        listing = ", ".join(leftovers_sorted[:15])
+        if len(leftovers_sorted) > 15:
+            listing += f", … ({len(leftovers_sorted)} total)"
+        dirty_class = _classify_dirty_paths(leftovers_sorted)
         kb.add_comment(
             conn, task_id, "integrator",
-            "⚠️ Working tree is NOT clean after the worker run — uncommitted "
-            f"changes: {listing}. The worker contract requires committing on "
-            "the task branch when gates are green; uncommitted leftovers are "
-            "grounds for REQUEST_CHANGES.",
+            f"⚠️ {dirty_class}: working tree is not clean after the worker run. "
+            f"Uncommitted paths: {listing}. "
+            f"{_dirty_recovery_instruction(dirty_class)}",
         )
     except Exception:
         _log.debug("note_dirty_worktree failed for %s", task_id, exc_info=True)
@@ -1699,15 +1769,20 @@ def integrate_chain(
                 leftovers = dirty_files(wt_path)
                 if not leftovers:
                     return None
-                if not all(_is_preservable_artifact_path(path) for path in leftovers):
+                leftovers_sorted = sorted(leftovers)
+                dirty_class = _classify_dirty_paths(leftovers_sorted)
+                if dirty_class != PRESERVABLE_ARTIFACTS_CLASS:
                     return parked(
-                        "chain worktree has uncommitted changes: "
-                        + ", ".join(sorted(leftovers)[:10]),
-                        dirty_files=sorted(leftovers),
+                        f"{dirty_class}: "
+                        + ", ".join(leftovers_sorted[:10])
+                        + ". "
+                        + _dirty_recovery_instruction(dirty_class),
+                        dirty_files=leftovers_sorted,
+                        park_class=dirty_class,
                     )
                 try:
                     artifact_receipt = _preserve_artifact_files(
-                        wt_path, wt_path.name, sorted(leftovers)
+                        wt_path, wt_path.name, leftovers_sorted
                     )
                 except Exception as exc:
                     return parked(
