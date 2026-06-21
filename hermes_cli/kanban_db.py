@@ -9116,6 +9116,33 @@ def _park_integration(
         if _run_originated_from_review(conn, task_id, run_id):
             _set_run_verdict(conn, run_id, "APPROVED")
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        park_class = outcome.get("park_class")
+        if park_class in {
+            "DIRTY_WORKTREE",
+            "PRESERVABLE_ARTIFACTS",
+            "ARTIFACT_POLICY_MISSING",
+        }:
+            dirty_files = outcome.get("dirty_files") or []
+            dirty_note = ""
+            if dirty_files:
+                dirty_note = " Dirty files: " + ", ".join(dirty_files[:10]) + "."
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    "integrator",
+                    f"⚠️ Integrator parked with {park_class}.{dirty_note} {outcome.get('reason', '')}".strip(),
+                    now,
+                    "comment",
+                ),
+            )
+            _append_event(
+                conn, task_id, "commented",
+                {"author": "integrator", "kind": "comment", "source": "park_integration"},
+                run_id=run_id,
+            )
     return True
 
 
