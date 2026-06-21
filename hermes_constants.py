@@ -501,11 +501,17 @@ def is_container() -> bool:
         pass
     # cgroup v2: /proc/1/cgroup is just "0::/" with no marker. The container
     # runtime still shows up in the mount table (overlay rootfs, runtime mount
-    # paths), so scan mountinfo as a last resort.
+    # paths), so scan mountinfo as a last resort. Only treat markers on the
+    # process root mount as evidence: Docker/containerd hosts commonly have
+    # ``/var/lib/docker`` overlay mounts in mountinfo, which are evidence that
+    # the host *runs* containers, not that this process is inside one.
     try:
         with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
-            mountinfo = f.read()
-            if any(marker in mountinfo for marker in ("kubepods", "containerd", "crio")):
+            root_mountinfo = "\n".join(
+                line for line in f
+                if len(line.split()) > 4 and line.split()[4] == "/"
+            )
+            if any(marker in root_mountinfo for marker in ("kubepods", "containerd", "crio")):
                 _container_detected = True
                 return True
     except OSError:

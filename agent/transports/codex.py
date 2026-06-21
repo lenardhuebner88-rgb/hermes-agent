@@ -302,6 +302,12 @@ class ResponsesApiTransport(ProviderTransport):
             # headers while keeping ``prompt_cache_key`` in the body for
             # standard OpenAI routing as a belt-and-braces fallback.
             cache_scope_id = str(session_id or "").strip()
+            if cache_key and cache_scope_id != str(cache_key):
+                # Cron session ids are intentionally collapsed into a stable
+                # prompt_cache_key. Do not also send the per-run timestamped id
+                # as a routing header, or every cron tick becomes a fresh cache
+                # scope again.
+                cache_scope_id = ""
             if cache_scope_id:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}
