@@ -45,9 +45,10 @@ import {
   VaultProvenanceResponseSchema,
   StrategistCountSchema,
   StrategistLastRunsSchema,
+  DispositionListResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { StrategistLastRuns } from "../lib/schemas";
+import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
 import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
@@ -1993,4 +1994,64 @@ export function useStrategistLastRuns() {
     async () => parseOrThrow(StrategistLastRunsSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/last-runs"), "strategist-last-runs"),
     15000,
   );
+}
+
+// ── Disposition-Items (FRD Phase 3b) ────────────────────────────────────────
+export function useDispositionItems() {
+  return usePolling<DispositionListResponse>(
+    "kanban/disposition-items",
+    async () => parseOrThrow(DispositionListResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/disposition-items?status=open"), "disposition-items"),
+    30000,
+  );
+}
+
+export function useDispositionActions(reload: () => Promise<void>) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+
+  const acceptDisposition = useCallback(async (id: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fetchJSON<unknown>(`/api/plugins/kanban/disposition-items/${encodeURIComponent(id)}/accept`, { method: "POST" });
+      await reload();
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, [reload]);
+
+  const dismissDisposition = useCallback(async (id: string, reason: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fetchJSON<unknown>(
+        `/api/plugins/kanban/disposition-items/${encodeURIComponent(id)}/dismiss`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) },
+      );
+      await reload();
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, [reload]);
+
+  const createFixTaskFromDisposition = useCallback(async (id: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fetchJSON<unknown>(`/api/plugins/kanban/disposition-items/${encodeURIComponent(id)}/create-fix-task`, { method: "POST" });
+      await reload();
+    } catch (e) {
+      if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (aliveRef.current) setBusy(false);
+    }
+  }, [reload]);
+
+  return { busy, error, acceptDisposition, dismissDisposition, createFixTaskFromDisposition };
 }
