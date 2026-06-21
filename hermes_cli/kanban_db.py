@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from toolsets import get_toolset_names
+from hermes_cli import disposition as _disposition_mod
 
 _log = logging.getLogger(__name__)
 
@@ -1411,6 +1412,27 @@ CREATE TABLE IF NOT EXISTS epics (
     created_at INTEGER NOT NULL,
     closed_at  INTEGER
 );
+
+-- FRD-S1: Disposition ledger — durable record of follow-ups, risks, and
+-- still-open threads captured at task-completion time. Purely additive;
+-- no existing code path reads or writes this table yet (wiring = later slice).
+CREATE TABLE IF NOT EXISTS disposition_items (
+    id              TEXT PRIMARY KEY,
+    source_task_id  TEXT NOT NULL,
+    typ             TEXT NOT NULL,
+    disposition     TEXT NOT NULL,
+    next_action     TEXT,
+    severity        TEXT NOT NULL DEFAULT 'none',
+    evidence        TEXT,
+    status          TEXT NOT NULL DEFAULT 'open',
+    supersedes_id   TEXT,
+    created_at      INTEGER NOT NULL,
+    decided_at      INTEGER,
+    decided_by      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_disposition_status     ON disposition_items(status);
+CREATE INDEX IF NOT EXISTS idx_disposition_source     ON disposition_items(source_task_id);
 
 -- F1 (night-sprint): lane presets — named profile→(worker_runtime, model)
 -- mappings stored in the board DB so the dispatcher hot-reads the ACTIVE lane
@@ -19473,6 +19495,223 @@ def set_task_epic(
         )
         _append_event(conn, task_id, "epic_changed", {"epic_id": epic_id})
         return True
+
+
+# ---------------------------------------------------------------------------
+# Disposition Ledger (FRD-S1) — additive; no wiring into completion path yet
+# ---------------------------------------------------------------------------
+
+
+def _new_disposition_id() -> str:
+    """Generate a short disposition-item id (``di_`` prefix)."""
+    return "di_" + secrets.token_hex(4)
+
+
+def _disposition_item_dict(row: sqlite3.Row) -> dict:
+    """Serialize a disposition_items row into a plain dict."""
+    return {
+        "id": row["id"],
+        "source_task_id": row["source_task_id"],
+        "typ": row["typ"],
+        "disposition": row["disposition"],
+        "next_action": row["next_action"],
+        "severity": row["severity"],
+        "evidence": row["evidence"],
+        "status": row["status"],
+        "supersedes_id": row["supersedes_id"],
+        "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
+        "decided_at": int(row["decided_at"]) if row["decided_at"] is not None else None,
+        "decided_by": row["decided_by"],
+    }
+
+
+def insert_disposition_item(
+    conn: sqlite3.Connection,
+    *,
+    source_task_id: str,
+    typ: str,
+    disposition: str,
+    next_action: str = "",
+    severity: str = "none",
+    evidence: str = "",
+    supersedes_id: Optional[str] = None,
+    item_id: Optional[str] = None,
+) -> str:
+    """Insert a new disposition-ledger item and return its id.
+
+    Validates enum values and source_task_id presence before writing.
+    Status is always ``open`` at creation; ``created_at`` = now.
+    """
+    if not source_task_id or not source_task_id.strip():
+        raise ValueError("source_task_id is required and must not be empty")
+    if typ not in _disposition_mod.VALID_TYP:
+        raise ValueError(
+            f"typ must be one of {sorted(_disposition_mod.VALID_TYP)!r}, got {typ!r}"
+        )
+    if disposition not in _disposition_mod.VALID_DISPOSITION:
+        raise ValueError(
+            f"disposition must be one of {sorted(_disposition_mod.VALID_DISPOSITION)!r}, "
+            f"got {disposition!r}"
+        )
+    if severity not in _disposition_mod.VALID_SEVERITY:
+        raise ValueError(
+            f"severity must be one of {sorted(_disposition_mod.VALID_SEVERITY)!r}, "
+            f"got {severity!r}"
+        )
+    iid = item_id or _new_disposition_id()
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO disposition_items "
+            "(id, source_task_id, typ, disposition, next_action, severity, evidence, "
+            " status, supersedes_id, created_at, decided_at, decided_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, NULL, NULL)",
+            (iid, source_task_id, typ, disposition,
+             next_action or None, severity, evidence or None,
+             supersedes_id, now),
+        )
+    return iid
+
+
+def list_disposition_items(
+    conn: sqlite3.Connection,
+    *,
+    status: Optional[str] = None,
+    source_task_id: Optional[str] = None,
+    typ: Optional[str] = None,
+) -> list[dict]:
+    """List disposition-ledger items, newest first.
+
+    All filter arguments are optional and combined with AND when provided.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if source_task_id is not None:
+        clauses.append("source_task_id = ?")
+        params.append(source_task_id)
+    if typ is not None:
+        clauses.append("typ = ?")
+        params.append(typ)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM disposition_items {where} "
+        "ORDER BY created_at DESC, id DESC",
+        params,
+    ).fetchall()
+    return [_disposition_item_dict(r) for r in rows]
+
+
+def get_disposition_item(conn: sqlite3.Connection, item_id: str) -> Optional[dict]:
+    """Return one disposition-ledger item by id, or None if absent."""
+    row = conn.execute(
+        "SELECT * FROM disposition_items WHERE id = ?", (item_id,)
+    ).fetchone()
+    return _disposition_item_dict(row) if row is not None else None
+
+
+def set_disposition_status(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    status: str,
+    decided_by: Optional[str] = None,
+) -> Optional[dict]:
+    """Update the lifecycle status of a disposition-ledger item.
+
+    Terminal status values (all except ``open``) cause ``decided_at`` and
+    ``decided_by`` to be stamped; ``open`` leaves them NULL.
+
+    Returns the updated dict, or ``None`` if ``item_id`` does not exist.
+    Raises ``ValueError`` for an unrecognised status.
+    """
+    if status not in _disposition_mod.VALID_LEDGER_STATUS:
+        raise ValueError(
+            f"status must be one of {sorted(_disposition_mod.VALID_LEDGER_STATUS)!r}, "
+            f"got {status!r}"
+        )
+    is_terminal = status in _disposition_mod._TERMINAL_LEDGER_STATUS
+    now = int(time.time())
+    decided_at_val = now if is_terminal else None
+    decided_by_val = decided_by if is_terminal else None
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE disposition_items "
+            "SET status = ?, decided_at = ?, decided_by = ? "
+            "WHERE id = ?",
+            (status, decided_at_val, decided_by_val, item_id),
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_disposition_item(conn, item_id)
+
+
+def supersede_disposition_item(
+    conn: sqlite3.Connection,
+    old_id: str,
+    *,
+    source_task_id: str,
+    typ: str,
+    disposition: str,
+    next_action: str = "",
+    severity: str = "none",
+    evidence: str = "",
+) -> Optional[str]:
+    """Create a replacement item and mark the old one as superseded.
+
+    Atomically (inside one write_txn):
+    1. Verifies old_id exists; returns None if not.
+    2. Inserts a new item with supersedes_id=old_id.
+    3. Sets old item status='superseded' + decided_at=now.
+
+    Returns the new item's id, or None if old_id not found.
+    Raises ValueError for invalid enum fields (validated by insert logic).
+    """
+    # Validate enums before opening the transaction (fail fast)
+    if not source_task_id or not source_task_id.strip():
+        raise ValueError("source_task_id is required and must not be empty")
+    if typ not in _disposition_mod.VALID_TYP:
+        raise ValueError(
+            f"typ must be one of {sorted(_disposition_mod.VALID_TYP)!r}, got {typ!r}"
+        )
+    if disposition not in _disposition_mod.VALID_DISPOSITION:
+        raise ValueError(
+            f"disposition must be one of {sorted(_disposition_mod.VALID_DISPOSITION)!r}, "
+            f"got {disposition!r}"
+        )
+    if severity not in _disposition_mod.VALID_SEVERITY:
+        raise ValueError(
+            f"severity must be one of {sorted(_disposition_mod.VALID_SEVERITY)!r}, "
+            f"got {severity!r}"
+        )
+    new_id = _new_disposition_id()
+    now = int(time.time())
+    with write_txn(conn):
+        # Check old item exists
+        old_row = conn.execute(
+            "SELECT id FROM disposition_items WHERE id = ?", (old_id,)
+        ).fetchone()
+        if old_row is None:
+            return None
+        # Insert new item
+        conn.execute(
+            "INSERT INTO disposition_items "
+            "(id, source_task_id, typ, disposition, next_action, severity, evidence, "
+            " status, supersedes_id, created_at, decided_at, decided_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, NULL, NULL)",
+            (new_id, source_task_id, typ, disposition,
+             next_action or None, severity, evidence or None,
+             old_id, now),
+        )
+        # Mark old item superseded
+        conn.execute(
+            "UPDATE disposition_items SET status = 'superseded', decided_at = ? "
+            "WHERE id = ?",
+            (now, old_id),
+        )
+    return new_id
 
 
 def set_task_model_override(

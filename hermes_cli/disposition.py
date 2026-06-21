@@ -49,6 +49,16 @@ VALID_TYP: frozenset[str] = frozenset({"risk", "follow_up", "still_open"})
 VALID_DISPOSITION: frozenset[str] = frozenset({"done", "delegate", "defer", "drop"})
 VALID_SEVERITY: frozenset[str] = frozenset({"real-risk", "scope-note", "none"})
 
+#: Valid lifecycle status values for a ``disposition_items`` ledger row.
+#: Terminal status values (accepted, task_created, dismissed, superseded) trigger
+#: ``decided_at`` to be recorded; ``open`` is non-terminal.
+VALID_LEDGER_STATUS: frozenset[str] = frozenset(
+    {"open", "accepted", "task_created", "dismissed", "superseded"}
+)
+
+#: Status values that record a ``decided_at`` timestamp (all except ``open``).
+_TERMINAL_LEDGER_STATUS: frozenset[str] = VALID_LEDGER_STATUS - {"open"}
+
 #: Dispositions that require an explicit next_action (otherwise it is optional).
 _NEXT_ACTION_REQUIRED: frozenset[str] = frozenset({"delegate", "defer"})
 
