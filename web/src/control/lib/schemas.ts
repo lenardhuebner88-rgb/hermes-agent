@@ -548,6 +548,7 @@ export const KanbanDecisionKindSchema = z
     "release_gate_parked",
     "tree_root_woke",
     "deliverable_posted_not_completed",
+    "disposition_risk",
   ])
   .catch("sticky_blocked");
 

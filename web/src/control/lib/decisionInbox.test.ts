@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildDecisionInbox, inboxSummary } from "./decisionInbox";
 import type { Proposal } from "./types";
 import type { BacklogItem } from "./schemas";
+import { KanbanDecisionKindSchema } from "./schemas";
 import type { AgentOpsIntervention } from "./agentOps";
 
 const NOW = Math.floor(Date.parse("2026-06-05T00:00:00Z") / 1000);
@@ -194,6 +195,28 @@ describe("buildDecisionInbox — kanban surface", () => {
     // durch — TopDecision/Queue können "vor Xm" zeigen.
     expect(items[0].ageSeconds).toBe(10);
     expect(items[1].ageSeconds).toBe(99);
+  });
+
+  it("renders disposition_risk with its own label/tone (FRD Phase 2a sink 1)", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "disposition_risk", task_id: "t9", title: "Done task", reason: "1 offenes Risiko", age_seconds: 42, suggested_command: null },
+      ],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].surface).toBe("kanban");
+    expect(items[0].why).toContain("Offenes Risiko aus Abschluss");
+    expect(items[0].tone).toBe("amber");
+    expect(items[0].key).toBe("kanban:disposition_risk:t9");
+    expect(items[0].target).toBe("/control/backlog?focus=t9");
+  });
+
+  it("KanbanDecisionKindSchema keeps disposition_risk (no .catch coercion to sticky_blocked)", () => {
+    expect(KanbanDecisionKindSchema.parse("disposition_risk")).toBe("disposition_risk");
   });
 
   it("lässt das Alter leer, wenn der Payload kein age_seconds trägt (graceful)", () => {

@@ -72,6 +72,7 @@ const KANBAN_KIND_META: Record<KanbanDecisionKind, { weight: number; tone: ToneN
   decompose_failed: { weight: 52, tone: "cyan" },
   stranded_by_stuck_parent: { weight: 50, tone: "cyan" },
   deliverable_posted_not_completed: { weight: 84, tone: "amber" },
+  disposition_risk: { weight: 83, tone: "amber" },
 };
 
 const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
@@ -87,6 +88,7 @@ const KANBAN_KIND_LABELS: Record<KanbanDecisionKind, string> = {
   decompose_failed: "Decompose fehlgeschlagen",
   stranded_by_stuck_parent: "Wartet auf blockierten Vorgänger",
   deliverable_posted_not_completed: "Deliverable da — Repair nötig",
+  disposition_risk: "Offenes Risiko aus Abschluss",
 };
 
 // Interventions that merely SUMMARIZE a surface already enumerated per-item above
