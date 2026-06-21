@@ -732,6 +732,150 @@ export const MetricsLiteResponseSchema = z.object({
   error: z.string().nullable().catch(null).optional(),
 });
 
+const PressureOverallSchema = z.enum(["ok", "busy", "saturated", "unknown"]);
+const TailnetPressureStateSchema = z.enum(["direct", "relay", "inactive", "unknown"]);
+
+const PressureHostSchema = z.object({
+  cpu_percent: z.coerce.number().nullable().catch(null),
+  load_avg: z.array(z.coerce.number()).catch([]),
+  cpu_count: z.coerce.number().catch(1),
+  memory_percent: z.coerce.number().nullable().catch(null),
+}).catch({
+  cpu_percent: null,
+  load_avg: [],
+  cpu_count: 1,
+  memory_percent: null,
+});
+
+const PressureDashboardProcessSchema = z.object({
+  pid: z.coerce.number().nullable().catch(null),
+  rss_mb: z.coerce.number().nullable().catch(null),
+  cpu_percent: z.coerce.number().nullable().catch(null),
+  cpu_weight: z.coerce.number().nullable().catch(null),
+  cpu_quota: z.string().catch("unknown"),
+  tasks_current: z.coerce.number().nullable().catch(null),
+  num_threads: z.coerce.number().nullable().catch(null).optional(),
+}).catch({
+  pid: null,
+  rss_mb: null,
+  cpu_percent: null,
+  cpu_weight: null,
+  cpu_quota: "unknown",
+  tasks_current: null,
+});
+
+const OperatorInventoryLeverSchema = z.object({
+  action: z.string().catch("observe"),
+  label: z.string().catch("Alles ruhig"),
+  detail: z.string().catch("Keine Inventar-Hebel erkannt."),
+  tone: z.enum(["emerald", "cyan", "sky", "indigo", "amber", "rose", "red", "zinc", "violet"]).catch("zinc"),
+  count: z.coerce.number().catch(0),
+  target: z.string().catch("/control/ops"),
+  mutation: z.literal("none").catch("none"),
+});
+
+const OperatorInventorySummarySchema = z.object({
+  worktrees_total: z.coerce.number().catch(0),
+  worktrees_locked: z.coerce.number().catch(0),
+  worktrees_dirty: z.coerce.number().catch(0),
+  worktrees_prunable: z.coerce.number().catch(0),
+  worktrees_orphaned: z.coerce.number().catch(0),
+  worktrees_status_unknown: z.coerce.number().catch(0),
+  actors_total: z.coerce.number().catch(0),
+  actors_canonical: z.coerce.number().catch(0),
+});
+
+const OperatorInventoryWorktreeSchema = z.object({
+  id: z.string().catch("unknown"),
+  path_label: z.string().catch("unknown"),
+  branch: z.string().catch("unknown"),
+  head: z.string().nullable().catch(null),
+  relation: z.string().catch("manual"),
+  task_hint: z.string().nullable().catch(null),
+  state: z.enum(["clean", "dirty", "locked", "prunable", "unknown"]).catch("unknown"),
+  locked: z.boolean().catch(false),
+  prunable: z.boolean().catch(false),
+  detached: z.boolean().catch(false),
+  dirty_count: z.coerce.number().nullable().catch(null),
+  untracked_count: z.coerce.number().nullable().catch(null),
+  status_checked: z.boolean().catch(false),
+  orphaned: z.boolean().catch(false),
+});
+
+const OperatorInventoryActorSchema = z.object({
+  role: z.string().catch("unknown"),
+  label: z.string().catch("Actor"),
+  count: z.coerce.number().catch(0),
+  cpu_percent: z.coerce.number().catch(0),
+  rss_mb: z.coerce.number().catch(0),
+  oldest_age_seconds: z.coerce.number().nullable().catch(null),
+  source: z.enum(["canonical", "process"]).catch("process"),
+  confidence: z.string().catch("medium"),
+  stale_count: z.coerce.number().catch(0),
+  target: z.string().catch("/control/ops"),
+  controllable: z.boolean().catch(false),
+});
+
+export const OperatorInventoryResponseSchema = z.object({
+  schema: z.string().catch("hermes-operator-inventory-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  summary: OperatorInventorySummarySchema,
+  next_lever: OperatorInventoryLeverSchema,
+  levers: z.array(OperatorInventoryLeverSchema).catch([]),
+  worktrees: z.array(OperatorInventoryWorktreeSchema).catch([]),
+  actors: z.array(OperatorInventoryActorSchema).catch([]),
+  errors: z.array(z.string()).catch([]),
+});
+
+const PressureSourceSchema = z.object({
+  kind: z.string().catch("unknown"),
+  label: z.string().catch("unknown"),
+  count: z.coerce.number().catch(0),
+  cpu_percent: z.coerce.number().catch(0),
+  rss_mb: z.coerce.number().catch(0),
+  scope: z.string().catch("unknown"),
+  scope_kind: z.string().catch("unknown"),
+  throttled: z.boolean().catch(false),
+});
+
+const PressureAccessSchema = z.object({
+  tailnet: TailnetPressureStateSchema.catch("unknown"),
+  api_latency_ms: z.coerce.number().nullable().catch(null),
+  detail: z.string().nullable().catch(null),
+}).catch({
+  tailnet: "unknown" as const,
+  api_latency_ms: null,
+  detail: null,
+});
+
+const PressureRecommendationSchema = z.object({
+  label: z.string().catch("Kein Hebel"),
+  detail: z.string().catch("Keine auffaellige Last erkannt."),
+  tone: z.enum(["emerald", "cyan", "sky", "indigo", "amber", "rose", "red", "zinc", "violet"]).catch("zinc"),
+}).catch({
+  label: "Kein Hebel",
+  detail: "Keine auffaellige Last erkannt.",
+  tone: "zinc" as const,
+});
+
+export const PressureStatusResponseSchema = z.object({
+  schema: z.string().catch("hermes-pressure-v1"),
+  checked_at: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  overall: PressureOverallSchema.catch("unknown"),
+  cause: z.string().catch("Pressure unbekannt"),
+  recommendation: PressureRecommendationSchema,
+  host: PressureHostSchema,
+  dashboard: PressureDashboardProcessSchema,
+  pressure_sources: z.array(PressureSourceSchema).catch([]),
+  access: PressureAccessSchema,
+  token_pressure: z.object({
+    class: z.string().catch("unknown"),
+    pct: z.coerce.number().nullable().catch(null),
+    updated_at: z.union([z.string(), z.number()]).nullable().catch(null).optional(),
+  }).catch({ class: "unknown", pct: null }),
+  errors: z.array(z.string()).catch([]),
+});
+
 export const CronOutputSchema = z.object({
   job_id: z.string().catch(""),
   filename: z.string().nullable().catch(null),

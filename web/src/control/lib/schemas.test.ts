@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OrchestrationBacklogResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -160,6 +160,102 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers).toHaveLength(1);
     expect(parsed.workers[0].run_id).toBe("380");
     expect(parsed.workers[0].run_status).toBe("blocked");
+  });
+});
+
+
+describe("OperatorInventoryResponseSchema", () => {
+  it("parses the read-only ops inventory without raw paths or command lines", () => {
+    const parsed = parseOrThrow(OperatorInventoryResponseSchema, {
+      schema: "hermes-operator-inventory-v1",
+      checked_at: 1782070000,
+      summary: {
+        worktrees_total: 3,
+        worktrees_locked: 1,
+        worktrees_dirty: 1,
+        worktrees_prunable: 0,
+        worktrees_orphaned: 1,
+        worktrees_status_unknown: 0,
+        actors_total: 3,
+        actors_canonical: 1,
+      },
+      next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/ops?filter=dirty", mutation: "none" },
+      levers: [
+        { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "1 Worktree hat echte Git-Aenderungen.", tone: "amber", count: 1, target: "/control/ops?filter=dirty", mutation: "none" },
+      ],
+      worktrees: [
+        { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "abc123", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
+      ],
+      actors: [
+        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: 0, rss_mb: 0, oldest_age_seconds: 120, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
+        { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 60, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
+      ],
+      errors: [],
+    }, "operator-inventory");
+
+    expect(parsed.summary.worktrees_total).toBe(3);
+    expect(parsed.next_lever.action).toBe("inspect_dirty_worktrees");
+    expect(parsed.worktrees[0].path_label).toBe("kanban:t_123");
+    expect(parsed.actors[0].source).toBe("canonical");
+    expect(JSON.stringify(parsed)).not.toContain("/home/");
+    expect(JSON.stringify(parsed)).not.toContain(".worktrees/");
+    expect(JSON.stringify(parsed).toLowerCase()).not.toContain("cmdline");
+  });
+});
+
+
+describe("PressureStatusResponseSchema", () => {
+  it("keeps the operator pressure contract small and redacted", () => {
+    const parsed = parseOrThrow(PressureStatusResponseSchema, {
+      schema: "hermes-pressure-v1",
+      checked_at: 1782070000,
+      overall: "busy",
+      cause: "Ungedrosselte Testprozesse in Session-Scope",
+      recommendation: {
+        label: "Tests laufen",
+        detail: "1 Testprozess aktiv.",
+        tone: "amber",
+      },
+      host: {
+        cpu_percent: 72,
+        load_avg: [7.2, 6.8, 5.1],
+        cpu_count: 12,
+        memory_percent: 61,
+      },
+      dashboard: {
+        pid: 1243,
+        rss_mb: 788,
+        cpu_percent: 8.5,
+        cpu_weight: 300,
+        cpu_quota: "infinity",
+        tasks_current: 23,
+      },
+      pressure_sources: [{
+        kind: "test",
+        label: "pytest",
+        count: 4,
+        cpu_percent: 370,
+        rss_mb: 410,
+        scope: "session scope",
+        scope_kind: "session",
+        throttled: false,
+      }],
+      access: {
+        tailnet: "direct",
+        api_latency_ms: 190,
+        detail: "tailnet direct",
+      },
+      token_pressure: {
+        class: "unknown",
+        pct: null,
+      },
+      errors: [],
+    }, "pressure-status");
+
+    expect(parsed.overall).toBe("busy");
+    expect(parsed.recommendation.label).toBe("Tests laufen");
+    expect(parsed.pressure_sources[0].label).toBe("pytest");
+    expect(parsed.access.tailnet).toBe("direct");
   });
 });
 

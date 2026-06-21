@@ -85,7 +85,38 @@ async function mockControlApis(page: Page) {
     } : path.includes("/orchestration/backlog") ? {
       items: [],
     } : path.includes("/metrics-lite") ? {
-      routes: [],
+      schema: "hermes-metrics-lite-v1",
+      checked_at: Math.floor(Date.now() / 1000),
+      uptime_seconds: 60,
+      groups: {},
+    } : path === "/api/pressure-status" ? {
+      schema: "hermes-pressure-v1",
+      checked_at: Math.floor(Date.now() / 1000),
+      overall: "busy",
+      cause: "Ungedrosselte Testprozesse laufen im gleichen Sitzungsbereich",
+      recommendation: { label: "Tests laufen", detail: "2 Testprozesse aktiv.", tone: "amber" },
+      host: { cpu_percent: 36, load_avg: [5.4, 4.8, 3.1], cpu_count: 12, memory_percent: 62 },
+      dashboard: { pid: 4242, rss_mb: 188, cpu_percent: 5, cpu_weight: 100, cpu_quota: "max", tasks_current: 24 },
+      pressure_sources: [{ kind: "test", label: "pytest", count: 2, cpu_percent: 190, rss_mb: 810, scope: "user-session", throttled: false }],
+      access: { tailnet: "direct", api_latency_ms: 128, detail: "tailnet direct" },
+      token_pressure: { class: "unknown", pct: null, updated_at: null },
+      errors: [],
+    } : path === "/api/operator-inventory" ? {
+      schema: "hermes-operator-inventory-v1",
+      checked_at: Math.floor(Date.now() / 1000),
+      summary: { worktrees_total: 86, worktrees_locked: 60, worktrees_dirty: 2, worktrees_prunable: 0, worktrees_orphaned: 1, worktrees_status_unknown: 0, actors_total: 4, actors_canonical: 1 },
+      next_lever: { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
+      levers: [
+        { action: "inspect_dirty_worktrees", label: "Dirty Worktrees", detail: "2 Worktrees haben echte Git-Aenderungen.", tone: "amber", count: 2, target: "/control/ops?filter=dirty", mutation: "none" },
+      ],
+      worktrees: [
+        { id: "kanban:t_123", path_label: "kanban:t_123", branch: "kanban/t_123", head: "def456", relation: "kanban", task_hint: "t_123", state: "dirty", locked: true, prunable: false, detached: false, dirty_count: 3, untracked_count: 1, status_checked: true, orphaned: true },
+      ],
+      actors: [
+        { role: "kanban_worker", label: "Kanban Worker", count: 1, cpu_percent: 0, rss_mb: 0, oldest_age_seconds: 500, source: "canonical", confidence: "high", stale_count: 0, target: "/control/flow", controllable: false },
+        { role: "codex", label: "Codex", count: 2, cpu_percent: 12.5, rss_mb: 512, oldest_age_seconds: 120, source: "process", confidence: "medium", stale_count: 0, target: "/control/ops", controllable: false },
+      ],
+      errors: [],
     } : {};
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
@@ -98,6 +129,8 @@ const TABS: Array<{ path: string; probe: string }> = [
   { path: "/control/flow", probe: "Flow Command Board" },
   { path: "/control/statistik", probe: "Statistik" },
   { path: "/control/bibliothek", probe: "Bibliothek" },
+  { path: "/control/pressure", probe: "Pressure" },
+  { path: "/control/ops", probe: "Ops Radar" },
 ];
 
 test.describe("Control Smoke (live)", () => {
@@ -165,4 +198,55 @@ test.describe("Control Smoke (live)", () => {
       await expect(page.getByText("Details sichtbar").filter({ visible: true })).toBeVisible();
     });
   }
+
+  for (const viewport of [
+    { name: "Desktop", size: { width: 1440, height: 1000 } },
+    { name: "Mobile", size: { width: 390, height: 844 } },
+  ]) {
+    test(`Pressure-Tab zeigt kompakte Lesefakten ohne Rohpfade (${viewport.name})`, async ({ page }) => {
+      await page.setViewportSize(viewport.size);
+      await mockControlApis(page);
+
+      await page.goto("/control/pressure");
+
+      await expect(page.getByText("Pressure").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText("Busy").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Last").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("CPU").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("RAM").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Tailnet").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Nächster Hebel").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Tests laufen").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("pytest").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("/home/")).toHaveCount(0);
+      await expect(page.getByText("run_tests_parallel.py")).toHaveCount(0);
+    });
+  }
+
+  for (const viewport of [
+    { name: "Desktop", size: { width: 1440, height: 1000 } },
+    { name: "Mobile", size: { width: 390, height: 844 } },
+  ]) {
+    test(`Ops-Radar zeigt echte Hebel und keine Rohdaten (${viewport.name})`, async ({ page }) => {
+      await page.setViewportSize(viewport.size);
+      await mockControlApis(page);
+
+      await page.goto("/control/ops");
+
+      await expect(page.getByText("Ops Radar").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText("86 total").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("60 locked").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText(/N.chster Hebel/).filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Dirty Worktrees").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Worktree-Ledger").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Actor Map").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Kanban Worker").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("read-only").filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("/home/")).toHaveCount(0);
+      await expect(page.getByText("cmdline")).toHaveCount(0);
+      await expect(page.getByText(".worktrees/")).toHaveCount(0);
+      await expect(page.getByText(/\b(stop|kill|update)\b/i)).toHaveCount(0);
+    });
+  }
+
 });

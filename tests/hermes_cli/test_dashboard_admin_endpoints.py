@@ -796,6 +796,8 @@ class TestAdminEndpointsAuthGate:
             "/api/portal",
             "/api/account-usage",
             "/api/system/stats",
+            "/api/pressure-status",
+            "/api/operator-inventory",
             "/api/hermes/update/check",
         ],
     )

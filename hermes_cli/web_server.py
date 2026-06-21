@@ -13322,6 +13322,12 @@ register_autoresearch_routes(app)
 from hermes_cli.health_status import register_health_status_routes  # noqa: E402
 register_health_status_routes(app)
 
+from hermes_cli.pressure_status import register_pressure_status_routes  # noqa: E402
+register_pressure_status_routes(app)
+
+from hermes_cli.operator_inventory import register_operator_inventory_routes  # noqa: E402
+register_operator_inventory_routes(app)
+
 # Read-only cron observability (redacted jobs + gateway liveness + real run
 # output). Under /api/ → inherits the session-token gate; never in
 # PUBLIC_API_PATHS. See hermes_cli/cron_observability.py.

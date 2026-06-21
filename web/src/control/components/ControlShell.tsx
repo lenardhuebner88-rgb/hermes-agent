@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, SearchCheck, Settings, Shield, Sparkles, Workflow } from "lucide-react";
+import { Activity, BookOpen, ChartSpline, Clock, Columns3, Command, FlaskConical, Gauge, GitBranch, Radar, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, SearchCheck, Settings, Shield, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -10,7 +10,7 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "research" | "bibliothek" | "schmiede" | "stratege";
+export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege";
 
 // The daily spine — 4 tabs. Start (the Command cockpit: needs-me + fleet +
 // health), Flow (the live work board, absorbs the fleet), Statistik (charts:
@@ -39,6 +39,8 @@ const moreTabs = [
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { label: "Lanes", path: "/control/lanes", icon: Shield },
+  { label: "Pressure", path: "/control/pressure", icon: Gauge },
+  { label: "Ops Radar", path: "/control/ops", icon: Radar },
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
   // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.
   { label: "Recherche", path: "/control/research", icon: SearchCheck },

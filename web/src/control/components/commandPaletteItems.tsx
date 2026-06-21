@@ -1,7 +1,7 @@
 // Ausgelagert aus CommandPalette.tsx (react-refresh/only-export-components):
 // Snapshot-Lese-, Item-Bau- und Filter-Logik der Palette, exportiert für
 // Tests und getrennt von der Komponente (Fast-Refresh-Boundary).
-import { Activity, ArrowRight, Bot, Clock, FlaskConical, GitBranch, Inbox, KanbanSquare, LayoutDashboard, Search, Workflow } from "lucide-react";
+import { Activity, ArrowRight, Bot, Clock, FlaskConical, Gauge, GitBranch, Inbox, KanbanSquare, LayoutDashboard, Radar, Search, Workflow } from "lucide-react";
 import { getSnapshot } from "../hooks/pollingStore";
 import type { BacklogResponse, EpicsResponse, OrchestrationBacklogResponse } from "../lib/schemas";
 import type { BoardResponse, CronObservabilityResponse, Worker } from "../lib/types";
@@ -104,6 +104,8 @@ export function buildCommandPaletteItems({ workers, snapshots, onNavigate, onGen
     { id: "nav-workstreams", group: "Navigation", label: "Arbeitsströme", hint: "/control/workstreams · g s", icon: <GitBranch className="h-4 w-4" />, action: () => onNavigate("/control/workstreams") },
     { id: "nav-flow-workers", group: "Navigation", label: "Worker (Flow)", hint: "/control/flow · g f", icon: <Bot className="h-4 w-4" />, action: () => onNavigate("/control/flow") },
     { id: "nav-statistik", group: "Navigation", label: "Statistik", hint: "/control/statistik · g t", icon: <Activity className="h-4 w-4" />, action: () => onNavigate("/control/statistik") },
+    { id: "nav-pressure", group: "Navigation", label: "Pressure", hint: "/control/pressure", icon: <Gauge className="h-4 w-4" />, action: () => onNavigate("/control/pressure") },
+    { id: "nav-ops", group: "Navigation", label: "Ops Radar", hint: "/control/ops", icon: <Radar className="h-4 w-4" />, action: () => onNavigate("/control/ops") },
     { id: "nav-autoresearch", group: "Navigation", label: "Autoresearch", hint: "/control/autoresearch · g a", icon: <FlaskConical className="h-4 w-4" />, action: () => onNavigate("/control/autoresearch") },
     { id: "nav-pulse", group: "Navigation", label: "Pulse", hint: "/control/pulse · g p", icon: <Activity className="h-4 w-4" />, action: () => onNavigate("/control/pulse") },
     ...secondary.map(([label, path]) => ({ id: `more-${path}`, group: "Navigation", label, hint: path, icon: <ArrowRight className="h-4 w-4" />, action: () => onNavigate(path) })),
@@ -129,4 +131,3 @@ export function filterCommandPaletteItems(items: CommandItem[], query: string): 
   }
   return out;
 }
-

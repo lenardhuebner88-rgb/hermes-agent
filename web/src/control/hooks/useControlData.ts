@@ -13,6 +13,8 @@ import {
   CronObservabilityResponseSchema,
   CronOutputSchema,
   MetricsLiteResponseSchema,
+  OperatorInventoryResponseSchema,
+  PressureStatusResponseSchema,
   ProposalsResponseSchema,
   RecentResultsResponseSchema,
   ReviewVerdictsResponseSchema,
@@ -56,7 +58,7 @@ import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
-import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
+import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, OperatorInventoryResponse, PressureStatusResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
 import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
@@ -1593,6 +1595,22 @@ export function useMetricsLite() {
     "metrics-lite",
     async () => parseOrThrow(MetricsLiteResponseSchema, await fetchJSON<unknown>("/api/metrics-lite"), "metrics-lite"),
     5000,
+  );
+}
+
+export function usePressureStatus() {
+  return usePolling<PressureStatusResponse>(
+    "pressure-status",
+    async () => parseOrThrow(PressureStatusResponseSchema, await fetchJSON<unknown>("/api/pressure-status"), "pressure-status"),
+    5000,
+  );
+}
+
+export function useOperatorInventory() {
+  return usePolling<OperatorInventoryResponse>(
+    "operator-inventory",
+    async () => parseOrThrow(OperatorInventoryResponseSchema, await fetchJSON<unknown>("/api/operator-inventory"), "operator-inventory"),
+    30000,
   );
 }
 

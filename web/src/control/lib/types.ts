@@ -666,6 +666,134 @@ export interface MetricsLiteResponse {
   error?: string | null;
 }
 
+export type OperatorInventoryWorktreeState = "clean" | "dirty" | "locked" | "prunable" | "unknown";
+
+export interface OperatorInventoryLever {
+  action: string;
+  label: string;
+  detail: string;
+  tone: ToneName;
+  count: number;
+  target: string;
+  mutation: "none";
+}
+
+export interface OperatorInventorySummary {
+  worktrees_total: number;
+  worktrees_locked: number;
+  worktrees_dirty: number;
+  worktrees_prunable: number;
+  worktrees_orphaned: number;
+  worktrees_status_unknown: number;
+  actors_total: number;
+  actors_canonical: number;
+}
+
+export interface OperatorInventoryWorktree {
+  id: string;
+  path_label: string;
+  branch: string;
+  head: string | null;
+  relation: string;
+  task_hint: string | null;
+  state: OperatorInventoryWorktreeState;
+  locked: boolean;
+  prunable: boolean;
+  detached: boolean;
+  dirty_count: number | null;
+  untracked_count: number | null;
+  status_checked: boolean;
+  orphaned: boolean;
+}
+
+export interface OperatorInventoryActor {
+  role: string;
+  label: string;
+  count: number;
+  cpu_percent: number;
+  rss_mb: number;
+  oldest_age_seconds: number | null;
+  source: "canonical" | "process";
+  confidence: string;
+  stale_count: number;
+  target: string;
+  controllable: boolean;
+}
+
+export interface OperatorInventoryResponse {
+  schema: string;
+  checked_at: number;
+  summary: OperatorInventorySummary;
+  next_lever: OperatorInventoryLever;
+  levers: OperatorInventoryLever[];
+  worktrees: OperatorInventoryWorktree[];
+  actors: OperatorInventoryActor[];
+  errors: string[];
+}
+
+export type PressureOverall = "ok" | "busy" | "saturated" | "unknown";
+export type TailnetPressureState = "direct" | "relay" | "inactive" | "unknown";
+
+export interface PressureHost {
+  cpu_percent: number | null;
+  load_avg: number[];
+  cpu_count: number;
+  memory_percent: number | null;
+}
+
+export interface PressureDashboardProcess {
+  pid: number | null;
+  rss_mb: number | null;
+  cpu_percent: number | null;
+  cpu_weight: number | null;
+  cpu_quota: string;
+  tasks_current: number | null;
+  num_threads?: number | null;
+}
+
+export interface PressureSource {
+  kind: "test" | "browser_test" | "agent" | "hermes_service" | string;
+  label: string;
+  count: number;
+  cpu_percent: number;
+  rss_mb: number;
+  scope: string;
+  scope_kind: string;
+  throttled: boolean;
+}
+
+export interface PressureAccess {
+  tailnet: TailnetPressureState;
+  api_latency_ms: number | null;
+  detail: string | null;
+}
+
+export interface TokenPressure {
+  class: string;
+  pct: number | null;
+  updated_at?: string | number | null;
+}
+
+export interface PressureRecommendation {
+  label: string;
+  detail: string;
+  tone: ToneName;
+}
+
+export interface PressureStatusResponse {
+  schema: string;
+  checked_at: number;
+  overall: PressureOverall;
+  cause: string;
+  recommendation: PressureRecommendation;
+  host: PressureHost;
+  dashboard: PressureDashboardProcess;
+  pressure_sources: PressureSource[];
+  access: PressureAccess;
+  token_pressure: TokenPressure;
+  errors: string[];
+}
+
 export type Priority = "high" | "med" | "low";
 
 export type AutoresearchState = "idle" | "running" | "stopping" | "crashed";

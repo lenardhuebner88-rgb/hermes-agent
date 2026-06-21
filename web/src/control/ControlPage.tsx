@@ -69,6 +69,12 @@ const SchmiedeView = lazy(() =>
 const StrategistView = lazy(() =>
   import("./views/StrategistView").then((m) => ({ default: m.StrategistView })),
 );
+const PressureView = lazy(() =>
+  import("./views/PressureView").then((m) => ({ default: m.PressureView })),
+);
+const OpsRadarView = lazy(() =>
+  import("./views/OpsRadarView").then((m) => ({ default: m.OpsRadarView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/overview")) return "overview";
@@ -83,6 +89,8 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/lanes")) return "lanes";
+  if (pathname.includes("/control/pressure")) return "pressure";
+  if (pathname.includes("/control/ops")) return "ops";
   if (pathname.includes("/control/research")) return "research";
   if (pathname.includes("/control/bibliothek")) return "bibliothek";
   if (pathname.includes("/control/schmiede")) return "schmiede";
@@ -111,6 +119,8 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   orchestrator: () => import("./views/OrchestratorBacklogView"),
   crons: () => import("./views/CronView"),
   lanes: () => import("./views/LanesView"),
+  pressure: () => import("./views/PressureView"),
+  ops: () => import("./views/OpsRadarView"),
   research: () => import("./views/ResearchView"),
   bibliothek: () => import("./views/BibliothekView"),
   schmiede: () => import("./views/SchmiedeView"),
@@ -136,6 +146,8 @@ const tabPath: Record<ControlTab, string> = {
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
   lanes: "/control/lanes",
+  pressure: "/control/pressure",
+  ops: "/control/ops",
   research: "/control/research",
   bibliothek: "/control/bibliothek",
   schmiede: "/control/schmiede",
@@ -241,6 +253,8 @@ export default function ControlPage() {
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
+            <Route path="pressure" element={<PressureView />} />
+            <Route path="ops" element={<OpsRadarView />} />
             <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
             <Route path="issues" element={<IssuesView density={density.density} />} />
             <Route path="research" element={<ResearchView density={density.density} />} />
