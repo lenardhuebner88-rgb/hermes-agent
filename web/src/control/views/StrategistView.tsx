@@ -290,9 +290,9 @@ export function TriggerPanel({ onRan }: { onRan: () => void }) {
   }, [onRan]);
 
   useEffect(() => {
-    void poll();
+    const initial = window.setTimeout(() => void poll(), 0);  // deferred: kein setState synchron im Effect
     const timer = window.setInterval(() => { if (!document.hidden) void poll(); }, 3000);
-    return () => window.clearInterval(timer);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
   }, [poll]);
 
   const fire = useCallback(async (which: TriggerWhich) => {
