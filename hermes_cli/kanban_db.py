@@ -7994,6 +7994,57 @@ def _maybe_advance_review_chain(
     return True
 
 
+def _record_disposition_items(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: object,
+    *,
+    run_id: Optional[int] = None,  # noqa: ARG001 — reserved for future event linking
+) -> None:
+    """Record disposition items from *metadata* into the disposition_items ledger.
+
+    Advisory — does not block the completion / own txn.
+    Deduplicates against existing rows for this task (typ + disposition +
+    next_action + evidence match = skip) so a retry completion does not
+    produce duplicate ledger entries.  Never raises: every exception is
+    swallowed and logged so a ledger-write problem can never block a
+    task-completion call.
+    """
+    try:
+        result = _disposition_mod.parse_disposition(metadata)
+        if not result.items:
+            return  # empty/missing disposition — legitimate no-op
+
+        existing = list_disposition_items(conn, source_task_id=task_id)
+        for item in result.items:
+            # Dedup: skip if a content-identical row already exists.
+            is_dup = any(
+                ex["typ"] == item.typ
+                and ex["disposition"] == item.disposition
+                and (ex["next_action"] or "") == item.next_action
+                and (ex["evidence"] or "") == item.evidence
+                for ex in existing
+            )
+            if is_dup:
+                continue
+            insert_disposition_item(
+                conn,
+                source_task_id=task_id,
+                typ=item.typ,
+                disposition=item.disposition,
+                next_action=item.next_action,
+                severity=item.severity,
+                evidence=item.evidence,
+            )
+    except Exception:
+        _log.error(
+            "disposition ledger write failed for task %s — "
+            "completion is unaffected",
+            task_id,
+            exc_info=True,
+        )
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -8300,6 +8351,14 @@ def complete_task(
                     },
                     run_id=run_id,
                 )
+    # Disposition-ledger write-back: extract disposition items from completion
+    # metadata and persist them as open ledger entries for triage.  Advisory —
+    # does not block the completion / own txn (see _record_disposition_items).
+    # Scope (Phase 1a): only the direct done-path records here. Review-gated
+    # (_submit_for_review) and workflow-step (_advance_workflow_step) routing do
+    # NOT yet capture the coder's disposition — its metadata stays on the run
+    # row, so a later slice (Phase 1b/4) can backfill it. Not a silent gap.
+    _record_disposition_items(conn, task_id, metadata, run_id=run_id)
     # Family Organizer write-back: the Kanban task is a Fleet copy of a
     # repo-native backlog item, so terminal done closes the linked source item.
     _maybe_close_family_organizer_backlog_item(
@@ -16679,7 +16738,20 @@ def _spawn_claude_worker(
         "--metadata '<json>' where <json> is ONE JSON object with "
         '"residual_risk" (one line: what could still break or was not '
         'verified) plus the facts that apply: "changed_files": [...], '
-        '"tests_run": N, "decisions": [...]. To keep a file you created, '
+        '"tests_run": N, "decisions": [...], '
+        '"disposition": {"items": [...]}. '
+        'Each disposition item captures a risk, follow-up, or still-open '
+        'thread you noticed while working: '
+        '{"typ": "risk|follow_up|still_open", '
+        '"disposition": "done|delegate|defer|drop", '
+        '"next_action": "<concrete next step — required when disposition is '
+        'delegate or defer>", '
+        '"severity": "real-risk|scope-note|none", '
+        '"evidence": "<file:line / commit / task_id>"}. '
+        'Nothing noticed? Use "disposition": {"items": []} — an empty list '
+        'is correct and expected. Do not invent items; only record what you '
+        'actually observed (evidence before assertion). '
+        'To keep a file you created, '
         'add "artifacts": ["<absolute path>"] — the workspace is deleted '
         "on completion; listed workspace files are copied to "
         "~/.hermes/reports/by-task/ first, anything unlisted is gone.\n"

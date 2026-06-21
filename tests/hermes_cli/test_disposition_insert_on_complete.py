@@ -1,0 +1,224 @@
+"""TDD tests for FRD Phase 1a — disposition insert on task completion.
+
+Covers:
+  1. _record_disposition_items: 2 valid items → 2 ledger rows (status=open).
+  2. Empty-list / missing-key → 0 rows, no error (no-op).
+  3. Dedup on retry: same item twice → only 1 row inserted.
+  4. Best-effort: insert raises → _record_disposition_items swallows, does not re-raise.
+  5. Integration: complete_task with disposition-metadata → items in ledger + task done.
+  6. Integration-empty: complete_task without disposition → task done, 0 rows, no error.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def db_conn(tmp_path, monkeypatch):
+    """Fresh kanban DB in a temp HERMES_HOME; yields an open connection."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = kb.kanban_db_path()
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    conn = kb.connect(db_path=db_path)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture()
+def kanban_home(tmp_path, monkeypatch):
+    """Isolated HERMES_HOME used for complete_task integration tests."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
+
+
+# ---------------------------------------------------------------------------
+# Sample metadata blobs
+# ---------------------------------------------------------------------------
+
+_TWO_ITEMS_METADATA = {
+    "residual_risk": "none",
+    "disposition": {
+        "items": [
+            {
+                "typ": "risk",
+                "disposition": "delegate",
+                "next_action": "ping security team",
+                "severity": "real-risk",
+                "evidence": "src/auth.py:42",
+            },
+            {
+                "typ": "follow_up",
+                "disposition": "defer",
+                "next_action": "add regression test in sprint 3",
+                "severity": "none",
+                "evidence": "tests/test_auth.py",
+            },
+        ]
+    },
+}
+
+_EMPTY_ITEMS_METADATA = {
+    "residual_risk": "none",
+    "disposition": {"items": []},
+}
+
+_NO_DISPOSITION_METADATA = {
+    "residual_risk": "none",
+    "changed_files": ["src/foo.py"],
+}
+
+
+# ===========================================================================
+# 1. _record_disposition_items: 2 valid items → 2 rows (status=open, fields ok)
+# ===========================================================================
+
+
+def test_record_two_items_creates_two_open_rows(db_conn):
+    task_id = "t_rec001"
+    kb._record_disposition_items(db_conn, task_id, _TWO_ITEMS_METADATA)
+
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert len(rows) == 2
+    # All must be status=open
+    assert all(r["status"] == "open" for r in rows)
+    # source_task_id must match
+    assert all(r["source_task_id"] == task_id for r in rows)
+    # Verify field round-trip for the risk item
+    risk_rows = [r for r in rows if r["typ"] == "risk"]
+    assert len(risk_rows) == 1
+    r = risk_rows[0]
+    assert r["disposition"] == "delegate"
+    assert r["next_action"] == "ping security team"
+    assert r["severity"] == "real-risk"
+    assert r["evidence"] == "src/auth.py:42"
+    # And the follow_up item
+    fu_rows = [r for r in rows if r["typ"] == "follow_up"]
+    assert len(fu_rows) == 1
+    fu = fu_rows[0]
+    assert fu["disposition"] == "defer"
+    assert fu["next_action"] == "add regression test in sprint 3"
+    assert fu["severity"] == "none"
+
+
+# ===========================================================================
+# 2. Empty-list → 0 rows, no error
+# ===========================================================================
+
+
+def test_record_empty_items_list_is_noop(db_conn):
+    task_id = "t_empty"
+    kb._record_disposition_items(db_conn, task_id, _EMPTY_ITEMS_METADATA)
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert rows == []
+
+
+def test_record_no_disposition_key_is_noop(db_conn):
+    task_id = "t_nokey"
+    kb._record_disposition_items(db_conn, task_id, _NO_DISPOSITION_METADATA)
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert rows == []
+
+
+def test_record_none_metadata_is_noop(db_conn):
+    task_id = "t_none"
+    kb._record_disposition_items(db_conn, task_id, None)
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert rows == []
+
+
+# ===========================================================================
+# 3. Dedup: calling twice with the same items → only 1 row per item
+# ===========================================================================
+
+
+def test_dedup_second_call_does_not_duplicate(db_conn):
+    task_id = "t_dedup"
+    kb._record_disposition_items(db_conn, task_id, _TWO_ITEMS_METADATA)
+    kb._record_disposition_items(db_conn, task_id, _TWO_ITEMS_METADATA)  # retry
+    rows = kb.list_disposition_items(db_conn, source_task_id=task_id)
+    assert len(rows) == 2  # still 2, not 4
+
+
+# ===========================================================================
+# 4. Best-effort: insert raises → function swallows, does NOT re-raise
+# ===========================================================================
+
+
+def test_best_effort_swallows_insert_error(db_conn, monkeypatch):
+    def _explode(*args, **kwargs):
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(kb, "insert_disposition_item", _explode)
+    task_id = "t_err"
+    # Must not raise — even when insert is broken
+    kb._record_disposition_items(db_conn, task_id, _TWO_ITEMS_METADATA)
+
+
+# ===========================================================================
+# 5. Integration: complete_task with disposition → items in ledger + task done
+# ===========================================================================
+
+
+def test_complete_task_with_disposition_inserts_items(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="integration test task", assignee="coder")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(
+            conn, tid,
+            result="done",
+            summary="all good",
+            metadata=_TWO_ITEMS_METADATA,
+        )
+    assert ok is True
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "done"
+        rows = kb.list_disposition_items(conn, source_task_id=tid)
+
+    assert len(rows) == 2
+    assert all(r["status"] == "open" for r in rows)
+    typs = {r["typ"] for r in rows}
+    assert typs == {"risk", "follow_up"}
+
+
+# ===========================================================================
+# 6. Integration-empty: complete_task without disposition → done, 0 rows, no error
+# ===========================================================================
+
+
+def test_complete_task_without_disposition_is_backward_compat(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="legacy task", assignee="coder")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(
+            conn, tid,
+            result="done",
+            summary="finished",
+            metadata=_NO_DISPOSITION_METADATA,
+        )
+    assert ok is True
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "done"
+        rows = kb.list_disposition_items(conn, source_task_id=tid)
+
+    assert rows == []
