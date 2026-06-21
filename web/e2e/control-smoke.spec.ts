@@ -236,7 +236,7 @@ test.describe("Control Smoke (live)", () => {
       await expect(page.getByText("Ops Radar").filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
       await expect(page.getByText("86 total").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("60 locked").filter({ visible: true }).first()).toBeVisible();
-      await expect(page.getByText(/N.chster Hebel/).filter({ visible: true }).first()).toBeVisible();
+      await expect(page.getByText("Top-Hebel").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("Dirty Worktrees").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("Worktree-Ledger").filter({ visible: true }).first()).toBeVisible();
       await expect(page.getByText("Actor Map").filter({ visible: true }).first()).toBeVisible();

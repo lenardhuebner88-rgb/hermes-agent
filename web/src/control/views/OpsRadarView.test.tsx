@@ -40,7 +40,7 @@ describe("OpsRadarContent", () => {
     expect(html).toContain("Ops Radar");
     expect(html).toContain("86 total");
     expect(html).toContain("60 locked");
-    expect(html).toContain("N?chster Hebel");
+    expect(html).toContain("Top-Hebel");
     expect(html).toContain("Dirty Worktrees");
     expect(html).toContain("Worktree-Ledger");
     expect(html).toContain("kanban:t_123");

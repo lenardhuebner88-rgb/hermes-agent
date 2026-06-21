@@ -156,7 +156,7 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error }: {
           <Chip icon={GitBranch} label="Worktrees" value={`${summary.worktrees_total} total`} hint={`${summary.worktrees_locked} locked - ${summary.worktrees_dirty} dirty`} tone={summary.worktrees_dirty || summary.worktrees_orphaned ? "amber" : "zinc"} />
           <Chip icon={Bot} label="Akteure" value={String(summary.actors_total)} hint={`${summary.actors_canonical} kanonisch`} tone={summary.actors_total ? "cyan" : "zinc"} />
           <Chip icon={Radar} label="Mismatch" value={String(mismatchCount)} hint={`${summary.worktrees_orphaned} orphan - ${summary.worktrees_status_unknown} unklar`} tone={mismatchCount ? "rose" : "emerald"} />
-          <Chip icon={Wrench} label="N?chster Hebel" value={next.label} hint={next.detail} tone={next.tone} />
+          <Chip icon={Wrench} label="Top-Hebel" value={next.label} hint={next.detail} tone={next.tone} />
         </div>
       </Card>
 
