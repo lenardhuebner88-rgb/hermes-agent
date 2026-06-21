@@ -967,6 +967,35 @@ def gather_recent_receipts(
     return out
 
 
+def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Nur Receipts mit Follow-up-Marker; ergänzt einen stabilen ``suggested_key``."""
+    # Marker, die im Receipt-Text auf unerledigte Out-of-Scope-Arbeit hindeuten.
+    followup_markers = (
+        "outside scope",
+        "out of scope",
+        "nicht im scope",
+        "ausser scope",
+        "remaining",
+        "verbleib",
+        "separat",
+        "follow-up",
+        "followup",
+        "folge-task",
+        "anschließend",
+        "nächster schritt",
+        "next step",
+        "todo",
+        "sollte noch",
+        "should be",
+    )
+    kept: list[dict[str, Any]] = []
+    for rc in receipts:
+        low = (rc.get("excerpt") or "").lower()
+        if any(marker in low for marker in followup_markers):
+            kept.append({**rc, "suggested_key": f"receipt-{rc['task_id']}"})
+    return kept
+
+
 # --------------------------------------------------------------------------- #
 # Default runtime paths (CLI fills these; tests inject explicit paths)
 # --------------------------------------------------------------------------- #
