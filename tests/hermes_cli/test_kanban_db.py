@@ -2764,6 +2764,100 @@ def test_respawn_guard_rate_limit_cooldown_zero_allows_immediately(
         assert kb.check_respawn_guard(conn, tid) is None
 
 
+def test_park_integration_records_parked_outcome_not_completed(kanban_home):
+    """C-2: a parked integration is stamped INTEGRATION_PARKED_OUTCOME, NOT
+    'completed' — so it falls out of every ``outcome = 'completed'`` filter
+    (recent_success guard, success-rate stats) while cost stays attributed."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="park-outcome", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        assert kb._park_integration(
+            conn, tid, {"reason": "dirty worktree"}, expected_run_id=run_id,
+        )
+        row = conn.execute(
+            "SELECT outcome, status FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert row["outcome"] == kb.INTEGRATION_PARKED_OUTCOME
+        assert row["outcome"] != "completed"
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_respawn_guard_recent_success_fires_without_unblock(kanban_home, monkeypatch):
+    """Baseline (no regression): a genuine completed run inside the window with
+    no operator unblock still defers as 'recent_success'."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 7_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="rs-baseline", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='completed', status='review', "
+            "ended_at=? WHERE id=?", (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, "
+            "claim_lock=NULL WHERE id=?", (tid,),
+        )
+        conn.commit()
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 100)
+        assert kb.check_respawn_guard(conn, tid) == "recent_success"
+
+
+def test_respawn_guard_unblock_clears_recent_success(kanban_home, monkeypatch):
+    """C-1 (operator override): an explicit unblock AFTER a completed run beats
+    the success cooldown — the deliberate "run this again" must not stall for
+    the rest of the guard window."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 7_100_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="rs-unblock", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='completed', status='blocked', "
+            "ended_at=? WHERE id=?", (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='blocked', current_run_id=NULL, "
+            "claim_lock=NULL, worker_pid=NULL WHERE id=?", (tid,),
+        )
+        conn.commit()
+        # Operator unblocks AFTER the completed run.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 50)
+        assert kb.unblock_task(conn, tid) is True
+        assert kb.get_task(conn, tid).status == "ready"
+        # Still inside the guard window, but the unblock must clear it.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 100)
+        assert kb.check_respawn_guard(conn, tid) is None
+
+
+def test_parked_then_unblocked_task_is_respawnable(kanban_home, monkeypatch):
+    """C-1 + C-2 end-to-end: park an integration, operator unblocks → the task
+    is dispatchable on the next tick (no 'recent_success' stall). The 1h-stall
+    bug this guards against had both a relabel and an unblock-override fix."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 7_200_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="park-respawn", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        monkeypatch.setattr(_kb.time, "time", lambda: now)
+        assert kb._park_integration(
+            conn, tid, {"reason": "dirty overlap"}, expected_run_id=run_id,
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 30)
+        assert kb.unblock_task(conn, tid) is True
+        assert kb.get_task(conn, tid).status == "ready"
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 60)
+        assert kb.check_respawn_guard(conn, tid) is None
+
+
 def test_resolve_rate_limit_cooldown_handles_bad_env(monkeypatch):
     import hermes_cli.kanban_db as _kb
 

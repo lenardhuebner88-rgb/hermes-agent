@@ -2899,6 +2899,15 @@ INTEGRATION_RETRY_LIMIT = 2
 INTEGRATION_RETRY_BACKOFF_SECONDS = 60
 INTEGRATION_RETRY_EXHAUSTED_CLASS = "integration_retry_exhausted"
 INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
+# Run ``outcome`` written by ``_park_integration`` for a completion whose chain
+# integration failed (worker isolation). Value intentionally matches the stall
+# class. A parked integration is NOT a successful run: stamping it ``completed``
+# (the historical behavior) made the respawn guard treat it as ``recent_success``
+# — silently stalling the task for the full guard window after an operator
+# ``unblock`` — and inflated per-profile success-rate stats. Its own value keeps
+# the success-rate / recent_success filters (``outcome = 'completed'``) honest
+# while cost/token attribution stays outcome-independent.
+INTEGRATION_PARKED_OUTCOME = "integration_parked"
 # Heiler: GENERAL bounded transient-INFRA retry lane (HEILER-TRANSIENT-RETRY-
 # BUDGET-S1). The named transient infra classes — spawn_failed (provisioning /
 # fork / quota at dispatch), rate_limited_loop (§4) and scheduled_overdue (§1)
@@ -8973,9 +8982,13 @@ def _park_integration(
     Called from :func:`complete_task` when the kanban_worktrees integrator
     returns ``parked`` (pre-check, merge conflict, or red post-merge gate).
     The task goes ``blocked`` — surfacing in the decision queue — instead of
-    ``done``. The closing run keeps outcome ``completed``, and a review-lane
-    run keeps its APPROVED verdict: the verifier DID approve; only the
-    integration into the live branch is parked for the operator.
+    ``done``. The closing run is stamped ``INTEGRATION_PARKED_OUTCOME`` (NOT
+    ``completed``): a parked integration is not a success, so it must not count
+    toward the respawn guard's ``recent_success`` (which would stall the task
+    for the full guard window after an operator ``unblock``) nor toward
+    per-profile success-rate stats. A review-lane run still keeps its APPROVED
+    verdict: the verifier DID approve; only the integration into the live
+    branch is parked for the operator.
     """
     reason = f"integration parked: {outcome.get('reason', 'unknown')}"
     with write_txn(conn):
@@ -9010,7 +9023,7 @@ def _park_integration(
             return False
         run_id = _end_run(
             conn, task_id,
-            outcome="completed", status="blocked",
+            outcome=INTEGRATION_PARKED_OUTCOME, status="blocked",
             summary=reason, metadata=outcome,
         )
         if _run_originated_from_review(conn, task_id, run_id):
@@ -14277,12 +14290,29 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
         )
         if not rejected:
             cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
-            if conn.execute(
-                "SELECT id FROM task_runs "
-                "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ?",
+            recent = conn.execute(
+                "SELECT ended_at FROM task_runs "
+                "WHERE task_id = ? AND outcome = 'completed' AND ended_at >= ? "
+                "ORDER BY ended_at DESC LIMIT 1",
                 (task_id, cutoff),
-            ).fetchone():
-                return "recent_success"
+            ).fetchone()
+            if recent is not None:
+                # Operator-override (defense-in-depth alongside the
+                # INTEGRATION_PARKED_OUTCOME relabel): an explicit ``unblock``
+                # AFTER the completed run is a deliberate "run this again" and
+                # must beat the success cooldown. Without it, a task the
+                # operator just unblocked silently stalls for the rest of the
+                # window. Covers ANY path that lands a completed run + ready +
+                # operator intervention, not just integration parks (whose runs
+                # are no longer ``completed`` after the relabel anyway).
+                unblocked_since = conn.execute(
+                    "SELECT 1 FROM task_events "
+                    "WHERE task_id = ? AND kind = 'unblocked' "
+                    "  AND created_at >= ? LIMIT 1",
+                    (task_id, recent["ended_at"]),
+                ).fetchone()
+                if unblocked_since is None:
+                    return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
