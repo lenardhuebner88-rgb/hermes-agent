@@ -1131,13 +1131,62 @@ def gather_recent_receipts(
 
 
 def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Nur Receipts mit Follow-up-Marker; ergänzt einen stabilen ``suggested_key``."""
+    """Nur Receipts mit Follow-up-Marker; ergänzt einen stabilen ``suggested_key``.
+
+    Markiert jeden Kandidaten mit ``source="keyword-fallback"`` — Übergangs-Fallback
+    für Alt-Receipts, die noch kein Ledger-Item besitzen (vor FRD Phase 1a).
+    Phase 4 kann diesen Pfad entfernen, sobald genug Ledger-Daten vorliegen.
+    """
     kept: list[dict[str, Any]] = []
     for rc in receipts:
         low = (rc.get("excerpt") or "").lower()
         if any(marker in low for marker in FOLLOWUP_MARKERS):
-            kept.append({**rc, "suggested_key": f"receipt-{rc['task_id']}"})
+            kept.append(
+                {**rc, "suggested_key": f"receipt-{rc['task_id']}", "source": "keyword-fallback"}
+            )
     return kept
+
+
+def load_followup_candidates_from_ledger(
+    conn, *, since_ts: int
+) -> list[dict[str, Any]]:
+    """Primäre Quelle: lädt ``follow_up``-Items (status=open, created_at >= since_ts)
+    aus dem Disposition-Ledger als Harvest-Kandidaten.
+
+    Kandidaten-Format ist kompatibel mit dem keyword-Pfad (``filter_followup_candidates``),
+    damit beide Quellen im Merge in ``run_harvest`` identisch behandelt werden.
+    """
+    items = kanban_db.list_disposition_items(conn, status="open", typ="follow_up")
+    out: list[dict[str, Any]] = []
+    for item in items:
+        item_created_at = item.get("created_at") or 0
+        if item_created_at < since_ts:
+            continue
+        source_task_id = item["source_task_id"]
+        # Titel-Fallback: kein tasks-Eintrag → source_task_id als Titel
+        row = conn.execute(
+            "SELECT title FROM tasks WHERE id = ?", (source_task_id,)
+        ).fetchone()
+        title = row["title"] if row is not None else source_task_id
+        # excerpt: next_action + evidence; Fallback auf disposition
+        next_action = item.get("next_action") or ""
+        evidence = item.get("evidence") or ""
+        if next_action or evidence:
+            excerpt = next_action + (" — " + evidence if evidence else "")
+        else:
+            excerpt = item.get("disposition") or ""
+        out.append(
+            {
+                "task_id": source_task_id,
+                "title": title,
+                "assignee": None,
+                "completed_at": item_created_at,
+                "excerpt": excerpt,
+                "suggested_key": f"disposition-{item['id']}",
+                "source": "ledger",
+            }
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1276,6 +1325,14 @@ def run_harvest(args) -> dict[str, Any]:
     KEIN LLM-Call und KEIN Ingest hier — rein deterministisch. Die Destillation
     der Kandidaten zu Lever-Drafts und der Ingest passieren im billigen
     ``claude -p``-Wrapper über den bestehenden ``--mode propose``-Pfad.
+
+    Merge-Strategie (zwei Quellen):
+      1. Primär: ``load_followup_candidates_from_ledger`` — getypte follow_up-Items
+         aus dem Disposition-Ledger (FRD Phase 1a+).
+      2. Übergangs-Fallback: ``filter_followup_candidates`` auf Keyword-Match im
+         Receipt-Text — für Alt-Receipts ohne Ledger-Item (vor FRD Phase 1a).
+         Phase 4 kann diesen Pfad entfernen, sobald genug Ledger-Daten vorliegen.
+    Dedup nach task_id: Ledger gewinnt — strukturierte Quelle schlägt Keyword.
     """
     state_dir = default_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -1285,26 +1342,53 @@ def run_harvest(args) -> dict[str, Any]:
 
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
+        # Beide Quellen laden, bevor conn geschlossen wird
+        ledger_cands = load_followup_candidates_from_ledger(conn, since_ts=since_ts)
         receipts = gather_recent_receipts(conn, since_ts=since_ts)
     finally:
         conn.close()
-    candidates = filter_followup_candidates(receipts)
+
+    keyword_cands = filter_followup_candidates(receipts)
+
+    # Merge: Ledger-Kandidaten zuerst; Keyword nur für task_ids, die das Ledger noch
+    # nicht kennt (Übergangs-Fallback für Alt-Receipts ohne Ledger-Item).
+    ledger_task_ids: set[str] = {c["task_id"] for c in ledger_cands}
+    keyword_only = [c for c in keyword_cands if c["task_id"] not in ledger_task_ids]
+    candidates = ledger_cands + keyword_only
 
     cand_path = state_dir / "harvest_candidates.json"
     cand_path.write_text(
         json.dumps(
-            {"generated_ts": now, "since_ts": since_ts, "candidates": candidates},
+            {
+                "generated_ts": now,
+                "since_ts": since_ts,
+                "ledger_candidates": len(ledger_cands),
+                "keyword_candidates": len(keyword_cands),
+                "candidates": candidates,
+            },
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
     marker.write_text(json.dumps({"ts": now}), encoding="utf-8")
-    append_run_history(state_dir, {"ts": now, "mode": "harvest", "receipts": len(receipts), "candidates": len(candidates)})
+    append_run_history(
+        state_dir,
+        {
+            "ts": now,
+            "mode": "harvest",
+            "receipts": len(receipts),
+            "ledger_candidates": len(ledger_cands),
+            "keyword_candidates": len(keyword_cands),
+            "candidates": len(candidates),
+        },
+    )
     return {
         "mode": "harvest",
         "since_ts": since_ts,
         "receipts": len(receipts),
+        "ledger_candidates": len(ledger_cands),
+        "keyword_candidates": len(keyword_cands),
         "candidates": len(candidates),
         "candidates_path": str(cand_path),
     }
