@@ -219,6 +219,23 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(KanbanDecisionKindSchema.parse("disposition_risk")).toBe("disposition_risk");
   });
 
+  it("renders disposition_stale with its own lower-urgency label/tone (FRD Phase 3a reaper)", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "disposition_stale", task_id: "t7", title: "Old task", reason: "2 alternde offene Items", age_seconds: 700000, suggested_command: null },
+      ],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].surface).toBe("kanban");
+    expect(items[0].why).toContain("Alterndes offenes Item");
+    expect(items[0].tone).toBe("cyan");
+    expect(KanbanDecisionKindSchema.parse("disposition_stale")).toBe("disposition_stale");
+  });
+
   it("lässt das Alter leer, wenn der Payload kein age_seconds trägt (graceful)", () => {
     const items = buildDecisionInbox({
       proposals: [],

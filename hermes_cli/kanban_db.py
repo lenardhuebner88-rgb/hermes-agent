@@ -19456,6 +19456,98 @@ def decision_queue(
     except Exception:
         pass
 
+    # 9) disposition_stale — alternde offene follow_up + still_open Items
+    #    (FRD Phase 3a, Reaper).  Risiken (typ=risk) laufen bereits über
+    #    Block 8 (disposition_risk) und werden hier NICHT nochmal erfasst.
+    #    Read-only, bounded (cap), Schwelle konfigurierbar.  Fail-soft.
+    #    Bekannte Grenze (bewusst, nicht still): ein typ=risk-Item mit
+    #    severity in {scope-note, none} fällt durch beide Senken — Block 8
+    #    filtert harmlose severity, Block 9 nur follow_up/still_open. Gewollte
+    #    Low-Signal-Einstufung; eine spätere Senke könnte es aufgreifen, falls
+    #    sich solche Notizen als Friedhof erweisen.
+    try:
+        _stale_max_age: int = (config or {}).get(
+            "disposition_stale_max_age_seconds", 7 * 24 * 3600
+        )
+        _stale_cap: int = (config or {}).get("disposition_stale_cap", 50)
+
+        # Zwei separate Aufrufe weil list_disposition_items keinen Multi-typ-Filter hat.
+        _stale_items = list_disposition_items(conn, status="open", typ="follow_up") + \
+                       list_disposition_items(conn, status="open", typ="still_open")
+
+        # Nur Items die (a) ein gesetztes created_at haben und (b) alt genug sind.
+        _cutoff = now - _stale_max_age
+        _stale_items = [
+            it for it in _stale_items
+            if it["created_at"] is not None and it["created_at"] < _cutoff
+        ]
+
+        # Gruppiere nach source_task_id.
+        _stale_by_task: dict[str, list[dict]] = {}
+        for _it in _stale_items:
+            _stale_by_task.setdefault(_it["source_task_id"], []).append(_it)
+
+        # Sortiere Tasks nach ältestem Item (älteste zuerst).
+        def _oldest_created_at(items: list[dict]) -> int:
+            return min(
+                it["created_at"] for it in items if it["created_at"] is not None
+            )
+
+        _sorted_task_ids = sorted(
+            _stale_by_task.keys(),
+            key=lambda tid: _oldest_created_at(_stale_by_task[tid]),
+        )
+
+        # Cap = reine Render-Begrenzung; überzählige Tasks bleiben im Ledger
+        # (read-only) und erscheinen beim nächsten Poll — kein Datenverlust,
+        # kein stilles Verschlucken.
+        _cap_applied = _sorted_task_ids[:_stale_cap]
+
+        for _src_tid in _cap_applied:
+            if _src_tid in seen:
+                continue
+            _items = _stale_by_task[_src_tid]
+            _n = len(_items)
+            _first = _items[0]
+            _title_row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (_src_tid,)
+            ).fetchone()
+            _title = _title_row["title"] if _title_row is not None else _src_tid
+            _oldest_ts = _oldest_created_at(_items)
+            _age_days = max(1, (_stale_max_age // (24 * 3600)))
+            _reason = (
+                f"{_n} alterndes/alternde offene(s) Item(s) seit >{_age_days}d: "
+                + (
+                    _first["next_action"]
+                    or _first["evidence"]
+                    or _first["disposition"]
+                    or ""
+                )
+            )
+            _add(
+                "disposition_stale",
+                _src_tid,
+                _title,
+                _reason,
+                _age(int(_oldest_ts)),
+                None,
+                extra={
+                    "stale_count": _n,
+                    "disposition_items": [
+                        {
+                            "id": it["id"],
+                            "typ": it["typ"],
+                            "next_action": it["next_action"],
+                            "evidence": it["evidence"],
+                            "disposition": it["disposition"],
+                        }
+                        for it in _items
+                    ],
+                },
+            )
+    except Exception:
+        pass
+
     # Oldest decisions first (most likely to be stale/forgotten); unknown ages
     # sort to the end.
     rows.sort(
