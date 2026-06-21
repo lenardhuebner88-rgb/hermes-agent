@@ -121,6 +121,11 @@ _CLOSED_STATUS_PREFIXES = (
     "superseded",
 )
 
+# Kanban root states that close a PlanSpec in the Flow-tab hub: a completed root
+# means the chain shipped; an archived root means the chain was retired. Both are
+# terminal — the hub must not keep surfacing them as "open" ghost work.
+_CLOSED_KANBAN_STATES = frozenset({"completed", "archived"})
+
 
 class PlanSpecBlocked(RuntimeError):
     def __init__(self, findings: list[str]):
@@ -406,11 +411,15 @@ def list_planspecs(
                 except Exception as exc:  # pragma: no cover - defensive UI fallback
                     kanban_state_error = str(exc)
             kanban_terminal_state = (kanban_state or {}).get("state") or "not_ingested"
-            open_record = closed is None and (valid or display_only_open) and kanban_terminal_state != "completed"
+            open_record = (
+                closed is None
+                and (valid or display_only_open)
+                and kanban_terminal_state not in _CLOSED_KANBAN_STATES
+            )
             if closed:
                 closed_reason = closed
-            elif kanban_terminal_state == "completed":
-                closed_reason = "kanban state: completed"
+            elif kanban_terminal_state in _CLOSED_KANBAN_STATES:
+                closed_reason = f"kanban state: {kanban_terminal_state}"
             elif open_record:
                 closed_reason = None
             else:
