@@ -305,7 +305,12 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
   ) : null;
 
   return (
-    <article className={cn("hc-surface-card", collapsible ? "space-y-3 p-3" : "space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-red-500/40", runaway.level === "warn" && "border-amber-500/40")}>
+    // min-w-0: the card is a grid item (FleetPanel `grid lg:grid-cols-2`, chain-node
+    // cockpit). Grid/flex items default to min-width:auto and refuse to shrink below
+    // their content width — on a narrow single-column (mobile) the card would overflow
+    // the viewport to the right (clipped by the page's overflow-x-hidden → content cut
+    // off). min-w-0 lets it shrink; the truncate/line-clamp children then reflow.
+    <article className={cn("hc-surface-card min-w-0", collapsible ? "space-y-3 p-3" : "space-y-4 p-4", density === "compact" && "p-3", runaway.level === "critical" && "border-red-500/40", runaway.level === "warn" && "border-amber-500/40")}>
       {collapsible ? (
         <button type="button" aria-expanded={expanded} onClick={() => setOpen((v) => !v)} className="block w-full text-left">
           <div className="flex flex-wrap items-center gap-2">

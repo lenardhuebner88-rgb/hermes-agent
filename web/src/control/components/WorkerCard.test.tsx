@@ -84,4 +84,14 @@ describe("WorkerCard error and status copy", () => {
     expect(criticalHtml).toContain("Entgleist");
     expect(`${warningHtml} ${criticalHtml}`).not.toMatch(/Runaway/i);
   });
+
+  it("keeps the card root shrinkable (min-w-0) so it never overflows a grid/flex column", () => {
+    // Regression: the card is a grid item (FleetPanel `grid lg:grid-cols-2`, the
+    // chain-node cockpit). A grid/flex item defaults to min-width:auto and refuses to
+    // shrink below its content → on a narrow single-column (mobile) the card overflowed
+    // the viewport to the right (clipped by the page's overflow-x-hidden → content cut
+    // off). Layout can't be measured in jsdom, so guard the load-bearing class itself.
+    const html = renderWorker(mkWorker());
+    expect(html).toMatch(/<article[^>]*\bmin-w-0\b/);
+  });
 });
