@@ -104,7 +104,8 @@ const t = {
   standard: "Standard",
   advanced: "Erweitert",
   permanent: "Dauerhaft",
-  permanentModel: (model: string) => `Dauerhaft: ${model}`,
+  activeLaneConfig: (model: string) => `Aktiv in Lane: ${model}`,
+  permanentModel: (model: string) => `Dauerhafte Profil-Konfiguration: ${model}`,
   savePermanently: "Dauerhaft speichern",
   divergenceHint: (model: string) => `läuft aktuell auf ${model}`,
   meteredBadge: "OpenRouter (metered)",
@@ -136,6 +137,12 @@ function groupedModelOptions(models: LaneModelOption[]) {
     groups.get(key)!.push(model);
   }
   return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+}
+
+function modelWithProviderLabel(provider: string | null | undefined, model: string, models: LaneModelOption[]): string {
+  const providerText = providerLabel(provider, models);
+  if (!providerText || providerText === "auto") return model;
+  return `${providerText} / ${model}`;
 }
 
 /** Effektiver Provider einer Zeile: Lane-Override gewinnt über Profil-Default. */
@@ -185,7 +192,7 @@ function SimpleModelSelect({
         <optgroup key={group} label={group}>
           {items.map((model) => (
             <option key={model.id} value={choiceFromEntry({ worker_runtime: model.runtime, model: model.id })}>
-              {model.label}
+              {model.group ? `${model.label} · ${model.group}` : model.label}
             </option>
           ))}
         </optgroup>
@@ -716,19 +723,30 @@ export function LanesEditor({
                       }
                     }}
                   />
-                  <div className="text-xs hc-dim">
-                    {t.permanentModel(row.defaultLabel)}
+                  <div className="space-y-0.5 text-xs hc-dim">
                     {(() => {
                       const profile = data.profiles.find((p) => p.name === row.profile);
                       const profileModel = profile?.default_model;
+                      const permanentLabel = modelWithProviderLabel(
+                        profile?.default_provider,
+                        row.defaultLabel,
+                        models,
+                      );
                       const activeLane = data.lanes.find((l) => l.active) ?? lane;
                       const activeEntry = activeLane.profiles[row.profile];
                       const activeModel = activeEntry?.model ?? profileModel;
-                      if (!activeModel || !profileModel || activeModel === profileModel) return null;
+                      const activeProvider = activeEntry?.provider ?? profile?.default_provider;
+                      const activeLabel = activeModel
+                        ? modelWithProviderLabel(activeProvider, modelLabel(activeModel, models), models)
+                        : permanentLabel;
+                      const differs = activeModel && profileModel && activeModel !== profileModel;
                       return (
-                        <span className="ml-2 text-amber-300/90">
-                          ⚠ {t.divergenceHint(modelLabel(activeModel, models))}
-                        </span>
+                        <>
+                          <div className={differs ? "text-amber-300/90" : undefined}>
+                            {t.activeLaneConfig(activeLabel)}
+                          </div>
+                          <div>{t.permanentModel(permanentLabel)}</div>
+                        </>
                       );
                     })()}
                   </div>

@@ -137,6 +137,7 @@ describe("lanes api client", () => {
 const MODELS: LaneModelOption[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
+  { id: "glm-5.2-fast", label: "GLM 5.2 Fast", runtime: "hermes", group: "Neuralwatt", provider: "neuralwatt" },
   { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "OpenRouter", provider: "openrouter" },
 ];
 
@@ -167,8 +168,10 @@ describe("choice encoding", () => {
   it("provider helpers expose provider-first dynamic options", () => {
     expect(providerOptions(MODELS)).toEqual([
       { id: "openai-codex", label: "OpenAI Codex" },
+      { id: "neuralwatt", label: "Neuralwatt" },
       { id: "openrouter", label: "OpenRouter" },
     ]);
+    expect(modelsForProvider("neuralwatt", MODELS).map((m) => m.id)).toEqual(["glm-5.2-fast"]);
     expect(modelsForProvider("openrouter", MODELS).map((m) => m.id)).toEqual(["qwen/qwen3.7-max"]);
   });
 
