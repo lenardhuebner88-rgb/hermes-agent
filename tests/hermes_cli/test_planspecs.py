@@ -229,6 +229,44 @@ def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
     assert by_name["draft.md"]["closed_reason"] == "invalid PlanSpec"
 
 
+def test_list_planspecs_treats_archived_kanban_root_as_closed(tmp_path: Path, monkeypatch):
+    plans_root = tmp_path / "03-Agents"
+    _write_planspec(plans_root, "2026-06-21-archived.md")
+
+    def _fake_state(path: Path, *, board: str | None = None) -> dict[str, object]:
+        return {"state": "archived", "root_task_id": "t_archived"}
+
+    monkeypatch.setattr(planspecs, "_planspec_kanban_state", _fake_state)
+
+    open_records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+    all_records = planspecs.list_planspecs(
+        plans_root=plans_root, scope="all", include_kanban_status=True
+    )
+
+    assert open_records == []
+    by_name = {item["filename"]: item for item in all_records}
+    row = by_name["2026-06-21-archived.md"]
+    assert row["open"] is False
+    assert row["closed_reason"] == "kanban state: archived"
+
+
+@pytest.mark.parametrize("live_state", ["running", "queued", "blocked"])
+def test_list_planspecs_keeps_live_kanban_root_open(tmp_path: Path, monkeypatch, live_state):
+    plans_root = tmp_path / "03-Agents"
+    _write_planspec(plans_root, "2026-06-21-live.md")
+
+    def _fake_state(path: Path, *, board: str | None = None) -> dict[str, object]:
+        return {"state": live_state, "root_task_id": "t_live"}
+
+    monkeypatch.setattr(planspecs, "_planspec_kanban_state", _fake_state)
+
+    records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+
+    assert [item["filename"] for item in records] == ["2026-06-21-live.md"]
+    assert records[0]["open"] is True
+    assert records[0]["closed_reason"] is None
+
+
 def test_list_planspecs_filters_valid_and_limits_server_side(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     first_valid = _write_planspec(plans_root, "2026-06-16-alpha.md")
