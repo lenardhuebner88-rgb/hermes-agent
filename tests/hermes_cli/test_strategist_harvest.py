@@ -69,6 +69,30 @@ def test_filter_keeps_only_marker_receipts():
     assert kept[0]["suggested_key"] == "receipt-t_b"
 
 
+def test_filter_ignores_generic_todo_and_should_be_phrases():
+    receipts = [
+        {"task_id": "t_a", "excerpt": "Die TODO-Liste wurde vollständig abgearbeitet."},
+        {"task_id": "t_b", "excerpt": "The service should be stable after this patch."},
+        {"task_id": "t_c", "excerpt": "Die Migration bleibt outside scope — separater Task nötig."},
+    ]
+    kept = strategist.filter_followup_candidates(receipts)
+    assert [c["task_id"] for c in kept] == ["t_c"]
+
+
+def test_gather_keeps_followup_marker_beyond_2000_chars(kanban_home):
+    body = (
+        "RESULT: erledigt. "
+        + ("a" * 2200)
+        + " Die Migration bleibt outside scope — separater Task nötig."
+    )
+    with kb.connect() as conn:
+        tid = _done_task(conn, title="Langer Receipt", body=body)
+        receipts = strategist.gather_recent_receipts(conn, since_ts=0)
+    assert len(receipts) == 1
+    assert receipts[0]["task_id"] == tid
+    assert "outside scope" in receipts[0]["excerpt"]
+
+
 def test_run_harvest_writes_candidates_and_marker(kanban_home):
     import json
     import time

@@ -7924,6 +7924,11 @@ def _advance_workflow_step(
                     },
                     run_id=run_id,
                 )
+    # Workflow step completions are non-terminal, but their handoff metadata is
+    # the only durable source for that role's dispositions. Capture it here so
+    # step-based plans feed the same ledger sinks as direct and review-gated
+    # completions; the ledger pre-check keeps retried step completions idempotent.
+    _record_disposition_items(conn, task_id, metadata, run_id=run_id)
     # The step succeeded — reset the failure counter so the next role starts
     # clean (mirrors complete_task's success semantics).
     _clear_failure_counter(conn, task_id)
@@ -8082,6 +8087,51 @@ def _record_disposition_items(
             task_id,
             exc_info=True,
         )
+
+
+def _review_submission_disposition_sources(
+    conn: sqlite3.Connection, task_id: str
+) -> list[tuple[int, object]]:
+    """Return review-submission run metadata that may contain dispositions.
+
+    Coder tasks with the review gate do not go through the direct ``done`` path
+    when the implementer completes; they are parked in ``review`` by
+    :func:`_submit_for_review` and only reach terminal ``done`` after a review
+    lane approves them. The implementer's disposition metadata therefore lives
+    on earlier ``submitted_for_review`` run(s), not necessarily on the final
+    verifier completion. Use those run rows as ledger sources during the
+    verified-done transition; ``_record_disposition_items`` keeps inserts
+    idempotent.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT run_id
+          FROM task_events
+         WHERE task_id = ?
+           AND kind = 'submitted_for_review'
+           AND run_id IS NOT NULL
+         ORDER BY id
+        """,
+        (task_id,),
+    ).fetchall()
+    sources: list[tuple[int, object]] = []
+    for row in rows:
+        try:
+            source_run_id = int(row["run_id"])
+        except (TypeError, ValueError):
+            continue
+        run = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ? AND task_id = ?",
+            (source_run_id, task_id),
+        ).fetchone()
+        if not (run and run["metadata"]):
+            continue
+        try:
+            source_metadata = json.loads(run["metadata"])
+        except Exception:
+            continue
+        sources.append((source_run_id, source_metadata))
+    return sources
 
 
 def complete_task(
@@ -8391,12 +8441,19 @@ def complete_task(
                     run_id=run_id,
                 )
     # Disposition-ledger write-back: extract disposition items from completion
-    # metadata and persist them as open ledger entries for triage.  Advisory —
+    # metadata and persist them as open ledger entries for triage. Advisory —
     # does not block the completion / own txn (see _record_disposition_items).
-    # Scope (Phase 1a): only the direct done-path records here. Review-gated
-    # (_submit_for_review) and workflow-step (_advance_workflow_step) routing do
-    # NOT yet capture the coder's disposition — its metadata stays on the run
-    # row, so a later slice (Phase 1b/4) can backfill it. Not a silent gap.
+    # Review-gated coder tasks park the implementer run in ``review`` first; on
+    # verified terminal ``done`` also replay those earlier submission metadata
+    # rows so the main code-task path reaches the same ledger sinks as direct
+    # completions. Each insert path remains idempotent via the ledger pre-check.
+    if _run_originated_from_review(conn, task_id, run_id):
+        for source_run_id, source_metadata in _review_submission_disposition_sources(
+            conn, task_id
+        ):
+            _record_disposition_items(
+                conn, task_id, source_metadata, run_id=source_run_id
+            )
     _record_disposition_items(conn, task_id, metadata, run_id=run_id)
     # Family Organizer write-back: the Kanban task is a Fleet copy of a
     # repo-native backlog item, so terminal done closes the linked source item.
