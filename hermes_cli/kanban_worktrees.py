@@ -28,6 +28,7 @@ receipt comments) via lazy imports so module import never cycles.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -63,11 +64,10 @@ _IGNORED_DIRTY_PATHS = (
 # branch diff. Gate runs themselves produce these (the verifier's
 # `ruff`/`pytest` in the worktree writes __pycache__), so counting them as
 # "uncommitted changes" would park every chain whose repo doesn't gitignore
-# them — observed live in the 2026-06-11 E2E probe. `.playwright-mcp` is the
-# Playwright-MCP visual-check output dir (console/network traces + page
-# snapshots, and any screenshot written there): a UI-verification run inside
-# the worktree drops `.playwright-mcp/console-*.log` + `page-*.yml`, which
-# parked chain t_7567c379 on 2026-06-17 — same byproduct class as __pycache__.
+# them — observed live in the 2026-06-11 E2E probe. Visual-QA artifacts are
+# handled separately by the integrator preserve/cleanup path below: they must
+# be visible as dirty files so the chain can copy them to a durable receipt
+# directory before removing the worktree.
 #
 # NOTE (belt-and-suspenders): `dirty_files()` runs `git status --porcelain`
 # WITHOUT `--ignored`, so anything the repo gitignores is already invisible
@@ -79,9 +79,19 @@ _IGNORED_DIRTY_PATHS = (
 # that legitimately left genuine untracked work, which SHOULD park for review.
 _IGNORED_DIRTY_DIR_PARTS = frozenset({
     "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv",
-    ".playwright-mcp",
 })
 _IGNORED_DIRTY_SUFFIXES = (".pyc", ".pyo")
+
+_PRESERVABLE_ARTIFACT_PREFIXES = (
+    ".playwright-mcp/",
+    "playwright-report/",
+    "test-results/",
+    "visual-qa/",
+    "artifacts/",
+)
+_ARTIFACT_RECEIPTS_ROOT = Path(
+    "/home/piet/vault/03-Agents/Hermes/receipts/artifacts"
+)
 
 
 def _is_ignorable_dirty_path(path: str) -> bool:
@@ -396,6 +406,59 @@ def dirty_files(repo: Path) -> list[str]:
             continue
         files.append(path)
     return files
+
+
+def _artifact_receipt_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _is_preservable_artifact_path(path: str) -> bool:
+    normalized = path.strip().lstrip("/")
+    if not normalized or ".." in Path(normalized).parts:
+        return False
+    return any(normalized.startswith(prefix) for prefix in _PRESERVABLE_ARTIFACT_PREFIXES)
+
+
+def _preserve_artifact_files(worktree: Path, task_id: str, paths: Sequence[str]) -> dict:
+    """Copy Visual-QA artifacts out of a worktree, then remove only those files.
+
+    The operation is intentionally two-phase: every file is copied first. Only
+    after all copies succeed do we unlink the originals, so a partial copy
+    failure parks the chain without deleting worker output.
+    """
+    dirty_paths = list(paths)
+    if not dirty_paths:
+        return {"destination": None, "file_count": 0, "paths": []}
+
+    dest = _ARTIFACT_RECEIPTS_ROOT / f"{task_id}-{_artifact_receipt_timestamp()}"
+    copied: list[tuple[Path, Path]] = []
+    try:
+        dest.mkdir(parents=True, exist_ok=False)
+        for rel in dirty_paths:
+            if not _is_preservable_artifact_path(rel):
+                raise RuntimeError(f"non-preservable artifact path: {rel}")
+            src = worktree / rel
+            if not src.is_file():
+                raise RuntimeError(f"artifact path is not a file: {rel}")
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            copied.append((src, target))
+        for src, _target in copied:
+            src.unlink()
+        # Remove now-empty artifact directories from deepest to shallowest;
+        # ignore non-empty parents so sibling artifacts/sources are untouched.
+        for rel in sorted(dirty_paths, key=lambda p: p.count("/"), reverse=True):
+            parent = (worktree / rel).parent
+            while parent != worktree:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+    except Exception:
+        raise
+    return {"destination": str(dest), "file_count": len(copied), "paths": dirty_paths}
 
 
 # ---------------------------------------------------------------------------
@@ -1627,33 +1690,65 @@ def integrate_chain(
                     f"{merge_target!r}"
                 )
 
+            artifact_receipt = None
+
+            def preserve_or_park_artifacts() -> dict | None:
+                nonlocal artifact_receipt
+                if not (wt_path.exists() and (wt_path / ".git").exists()):
+                    return None
+                leftovers = dirty_files(wt_path)
+                if not leftovers:
+                    return None
+                if not all(_is_preservable_artifact_path(path) for path in leftovers):
+                    return parked(
+                        "chain worktree has uncommitted changes: "
+                        + ", ".join(sorted(leftovers)[:10]),
+                        dirty_files=sorted(leftovers),
+                    )
+                try:
+                    artifact_receipt = _preserve_artifact_files(
+                        wt_path, wt_path.name, sorted(leftovers)
+                    )
+                except Exception as exc:
+                    return parked(
+                        f"ARTIFACT_PRESERVE_FAILED: {exc}",
+                        dirty_files=sorted(leftovers),
+                        park_class="ARTIFACT_PRESERVE_FAILED",
+                    )
+                remaining = dirty_files(wt_path)
+                if remaining:
+                    return parked(
+                        "chain worktree has uncommitted changes after artifact cleanup: "
+                        + ", ".join(sorted(remaining)[:10]),
+                        dirty_files=sorted(remaining),
+                        artifact_receipt=artifact_receipt,
+                    )
+                return None
+
+            preserve_failure = preserve_or_park_artifacts()
+            if preserve_failure:
+                return preserve_failure
+
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
-                if wt_path.exists() and (wt_path / ".git").exists() and dirty_files(wt_path):
-                    return parked(
-                        "worktree has uncommitted changes but no commits to merge"
-                    )
                 already_integrated = _branch_is_ancestor(repo_root, branch, cur)
                 remove_worktree(repo_root, wt_path, branch)
                 if already_integrated:
-                    return {
+                    result = {
                         "action": "clean",
                         "branch": branch,
                         "target": cur,
                         "already_integrated": True,
                         "reason": f"chain branch already reachable from {cur}",
                     }
-                return {"action": "clean", "branch": branch,
-                        "reason": "no commits on chain branch"}
-
-            # The chain's own worktree must be fully committed.
-            if wt_path.exists() and (wt_path / ".git").exists():
-                leftovers = dirty_files(wt_path)
-                if leftovers:
-                    return parked(
-                        "chain worktree has uncommitted changes: "
-                        + ", ".join(sorted(leftovers)[:10])
-                    )
+                    if artifact_receipt:
+                        result["artifact_receipt"] = artifact_receipt
+                    return result
+                result = {"action": "clean", "branch": branch,
+                          "reason": "no commits on chain branch"}
+                if artifact_receipt:
+                    result["artifact_receipt"] = artifact_receipt
+                return result
 
             diff_files = [
                 f for f in _git(
@@ -1732,7 +1827,7 @@ def integrate_chain(
                 )
 
             remove_worktree(repo_root, wt_path, branch)
-            return {
+            result = {
                 "action": "merged",
                 "state": MERGED_GREEN,
                 "merge_commit": merge_commit,
@@ -1742,6 +1837,9 @@ def integrate_chain(
                 "files": len(diff_files),
                 "changed_files": diff_files,
             }
+            if artifact_receipt:
+                result["artifact_receipt"] = artifact_receipt
+            return result
         finally:
             _release_file_lock(lock)
 
@@ -1846,6 +1944,13 @@ def maybe_integrate_on_complete(
                 "rebase_conflict": "integration_rebase_conflict",
             }.get(outcome["action"], "integration_parked")
             kb._append_event(conn, task_id, kind, outcome)
+            if outcome.get("artifact_receipt"):
+                kb._append_event(
+                    conn,
+                    task_id,
+                    "artifact_preserved",
+                    outcome["artifact_receipt"],
+                )
             if outcome["action"] == "merged":
                 kb._append_event(
                     conn,
@@ -1860,6 +1965,19 @@ def maybe_integrate_on_complete(
     except Exception:
         _log.warning("could not record integration event for %s", task_id,
                      exc_info=True)
+    if outcome.get("artifact_receipt"):
+        receipt = outcome["artifact_receipt"]
+        paths = receipt.get("paths", [])
+        try:
+            kb.add_comment(
+                conn, task_id, "integrator",
+                "📎 Preserved Visual-QA artifacts: "
+                f"{receipt.get('file_count', 0)} file(s) copied to "
+                f"`{receipt.get('destination')}`; removed dirty path(s): "
+                f"{', '.join(paths[:20])}.",
+            )
+        except Exception:
+            _log.debug("artifact preserve receipt comment failed", exc_info=True)
     if outcome["action"] == "merged":
         try:
             kb.add_comment(

@@ -1060,9 +1060,7 @@ def test_deliverable_md_alone_does_not_block_clean_close(repo):
 def test_cache_byproducts_do_not_count_as_dirty(repo):
     """Gate runs write __pycache__/.pytest_cache into the worktree; in repos
     without a .gitignore those must NOT park the chain (live E2E finding
-    2026-06-11: verifier's ruff run created util.cpython-311.pyc → park).
-    `.playwright-mcp` (UI-verification trace/snapshot dir) is the same class —
-    it parked chain t_7567c379 on 2026-06-17."""
+    2026-06-11: verifier's ruff run created util.cpython-311.pyc → park)."""
     info = _provisioned_chain(repo, "t_cache")
     wt = info["path"]
     (wt / "__pycache__").mkdir()
@@ -1070,9 +1068,6 @@ def test_cache_byproducts_do_not_count_as_dirty(repo):
     (wt / ".pytest_cache").mkdir()
     (wt / ".pytest_cache" / "CACHEDIR.TAG").write_text("tag")
     (wt / "stray.pyc").write_bytes(b"\x00")
-    (wt / ".playwright-mcp").mkdir()
-    (wt / ".playwright-mcp" / "console-2026-06-17T17-30-15.log").write_text("[]")
-    (wt / ".playwright-mcp" / "page-2026-06-17T17-30-16.yml").write_text("a: 1")
     assert kwt.dirty_files(wt) == []
     out = kwt.integrate_chain(repo, wt, info["branch"], "main",
                               gate_runner=_ok_gate)
@@ -1085,6 +1080,75 @@ def test_cache_byproducts_do_not_count_as_dirty(repo):
                                gate_runner=_ok_gate)
     assert out2["action"] == "parked"
     assert "real_leftover.py" in out2["reason"]
+
+
+def test_visual_artifacts_are_preserved_then_chain_merges(repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", tmp_path / "receipts")
+    monkeypatch.setattr(kwt, "_artifact_receipt_timestamp", lambda: "20260621T010203Z")
+    info = _provisioned_chain(repo, "t_artifact")
+    wt = info["path"]
+    (wt / ".playwright-mcp").mkdir()
+    (wt / ".playwright-mcp" / "console.log").write_text("[]")
+    (wt / ".playwright-mcp" / "page.yml").write_text("a: 1")
+
+    assert sorted(kwt.dirty_files(wt)) == [
+        ".playwright-mcp/console.log",
+        ".playwright-mcp/page.yml",
+    ]
+    out = kwt.integrate_chain(repo, wt, info["branch"], "main",
+                              gate_runner=_ok_gate)
+
+    assert out["action"] == "merged"
+    receipt = out["artifact_receipt"]
+    assert receipt["destination"] == str(tmp_path / "receipts" / "t_artifact-20260621T010203Z")
+    assert receipt["file_count"] == 2
+    assert sorted(receipt["paths"]) == [
+        ".playwright-mcp/console.log",
+        ".playwright-mcp/page.yml",
+    ]
+    assert (Path(receipt["destination"]) / ".playwright-mcp" / "console.log").read_text() == "[]"
+    assert (repo / "feature.py").read_text() == "VALUE = 1\n"
+    assert not wt.exists()
+
+
+def test_mixed_artifacts_and_source_change_park_without_cleanup(repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", tmp_path / "receipts")
+    info = _provisioned_chain(repo, "t_mixed")
+    wt = info["path"]
+    (wt / ".playwright-mcp").mkdir()
+    (wt / ".playwright-mcp" / "console.log").write_text("[]")
+    (wt / "uncommitted.py").write_text("oops = 1\n")
+
+    out = kwt.integrate_chain(repo, wt, info["branch"], "main",
+                              gate_runner=_ok_gate)
+
+    assert out["action"] == "parked"
+    assert "uncommitted.py" in out["reason"]
+    assert "artifact_receipt" not in out
+    assert (wt / ".playwright-mcp" / "console.log").exists()
+    assert (wt / "uncommitted.py").exists()
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_artifact_copy_failure_parks_without_deleting(repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", tmp_path / "receipts")
+    info = _provisioned_chain(repo, "t_copyfail")
+    wt = info["path"]
+    (wt / ".playwright-mcp").mkdir()
+    artifact = wt / ".playwright-mcp" / "console.log"
+    artifact.write_text("[]")
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(kwt.shutil, "copy2", fail_copy)
+    out = kwt.integrate_chain(repo, wt, info["branch"], "main",
+                              gate_runner=_ok_gate)
+
+    assert out["action"] == "parked"
+    assert out["park_class"] == "ARTIFACT_PRESERVE_FAILED"
+    assert "ARTIFACT_PRESERVE_FAILED" in out["reason"]
+    assert artifact.read_text() == "[]"
 
 
 def test_no_commits_is_clean_and_removes_worktree(repo):
@@ -1146,6 +1210,44 @@ def test_complete_task_integrates_then_done(kanban_home, repo, monkeypatch):
     assert not ws.exists()
     receipt = [c for c in comments if c["author"] == "integrator"]
     assert receipt and merged_events[0]["merge_commit"][:12] in receipt[0]["body"]
+
+
+def test_complete_task_records_artifact_preserve_receipt(
+    kanban_home, repo, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", tmp_path / "receipts")
+    monkeypatch.setattr(kwt, "_artifact_receipt_timestamp", lambda: "20260621T010203Z")
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(ws, "feature.py", "VALUE = 7\n", msg=f"kanban({tid}): work")
+        (ws / ".playwright-mcp").mkdir()
+        (ws / ".playwright-mcp" / "console.log").write_text("[]")
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        preserved_events = _events(conn, tid, "artifact_preserved")
+        merged_events = _events(conn, tid, "integration_merged")
+        comments = conn.execute(
+            "SELECT author, body FROM task_comments WHERE task_id = ?", (tid,)
+        ).fetchall()
+
+    expected_dest = tmp_path / "receipts" / f"{tid}-20260621T010203Z"
+    assert task is not None
+    assert task.status == "done"
+    assert len(merged_events) == 1
+    assert len(preserved_events) == 1
+    assert preserved_events[0]["destination"] == str(expected_dest)
+    assert preserved_events[0]["file_count"] == 1
+    assert preserved_events[0]["paths"] == [".playwright-mcp/console.log"]
+    assert (expected_dest / ".playwright-mcp" / "console.log").read_text() == "[]"
+    assert any(
+        c["author"] == "integrator"
+        and str(expected_dest) in c["body"]
+        and "1 file" in c["body"]
+        and ".playwright-mcp/console.log" in c["body"]
+        for c in comments
+    )
+    assert not ws.exists()
 
 
 def test_web_integration_creates_parked_release_gate_child(
