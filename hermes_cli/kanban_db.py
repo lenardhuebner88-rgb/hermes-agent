@@ -19397,6 +19397,65 @@ def decision_queue(
     except Exception:
         pass
 
+    # 8) disposition_risk — offene Risiko-Items aus dem Disposition-Ledger
+    #    (FRD Phase 2a, Senke 1).  Ein Eintrag pro source_task_id; das
+    #    _add-seen-Modell erzwingt Deduplication ohnehin.
+    #
+    #    Fail-safe-Filter: severity NOT IN ("scope-note", "none").
+    #    Begründung: zeige alles, was NICHT explizit als harmlos markiert ist —
+    #    heute äquivalent zu severity=="real-risk", aber robust gegen künftige
+    #    neue severity-Werte, die sonst still aus der Inbox fallen würden.
+    try:
+        risk_items = list_disposition_items(conn, status="open", typ="risk")
+        # Harmlose Severities ausblenden (fail-safe: Whitelist der Harmlosigkeit,
+        # nicht Blacklist des Gezeigten).
+        _HARMLESS_SEVERITY = {"scope-note", "none"}
+        visible = [it for it in risk_items if it["severity"] not in _HARMLESS_SEVERITY]
+        # Gruppiere nach source_task_id.
+        by_task: dict[str, list[dict]] = {}
+        for it in visible:
+            by_task.setdefault(it["source_task_id"], []).append(it)
+        for src_tid, items in by_task.items():
+            if src_tid in seen:
+                continue
+            n = len(items)
+            first = items[0]
+            # Task-Titel nachschlagen; Fallback = source_task_id (orphaned item).
+            title_row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (src_tid,)
+            ).fetchone()
+            title = title_row["title"] if title_row is not None else src_tid
+            reason = (
+                f"{n} offene(s) Risiko(en) aus Abschluss: "
+                + (first["next_action"] or first["evidence"] or first["disposition"])
+            )
+            age_seconds = _age(min(
+                it["created_at"] for it in items if it["created_at"] is not None
+            ) if any(it["created_at"] is not None for it in items) else None)
+            _add(
+                "disposition_risk",
+                src_tid,
+                title,
+                reason,
+                age_seconds,
+                None,
+                extra={
+                    "risk_count": n,
+                    "disposition_items": [
+                        {
+                            "id": it["id"],
+                            "next_action": it["next_action"],
+                            "evidence": it["evidence"],
+                            "severity": it["severity"],
+                            "disposition": it["disposition"],
+                        }
+                        for it in items
+                    ],
+                },
+            )
+    except Exception:
+        pass
+
     # Oldest decisions first (most likely to be stale/forgotten); unknown ages
     # sort to the end.
     rows.sort(
