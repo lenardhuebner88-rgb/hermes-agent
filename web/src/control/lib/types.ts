@@ -112,7 +112,7 @@ export interface PlanSpecRecord {
   closed_reason: string | null;
   kanban_root_task_id: string | null;
   kanban_root_status: string | null;
-  kanban_state: "not_ingested" | "queued" | "running" | "blocked" | "completed" | "done" | "unknown";
+  kanban_state: "not_ingested" | "queued" | "running" | "blocked" | "completed" | "done" | "archived" | "unknown";
   kanban_child_total: number;
   kanban_child_done: number;
   kanban_child_blocked: number;

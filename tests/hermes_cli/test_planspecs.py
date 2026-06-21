@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs
+from hermes_cli.subcommands import plan as plan_subcommand
 
 
 @pytest.fixture
@@ -336,6 +338,82 @@ def test_mark_planspec_not_needed_closes_display_only_plan(tmp_path: Path):
     assert "closed_reason: not needed anymore" in updated
 
 
+def test_mark_planspec_shipped_requires_terminal_or_receipt_evidence(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.mark_planspec_shipped(path, plans_root=plans_root, author="tester")
+
+    assert "Kanban terminal state or release/receipt evidence is required" in str(exc.value)
+
+
+def test_mark_planspec_shipped_closes_with_metadata_and_is_idempotent(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.mark_planspec_shipped(
+        path,
+        plans_root=plans_root,
+        author="tester",
+        kanban_state="completed",
+        receipt="/home/piet/vault/03-Agents/Hermes/receipts/ship.md",
+        kanban_root_task_id="t_root1234",
+    )
+    second = planspecs.mark_planspec_shipped(
+        path,
+        plans_root=plans_root,
+        author="someone-else",
+        kanban_state="completed",
+        receipt="/home/piet/vault/03-Agents/Hermes/receipts/other.md",
+        kanban_root_task_id="t_other",
+    )
+    open_records = planspecs.list_planspecs(plans_root=plans_root)
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
+    updated = path.read_text(encoding="utf-8")
+
+    assert first["ok"] is True
+    assert first["status"] == "shipped"
+    assert first["idempotent"] is False
+    assert second["ok"] is True
+    assert second["status"] == "shipped"
+    assert second["idempotent"] is True
+    assert open_records == []
+    row = all_records[0]
+    assert row["open"] is False
+    assert row["closed_reason"] == "closed status: shipped"
+    assert row["closed_by"] == "tester"
+    assert row["receipt"] == "/home/piet/vault/03-Agents/Hermes/receipts/ship.md"
+    assert row["kanban_root_task_id"] == "t_root1234"
+    assert "status: shipped" in updated
+    assert "closed_by: tester" in updated
+    assert "closed_reason: shipped" in updated
+    assert "receipt: /home/piet/vault/03-Agents/Hermes/receipts/ship.md" in updated
+    assert "kanban_root_task_id: t_root1234" in updated
+
+
+def test_plan_shipped_cli_json(tmp_path: Path, capsys):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    rc = plan_subcommand.plan_command(
+        Namespace(
+            plan_action="shipped",
+            path=str(path),
+            author="cli-tester",
+            kanban_state="completed",
+            receipt=None,
+            release_evidence=None,
+            kanban_root_task_id="t_root1234",
+            json=True,
+            plans_root=plans_root,
+        )
+    )
+
+    assert rc == 0
+    assert '\"status\": \"shipped\"' in capsys.readouterr().out
+
+
 def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
@@ -401,6 +479,64 @@ def test_list_planspecs_hides_completed_kanban_state_from_open_scope(kanban_home
     assert row["kanban_child_done"] == 2
 
 
+def test_list_planspecs_lifecycle_scope_separates_closed_and_open_records(kanban_home, tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    shipped_path = _write_planspec(plans_root, "2026-06-16-shipped.md")
+    obsolete_path = _write_planspec(plans_root, "2026-06-16-obsolete.md")
+    completed_path = _write_planspec(plans_root, "2026-06-16-completed-kanban.md")
+    archived_path = _write_planspec(plans_root, "2026-06-16-archived-kanban.md")
+    open_path = _write_planspec(plans_root, "2026-06-16-not-ingested-open.md")
+    for path, slice_id in (
+        (shipped_path, "LC-SHIPPED"),
+        (obsolete_path, "LC-OBSOLETE"),
+        (completed_path, "LC-COMPLETED"),
+        (archived_path, "LC-ARCHIVED"),
+        (open_path, "LC-OPEN"),
+    ):
+        path.write_text(path.read_text(encoding="utf-8").replace("slice: B1", f"slice: {slice_id}"), encoding="utf-8")
+
+    planspecs.mark_planspec_shipped(
+        shipped_path,
+        plans_root=plans_root,
+        author="tester",
+        kanban_state="completed",
+        kanban_root_task_id="t_ship1234",
+    )
+    planspecs.mark_planspec_not_needed(obsolete_path, plans_root=plans_root, author="tester")
+    completed = planspecs.ingest_planspec(completed_path, plans_root=plans_root)
+    archived = planspecs.ingest_planspec(archived_path, plans_root=plans_root)
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "UPDATE tasks SET status = 'done' WHERE id = ?",
+                [(task_id,) for task_id in completed["child_ids"]],
+            )
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (completed["root_task_id"],))
+        assert kb.archive_task(conn, archived["root_task_id"]) is True
+
+    open_records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all", include_kanban_status=True)
+    by_filename = {row["filename"]: row for row in all_records}
+
+    assert [row["filename"] for row in open_records] == [open_path.name]
+    assert by_filename[shipped_path.name]["open"] is False
+    assert by_filename[shipped_path.name]["closed_reason"] == "closed status: shipped"
+    assert by_filename[shipped_path.name]["kanban_state"] == "not_ingested"
+    assert by_filename[shipped_path.name]["kanban_root_task_id"] == "t_ship1234"
+    assert by_filename[obsolete_path.name]["open"] is False
+    assert by_filename[obsolete_path.name]["closed_reason"] == "closed status: obsolete"
+    assert by_filename[completed_path.name]["open"] is False
+    assert by_filename[completed_path.name]["closed_reason"] == "kanban state: completed"
+    assert by_filename[completed_path.name]["kanban_state"] == "completed"
+    assert by_filename[completed_path.name]["kanban_child_done"] == 2
+    assert by_filename[archived_path.name]["open"] is False
+    assert by_filename[archived_path.name]["closed_reason"] == "kanban state: archived"
+    assert by_filename[archived_path.name]["kanban_state"] == "archived"
+    assert by_filename[open_path.name]["open"] is True
+    assert by_filename[open_path.name]["closed_reason"] is None
+    assert by_filename[open_path.name]["kanban_state"] == "not_ingested"
+
+
 def test_list_planspecs_derives_blocked_and_running_kanban_state(kanban_home, tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
@@ -409,16 +545,25 @@ def test_list_planspecs_derives_blocked_and_running_kanban_state(kanban_home, tm
     with kb.connect_closing() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (result["child_ids"][0],))
-    running = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)[0]
+    running_records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+    assert len(running_records) == 1
+    running = running_records[0]
+    assert running["open"] is True
+    assert running["closed_reason"] is None
     assert running["kanban_state"] == "running"
     assert running["kanban_child_running"] == 1
 
     with kb.connect_closing() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (result["child_ids"][1],))
-    blocked = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)[0]
+    blocked_records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
+    assert len(blocked_records) == 1
+    blocked = blocked_records[0]
+    assert blocked["open"] is True
+    assert blocked["closed_reason"] is None
     assert blocked["kanban_state"] == "blocked"
     assert blocked["kanban_child_blocked"] == 1
+    assert blocked["kanban_child_running"] == 1
 
 
 def test_ingest_planspec_is_idempotent_on_reingest(kanban_home, tmp_path: Path):

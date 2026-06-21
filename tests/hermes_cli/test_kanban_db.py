@@ -7587,6 +7587,40 @@ def _make_integration_parked(conn, reason_suffix, *, title="parked finalizer"):
     return tid
 
 
+def test_park_integration_comments_dirty_artifact_recovery(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="artifact policy miss", assignee="coder")
+        kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        ok = kb._park_integration(
+            conn,
+            tid,
+            {
+                "action": "parked",
+                "reason": (
+                    "ARTIFACT_POLICY_MISSING: coverage/index.html. "
+                    "Recovery: extend the artifact policy."
+                ),
+                "branch": "kanban/t_artifact_policy",
+                "park_class": "ARTIFACT_POLICY_MISSING",
+                "dirty_files": ["coverage/index.html"],
+            },
+            expected_run_id=task.current_run_id,
+        )
+        comments = conn.execute(
+            "SELECT author, body FROM task_comments WHERE task_id = ?",
+            (tid,),
+        ).fetchall()
+
+    assert ok is True
+    assert comments[-1]["author"] == "integrator"
+    assert "ARTIFACT_POLICY_MISSING" in comments[-1]["body"]
+    assert "coverage/index.html" in comments[-1]["body"]
+    assert "Recovery: extend the artifact policy" in comments[-1]["body"]
+    assert "worker contract" not in comments[-1]["body"]
+
+
 def _patch_integrate(monkeypatch, outcomes):
     """Patch maybe_integrate_on_complete; record call task_ids.
 

@@ -28,6 +28,7 @@ const fixture: LanesResponse = {
     { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
     { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
     { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
+    { id: "glm-5.2-fast", label: "GLM 5.2 Fast", runtime: "hermes", group: "Neuralwatt", provider: "neuralwatt" },
     { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "OpenRouter", provider: "openrouter" },
   ],
   lanes: [
@@ -162,6 +163,17 @@ describe("LanesEditor (routing cards)", () => {
     expect(html).toContain("<optgroup");
     expect(html).toContain("Claude (Max-Abo)");
     expect(html).toContain("OpenAI Codex");
+    expect(html).toContain("Neuralwatt");
+    expect(html).toContain("GLM 5.2 Fast · Neuralwatt");
+    expect(html).toContain('value="hermes|glm-5.2-fast"');
+  });
+
+  it("erklärt im Standard-Modus aktiven Lane-Override getrennt von dauerhaftem Profil-Default", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    expect(html).toContain("Aktiv in Lane: OpenRouter / Qwen 3.7 Max");
+    expect(html).toContain("Dauerhafte Profil-Konfiguration: OpenAI Codex / GPT-5.5");
   });
 
   it("bietet einen Erweitert-Collapse für Provider/Fallbacks/Presets", () => {
