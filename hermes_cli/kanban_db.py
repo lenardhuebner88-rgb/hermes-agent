@@ -182,6 +182,13 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # Config wiring is intentionally deferred; task-level max_continuations wins.
 DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 
+# HEILER-BUDGET-BOUNDED-EXTEND-S1: hard, NON-configurable cap on how many
+# progress-gated extensions a single task may ever receive beyond its
+# continuation limit. Kept a code constant (not config) so the worst-case
+# extra-dispatch exposure is structurally bounded to one run per task — the
+# token-runaway guardrail the lever is explicitly gated for.
+BUDGET_PROGRESS_EXTENSION_LIMIT = 1
+
 # Opt-in blocked-run auto-retry policy. Defaults are code-level constants;
 # gateway/daemon config decides whether the policy runs at all.
 DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS = 5 * 60
@@ -908,6 +915,11 @@ class Task:
     continuation_count: int = 0
     max_continuations: Optional[int] = None
     last_continuation_reason: Optional[str] = None
+    # HEILER-BUDGET-BOUNDED-EXTEND-S1: progress-gated one-time extension state.
+    # ``budget_extension_count`` is hard-capped at 1 in code; ``budget_progress_marker``
+    # is the last-checkpoint workspace work proxy (diff lines + changed files).
+    budget_extension_count: int = 0
+    budget_progress_marker: Optional[int] = None
     # When True, the dispatched worker runs in a Ralph-style goal loop
     # (the same engine behind the ``/goal`` slash command): after each
     # turn an auxiliary judge model evaluates the worker's response
@@ -1019,6 +1031,16 @@ class Task:
             last_continuation_reason=(
                 row["last_continuation_reason"]
                 if "last_continuation_reason" in keys else None
+            ),
+            budget_extension_count=(
+                row["budget_extension_count"]
+                if "budget_extension_count" in keys
+                and row["budget_extension_count"] is not None
+                else 0
+            ),
+            budget_progress_marker=(
+                row["budget_progress_marker"]
+                if "budget_progress_marker" in keys else None
             ),
             goal_mode=(
                 bool(row["goal_mode"]) if "goal_mode" in keys and row["goal_mode"] else False
@@ -1235,6 +1257,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     continuation_count   INTEGER NOT NULL DEFAULT 0,
     max_continuations    INTEGER,
     last_continuation_reason TEXT,
+    -- HEILER-BUDGET-BOUNDED-EXTEND-S1: progress-gated, one-time bounded
+    -- extension. When a task hits its continuation limit but is STILL making
+    -- measurable progress, it gets EXACTLY ONE extra continuation before being
+    -- blocked/escalated as capacity. ``budget_extension_count`` is hard-capped
+    -- at 1 in code (never configurable) so the extra-dispatch exposure is one
+    -- run per task, ever. ``budget_progress_marker`` is the workspace work
+    -- proxy (diff lines + changed files) recorded at the last checkpoint, used
+    -- only as a *delta* signal to tell a progressing task from a looping one.
+    -- The lever is OFF by default; the per-task input-token cap is untouched.
+    budget_extension_count   INTEGER NOT NULL DEFAULT 0,
+    budget_progress_marker   INTEGER,
     -- When 1, the dispatched worker runs in a Ralph-style goal loop: an
     -- auxiliary judge re-evaluates the worker's response against the
     -- card title/body after each turn and feeds a continuation prompt
@@ -2140,6 +2173,20 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "tasks",
             "last_continuation_reason",
             "last_continuation_reason TEXT",
+        )
+    if "budget_extension_count" not in cols:
+        # HEILER-BUDGET-BOUNDED-EXTEND-S1: one-time progress-gated extension
+        # bookkeeping. Existing rows get 0 (never extended) — byte-identical to
+        # pre-column behaviour, and the lever stays OFF until opted in.
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "budget_extension_count",
+            "budget_extension_count INTEGER NOT NULL DEFAULT 0",
+        )
+    if "budget_progress_marker" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "budget_progress_marker", "budget_progress_marker INTEGER"
         )
 
     if "model_override" not in cols:
@@ -5407,6 +5454,85 @@ def _resolve_max_continuations(task: Task) -> int:
     return DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT
 
 
+def _budget_extension_config() -> dict:
+    """Resolve ``kanban.budget_progress_extension`` policy from the ROOT config.
+
+    HEILER-BUDGET-BOUNDED-EXTEND-S1. A budget-exhausted task that has hit its
+    continuation limit but is STILL making measurable progress (workspace diff
+    grew by at least ``min_progress_delta`` since the last checkpoint) is granted
+    EXACTLY ONE bounded extra continuation before it is blocked/escalated as
+    capacity. A looping task (flat diff) is never extended.
+
+    Conservative default: ``enabled=False`` — merging this code changes nothing
+    at runtime until the operator opts in with
+    ``kanban.budget_progress_extension.enabled: true``. The extension *count*
+    cap (1) is structural (:data:`BUDGET_PROGRESS_EXTENSION_LIMIT`), NOT
+    configurable, and the per-task input-token cap is untouched, so the
+    token-runaway exposure stays bounded to one extra run per task.
+
+    Read from the ROOT ``config.yaml`` (not the worker profile) for the same
+    reason :func:`_review_gate_config` does: the decision runs in the worker
+    process under a profile ``HERMES_HOME`` and must agree with the board.
+    """
+    be: dict = {}
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        cfg_path = get_default_hermes_root() / "config.yaml"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                root_cfg = yaml.safe_load(fh) or {}
+            candidate = (
+                (root_cfg.get("kanban") or {}).get("budget_progress_extension") or {}
+            )
+            if isinstance(candidate, dict):
+                be = candidate
+    except Exception:
+        be = {}
+    enabled = bool(be.get("enabled", False))
+    try:
+        min_delta = int(be.get("min_progress_delta", 1))
+    except (TypeError, ValueError):
+        min_delta = 1
+    if min_delta < 1:
+        min_delta = 1
+    return {"enabled": enabled, "min_progress_delta": min_delta}
+
+
+_DIFF_STAT_INS_RE = re.compile(r"(\d+)\s+insertion")
+_DIFF_STAT_DEL_RE = re.compile(r"(\d+)\s+deletion")
+
+
+def _workspace_progress_size(conn: sqlite3.Connection, task_id: str) -> int:
+    """Coarse, monotonic ``work done`` proxy for *task_id*'s workspace.
+
+    Sums the changed-file count and (insertions+deletions) from the SAME
+    best-effort git snapshot the review handoff uses
+    (:func:`_capture_review_diff_snapshot`). Counting changed files as well as
+    line deltas means a worker that creates brand-new (untracked) files also
+    registers progress, not only edits to tracked files.
+
+    Returns 0 when there is no workspace, it is not a git work tree, or git
+    errors/times out. Never raises. Used ONLY as a *delta* signal between
+    budget-exhaustion checkpoints — to tell a task that is still producing code
+    (diff growing) apart from one that is looping (diff flat). It is
+    deliberately not a precise line count.
+    """
+    try:
+        snap = _capture_review_diff_snapshot(conn, task_id)
+    except Exception:
+        return 0
+    if not isinstance(snap, dict) or not snap:
+        return 0
+    files = snap.get("changed_files")
+    n_files = len(files) if isinstance(files, list) else 0
+    stat = snap.get("diff_stat") or ""
+    ins = sum(int(m) for m in _DIFF_STAT_INS_RE.findall(stat))
+    dels = sum(int(m) for m in _DIFF_STAT_DEL_RE.findall(stat))
+    return int(n_files + ins + dels)
+
+
 def _schedule_continuation_after_closed_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5423,6 +5549,14 @@ def _schedule_continuation_after_closed_run(
         return False
     limit = _resolve_max_continuations(task)
     now = int(time.time())
+    # HEILER-BUDGET-BOUNDED-EXTEND-S1: progress-gated one-time extension. When
+    # OFF (default), nothing below changes behaviour — no git probe, no marker
+    # write, byte-identical to the long-standing continuation contract.
+    _ext_cfg = _budget_extension_config()
+    _ext_enabled = bool(_ext_cfg.get("enabled"))
+    _ext_count = int(task.budget_extension_count or 0)
+    _prior_marker = task.budget_progress_marker
+    _progress = _workspace_progress_size(conn, task_id) if _ext_enabled else 0
     if limit <= 0:
         message = "iteration budget exhausted; auto-continuation disabled"
         cur = conn.execute(
@@ -5444,6 +5578,49 @@ def _schedule_continuation_after_closed_run(
         )
         return True
     if int(task.continuation_count or 0) >= limit:
+        # Lever: at the continuation cap, a task that is STILL producing code
+        # (workspace diff grew past the last checkpoint by >= min_progress_delta)
+        # earns EXACTLY ONE bounded extra continuation before we block/escalate.
+        # ``_ext_count < LIMIT`` (==0) makes this strictly once-per-task. A
+        # looping task (flat diff) fails the delta check and falls through to the
+        # block below — escalated as capacity without an extra run.
+        _progressed = (
+            _prior_marker is not None
+            and _progress >= int(_prior_marker) + int(_ext_cfg["min_progress_delta"])
+        )
+        if (
+            _ext_enabled
+            and _ext_count < BUDGET_PROGRESS_EXTENSION_LIMIT
+            and _progressed
+        ):
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+                       worker_pid = NULL,
+                       budget_extension_count = budget_extension_count + 1,
+                       budget_progress_marker = ?,
+                       last_continuation_reason = ?
+                 WHERE id = ? AND status = 'running' AND current_run_id IS NULL
+                """,
+                (int(_progress), reason, task_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            _append_event(
+                conn, task_id, "budget_extension_granted",
+                {
+                    "reason": reason,
+                    "continuation_count": int(task.continuation_count or 0),
+                    "limit": limit,
+                    "progress": int(_progress),
+                    "prior_marker": int(_prior_marker),
+                    "extension": _ext_count + 1,
+                    "extension_limit": BUDGET_PROGRESS_EXTENSION_LIMIT,
+                },
+                run_id=run_id,
+            )
+            return True
         message = (
             f"iteration budget exhausted; continuation limit exhausted "
             f"({int(task.continuation_count or 0)}/{limit})"
@@ -5460,15 +5637,27 @@ def _schedule_continuation_after_closed_run(
         )
         if cur.rowcount != 1:
             return False
+        payload = {
+            "reason": reason,
+            "count": int(task.continuation_count or 0),
+            "limit": limit,
+            "message": message,
+        }
+        if _ext_enabled:
+            # Observability: WHY no extension — distinguishes a looping task
+            # (no measurable progress) from one that already spent its single
+            # extension. Counter-metric: never grants an extra dispatch here.
+            payload["progress"] = int(_progress)
+            payload["prior_marker"] = (
+                int(_prior_marker) if _prior_marker is not None else None
+            )
+            payload["extension_skipped"] = (
+                "already_used"
+                if _ext_count >= BUDGET_PROGRESS_EXTENSION_LIMIT
+                else "no_progress"
+            )
         _append_event(
-            conn, task_id, "auto_continuation_exhausted",
-            {
-                "reason": reason,
-                "count": int(task.continuation_count or 0),
-                "limit": limit,
-                "message": message,
-            },
-            run_id=run_id,
+            conn, task_id, "auto_continuation_exhausted", payload, run_id=run_id,
         )
         return True
     new_count = int(task.continuation_count or 0) + 1
@@ -5485,6 +5674,14 @@ def _schedule_continuation_after_closed_run(
     )
     if cur.rowcount != 1:
         return False
+    if _ext_enabled:
+        # Record this run's work proxy as the checkpoint the NEXT exhaustion's
+        # delta is measured against. Separate write so the disabled path's
+        # UPDATE above stays byte-identical to the pre-lever statement.
+        conn.execute(
+            "UPDATE tasks SET budget_progress_marker = ? WHERE id = ?",
+            (int(_progress), task_id),
+        )
     _append_event(
         conn, task_id, "auto_continuation_scheduled",
         {"reason": reason, "count": new_count, "limit": limit},
