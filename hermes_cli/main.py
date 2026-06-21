@@ -11423,6 +11423,10 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def cmd_memory(args):
     sub = getattr(args, "memory_command", None)
+    if sub == "digest":
+        from hermes_cli.memory_digest import cmd_memory_digest
+
+        return cmd_memory_digest(args)
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 
