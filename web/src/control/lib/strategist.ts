@@ -9,6 +9,8 @@
 export interface StrategistProposal {
   id: string;
   title: string;
+  /** Short title with the `PlanSpec <key>:` prefix stripped (backend-computed). */
+  display_title?: string | null;
   created_by: string | null;
   created_at: number;
   subtask_count: number;
@@ -21,6 +23,10 @@ export interface StrategistProposal {
   /** Grounding-Evidenz (Code-/git-log-Beleg, STRATEGIST-SELF-GROUNDING) — null
    *  when the strategist left it unannotated (operator-authored specs carry none). */
   grounding: string | null;
+  /** Provenance category: "receipt" | "gate" | "metric" | "other". */
+  source?: string | null;
+  /** For receipt-keyed proposals: the title of the origin task. */
+  origin?: string | null;
 }
 
 export interface StrategistProposalsResponse {
@@ -37,25 +43,6 @@ export interface MetricRow {
   value: string;
 }
 
-// Friendly German labels for the metric keys H1 is expected to write. Unknown
-// keys still render — humanised from snake_case — so the surface never hides a
-// metric just because this map lags the writer.
-const METRIC_LABELS: Record<string, string> = {
-  autonomy_pct: "Autonomie-%",
-  autonomy: "Autonomie-%",
-  cost_per_task: "Kosten/Task",
-  cost_per_task_usd: "Kosten/Task",
-  cost_trend: "Kosten-Trend",
-  escalation_rate: "Eskalations-Rate",
-  escalation_rate_per_week: "Eskalations-Rate/Woche",
-  green_gate_streak: "Green-Gate-Streak",
-  // Paired counter-metrics (guardrails).
-  missed_escalation_rate: "Fehl-Eskalations-Rate",
-  should_have_escalated_rate: "Hätte-eskalieren-sollen-Rate",
-  generated_at: "Stand",
-  window: "Fenster",
-};
-
 /** snake_case / kebab-case → "Title Case" fallback label. */
 export function humanizeMetricKey(key: string): string {
   return key
@@ -64,34 +51,50 @@ export function humanizeMetricKey(key: string): string {
     .trim();
 }
 
-function formatMetricValue(key: string, value: unknown): string {
-  if (value == null) return "—";
-  if (typeof value === "boolean") return value ? "ja" : "nein";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return "—";
-    // Percent-ish keys get a % suffix; otherwise trim to 2 decimals max.
-    const rounded = Math.round(value * 100) / 100;
-    if (/pct|percent|rate/.test(key)) return `${rounded}%`;
-    return String(rounded);
-  }
-  if (typeof value === "string") return value;
-  // Objects/arrays: compact JSON so a nested counter-metric still shows.
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
+// Curated headline metrics pulled from the nested `metrics` object in the
+// vision-metrics.json envelope.  Each entry: [nested path parts, label, formatter].
+type MetricSpec = {
+  path: [string, string];
+  label: string;
+  fmt: (v: number) => string;
+};
 
-/** Turn the (free-shaped) metric snapshot into ordered display rows. Returns []
- *  for a null/empty/invalid snapshot so the caller can show "no snapshot yet". */
-export function metricSnapshotRows(metrics: Record<string, unknown> | null | undefined): MetricRow[] {
-  if (!metrics || typeof metrics !== "object") return [];
-  return Object.entries(metrics).map(([key, value]) => ({
-    key,
-    label: METRIC_LABELS[key] ?? humanizeMetricKey(key),
-    value: formatMetricValue(key, value),
-  }));
+const round1 = (v: number) => String(Math.round(v * 10) / 10);
+
+const CURATED_METRICS: MetricSpec[] = [
+  { path: ["autonomy", "autonomy_pct"],                              label: "Autonomie",               fmt: (v) => `${round1(v)}%` },
+  { path: ["green_gate_streak", "streak"],                           label: "Green-Gate-Streak",       fmt: (v) => String(Math.round(v)) },
+  { path: ["escalation_rate", "escalations_per_week"],               label: "Eskalationen/Woche",      fmt: (v) => String(Math.round(v)) },
+  { path: ["cost_per_task", "recent_avg_cost_per_task"],             label: "Kosten/Aufgabe",          fmt: (v) => `$${v.toFixed(2)}` },
+  { path: ["classification_coverage", "coverage_pct"],               label: "Klassifik.-Abdeckung",    fmt: (v) => `${round1(v)}%` },
+];
+
+/** Turn the Vision metrics envelope into ordered curated display rows.
+ *
+ *  The live `vision-metrics.json` is nested:
+ *  `{ schema_version, generated_at, metrics: { autonomy: {…}, … } }`.
+ *  We unwrap the inner `metrics` object and pull only the curated headline set.
+ *  Falls back to treating the input as flat when no inner `metrics` key exists
+ *  (forward-compat safety). Returns [] for null/undefined/non-object/empty. */
+export function metricSnapshotRows(input: Record<string, unknown> | null | undefined): MetricRow[] {
+  if (!input || typeof input !== "object") return [];
+  // Unwrap envelope: if input.metrics is itself an object, use it.
+  const inner: Record<string, unknown> =
+    input.metrics && typeof input.metrics === "object" && !Array.isArray(input.metrics)
+      ? (input.metrics as Record<string, unknown>)
+      : input;
+  if (Object.keys(inner).length === 0) return [];
+
+  const rows: MetricRow[] = [];
+  for (const spec of CURATED_METRICS) {
+    const [group, field] = spec.path;
+    const groupObj = inner[group];
+    if (!groupObj || typeof groupObj !== "object" || Array.isArray(groupObj)) continue;
+    const raw = (groupObj as Record<string, unknown>)[field];
+    if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+    rows.push({ key: `${group}.${field}`, label: spec.label, value: spec.fmt(raw) });
+  }
+  return rows;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -99,8 +102,18 @@ const SOURCE_LABELS: Record<string, string> = {
   strategist: "Stratege",
 };
 
-/** Human label for the proposal's origin (created_by). */
+/** Human label for the proposal's origin (created_by). @deprecated Use sourceLabel instead. */
 export function proposalSource(createdBy: string | null): string {
   if (!createdBy) return "Stratege";
   return SOURCE_LABELS[createdBy] ?? createdBy;
+}
+
+/** Human label for the provenance `source` field. */
+export function sourceLabel(source: string | null | undefined): string {
+  switch (source) {
+    case "receipt": return "Aus eurer Arbeit";
+    case "gate":    return "Gate-Heilung";
+    case "metric":  return "Aus Kennzahl";
+    default:        return "Stratege";
+  }
 }

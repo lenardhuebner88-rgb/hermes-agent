@@ -185,3 +185,108 @@ def test_held_operator_proposals_excludes_children_and_non_operator(kanban_home)
     assert len(proposals) == 1
     ids = {p["id"] for p in proposals}
     assert other not in ids
+
+
+# ---------------------------------------------------------------------------
+# _parse_planspec_title / _classify_source (pure helpers)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_planspec_title_extracts_key_and_rest():
+    key, rest = ss._parse_planspec_title("PlanSpec receipt-t_abc123: Worker-Smoke-Probes für CI")
+    assert key == "receipt-t_abc123"
+    assert rest == "Worker-Smoke-Probes für CI"
+
+
+def test_parse_planspec_title_returns_none_none_for_no_match():
+    key, rest = ss._parse_planspec_title("Operator-authored proposal without prefix")
+    assert key is None
+    assert rest is None
+
+
+def test_classify_source_receipt():
+    assert ss._classify_source("receipt-t_899c38b0") == "receipt"
+
+
+def test_classify_source_gate_autoheal():
+    assert ss._classify_source("GREEN-GATE-AUTOHEAL-2026") == "gate"
+
+
+def test_classify_source_gate_green_gate():
+    assert ss._classify_source("GREEN-GATE-STREAK") == "gate"
+
+
+def test_classify_source_autoheal_anywhere():
+    assert ss._classify_source("some-AUTOHEAL-key") == "gate"
+
+
+def test_classify_source_metric():
+    assert ss._classify_source("autonomy-boost-lever") == "metric"
+
+
+def test_classify_source_other():
+    assert ss._classify_source(None) == "other"
+
+
+# ---------------------------------------------------------------------------
+# held_operator_proposals provenance fields
+# ---------------------------------------------------------------------------
+
+
+def _make_held(conn, *, title: str, body: str = "") -> str:
+    """Create a minimal held freigabe:operator root. Returns its id."""
+    task_id = kb.create_task(conn, title=title, body=body or "Lever proposal.", assignee="coder-claude")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='scheduled', freigabe='operator' WHERE id=?",
+            (task_id,),
+        )
+    return task_id
+
+
+def test_receipt_proposal_source_and_display_title_and_origin(kanban_home):
+    """A receipt-keyed proposal surfaces source=receipt, trimmed display_title, and
+    resolves origin to the origin task's title via DB lookup."""
+    with kb.connect() as conn:
+        # Create the origin task that the receipt refers to.
+        origin_id = kb.create_task(conn, title="Build CI smoke tests", assignee="coder-claude")
+        receipt_key = f"receipt-{origin_id}"
+        proposal_title = f"PlanSpec {receipt_key}: Worker-Smoke-Probes für CI"
+        _make_held(conn, title=proposal_title)
+        proposals = ss.held_operator_proposals(conn)
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert p["source"] == "receipt"
+    assert p["display_title"] == "Worker-Smoke-Probes für CI"
+    assert p["origin"] == "Build CI smoke tests"
+
+
+def test_gate_proposal_source(kanban_home):
+    """A GREEN-GATE-AUTOHEAL key → source='gate'."""
+    with kb.connect() as conn:
+        _make_held(conn, title="PlanSpec GREEN-GATE-AUTOHEAL-2026: Self-heal-Sweep")
+        proposals = ss.held_operator_proposals(conn)
+    assert proposals[0]["source"] == "gate"
+    assert proposals[0]["display_title"] == "Self-heal-Sweep"
+    assert proposals[0]["origin"] is None
+
+
+def test_metric_proposal_source(kanban_home):
+    """A parsed key that is neither receipt nor gate → source='metric'."""
+    with kb.connect() as conn:
+        _make_held(conn, title="PlanSpec autonomy-boost-q3: Autonomie erhöhen")
+        proposals = ss.held_operator_proposals(conn)
+    assert proposals[0]["source"] == "metric"
+    assert proposals[0]["display_title"] == "Autonomie erhöhen"
+    assert proposals[0]["origin"] is None
+
+
+def test_other_proposal_source_no_planspec_prefix(kanban_home):
+    """A title without the PlanSpec prefix → source='other', display_title==full title."""
+    full_title = "Operator-authored: do something useful"
+    with kb.connect() as conn:
+        _make_held(conn, title=full_title)
+        proposals = ss.held_operator_proposals(conn)
+    assert proposals[0]["source"] == "other"
+    assert proposals[0]["display_title"] == full_title
+    assert proposals[0]["origin"] is None

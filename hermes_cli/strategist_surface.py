@@ -43,6 +43,8 @@ __all__ = [
     "vision_metrics_path",
     "read_vision_metrics",
     "held_operator_proposals",
+    "_parse_planspec_title",
+    "_classify_source",
 ]
 
 # The body marker the strategist stamps and the surface parses. An HTML comment
@@ -81,6 +83,35 @@ _BLOCK_RE = re.compile(
     r"<!--\s*" + re.escape(STRATEGIST_META_MARKER) + r"\s*(.*?)-->",
     re.DOTALL | re.IGNORECASE,
 )
+
+# Matches "PlanSpec <key>: <rest>" — the form the strategist-cron stamps on titles.
+_PLANSPEC_TITLE_RE = re.compile(r"^PlanSpec\s+(\S+):\s*(.*)$", re.IGNORECASE)
+
+
+def _parse_planspec_title(title: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (key, rest) when *title* matches ``PlanSpec <key>: <rest>``.
+
+    Returns ``(None, None)`` when the title does not match the pattern.
+    """
+    m = _PLANSPEC_TITLE_RE.match(title.strip())
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def _classify_source(key: Optional[str]) -> str:
+    """Classify a parsed PlanSpec *key* into a source category.
+
+    Pure function of the key string — no I/O.
+    """
+    if key is None:
+        return "other"
+    upper = key.upper()
+    if key.lower().startswith("receipt-"):
+        return "receipt"
+    if "AUTOHEAL" in upper or upper.startswith("GREEN-GATE"):
+        return "gate"
+    return "metric"
 
 
 def format_annotation(
@@ -218,16 +249,36 @@ def held_operator_proposals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     proposals: list[dict[str, Any]] = []
     for row in rows:
         task_id = row["id"]
+        raw_title: str = row["title"] or ""
         # Children are linked as the root's parents (decompose link direction).
         subtask_rows = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
             (task_id,),
         ).fetchall()
         annotation = parse_annotation(row["body"])
+
+        # Provenance classification.
+        key, rest = _parse_planspec_title(raw_title)
+        source = _classify_source(key)
+        display_title = rest if key is not None else raw_title
+
+        # Origin lookup: for receipt-keyed proposals resolve the origin task title.
+        origin: Optional[str] = None
+        if source == "receipt" and key is not None:
+            origin_id = key[len("receipt-"):]
+            origin_row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (origin_id,)
+            ).fetchone()
+            if origin_row:
+                origin = origin_row["title"]
+
         proposals.append(
             {
                 "id": task_id,
-                "title": row["title"],
+                "title": raw_title,
+                "display_title": display_title,
+                "source": source,
+                "origin": origin,
                 "created_by": row["created_by"],
                 "created_at": row["created_at"],
                 "subtask_count": len(subtask_rows),
