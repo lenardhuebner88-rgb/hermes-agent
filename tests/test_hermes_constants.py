@@ -200,6 +200,49 @@ class TestIsContainer:
         monkeypatch.setattr("builtins.open", _fake_open)
         assert is_container() is True
 
+    def test_host_running_containers_is_not_a_container(self, monkeypatch, tmp_path):
+        """A host that *runs* containers must not be misdetected as being
+        *inside* one.
+
+        Regression (green-gate RED 2026-06-20/06-21): is_container() used to
+        scan the whole /proc/self/mountinfo for runtime markers, so any host
+        with Docker/containerd overlay mounts (``/var/lib/docker/...``,
+        ``/run/containerd/...``) matched 'containerd'/'docker' and returned
+        True. That false positive flipped the dashboard update-check to
+        'managed-runtime' and made voice_mode.detect_audio_environment report
+        audio unavailable, reddening the nightly full suite (5 of the 9
+        failures). Markers must only count on the process *root* mount, which
+        on a real host is a plain ext4/overlay rootfs with no runtime marker.
+        """
+        import builtins
+        self._reset_cache(monkeypatch)
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.setattr(os.path, "exists", lambda p: False)
+        cgroup_file = tmp_path / "cgroup"
+        cgroup_file.write_text("0::/init.scope\n")  # cgroup v2 host — no marker
+        mountinfo_file = tmp_path / "mountinfo"
+        # Root ('/') mount is plain ext4 with no marker; the only 'containerd'/
+        # 'docker' markers live on NON-root mounts the host uses to *run*
+        # containers. The old whole-file scan matched these and false-flagged.
+        mountinfo_file.write_text(
+            "33 2 252:0 / / rw,relatime shared:1 - ext4 /dev/mapper/vg-lv rw\n"
+            "1500 33 0:99 / /var/lib/docker/overlay2/abc/merged rw,relatime "
+            "- overlay overlay rw,lowerdir=/var/lib/containerd/io.containerd.x\n"
+            "1600 33 0:42 / /run/containerd/io.containerd.runtime/k8s.io/x/rootfs "
+            "rw,relatime - overlay overlay rw\n"
+        )
+        _real_open = builtins.open
+
+        def _fake_open(p, *a, **kw):
+            if p == "/proc/1/cgroup":
+                return _real_open(str(cgroup_file), *a, **kw)
+            if p == "/proc/self/mountinfo":
+                return _real_open(str(mountinfo_file), *a, **kw)
+            return _real_open(p, *a, **kw)
+
+        monkeypatch.setattr("builtins.open", _fake_open)
+        assert is_container() is False
+
     def test_caches_result(self, monkeypatch):
         """Second call uses cached value without re-probing."""
         monkeypatch.setattr(hermes_constants, "_container_detected", True)
