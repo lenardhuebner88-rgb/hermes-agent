@@ -939,6 +939,7 @@ class Task:
     kind: Optional[str] = None
     auto_retry_count: int = 0
     integration_retry_count: int = 0
+    transient_retry_count: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1043,6 +1044,10 @@ class Task:
             integration_retry_count=(
                 row["integration_retry_count"]
                 if "integration_retry_count" in keys else 0
+            ),
+            transient_retry_count=(
+                row["transient_retry_count"]
+                if "transient_retry_count" in keys else 0
             ),
         )
 
@@ -1264,7 +1269,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- SEPARATE from auto_retry_count so a re-integration round never trips
     -- the premium/opus escalation ladder that auto_retry_count drives; gates
     -- the no-silent-stall integration-retry path.
-    integration_retry_count INTEGER NOT NULL DEFAULT 0
+    integration_retry_count INTEGER NOT NULL DEFAULT 0,
+    -- Bounded transient INFRA retry count (Heiler lane). Gates the general
+    -- transient-class retry budget (spawn_failed / rate_limited_loop /
+    -- scheduled_overdue): a momentary infra blip is re-queued a bounded,
+    -- backoff-spaced number of times before it pages the operator, instead of
+    -- escalating on the first failure. Kept SEPARATE from both auto_retry_count
+    -- (the premium/opus ladder) and integration_retry_count (the §5 lane) so the
+    -- three budgets never cross-trip.
+    transient_retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2196,6 +2209,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "integration_retry_count",
             "integration_retry_count INTEGER NOT NULL DEFAULT 0",
         )
+    if "transient_retry_count" not in cols:
+        # Heiler lane: bounded transient-INFRA retry counter (spawn_failed /
+        # rate_limited_loop / scheduled_overdue). Separate from both
+        # auto_retry_count and integration_retry_count so the three budgets
+        # never cross-trip.
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "transient_retry_count",
+            "transient_retry_count INTEGER NOT NULL DEFAULT 0",
+        )
 
     # A1 (kanban-chain-haertung): PlanSpec provenance columns. All four are
     # plain nullable TEXT — no default needed; NULL on every pre-A1 row
@@ -2793,6 +2817,24 @@ INTEGRATION_RETRY_LIMIT = 2
 INTEGRATION_RETRY_BACKOFF_SECONDS = 60
 INTEGRATION_RETRY_EXHAUSTED_CLASS = "integration_retry_exhausted"
 INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
+# Heiler: GENERAL bounded transient-INFRA retry lane (HEILER-TRANSIENT-RETRY-
+# BUDGET-S1). The named transient infra classes — spawn_failed (provisioning /
+# fork / quota at dispatch), rate_limited_loop (§4) and scheduled_overdue (§1)
+# — are infra noise without a real defect, so they should self-heal by retrying
+# a BOUNDED, backoff-spaced number of times before paging the operator, exactly
+# like the §5 integration-retry lane. Bounded by its OWN counter
+# (``transient_retry_count``, never auto_retry_count / integration_retry_count)
+# so it cannot trip the premium/opus or re-integration ladders. A retry round
+# emits a ``transient_retry`` event (NOT a heiler_classification), so a root
+# that self-heals within budget never lands a transient escalation in the
+# ledger; only an EXHAUSTED budget escalates and classifies, byte-identically to
+# the pre-existing path. The per-attempt backoff is enforced at the spawn re-
+# dispatch by ``check_respawn_guard`` (so a flaky spawn can't burn a worker slot
+# every tick) and inside the sweep helper for the §1/§4 paths.
+TRANSIENT_RETRY_EVENT = "transient_retry"
+TRANSIENT_RETRY_OUTCOME = "transient_retry"
+TRANSIENT_RETRY_LIMIT = 2
+TRANSIENT_RETRY_BACKOFF_SECONDS = 300
 # Conflict-park fixer routing (no_silent_stall_sweep §5, NON-transient branch).
 # A ``needs_orchestrator`` park (real merge conflict / red post-merge gate, per
 # ``kanban_worktrees._integration_park_class``) is routed to a BOUNDED
@@ -9026,7 +9068,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         new_status = "todo" if undone_parents else "ready"
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, transient_retry_count = 0, "
+            "last_failure_error = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (new_status, task_id),
         )
@@ -11625,6 +11668,7 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
     with write_txn(conn):
         conn.execute(
             "UPDATE tasks SET consecutive_failures = 0, "
+            "transient_retry_count = 0, "
             "last_failure_error = NULL WHERE id = ?",
             (task_id,),
         )
@@ -11913,6 +11957,158 @@ def _has_operator_escalation(conn: sqlite3.Connection, task_id: str) -> bool:
         "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
         (task_id, OPERATOR_ESCALATION_EVENT),
     ).fetchone() is not None
+
+
+def _transient_retry_phase(
+    retry_count: int,
+    last_event_at: Optional[int],
+    now: int,
+    *,
+    limit: int = TRANSIENT_RETRY_LIMIT,
+    backoff_seconds: int = TRANSIENT_RETRY_BACKOFF_SECONDS,
+) -> str:
+    """Pure budget arithmetic for the bounded transient-retry lane.
+
+    Returns ``"exhausted"`` (budget spent — caller escalates exactly as before),
+    ``"backoff"`` (inside the per-attempt backoff window — skip this tick, do NOT
+    escalate), or ``"retry"`` (claim one more bounded round). Side-effect-free so
+    both the sweep (§1/§4) and the spawn-dispatch path share one tested rule and
+    the same hard cap. Mirrors the §5 ``INTEGRATION_RETRY_LIMIT`` check.
+    """
+    if int(retry_count) >= max(1, int(limit)):
+        return "exhausted"
+    if last_event_at is not None and int(last_event_at) + int(backoff_seconds) > int(now):
+        return "backoff"
+    return "retry"
+
+
+def _transient_retry_or_escalate(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    error: str,
+    now: int,
+    limit: int = TRANSIENT_RETRY_LIMIT,
+    backoff_seconds: int = TRANSIENT_RETRY_BACKOFF_SECONDS,
+) -> str:
+    """Sweep-side bounded transient retry — the task stays where it is.
+
+    Used by the no-silent-stall sweep for ``rate_limited_loop`` (§4, the task
+    sits in ``ready`` and the dispatcher re-probes it, spaced by the rate-limit
+    cooldown) and ``scheduled_overdue`` (§1, the deterministic ``unblock_task``
+    nudge IS the retry). On a claimed ``"retry"`` round it bumps the OWN
+    CAS-guarded ``transient_retry_count`` and writes a ``transient_retry`` event
+    (NOT a heiler_classification) inside one txn, then returns ``"retried"``. The
+    backoff and hard limit come from :func:`_transient_retry_phase`; a lost CAS
+    (a concurrent sweep claimed the same round) degrades to ``"backoff"`` so the
+    caller neither escalates nor double-attempts. Returns ``"retried"`` /
+    ``"backoff"`` / ``"exhausted"``.
+    """
+    task_id = row["id"]
+    try:
+        retry_count = int(row["transient_retry_count"] or 0)
+    except (IndexError, KeyError, TypeError):
+        retry_count = 0
+    last_at = _latest_event_at(conn, task_id, TRANSIENT_RETRY_EVENT)
+    phase = _transient_retry_phase(
+        retry_count, last_at, now, limit=limit, backoff_seconds=backoff_seconds,
+    )
+    if phase != "retry":
+        return phase
+    attempt = retry_count + 1
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET transient_retry_count = ? "
+            "WHERE id = ? AND transient_retry_count = ? "
+            "AND status NOT IN ('done', 'archived')",
+            (attempt, task_id, retry_count),
+        )
+        if cur.rowcount != 1:
+            return "backoff"
+        _append_event(
+            conn, task_id, TRANSIENT_RETRY_EVENT,
+            {
+                "attempt": attempt,
+                "limit": int(limit),
+                "error": str(error)[:500],
+            },
+        )
+    return "retried"
+
+
+def _spawn_failure_or_transient_retry(
+    conn: sqlite3.Connection,
+    task_id: str,
+    error: str,
+    *,
+    failure_limit: int,
+    now: int,
+    limit: int = TRANSIENT_RETRY_LIMIT,
+) -> tuple[str, bool]:
+    """Spawn-dispatch-side bounded transient retry, then the normal escalation.
+
+    A spawn failure (``resolve_workspace`` error, non-timeout worktree
+    provisioning error, or a raising ``spawn_fn``) is structurally a transient
+    infra class. Instead of counting a real failure and (often on the first hit)
+    paging the operator, re-queue the claimed task ``running -> ready`` up to
+    ``TRANSIENT_RETRY_LIMIT`` times, closing the open run with a
+    ``transient_retry`` outcome and writing a ``transient_retry`` event (NOT a
+    heiler_classification — a self-heal must not show up as a transient
+    escalation). Per-attempt backoff is enforced at re-dispatch by
+    :func:`check_respawn_guard` (``transient_retry_backoff``), so this helper
+    only gates on the hard limit. Once the budget is spent it falls back to the
+    exact pre-existing :func:`_record_spawn_failure` escalation path.
+
+    Returns ``("retried", False)`` when re-queued, else ``("escalated", auto)``
+    where ``auto`` is the ``_record_spawn_failure`` auto-blocked result.
+    """
+    row = conn.execute(
+        "SELECT transient_retry_count FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    retry_count = 0
+    if row is not None:
+        try:
+            retry_count = int(row["transient_retry_count"] or 0)
+        except (IndexError, KeyError, TypeError):
+            retry_count = 0
+    # Backoff is enforced by check_respawn_guard at re-dispatch (the dispatcher
+    # will not re-claim a transient_retry'd task inside the window), so here we
+    # only gate on the hard limit — never on backoff (the claimed task is mid
+    # spawn-failure and must be re-queued or escalated, not left running).
+    if retry_count < max(1, int(limit)):
+        attempt = retry_count + 1
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET transient_retry_count = ?, status = 'ready', "
+                "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+                "last_failure_error = ? "
+                "WHERE id = ? AND status = 'running' "
+                "AND transient_retry_count = ?",
+                (attempt, str(error)[:500], task_id, retry_count),
+            )
+            if cur.rowcount == 1:
+                run_id = _end_run(
+                    conn, task_id,
+                    outcome=TRANSIENT_RETRY_OUTCOME,
+                    status=TRANSIENT_RETRY_OUTCOME,
+                    error=str(error)[:500],
+                    metadata={"attempt": attempt, "limit": int(limit)},
+                )
+                _append_event(
+                    conn, task_id, TRANSIENT_RETRY_EVENT,
+                    {
+                        "attempt": attempt,
+                        "limit": int(limit),
+                        "error": str(error)[:500],
+                        "trigger_outcome": "spawn_failed",
+                    },
+                    run_id=run_id,
+                )
+                return ("retried", False)
+        # CAS / status race (someone else moved the row): fall through to the
+        # normal escalation path rather than double-acting.
+    auto = _record_spawn_failure(conn, task_id, error, failure_limit=failure_limit)
+    return ("escalated", auto)
 
 
 # ---------------------------------------------------------------------------
@@ -12315,6 +12511,7 @@ def no_silent_stall_sweep(
         "skipped_funnel": [],
         "skipped_held": [],
         "integration_retried": [],
+        "transient_retried": [],
         "conflict_fixer_dispatched": [],
     }
 
@@ -12350,9 +12547,23 @@ def no_silent_stall_sweep(
             summary["self_healed"].append(
                 {"task_id": row["id"], "class": stall_class, "action": "unblocked"}
             )
-        elif _park_stall_once(
+            continue
+        # The deterministic nudge could not apply (race / status moved): this is
+        # transient infra, not a defect — give it a bounded, backoff-spaced
+        # retry budget before paging the operator (HEILER-TRANSIENT-RETRY-
+        # BUDGET-S1), mirroring the §5 integration-retry lane. Only an exhausted
+        # budget escalates (and classifies) exactly as the pre-existing path did.
+        decision = _transient_retry_or_escalate(
+            conn, row, error=reason, now=ts,
+        )
+        if decision == "retried":
+            summary["transient_retried"].append(
+                {"task_id": row["id"], "class": stall_class}
+            )
+        elif decision == "exhausted" and _park_stall_once(
             conn, row, stall_class=stall_class, reason=reason,
-            evidence={"attempts": 1}, now=ts,
+            evidence={"attempts": int(row["transient_retry_count"] or 0) + 1},
+            now=ts,
         ):
             summary["parked"].append({"task_id": row["id"], "class": stall_class})
 
@@ -12436,7 +12647,20 @@ def no_silent_stall_sweep(
         if _has_stall_marker(conn, row["id"], stall_class):
             continue
         reason = f"persistent rate-limit loop after {attempts} rate-limited runs"
-        if _park_stall_once(
+        # A persistent quota wall is transient infra, not a defect: give it a
+        # bounded, backoff-spaced retry budget (the task stays in ``ready`` and
+        # the dispatcher keeps cheaply re-probing it, spaced by the rate-limit
+        # cooldown) before paging the operator (HEILER-TRANSIENT-RETRY-BUDGET-
+        # S1). Only an exhausted budget escalates and classifies, byte-identical
+        # to the pre-existing path.
+        decision = _transient_retry_or_escalate(
+            conn, row, error=reason, now=ts,
+        )
+        if decision == "retried":
+            summary["transient_retried"].append(
+                {"task_id": row["id"], "class": stall_class}
+            )
+        elif decision == "exhausted" and _park_stall_once(
             conn, row, stall_class=stall_class, reason=reason,
             evidence={"attempts": attempts, "latest_ended_at": latest["ended_at"]},
             now=ts,
@@ -13537,6 +13761,26 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
         # (cheaply, spaced by the cooldown) until quota returns or a real
         # crash/completion supersedes it.
         return None
+
+    # 1b. Transient-retry backoff. The task's most recent run ended
+    #     ``transient_retry`` — a bounded transient infra blip (spawn / worktree
+    #     provisioning) re-queued it (HEILER-TRANSIENT-RETRY-BUDGET-S1). Defer
+    #     the re-spawn until the backoff elapses so a flaky spawn can't burn a
+    #     worker slot every tick. This is what spaces the bounded retries apart
+    #     (the budget itself — ``transient_retry_count`` — caps how many such
+    #     rounds happen, so this can never defer forever). Mirrors the rate-limit
+    #     cooldown shape, but the error text here is not quota-flavored, so we do
+    #     NOT return early: once the window elapses the task falls through to the
+    #     remaining guards exactly like any other ready task.
+    if (
+        latest_run is not None
+        and latest_run["outcome"] == TRANSIENT_RETRY_OUTCOME
+    ):
+        ended_at = latest_run["ended_at"]
+        if ended_at is not None and (
+            now - int(ended_at)
+        ) < TRANSIENT_RETRY_BACKOFF_SECONDS:
+            return "transient_retry_backoff"
 
     # 2. Quota / auth blocker: retrying immediately will not help.
     err = row["last_failure_error"]
@@ -15190,9 +15434,11 @@ def dispatch_once(
         try:
             workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
-            auto = _record_spawn_failure(
+            # Transient infra (workspace resolution) — bounded transient retry
+            # before the normal escalation (HEILER-TRANSIENT-RETRY-BUDGET-S1).
+            _phase, auto = _spawn_failure_or_transient_retry(
                 conn, claimed.id, f"workspace: {exc}",
-                failure_limit=failure_limit,
+                failure_limit=failure_limit, now=int(time.time()),
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -15228,6 +15474,12 @@ def dispatch_once(
                     f"worktree provisioning (transient): {exc}",
                 )
             else:
+                # WorktreeTimeout budget already spent (its own bounded
+                # spawn_retry lane), or a permanent WorktreeError (missing repo
+                # etc.) where a retry cannot help: escalate via the normal path.
+                # Deliberately NOT routed through the general transient-retry
+                # budget — that would double-stack a second budget on a path that
+                # already has one and break the spawn-budget contract.
                 auto = _record_spawn_failure(
                     conn, claimed.id, f"worktree provisioning: {exc}",
                     failure_limit=failure_limit,
@@ -15271,9 +15523,11 @@ def dispatch_once(
             if serialize_by_repo and _cand_repo:
                 _repo_locked.add(_cand_repo)
         except Exception as exc:
-            auto = _record_spawn_failure(
+            # spawn_fn raised (fork/exec blip) — transient infra class: bounded
+            # transient retry before escalating (HEILER-TRANSIENT-RETRY-BUDGET-S1).
+            _phase, auto = _spawn_failure_or_transient_retry(
                 conn, claimed.id, str(exc),
-                failure_limit=failure_limit,
+                failure_limit=failure_limit, now=int(time.time()),
             )
             if auto:
                 result.auto_blocked.append(claimed.id)

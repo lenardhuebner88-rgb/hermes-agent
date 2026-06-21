@@ -7273,7 +7273,17 @@ def test_4a_decompose_failure_exemption_is_scoped_to_active_hold(kanban_home):
     assert root_task.status == "blocked"
 
 
-def test_4a_rate_limited_loop_parks_once(kanban_home):
+def test_4a_rate_limited_loop_retries_then_parks(kanban_home):
+    # HEILER-TRANSIENT-RETRY-BUDGET-S1: a persistent rate-limit loop is transient
+    # infra, so it now runs through a BOUNDED, backoff-spaced retry budget before
+    # paging the operator (instead of escalating on the first detection). Each
+    # retry round emits a ``transient_retry`` event (NOT a heiler_classification),
+    # so a root that self-heals within budget never lands a transient escalation;
+    # only the EXHAUSTED budget escalates — exactly once.
+    # Sweeps step the logical clock forward; the per-attempt backoff is keyed on
+    # the real-time event stamp (so it bites in production but is moot under a
+    # far-future test ``now``, exactly like the §5 integration-retry tests). The
+    # backoff rule itself is covered by test_transient_retry_phase_pure_rule.
     now = 1_900_000_000
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="quota loop", assignee="coder")
@@ -7286,23 +7296,48 @@ def test_4a_rate_limited_loop_parks_once(kanban_home):
                     "'429 quota', ?, ?)",
                     (tid, now - 100 - i, now - 90 - i),
                 )
-        first = kb.no_silent_stall_sweep(
-            conn, now=now, rate_limit_attempt_limit=3,
+        # Rounds 1..LIMIT: retry, NOT park.
+        retried = []
+        for k in range(kb.TRANSIENT_RETRY_LIMIT):
+            s = kb.no_silent_stall_sweep(
+                conn, now=now + k, rate_limit_attempt_limit=3,
+            )
+            retried.append(s)
+        t_mid = kb.get_task(conn, tid)
+        # Budget exhausted: escalate exactly once.
+        s_park = kb.no_silent_stall_sweep(
+            conn, now=now + kb.TRANSIENT_RETRY_LIMIT, rate_limit_attempt_limit=3,
         )
-        second = kb.no_silent_stall_sweep(
-            conn, now=now + 1, rate_limit_attempt_limit=3,
+        t_park = kb.get_task(conn, tid)
+        # Idempotent: no second escalation.
+        s_after = kb.no_silent_stall_sweep(
+            conn, now=now + kb.TRANSIENT_RETRY_LIMIT + 1, rate_limit_attempt_limit=3,
         )
-        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
         escalations = [
             e for e in kb.list_events(conn, tid)
             if e.kind == kb.OPERATOR_ESCALATION_EVENT
         ]
+        heiler = [e for e in kb.list_events(conn, tid)
+                  if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
 
-    assert {"task_id": tid, "class": "rate_limited_loop"} in first["parked"]
-    assert second["parked"] == []
-    assert task.status == "blocked"
+    # Every round below the limit retried, stayed ready, no escalation/park.
+    for s in retried:
+        assert {"task_id": tid, "class": "rate_limited_loop"} in s["transient_retried"]
+        assert s["parked"] == []
+    assert t_mid.status == "ready"
+    assert t_mid.transient_retry_count == kb.TRANSIENT_RETRY_LIMIT
+    # Budget spent → escalate once, byte-identically to the old park path.
+    assert {"task_id": tid, "class": "rate_limited_loop"} in s_park["parked"]
+    assert t_park.status == "blocked"
+    assert s_after["parked"] == [] and s_after["transient_retried"] == []
     assert len(escalations) == 1
     assert escalations[0].payload["attempts_already_made"] == 3
+    # The retries themselves never classified the root as a transient escalation;
+    # only the final park did (the AC-1 ledger reduction lever).
+    assert kb.TRANSIENT_RETRY_EVENT in kinds
+    assert len(heiler) == 1
+    assert heiler[0].payload["class"] == "transient"
 
 
 # ---------------------------------------------------------------------------
@@ -7470,6 +7505,180 @@ def test_integration_retry_repark_turned_non_transient_escalates(
     assert task.status == "blocked"
     assert len(escalations) == 1                 # reclassified → escalate, stop
     assert {"task_id": tid, "class": "integration_parked"} in s1["parked"]
+
+
+# ---------------------------------------------------------------------------
+# Heiler: GENERAL bounded transient-INFRA retry lane (HEILER-TRANSIENT-RETRY-
+# BUDGET-S1). spawn_failed / rate_limited_loop / scheduled_overdue run through a
+# bounded, backoff-spaced retry budget (OWN counter, never auto_retry_count /
+# integration_retry_count) before paging the operator.
+# ---------------------------------------------------------------------------
+
+def test_transient_retry_phase_pure_rule():
+    bo = kb.TRANSIENT_RETRY_BACKOFF_SECONDS
+    lim = kb.TRANSIENT_RETRY_LIMIT
+    # No prior attempt → retry.
+    assert kb._transient_retry_phase(0, None, 1000) == "retry"
+    # Inside backoff window → backoff.
+    assert kb._transient_retry_phase(1, 1000, 1000 + bo - 1) == "backoff"
+    # Backoff elapsed → retry.
+    assert kb._transient_retry_phase(1, 1000, 1000 + bo + 1) == "retry"
+    # Budget spent → exhausted (even with no recent event).
+    assert kb._transient_retry_phase(lim, None, 10**12) == "exhausted"
+
+
+def test_transient_retry_spawn_bounded_then_escalates(kanban_home):
+    # The spawn-dispatch helper re-queues a claimed (running) task running→ready
+    # up to TRANSIENT_RETRY_LIMIT times — emitting a transient_retry event and
+    # NOT a heiler_classification — then falls back to the normal spawn-failure
+    # escalation. Driven directly (re-claim each round) so the test does not
+    # depend on the real-time backoff (that lives in check_respawn_guard).
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="flaky spawn", assignee="coder", max_retries=1)
+        phases = []
+        for _ in range(kb.TRANSIENT_RETRY_LIMIT + 1):
+            assert kb.claim_task(conn, tid) is not None      # ready → running + run
+            phase, auto = kb._spawn_failure_or_transient_retry(
+                conn, tid, "spawn boom", failure_limit=1, now=now,
+            )
+            phases.append((phase, auto))
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        kinds = [e.kind for e in events]
+        tretry_runs = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_runs "
+            "WHERE task_id = ? AND outcome = ?",
+            (tid, kb.TRANSIENT_RETRY_OUTCOME),
+        ).fetchone()["n"]
+
+    # First N rounds re-queued; the (N+1)-th exhausted the budget and escalated.
+    assert phases[:-1] == [("retried", False)] * kb.TRANSIENT_RETRY_LIMIT
+    assert phases[-1][0] == "escalated"
+    assert task.transient_retry_count == kb.TRANSIENT_RETRY_LIMIT
+    # OWN counter only — the premium/opus + re-integration ladders are untouched.
+    assert task.auto_retry_count == 0
+    assert task.integration_retry_count == 0
+    assert task.status == "blocked"                          # finally escalated
+    assert tretry_runs == kb.TRANSIENT_RETRY_LIMIT
+    # Bounded retries emit transient_retry, NOT heiler_classification: a self-
+    # heal within budget never lands a transient escalation in the ledger. The
+    # single heiler_classification belongs to the final (exhausted) escalation.
+    assert kb.TRANSIENT_RETRY_EVENT in kinds
+    heiler = [e for e in events if e.kind == kb.HEILER_CLASSIFICATION_EVENT]
+    assert len(heiler) == 1 and heiler[0].payload["class"] == "transient"
+    assert len([e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]) == 1
+
+
+def test_transient_retry_self_heal_leaves_no_transient_escalation(kanban_home):
+    # A spawn blip that self-heals on the next attempt must NOT show up as a
+    # transient escalation in the ledger — the whole AC-1 reduction lever.
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="blip", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        phase, _auto = kb._spawn_failure_or_transient_retry(
+            conn, tid, "spawn boom", failure_limit=2, now=now,
+        )
+        assert phase == "retried"
+        task = kb.get_task(conn, tid)
+        # Next attempt succeeds.
+        assert kb.claim_task(conn, tid) is not None
+        kb.complete_task(conn, tid, summary="ok")
+        done = kb.get_task(conn, tid)
+        ledger = kb.read_escalation_ledger(conn)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+
+    assert task.status == "ready" and task.transient_retry_count == 1
+    # Completed: the transient budget resets so a later, unrelated blip starts
+    # from a clean slate.
+    assert done.status == "done" and done.transient_retry_count == 0
+    assert "operator_escalation" not in kinds
+    assert kb.HEILER_CLASSIFICATION_EVENT not in kinds
+    assert ledger["roots_by_class"].get("transient", 0) == 0
+
+
+def test_transient_retry_backoff_guard_defers_then_releases(kanban_home):
+    # check_respawn_guard spaces the bounded spawn retries apart: a task whose
+    # latest run ended transient_retry is deferred inside the backoff window and
+    # respawnable once it elapses.
+    real_now = int(time.time())
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, outcome, started_at, ended_at) "
+                "VALUES (?, 'coder', ?, ?, ?, ?)",
+                (tid, kb.TRANSIENT_RETRY_OUTCOME, kb.TRANSIENT_RETRY_OUTCOME,
+                 real_now - 5, real_now - 5),
+            )
+        assert kb.check_respawn_guard(conn, tid) == "transient_retry_backoff"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET ended_at = ? WHERE task_id = ?",
+                (real_now - kb.TRANSIENT_RETRY_BACKOFF_SECONDS - 5, tid),
+            )
+        assert kb.check_respawn_guard(conn, tid) is None
+
+
+def test_transient_retry_dispatch_end_to_end(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    # End-to-end through dispatch_once: a persistently-raising spawn_fn is
+    # re-queued a bounded number of times, then escalates. Backoff is collapsed
+    # so the loop can exhaust the budget without wall-clock waits.
+    monkeypatch.setattr(kb, "TRANSIENT_RETRY_BACKOFF_SECONDS", 0)
+
+    def boom(task, workspace):
+        raise RuntimeError("spawn boom")
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="flaky", assignee="alice", max_retries=1)
+        for _ in range(kb.TRANSIENT_RETRY_LIMIT + 3):
+            kb.dispatch_once(conn, spawn_fn=boom)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    tretries = [e for e in events if e.kind == kb.TRANSIENT_RETRY_EVENT]
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    assert len(tretries) == kb.TRANSIENT_RETRY_LIMIT     # bounded re-queues
+    assert task.status == "blocked"                      # then escalated
+    assert len(escalations) == 1
+
+
+def test_scheduled_overdue_failed_nudge_retries_then_escalates(
+    kanban_home, monkeypatch,
+):
+    # When the deterministic scheduled-overdue nudge cannot apply (forced here),
+    # the sweep runs a bounded transient-retry budget before escalating, instead
+    # of paging on the first failed nudge.
+    now = 1_900_000_000
+    bo = kb.TRANSIENT_RETRY_BACKOFF_SECONDS
+    monkeypatch.setattr(kb, "unblock_task", lambda conn, task_id: False)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="overdue", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'scheduled', created_at = ? WHERE id = ?",
+                (now - 10_000, tid),
+            )
+        s1 = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        t1 = kb.get_task(conn, tid)
+        s2 = kb.no_silent_stall_sweep(conn, now=now + bo + 1, min_age_seconds=3600)
+        s3 = kb.no_silent_stall_sweep(conn, now=now + 2 * bo + 2, min_age_seconds=3600)
+        t3 = kb.get_task(conn, tid)
+        escalations = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert {"task_id": tid, "class": "scheduled_overdue"} in s1["transient_retried"]
+    assert t1.status == "scheduled" and t1.transient_retry_count == 1
+    assert {"task_id": tid, "class": "scheduled_overdue"} in s2["transient_retried"]
+    assert {"task_id": tid, "class": "scheduled_overdue"} in s3["parked"]
+    assert t3.status == "blocked"
+    assert len(escalations) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -9899,7 +10108,11 @@ def test_4b_decision_queue_specific_recovery_classes_beat_generic_escalation(
                     (limited, now - 100 - i, now - 90 - i),
                 )
 
-        kb.no_silent_stall_sweep(conn, now=now, rate_limit_attempt_limit=3)
+        # The rate-limit loop now runs through the bounded transient-retry
+        # budget first (HEILER-TRANSIENT-RETRY-BUDGET-S1); sweep until it is
+        # exhausted and escalates, so the decision queue sees the recovery class.
+        for k in range(kb.TRANSIENT_RETRY_LIMIT + 1):
+            kb.no_silent_stall_sweep(conn, now=now + k, rate_limit_attempt_limit=3)
         result = kb.decision_queue(conn, now=now + 10)
 
     assert _kinds_for(parked, result) == ["integration_parked"]
