@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs
+from hermes_cli.subcommands import plan as plan_subcommand
 
 
 @pytest.fixture
@@ -334,6 +336,82 @@ def test_mark_planspec_not_needed_closes_display_only_plan(tmp_path: Path):
     assert "status: obsolete" in updated
     assert "closed_by: tester" in updated
     assert "closed_reason: not needed anymore" in updated
+
+
+def test_mark_planspec_shipped_requires_terminal_or_receipt_evidence(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.mark_planspec_shipped(path, plans_root=plans_root, author="tester")
+
+    assert "Kanban terminal state or release/receipt evidence is required" in str(exc.value)
+
+
+def test_mark_planspec_shipped_closes_with_metadata_and_is_idempotent(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    first = planspecs.mark_planspec_shipped(
+        path,
+        plans_root=plans_root,
+        author="tester",
+        kanban_state="completed",
+        receipt="/home/piet/vault/03-Agents/Hermes/receipts/ship.md",
+        kanban_root_task_id="t_root1234",
+    )
+    second = planspecs.mark_planspec_shipped(
+        path,
+        plans_root=plans_root,
+        author="someone-else",
+        kanban_state="completed",
+        receipt="/home/piet/vault/03-Agents/Hermes/receipts/other.md",
+        kanban_root_task_id="t_other",
+    )
+    open_records = planspecs.list_planspecs(plans_root=plans_root)
+    all_records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
+    updated = path.read_text(encoding="utf-8")
+
+    assert first["ok"] is True
+    assert first["status"] == "shipped"
+    assert first["idempotent"] is False
+    assert second["ok"] is True
+    assert second["status"] == "shipped"
+    assert second["idempotent"] is True
+    assert open_records == []
+    row = all_records[0]
+    assert row["open"] is False
+    assert row["closed_reason"] == "closed status: shipped"
+    assert row["closed_by"] == "tester"
+    assert row["receipt"] == "/home/piet/vault/03-Agents/Hermes/receipts/ship.md"
+    assert row["kanban_root_task_id"] == "t_root1234"
+    assert "status: shipped" in updated
+    assert "closed_by: tester" in updated
+    assert "closed_reason: shipped" in updated
+    assert "receipt: /home/piet/vault/03-Agents/Hermes/receipts/ship.md" in updated
+    assert "kanban_root_task_id: t_root1234" in updated
+
+
+def test_plan_shipped_cli_json(tmp_path: Path, capsys):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+
+    rc = plan_subcommand.plan_command(
+        Namespace(
+            plan_action="shipped",
+            path=str(path),
+            author="cli-tester",
+            kanban_state="completed",
+            receipt=None,
+            release_evidence=None,
+            kanban_root_task_id="t_root1234",
+            json=True,
+            plans_root=plans_root,
+        )
+    )
+
+    assert rc == 0
+    assert '\"status\": \"shipped\"' in capsys.readouterr().out
 
 
 def test_ingest_planspec_creates_scheduled_children(kanban_home, tmp_path: Path):

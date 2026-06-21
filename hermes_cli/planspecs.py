@@ -443,7 +443,12 @@ def list_planspecs(
                     "valid": valid,
                     "open": open_record,
                     "closed_reason": closed_reason,
-                    "kanban_root_task_id": (kanban_state or {}).get("root_task_id"),
+                    "closed_at": frontmatter.get("closed_at"),
+                    "closed_by": frontmatter.get("closed_by"),
+                    "receipt": frontmatter.get("receipt"),
+                    "release_evidence": frontmatter.get("release_evidence"),
+                    "kanban_root_task_id": frontmatter.get("kanban_root_task_id")
+                    or (kanban_state or {}).get("root_task_id"),
                     "kanban_root_status": (kanban_state or {}).get("root_status"),
                     "kanban_state": kanban_terminal_state,
                     "kanban_child_total": (kanban_state or {}).get("child_total", 0),
@@ -531,6 +536,65 @@ def mark_planspec_not_needed(
         "path": str(resolved),
         "status": "obsolete",
         "closed_reason": "not needed anymore",
+    }
+
+
+def mark_planspec_shipped(
+    path: str | Path,
+    *,
+    plans_root: Path = DEFAULT_PLANS_ROOT,
+    author: str = "dashboard",
+    kanban_state: str | None = None,
+    receipt: str | None = None,
+    release_evidence: str | None = None,
+    kanban_root_task_id: str | None = None,
+) -> dict[str, object]:
+    resolved = resolve_planspec_path(path, plans_root=plans_root)
+    try:
+        frontmatter, body = _extract_frontmatter(resolved.read_text(encoding="utf-8"))
+    except CompileBlocked as exc:
+        raise PlanSpecBlocked(exc.findings) from exc
+    except UnicodeDecodeError as exc:
+        raise PlanSpecBlocked([f"planspec is not valid utf-8: {exc}"]) from exc
+
+    current_status = str(frontmatter.get("status") or "").strip()
+    if _closed_reason(current_status):
+        return {
+            "ok": True,
+            "path": str(resolved),
+            "status": current_status,
+            "closed_reason": _closed_reason(current_status),
+            "idempotent": True,
+        }
+
+    normalized_state = (kanban_state or "").strip().lower()
+    has_terminal_state = normalized_state in _CLOSED_KANBAN_STATES
+    has_explicit_evidence = bool((receipt or "").strip() or (release_evidence or "").strip())
+    if not has_terminal_state and not has_explicit_evidence:
+        raise PlanSpecBlocked(["Kanban terminal state or release/receipt evidence is required"])
+
+    frontmatter["status"] = "shipped"
+    frontmatter["closed_at"] = datetime.now(timezone.utc).date().isoformat()
+    frontmatter["closed_by"] = author.strip() or "dashboard"
+    frontmatter["closed_reason"] = "shipped"
+    if receipt and receipt.strip():
+        frontmatter["receipt"] = receipt.strip()
+    if release_evidence and release_evidence.strip():
+        frontmatter["release_evidence"] = release_evidence.strip()
+    if kanban_root_task_id and kanban_root_task_id.strip():
+        frontmatter["kanban_root_task_id"] = kanban_root_task_id.strip()
+
+    raw_frontmatter = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
+    next_text = f"---\n{raw_frontmatter}\n---\n\n{body.lstrip()}"
+    tmp_path = resolved.with_name(f".{resolved.name}.tmp")
+    tmp_path.write_text(next_text, encoding="utf-8")
+    tmp_path.replace(resolved)
+    return {
+        "ok": True,
+        "path": str(resolved),
+        "status": "shipped",
+        "closed_reason": "shipped",
+        "idempotent": False,
     }
 
 
