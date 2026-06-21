@@ -31,7 +31,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_db as kb
@@ -330,6 +330,17 @@ def derive_gate_streak(records: list[dict]) -> dict:
 # consecutive recorded nights (AC-1 / AC-2: >= 2, never on a single red night).
 GATE_FIX_MIN_NIGHTS = 2
 
+# Legacy-night log backfill (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1): the nightly
+# heartbeat writes one per-run dir ``<GREEN_GATE_LOG_DIR>/YYYYMMDD-HHMMSS/`` with
+# a ``<gate>.log`` each. A red night that predates the first_fail format carries
+# no cause in the ledger; to decide whether it shares an attributed head's cause
+# we read the TAIL of that night's gate log (the failure summary sits at the end)
+# and compare failing-test signatures. Both reads are bounded so a pathological
+# log can never balloon the walk.
+GREEN_GATE_LOG_DIR_ENV = "GREEN_GATE_LOG_DIR"
+GATE_LOG_BACKFILL_MAX_BYTES = 256 * 1024  # tail we read from a legacy gate log
+GATE_BACKFILL_MAX_FILES = 200  # cap failing-file tokens parsed from one log
+
 
 def _record_epoch(rec: dict) -> Optional[int]:
     """Best-effort unix epoch for a ledger record (``epoch`` then ``ts``)."""
@@ -417,8 +428,117 @@ def _night_cause_and_purity(
     return None, (len(fails) > 0 and has_leaker_only)
 
 
+# ---------------------------------------------------------------------------
+# Legacy-night log backfill helpers (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1)
+# ---------------------------------------------------------------------------
+
+# Failing-test files appear ONLY in failure context: the run_tests.sh summary
+# block (``  tests/x.py  (k test failed)``) and pytest ``FAILED tests/x.py::…``
+# lines. Matching just these two shapes means the thousands of PASSED lines in a
+# full log (``✓ tests/x.py (…)``) never pollute the signature.
+_FAIL_SUMMARY_FILE_RE = re.compile(
+    r"^\s+(tests/[\w./-]+\.py)\s+\(\d+\s+test", re.MULTILINE
+)
+_PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(tests/[\w./-]+\.py)\b", re.MULTILINE)
+
+
+def _extract_failing_test_files(text: Optional[str]) -> set[str]:
+    """Pull the set of FAILING test-file paths out of a run_tests.sh log/detail.
+
+    Only failure-context lines feed the set (see the regexes above), so a full
+    nightly log's passing lines are never mistaken for failures. Bounded to
+    :data:`GATE_BACKFILL_MAX_FILES` tokens. Returns an empty set when nothing
+    failure-shaped is present (the caller then declines to backfill)."""
+    if not text:
+        return set()
+    files: set[str] = set()
+    for rx in (_FAIL_SUMMARY_FILE_RE, _PYTEST_FAILED_RE):
+        for match in rx.finditer(text):
+            files.add(match.group(1))
+            if len(files) >= GATE_BACKFILL_MAX_FILES:
+                return files
+    return files
+
+
+def _same_recurring_cause(prev_files: set[str], head_files: set[str]) -> bool:
+    """True iff a log-confirmed un-attributed night shares the head's cause.
+
+    Sound + conservative: one failing-file set must be a SUBSET of the other —
+    the recurring core is identical and only the boundary churns (a test the head
+    newly broke, or newly fixed). A predecessor that failed on a DISJOINT or only
+    partially-overlapping set is a *different* cause and breaks the chain (AC-2).
+    Both sets must be non-empty: we never 'confirm' a shared cause from a log we
+    could extract no failure signature from (empty ⊆ anything would falsely heal).
+    """
+    if not prev_files or not head_files:
+        return False
+    return prev_files <= head_files or head_files <= prev_files
+
+
+def _green_gate_log_root() -> Path:
+    """Root dir the nightly green-gate heartbeat writes per-run logs to.
+
+    Mirrors the heartbeat's ``GREEN_GATE_LOG_DIR`` env (default
+    ``<hermes_root>/logs/green-gate``) so the autoheal backfill reads exactly the
+    logs the heartbeat produced."""
+    override = os.environ.get(GREEN_GATE_LOG_DIR_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "logs" / "green-gate"
+
+
+def _read_night_gate_log(root: Path, date: str, *, gate: str = "python") -> Optional[str]:
+    """Best-effort read of the per-night green-gate ``<gate>.log`` for ``date``.
+
+    The heartbeat names each run dir ``YYYYMMDD-HHMMSS``; this locates the dir(s)
+    whose date-part equals ``date`` (the latest run that night wins) and returns
+    the TAIL of ``<gate>.log`` (bounded to :data:`GATE_LOG_BACKFILL_MAX_BYTES` —
+    the failure summary lives at the end). Returns ``None`` when nothing is found
+    or readable, so the caller treats the night as *unconfirmed* and declines to
+    backfill (idle stays the safe default — never a guessed heal)."""
+    compact = str(date or "").replace("-", "")
+    if not compact:
+        return None
+    try:
+        if not root.exists():
+            return None
+        candidates = sorted(
+            (p for p in root.glob(f"{compact}-*") if p.is_dir()), reverse=True
+        )
+    except OSError:
+        return None
+    for run_dir in candidates:
+        try:
+            raw = (run_dir / f"{gate}.log").read_bytes()
+        except OSError:
+            continue
+        if len(raw) > GATE_LOG_BACKFILL_MAX_BYTES:
+            raw = raw[-GATE_LOG_BACKFILL_MAX_BYTES:]
+        return raw.decode("utf-8", "ignore")
+    return None
+
+
+def default_night_log_reader(
+    log_root: Optional[Path] = None, *, gate: str = "python"
+) -> Callable[[str, list], Optional[str]]:
+    """A night-log reader bound to the green-gate log root, for the backfill in
+    :func:`derive_consecutive_red_cause`. Reads the per-night ``<gate>.log``;
+    returns ``None`` for any night whose log is missing/unreadable."""
+    root = log_root or _green_gate_log_root()
+
+    def _reader(date: str, _fails: list) -> Optional[str]:
+        return _read_night_gate_log(root, date, gate=gate)
+
+    return _reader
+
+
 def derive_consecutive_red_cause(
-    records: list[dict], *, min_nights: int = GATE_FIX_MIN_NIGHTS
+    records: list[dict],
+    *,
+    min_nights: int = GATE_FIX_MIN_NIGHTS,
+    night_log_reader: Optional[Callable[[str, list], Optional[str]]] = None,
 ) -> Optional[dict]:
     """Detect a recurring *same-cause* red streak at the head of the ledger.
 
@@ -436,6 +556,18 @@ def derive_consecutive_red_cause(
     coalesce, but never merge with an attributed cause). Returns ``None`` when no
     such recurring cause exists — the signal the autoheal loop reads as "nothing
     to open" (idle is the correct, no-spam outcome).
+
+    Legacy-night log backfill (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1): when an
+    ATTRIBUTED head is directly preceded by a red but un-attributed night (one
+    that predates the first_fail format, like the live 06-20/06-21 case), the
+    ``"unknown"`` sentinel would otherwise break the chain at length 1. If a
+    ``night_log_reader`` is supplied, the predecessor's on-disk gate log is read
+    and the night is adopted into the chain ONLY when its log proves it shares the
+    head's failing-test signature (:func:`_same_recurring_cause`) — bounded, and
+    purely for the HELD detection. A predecessor whose log shows a different cause
+    (or no signature) still ends the run. Without a reader the behaviour is
+    unchanged (pure ledger), and an UN-attributed head keeps the legacy
+    ``"unknown"`` coalescing untouched.
 
     The returned dict — ``{gate, fingerprint, detail, red_nights, dates}`` — is
     pure detection; the volatile ``red_nights``/``detail`` are for logging only.
@@ -467,6 +599,13 @@ def derive_consecutive_red_cause(
         # (the whole point: a leaker must never mint a fix-PlanSpec).
         return None
     target_fp = target_cause["fingerprint"] if target_cause else "unknown"
+    # Only an ATTRIBUTED head can adopt an un-attributed predecessor via log
+    # backfill; an un-attributed head keeps the legacy "unknown" coalescing.
+    head_files = (
+        _extract_failing_test_files(target_cause["detail"])
+        if (night_log_reader is not None and target_cause is not None)
+        else set()
+    )
 
     matched: list[str] = []
     for date in dates_desc:
@@ -476,10 +615,26 @@ def derive_consecutive_red_cause(
         cause, pure_leaker = _night_cause_and_purity(slot["fails"])
         if pure_leaker:
             break  # a harness-noise night is not part of a real recurring cause
-        fp = cause["fingerprint"] if cause else "unknown"
-        if fp != target_fp:
-            break
-        matched.append(date)
+        if cause is not None:
+            if cause["fingerprint"] != target_fp:
+                break
+            matched.append(date)
+            continue
+        # Un-attributed red night (no first_fail payload).
+        if target_fp == "unknown":
+            # legacy behaviour: unattributed reds coalesce under the sentinel
+            matched.append(date)
+            continue
+        # Head is attributed but this older night carries no cause. Backfill from
+        # its on-disk gate log: adopt it ONLY when the log proves it shares the
+        # head's failing-test signature (HELD-only, bounded). Otherwise the chain
+        # ends here exactly as before — never a guessed merge.
+        if head_files and night_log_reader is not None:
+            prev_files = _extract_failing_test_files(night_log_reader(date, slot["fails"]))
+            if _same_recurring_cause(prev_files, head_files):
+                matched.append(date)
+                continue
+        break
 
     if len(matched) < max(1, int(min_nights)):
         return None

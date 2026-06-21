@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
 from hermes_cli import vision_metrics
@@ -900,6 +900,7 @@ def propose_gate_fix(
     gate_records: Optional[list[dict[str, Any]]] = None,
     min_nights: int = GATE_FIX_MIN_NIGHTS,
     do_ingest: bool = True,
+    night_log_reader: Optional[Callable[[str, list], Optional[str]]] = None,
 ) -> dict[str, Any]:
     """GREEN-GATE-AUTOHEAL-LOOP-S1 — open a HELD fix-PlanSpec for a stuck gate.
 
@@ -918,11 +919,19 @@ def propose_gate_fix(
     headless from the nightly heartbeat. Pass ``do_ingest=False`` for detection
     only (no DB write). ``gate_records`` defaults to the on-disk ledger; tests
     inject an explicit list.
+
+    ``night_log_reader`` (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1) enables the
+    legacy-night log backfill in
+    :func:`vision_metrics.derive_consecutive_red_cause`: a red but un-attributed
+    night directly preceding an attributed head is adopted into the streak only
+    when its on-disk gate log proves the same failing-test signature. Defaults to
+    ``None`` (pure ledger); the CLI adapter :func:`run_gate_fix` wires the real
+    filesystem reader so the live 06-20/06-21 case heals.
     """
     if gate_records is None:
         gate_records = vision_metrics.read_gate_records()
     cause = vision_metrics.derive_consecutive_red_cause(
-        gate_records, min_nights=min_nights
+        gate_records, min_nights=min_nights, night_log_reader=night_log_reader
     )
     if cause is None:
         return {
@@ -1204,7 +1213,11 @@ def run_propose(args) -> dict[str, Any]:
 
 
 def run_gate_fix(args) -> dict[str, Any]:
-    """CLI adapter: resolve defaults from the runtime layout, then gate-fix-check."""
+    """CLI adapter: resolve defaults from the runtime layout, then gate-fix-check.
+
+    Wires the real filesystem ``night_log_reader`` so a legacy un-attributed red
+    night directly preceding an attributed head can be log-backfilled into the
+    streak (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1 — the live 06-20/06-21 case)."""
     state_dir = default_state_dir()
     out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
     return propose_gate_fix(
@@ -1212,6 +1225,7 @@ def run_gate_fix(args) -> dict[str, Any]:
         out_dir=out_dir,
         min_nights=getattr(args, "min_nights", GATE_FIX_MIN_NIGHTS),
         do_ingest=not getattr(args, "dry_run", False),
+        night_log_reader=vision_metrics.default_night_log_reader(),
     )
 
 

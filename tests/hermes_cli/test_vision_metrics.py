@@ -644,6 +644,168 @@ def test_red_cause_empty_ledger():
 
 
 # ---------------------------------------------------------------------------
+# Legacy-night log backfill (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1)
+#
+# The live 06-20/06-21 case: an OLDER red night predates the first_fail format
+# (un-attributed) while the head is attributed. Reading the predecessor's
+# on-disk gate log to confirm it shares the head's failing-test signature lets
+# the chain heal, instead of breaking at length 1 (idle) because "unknown"
+# never matches the attributed head fingerprint.
+# ---------------------------------------------------------------------------
+
+# the head's stored first_fail.detail (run_tests.sh tail — 6 failing files)
+_HEAD_DETAIL = (
+    "Python (run_tests.sh):\n\n"
+    "=== 6 files with test failures (9 tests failed) ===\n"
+    "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+    "  tests/agent/transports/test_codex_transport.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_dashboard_admin_endpoints.py  (3 tests failed)\n"
+    "  tests/hermes_cli/test_redact_config_bridge.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_startup_plugin_gating.py  (1 test failed)\n"
+    "  tests/tools/test_voice_mode.py  (2 tests failed)\n"
+    "Volles Log: /x/20260621-052029/python.log"
+)
+# the predecessor night's FULL python.log: thousands of PASSED lines plus the
+# trailing failure-summary block (5 of the head's 6 files -> a subset).
+_PREV_LOG_SAME = (
+    "[  0.0% |    7/34736 | OK7 | x0] ok tests/acp/test_auth.py (7ok, 1.0s)\n"
+    "[  0.1% |   35/34736 | OK35 | x0] ok tests/acp/test_events.py (19ok, 1.5s)\n"
+    "FAILED tests/agent/test_copilot_acp_client.py::TestA::test_x\n"
+    "=== 5 files with test failures (8 tests failed) ===\n"
+    "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+    "  tests/agent/transports/test_codex_transport.py  (1 test failed)\n"
+    "  tests/hermes_cli/test_dashboard_admin_endpoints.py  (3 tests failed)\n"
+    "  tests/hermes_cli/test_startup_plugin_gating.py  (1 test failed)\n"
+    "  tests/tools/test_voice_mode.py  (2 tests failed)\n"
+)
+# a wholly different failure domain (no overlap with the head's files)
+_PREV_LOG_DIFFERENT = (
+    "=== 1 files with test failures (1 tests failed) ===\n"
+    "  tests/totally/test_other_thing.py  (1 test failed)\n"
+)
+
+
+def test_extract_failing_files_ignores_passed_lines():
+    # only failure-context lines feed the signature — never the thousands of
+    # passed lines a full run_tests.sh log carries.
+    files = vm._extract_failing_test_files(_PREV_LOG_SAME)
+    assert files == {
+        "tests/agent/test_copilot_acp_client.py",
+        "tests/agent/transports/test_codex_transport.py",
+        "tests/hermes_cli/test_dashboard_admin_endpoints.py",
+        "tests/hermes_cli/test_startup_plugin_gating.py",
+        "tests/tools/test_voice_mode.py",
+    }
+
+
+def test_extract_failing_files_empty_when_no_failure_block():
+    assert vm._extract_failing_test_files("all green, nothing to see") == set()
+    assert vm._extract_failing_test_files(None) == set()
+
+
+def test_red_cause_backfills_legacy_unattributed_predecessor():
+    # head attributed (python, 6 files); the older night is red but un-attributed.
+    records = [
+        _red("2026-06-20"),  # legacy: no first_fail payload
+        _red("2026-06-21", gate="python", detail=_HEAD_DETAIL),
+    ]
+    # WITHOUT a reader the current behaviour is preserved (idle).
+    assert vm.derive_consecutive_red_cause(records) is None
+    # WITH a reader whose log proves the same failing-file signature -> fires.
+    reader = lambda date, fails: _PREV_LOG_SAME if date == "2026-06-20" else None
+    cause = vm.derive_consecutive_red_cause(records, night_log_reader=reader)
+    assert cause is not None
+    assert cause["gate"] == "python"
+    assert cause["fingerprint"].startswith("python|")
+    assert cause["red_nights"] == 2
+    assert cause["dates"] == ["2026-06-21", "2026-06-20"]
+
+
+def test_red_cause_backfill_rejects_different_cause_predecessor():
+    # AC-2: the predecessor log shows a demonstrably DIFFERENT failure -> the
+    # chain breaks (the two reds are NOT merged into one series).
+    records = [
+        _red("2026-06-20"),
+        _red("2026-06-21", gate="python", detail=_HEAD_DETAIL),
+    ]
+    reader = lambda date, fails: _PREV_LOG_DIFFERENT if date == "2026-06-20" else None
+    assert vm.derive_consecutive_red_cause(records, night_log_reader=reader) is None
+
+
+def test_red_cause_backfill_rejects_when_log_missing():
+    # the reader cannot locate the predecessor log -> no false heal (idle stays
+    # the safe default rather than guessing the cause matched).
+    records = [
+        _red("2026-06-20"),
+        _red("2026-06-21", gate="python", detail=_HEAD_DETAIL),
+    ]
+    reader = lambda date, fails: None
+    assert vm.derive_consecutive_red_cause(records, night_log_reader=reader) is None
+
+
+def test_red_cause_backfill_never_fires_on_single_red_night():
+    # AC-2: min_nights stays 2 — a single attributed red night never fires even
+    # with a reader present.
+    records = [_red("2026-06-21", gate="python", detail=_HEAD_DETAIL)]
+    reader = lambda date, fails: _PREV_LOG_SAME
+    assert vm.derive_consecutive_red_cause(records, night_log_reader=reader) is None
+
+
+def test_red_cause_backfill_unattributed_head_unaffected():
+    # reader present, but the HEAD is un-attributed -> legacy 'unknown' coalescing
+    # applies (NOT a log backfill); the attributed predecessor breaks the chain
+    # exactly as before, so no merge happens.
+    records = [
+        _red("2026-06-20", gate="python", detail="boom"),
+        _red("2026-06-21"),  # un-attributed head
+    ]
+    reader = lambda date, fails: _PREV_LOG_SAME
+    assert vm.derive_consecutive_red_cause(records, night_log_reader=reader) is None
+
+
+def test_red_cause_backfill_three_nights_middle_legacy():
+    # attributed head + attributed oldest, with a legacy un-attributed night in
+    # the middle -> the log backfill bridges it so all three coalesce.
+    records = [
+        _red("2026-06-19", gate="python", detail=_HEAD_DETAIL),
+        _red("2026-06-20"),  # legacy middle night
+        _red("2026-06-21", gate="python", detail=_HEAD_DETAIL),
+    ]
+    reader = lambda date, fails: _PREV_LOG_SAME if date == "2026-06-20" else None
+    cause = vm.derive_consecutive_red_cause(records, night_log_reader=reader)
+    assert cause is not None
+    assert cause["red_nights"] == 3
+    assert cause["dates"] == ["2026-06-21", "2026-06-20", "2026-06-19"]
+
+
+def test_default_night_log_reader_locates_log_by_date(tmp_path):
+    root = tmp_path / "green-gate"
+    run = root / "20260620-052029"
+    run.mkdir(parents=True)
+    (run / "python.log").write_text(
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/x/test_a.py  (1 test failed)\n",
+        encoding="utf-8",
+    )
+    reader = vm.default_night_log_reader(log_root=root)
+    text = reader("2026-06-20", [])
+    assert text is not None
+    assert "test_a.py" in text
+    # a night with no matching run dir is unreadable -> None (no guess)
+    assert reader("2026-06-19", []) is None
+
+
+def test_default_night_log_reader_picks_latest_run_that_night(tmp_path):
+    root = tmp_path / "green-gate"
+    (root / "20260620-052029").mkdir(parents=True)
+    (root / "20260620-052029" / "python.log").write_text("EARLY run\n", encoding="utf-8")
+    (root / "20260620-231500").mkdir(parents=True)
+    (root / "20260620-231500" / "python.log").write_text("LATE run\n", encoding="utf-8")
+    reader = vm.default_night_log_reader(log_root=root)
+    assert "LATE run" in reader("2026-06-20", [])
+
+
+# ---------------------------------------------------------------------------
 # record-gate-result CLI logic
 # ---------------------------------------------------------------------------
 
@@ -886,6 +1048,77 @@ def test_cli_gate_fix_check_idle_on_green_head(tmp_path, monkeypatch, state_dir,
     out = json.loads(capsys.readouterr().out.strip())
     assert out["triggered"] is False
     assert out["ingested"] is None
+
+
+def test_cli_gate_fix_check_backfills_legacy_night_from_log(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """E2E (GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1): run_gate_fix wires the real
+    filesystem reader, so a legacy un-attributed 06-20 night whose on-disk
+    python.log shares the attributed 06-21 head's failing-file signature heals
+    (the live case). Dry-run keeps it hermetic (no board ingest needed)."""
+    db_path = tmp_path / "kanban.db"
+    # ledger: 06-20 red but un-attributed (legacy), 06-21 red + attributed
+    vm.record_gate_result("fail", ts="2026-06-20T03:31:14+00:00")
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:31:15+00:00",
+        first_fail_gate="python",
+        first_fail_detail=(
+            "=== 2 files with test failures (3 tests failed) ===\n"
+            "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+            "  tests/tools/test_voice_mode.py  (2 tests failed)\n"
+        ),
+    )
+    # on-disk green-gate log root the reader resolves via GREEN_GATE_LOG_DIR
+    log_root = tmp_path / "green-gate"
+    run = log_root / "20260620-052029"
+    run.mkdir(parents=True)
+    (run / "python.log").write_text(
+        "lots of ✓ tests/acp/test_auth.py (10✓) passing lines\n"
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GREEN_GATE_LOG_DIR", str(log_root))
+
+    rc = _run_cli(["vision", "gate-fix-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is True
+    assert out["gate"] == "python"
+    assert out["red_nights"] == 2
+    assert out["dates"] == ["2026-06-21", "2026-06-20"]
+
+
+def test_cli_gate_fix_check_idle_when_legacy_log_differs(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """AC-2 counter at the CLI seam: the legacy night's on-disk log shows a
+    DIFFERENT failure than the head -> no merge, stays idle."""
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result("fail", ts="2026-06-20T03:31:14+00:00")
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:31:15+00:00",
+        first_fail_gate="python",
+        first_fail_detail=(
+            "=== 1 files with test failures (1 tests failed) ===\n"
+            "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+        ),
+    )
+    log_root = tmp_path / "green-gate"
+    run = log_root / "20260620-052029"
+    run.mkdir(parents=True)
+    (run / "python.log").write_text(
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/unrelated/test_other.py  (1 test failed)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GREEN_GATE_LOG_DIR", str(log_root))
+
+    rc = _run_cli(["vision", "gate-fix-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is False
 
 
 # ---------------------------------------------------------------------------
