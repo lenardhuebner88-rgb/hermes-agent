@@ -68,11 +68,12 @@ def test_filter_keeps_only_marker_receipts():
 
 def test_run_harvest_writes_candidates_and_marker(kanban_home):
     import json
+    import time
     import types
 
     body = "RESULT: erledigt. Der Cache-Refactor bleibt outside scope — separater Task. " * 4
     with kb.connect() as conn:
-        _done_task(conn, title="Endpoint bauen", body=body)
+        _done_task(conn, title="Endpoint bauen", body=body, completed_at=int(time.time()))
     args = types.SimpleNamespace(board=None)
     result = strategist.run_harvest(args)
     assert result["mode"] == "harvest"

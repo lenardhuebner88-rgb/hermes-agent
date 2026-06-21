@@ -1035,3 +1035,51 @@ def run_reflect(args) -> dict[str, Any]:
         return reflect(conn, notes_path=notes_path)
     finally:
         conn.close()
+
+
+def _read_harvest_since(marker_path: Path, *, now: int) -> int:
+    """Letzter Harvest-Lauf aus dem Marker, sonst Fenster-Fallback (now-48h)."""
+    try:
+        ts = int(json.loads(Path(marker_path).read_text(encoding="utf-8"))["ts"])
+        return ts
+    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        return now - HARVEST_WINDOW_FALLBACK_SECONDS
+
+
+def run_harvest(args) -> dict[str, Any]:
+    """CLI-Adapter: Receipts sammeln + vorfiltern → Kandidaten-Datei + Marker.
+
+    KEIN LLM-Call und KEIN Ingest hier — rein deterministisch. Die Destillation
+    der Kandidaten zu Lever-Drafts und der Ingest passieren im billigen
+    ``claude -p``-Wrapper über den bestehenden ``--mode propose``-Pfad.
+    """
+    state_dir = default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    marker = state_dir / "harvest_last_run.json"
+    now = int(time.time())
+    since_ts = _read_harvest_since(marker, now=now)
+
+    conn = kanban_db.connect(board=getattr(args, "board", None))
+    try:
+        receipts = gather_recent_receipts(conn, since_ts=since_ts)
+    finally:
+        conn.close()
+    candidates = filter_followup_candidates(receipts)
+
+    cand_path = state_dir / "harvest_candidates.json"
+    cand_path.write_text(
+        json.dumps(
+            {"generated_ts": now, "since_ts": since_ts, "candidates": candidates},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    marker.write_text(json.dumps({"ts": now}), encoding="utf-8")
+    return {
+        "mode": "harvest",
+        "since_ts": since_ts,
+        "receipts": len(receipts),
+        "candidates": len(candidates),
+        "candidates_path": str(cand_path),
+    }
