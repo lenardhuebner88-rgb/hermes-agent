@@ -241,6 +241,13 @@ describe("captureRequest", () => {
     // the triage task; a pre-set "coder" would short-circuit it straight to coder.
     expect(r.assignee).toBeNull();
   });
+  it("park + reviewTier → carries review_tier; lever-less stays byte-identical", () => {
+    expect(captureRequest("park me", "park", { reviewTier: "critical" }).review_tier).toBe("critical");
+    // no levers → the key is absent entirely (not present-as-undefined)
+    expect("review_tier" in captureRequest("plain", "park")).toBe(false);
+    // an empty tier string is the silent default → dropped, not sent
+    expect("review_tier" in captureRequest("x", "park", { reviewTier: "" })).toBe(false);
+  });
 });
 
 describe("flowCaptureRequest", () => {
@@ -257,6 +264,18 @@ describe("flowCaptureRequest", () => {
   });
   it("park is never a flow-capture method → coerces to lean shape", () => {
     expect(flowCaptureRequest("X", "park", false).method).toBe("lean");
+  });
+  it("carries review_tier + inject_scout when set; omits them otherwise (byte-identical)", () => {
+    const r = flowCaptureRequest("Baue X", "lean", true, { reviewTier: "review", injectScout: true });
+    expect(r.review_tier).toBe("review");
+    expect(r.inject_scout).toBe(true);
+    const bare = flowCaptureRequest("Baue X", "lean", true);
+    expect("review_tier" in bare).toBe(false);
+    expect("inject_scout" in bare).toBe(false);
+    // injectScout:false / reviewTier:"" are the silent defaults → not sent
+    const off = flowCaptureRequest("X", "document", true, { injectScout: false, reviewTier: "" });
+    expect("inject_scout" in off).toBe(false);
+    expect("review_tier" in off).toBe(false);
   });
 });
 

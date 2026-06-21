@@ -53,7 +53,7 @@ import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
 import { buildDecisionInbox, inboxSummary, type InboxItem, type InboxSummary } from "../lib/decisionInbox";
 import { nowSec } from "../lib/derive";
 import type { AccountUsageResponse, AutoresearchRunsResponse, AutoresearchStatus, BlockedCompletionsResponse, BoardResponse, ChainGraphResponse, CronObservabilityResponse, CronOutput, FlowReleaseOptions, FlowReleaseResponse, FlowSizingResponse, FlowTimeoutSweepResponse, MetricsLiteResponse, Proposal, ProposalsResponse, RecentResultsResponse, ReviewVerdictsResponse, RunInspect, SystemHealthResponse, TaskStatus, TodayDigestResponse, ToneName, WorkersResponse, VaultProvenanceResponse } from "../lib/types";
-import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod } from "../lib/fleet";
+import { captureRequest, flowCaptureRequest, usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../lib/fleet";
 
 type BatchConfirmState = "pending" | "ok" | "fail";
 type BatchConfirmById = Record<string, { status: BatchConfirmState; detail?: string }>;
@@ -1029,19 +1029,19 @@ export interface CaptureResult {
   detail?: string;
 }
 
-async function postFlowCapture(title: string, method: CaptureMethod, gate: boolean) {
+async function postFlowCapture(title: string, method: CaptureMethod, gate: boolean, levers?: CaptureLevers) {
   return fetchJSON<{ ok?: boolean; task_id?: string; reason?: string }>("/api/plugins/kanban/tasks/flow-capture", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(flowCaptureRequest(title, method, gate)),
+    body: JSON.stringify(flowCaptureRequest(title, method, gate, levers)),
   });
 }
 
-async function postPlainCapture(title: string, method: CaptureMethod) {
+async function postPlainCapture(title: string, method: CaptureMethod, levers?: CaptureLevers) {
   return fetchJSON<{ task?: { id?: string; status?: string } }>("/api/plugins/kanban/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(captureRequest(title, method)),
+    body: JSON.stringify(captureRequest(title, method, levers)),
   });
 }
 
@@ -1056,7 +1056,7 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
   // promise can take a little longer — the sheet shows a "planning" state). Both
   // resolve to the new task id; flow-capture also reports ok=false + reason when
   // the planner itself fails (the root is left safely parked).
-  const capture = useCallback(async (title: string, method: CaptureMethod, gate: boolean): Promise<CaptureResult> => {
+  const capture = useCallback(async (title: string, method: CaptureMethod, gate: boolean, levers?: CaptureLevers): Promise<CaptureResult> => {
     if (!title.trim()) {
       setState("error");
       setError("Titel fehlt");
@@ -1066,7 +1066,7 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
     setError("");
     try {
       if (usesFlowCaptureEndpoint(method, gate)) {
-        const res = await postFlowCapture(title, method, gate);
+        const res = await postFlowCapture(title, method, gate, levers);
         if (res.ok === false) {
           const detail = res.reason || "Planung fehlgeschlagen";
           if (aliveRef.current) { setState("error"); setError(detail); }
@@ -1079,7 +1079,7 @@ export function useCaptureTask(onCreated?: (taskId: string) => void) {
         if (res.task_id) onCreated?.(res.task_id);
         return { ok: true, taskId: res.task_id };
       }
-      const res = await postPlainCapture(title, method);
+      const res = await postPlainCapture(title, method, levers);
       if (aliveRef.current) setState("done");
       if (res.task?.id) onCreated?.(res.task.id);
       return { ok: true, taskId: res.task?.id, taskStatus: res.task?.status };

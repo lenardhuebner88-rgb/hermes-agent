@@ -1747,6 +1747,11 @@ class CreateTaskBody(BaseModel):
     # Phase B (Programm 3): per-task model escalation — highest precedence in
     # the spawn resolution (task.model_override > active lane > profile).
     model_override: Optional[ShortText] = None
+    # Phase C lever carried from the Flow capture sheet: a PARKED task carries the
+    # chosen review tier so the staged-review resolver governs it at dispatch.
+    # Only the park capture sends it (the levers are hidden for lean+auto). Optional
+    # → omitting it is byte-identical to today.
+    review_tier: Optional[Literal["standard", "review", "critical"]] = None
 
 
 @router.post("/tasks")
@@ -1780,6 +1785,11 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
                 reason="Aus dem Backlog in die Fleet kopiert — wartet auf Dispatch.",
                 allow_existing_active=False,
             )
+        # Phase C: stamp the chosen review tier on the freshly-created (parked)
+        # task. After park so the column write survives; the setter validates the
+        # value and is a no-op for None.
+        if payload.review_tier:
+            kanban_db.set_task_review_tier(conn, task_id, payload.review_tier)
         if payload.notify_home:
             _subscribe_task_to_home_channels(conn, task_id)
         task = kanban_db.get_task(conn, task_id)
@@ -5394,6 +5404,13 @@ class FlowCaptureBody(BaseModel):
     priority: int = 0
     notify_home: bool = True
     author: Optional[ShortText] = None
+    # Phase C levers carried from the Flow capture sheet (gated chains only, so
+    # they are consumed at release). ``review_tier`` is stamped on the root (the
+    # chain Review-pill shows it at once; children inherit at release).
+    # ``inject_scout`` is persisted as a root intent the release path honours.
+    # Both optional → a lever-less capture is byte-identical to today.
+    review_tier: Optional[Literal["standard", "review", "critical"]] = None
+    inject_scout: bool = False
 
 
 class FlowReleaseBody(BaseModel):
@@ -5402,9 +5419,11 @@ class FlowReleaseBody(BaseModel):
     # Phase C operator levers (both optional → calls without them are
     # byte-identical to today). ``review_tier`` is applied chain-wide to every
     # child; ``inject_scout`` prepends one read-only scout recon task before the
-    # entry children of the released chain.
+    # entry children of the released chain. Both are TRI-STATE (``None`` = the
+    # release did not specify → fall back to the capture-step intent; an explicit
+    # value — including ``inject_scout: false`` — vetoes the captured intent).
     review_tier: Optional[Literal["standard", "review", "critical"]] = None
-    inject_scout: bool = False
+    inject_scout: Optional[bool] = None
 
 
 class FlowSizingBody(BaseModel):
@@ -5991,6 +6010,32 @@ def _split_flow_child(
     return {"action": "split", "source_id": task_id, "new_id": new_id}
 
 
+def _flow_capture_intent(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
+    """Return the ``{review_tier, inject_scout}`` the operator chose at the Flow
+    *capture* step (persisted as a ``flow_capture_opts`` event), or ``{}`` when
+    none. This lets a gated chain's release honour the capture-step levers even
+    when the release call itself omits them — the operator just clicks "Kette
+    starten", or the timeout sweep releases the chain autonomously."""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload FROM task_events
+             WHERE task_id = ? AND kind = 'flow_capture_opts'
+             ORDER BY id DESC LIMIT 1
+            """,
+            (root_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {}
+    if not row or not row["payload"]:
+        return {}
+    try:
+        data = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _release_flow_gate(
     conn: sqlite3.Connection,
     root_id: str,
@@ -5999,11 +6044,23 @@ def _release_flow_gate(
     release_level: Literal["merge", "live"],
     reason: str,
     review_tier: Optional[str] = None,
-    inject_scout: bool = False,
+    inject_scout: Optional[bool] = None,
 ) -> dict[str, Any]:
     root = kanban_db.get_task(conn, root_id)
     if root is None:
         raise HTTPException(status_code=404, detail=f"task {root_id} not found")
+    # Fall back to the capture-step levers (persisted at flow-capture) when this
+    # release call did not SPECIFY them (param is None). An explicit release-time
+    # value always wins — including ``inject_scout=False`` to veto a captured
+    # scout — so the operator keeps full control at "Kette starten"; the capture
+    # intent only fills the gap for a bare release / the autonomous sweep. Using
+    # ``is None`` (not falsiness) is what makes an explicit False distinguishable
+    # from "not specified".
+    _intent = _flow_capture_intent(conn, root_id)
+    if review_tier is None:
+        review_tier = _intent.get("review_tier")
+    if inject_scout is None:
+        inject_scout = bool(_intent.get("inject_scout", False))
     child_ids = _flow_gate_child_ids(conn, root_id)
     child_set = set(child_ids)
     overrides: dict[str, Optional[str]] = {}
@@ -6149,6 +6206,10 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
             tenant=payload.tenant,
             priority=payload.priority,
             triage=True,
+            # Phase C: stamp the chosen tier on the root so the chain Review-pill
+            # shows it immediately on the held chain. create_task sets the column
+            # directly (no auto-scout hook); children inherit at release.
+            review_tier=payload.review_tier,
         )
         _park_task_for_operator(
             conn,
@@ -6156,6 +6217,20 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
             reason="Flow-Plan: geparkt während der Planung",
             allow_existing_active=True,
         )
+        # Phase C: persist the capture-step levers as a root intent so the gated
+        # chain's release honours them even when the operator just clicks "Kette
+        # starten" (or the timeout sweep releases autonomously) without re-picking
+        # them. Recorded only when an actual lever was set → byte-identical else.
+        if payload.review_tier or payload.inject_scout:
+            _append_flow_gate_event(
+                conn,
+                task_id,
+                "flow_capture_opts",
+                {
+                    "review_tier": payload.review_tier,
+                    "inject_scout": bool(payload.inject_scout),
+                },
+            )
         if payload.notify_home:
             _subscribe_task_to_home_channels(conn, task_id)
     except ValueError as e:

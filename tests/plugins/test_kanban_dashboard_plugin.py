@@ -4391,6 +4391,143 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
             assert len(scouts) == 1, (cid, scouts)   # exactly one scout, never two
 
 
+# ---------------------------------------------------------------------------
+# Phase C — capture-step levers: tier+scout chosen at "Aufgabe erfassen" carry
+# through to execution for the gated/parked paths (mirror of the release panel).
+# ---------------------------------------------------------------------------
+
+
+def test_create_task_park_stamps_review_tier(client):
+    """A PARKED capture (POST /tasks) carries the chosen review tier onto the
+    parked task so the staged-review resolver governs it at later dispatch."""
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "park me", "park": True, "review_tier": "review"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["id"]
+    with kb.connect() as conn:
+        t = kb.get_task(conn, tid)
+    assert t.review_tier == "review"
+    assert t.status == "scheduled"  # parked, not auto-dispatched
+
+
+def test_create_task_without_review_tier_is_unchanged(client):
+    """No review_tier on a plain create → the column stays None (byte-identical)."""
+    r = client.post("/api/plugins/kanban/tasks", json={"title": "plain"})
+    assert r.status_code == 200, r.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, r.json()["task"]["id"]).review_tier is None
+
+
+def _patch_planner(monkeypatch, *, gate):
+    """Stub kanban_decompose.plan_and_document so flow-capture runs its create/
+    park/stamp/intent logic without the real LLM fan-out. The capture-step
+    stamping happens BEFORE the planner is called, so an empty outcome is fine."""
+    from types import SimpleNamespace
+
+    def _fake(task_id, **kw):
+        return SimpleNamespace(
+            ok=True, task_id=task_id, reason=None, fanout=False,
+            child_ids=[], new_title=None, spec_relpath=None, gated=gate,
+        )
+
+    monkeypatch.setattr("hermes_cli.kanban_decompose.plan_and_document", _fake)
+
+
+def test_flow_capture_stamps_root_tier_and_records_intent(client, monkeypatch):
+    """Phase C: the capture sheet's tier+scout ride along to /flow-capture — the
+    root is tier-stamped at once (so the chain Review-pill shows) and the intent
+    is persisted as a flow_capture_opts event for the gated release to honour."""
+    _patch_planner(monkeypatch, gate=True)
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-capture",
+        json={"title": "Baue X", "method": "lean", "gate": True,
+              "review_tier": "critical", "inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task_id"]
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).review_tier == "critical"
+        opts = [e for e in kb.list_events(conn, tid) if e.kind == "flow_capture_opts"]
+    assert opts, "capture intent must be persisted"
+    assert opts[-1].payload["review_tier"] == "critical"
+    assert opts[-1].payload["inject_scout"] is True
+
+
+def test_flow_capture_without_levers_records_no_intent(client, monkeypatch):
+    """No tier/scout at capture → no flow_capture_opts event, root untagged
+    (byte-identical to the pre-Phase-C flow-capture)."""
+    _patch_planner(monkeypatch, gate=True)
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-capture",
+        json={"title": "Baue Y", "method": "lean", "gate": True},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["task_id"]
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).review_tier is None
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "flow_capture_opts"]
+
+
+def test_flow_capture_intent_applied_on_bare_release(client):
+    """The core carry-through: a gated chain captured with tier+scout (persisted
+    as flow_capture_opts) has them applied when the operator just clicks "Kette
+    starten" — the release call carries no levers, the capture intent fills it."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn, kb.write_txn(conn):
+        kb._append_event(conn, root, "flow_capture_opts",
+                         {"review_tier": "critical", "inject_scout": True})
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")  # no body levers
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["review_tier"] == "critical"
+    assert body["scout_id"]
+    with kb.connect() as conn:
+        assert all(kb.get_task(conn, c).review_tier == "critical" for c in child_ids)
+        # entry children (no in-chain parent) gained the captured scout predecessor
+        assert kb.scout_predecessor_id(conn, child_ids[0]) == body["scout_id"]
+
+
+def test_flow_release_explicit_levers_override_capture_intent(client):
+    """An explicit release-time tier still wins over the capture intent — the
+    operator can change their mind at "Kette starten"."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn, kb.write_txn(conn):
+        kb._append_event(conn, root, "flow_capture_opts",
+                         {"review_tier": "review", "inject_scout": False})
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"review_tier": "critical"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["review_tier"] == "critical"
+    with kb.connect() as conn:
+        assert all(kb.get_task(conn, c).review_tier == "critical" for c in child_ids)
+
+
+def test_flow_release_explicit_false_vetoes_captured_scout(client):
+    """Tri-state inject_scout: an explicit ``inject_scout=False`` at release
+    VETOES a captured scout intent — distinct from omitting it (which applies the
+    intent). Guards the precedence contract: an explicit release value wins."""
+    root, child_ids = _setup_gated_root()
+    with kb.connect() as conn, kb.write_txn(conn):
+        kb._append_event(conn, root, "flow_capture_opts",
+                         {"review_tier": None, "inject_scout": True})
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"inject_scout": False},
+    )
+    assert r.status_code == 200, r.text
+    assert "scout_id" not in r.json()  # vetoed → no scout spawned
+    with kb.connect() as conn:
+        assert kb.scout_predecessor_id(conn, child_ids[0]) is None
+        assert kb.scout_predecessor_id(conn, child_ids[1]) is None
+
+
 def test_flow_release_clears_freigabe_operator_hold_at_root(client):
     """A freigabe:operator root released via the flow gate must leave the held
     state exactly like release_freigabe_hold does. Otherwise it stays

@@ -287,6 +287,18 @@ export function flowCounts(tasks: BoardTaskLite[]): FlowCounts {
 // manual Dispatch (same end result as before).
 export type CaptureMethod = "park" | "lean" | "document";
 
+// Phase-C levers carried straight from the capture sheet (mirror of the
+// "Kette starten"-Panel): the chain-wide review tier and an optional read-only
+// scout recon pre-step. Both optional — a lever-less capture stays byte-identical
+// to the Stufe-A behaviour, so old payload assertions/tests don't churn.
+export interface CaptureLevers {
+  /** Chain-wide staged-review tier; "" / undefined = silent default (not sent). */
+  reviewTier?: ReviewTier | "";
+  /** Prepend a read-only scout recon task before the entry children. Gated
+   *  chains only (a single parked task has no build-children to precede). */
+  injectScout?: boolean;
+}
+
 export interface CaptureRequest {
   title: string;
   assignee: string | null;
@@ -295,11 +307,13 @@ export interface CaptureRequest {
   triage: boolean;
   park: boolean;
   notify_home: boolean;
+  /** Only present for a parked capture that picked an explicit review tier. */
+  review_tier?: ReviewTier;
 }
 
 /** POST /tasks body for the park / lean+AUTO captures (the Stufe-A path). */
-export function captureRequest(title: string, method: CaptureMethod): CaptureRequest {
-  return {
+export function captureRequest(title: string, method: CaptureMethod, levers?: CaptureLevers): CaptureRequest {
+  const req: CaptureRequest = {
     title: title.trim(),
     assignee: null,
     priority: 0,
@@ -310,6 +324,11 @@ export function captureRequest(title: string, method: CaptureMethod): CaptureReq
     // waits for the operator who is already looking at the board.
     notify_home: method !== "park",
   };
+  // Park: the parked single task carries the chosen review tier so the staged-
+  // review resolver governs it when the operator later dispatches it. Attached
+  // only when a real tier was picked → a tier-less capture is byte-identical.
+  if (levers?.reviewTier) req.review_tier = levers.reviewTier;
+  return req;
 }
 
 export interface FlowCaptureRequest {
@@ -319,13 +338,18 @@ export interface FlowCaptureRequest {
   tenant: string;
   priority: number;
   notify_home: boolean;
+  /** Stamped on the root (children inherit at release). Only present when set. */
+  review_tier?: ReviewTier;
+  /** Persisted as a root intent the release path honours. Only present when on. */
+  inject_scout?: boolean;
 }
 
 /** POST /tasks/flow-capture body for the backend-driven captures (document*,
  *  lean+GATE). The backend parks the root, plans it, optionally writes the
- *  Vault spec, and holds the subtasks when gated. */
-export function flowCaptureRequest(title: string, method: CaptureMethod, gate: boolean): FlowCaptureRequest {
-  return {
+ *  Vault spec, and holds the subtasks when gated. The Phase-C levers ride along
+ *  so the operator's tier/scout choice at capture reaches the gated chain. */
+export function flowCaptureRequest(title: string, method: CaptureMethod, gate: boolean, levers?: CaptureLevers): FlowCaptureRequest {
+  const req: FlowCaptureRequest = {
     title: title.trim(),
     method: method === "document" ? "document" : "lean",
     gate,
@@ -333,6 +357,9 @@ export function flowCaptureRequest(title: string, method: CaptureMethod, gate: b
     priority: 0,
     notify_home: true,
   };
+  if (levers?.reviewTier) req.review_tier = levers.reviewTier;
+  if (levers?.injectScout) req.inject_scout = true;
+  return req;
 }
 
 /** Which backend a (method, gate) capture routes to. park and lean+AUTO use the
