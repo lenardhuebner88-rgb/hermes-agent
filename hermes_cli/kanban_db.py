@@ -2836,6 +2836,11 @@ HEILER_SOURCE_SILENT_BLOCK = "silent_block_escalation"
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
 SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
+# Author the Stratege stamps on every PlanSpec chain it ingests (propose()).
+# Single source of truth for the silent-block strategist carve-out
+# (HEILER-SILENTBLOCK-REASON-FIDELITY-S1); ``strategist.STRATEGIST_AUTHOR``
+# aliases this so the value never drifts between the writer and the carve-out.
+STRATEGIST_CREATED_BY = "strategist-cron"
 HEILER_CLASS_TRANSIENT = "transient"
 HEILER_CLASS_FLAKY = "flaky"
 HEILER_CLASS_REAL_BUG = "real-bug"
@@ -11352,6 +11357,12 @@ _HEILER_TEXT_SIGNALS = (
         "cannot be decomposed",
         "no runnable verifier",
         "no runnable reviewer",
+        # REASON-FIDELITY-S1: spec-gap park reasons — the true class of the
+        # dominant live silent-block real-bug cluster (the card has no actionable
+        # work, not a code defect). Specific enough to never catch a red gate.
+        "no actionable implementation spec",
+        "no implementation spec",
+        "missing task spec",
     )),
     (HEILER_CLASS_FLAKY, (
         "flake",
@@ -11379,6 +11390,12 @@ _HEILER_TEXT_SIGNALS = (
         "type error",
         "build failed",
     )),
+    (HEILER_CLASS_CAPACITY, (
+        # HEILER-BUDGET-BOUNDED-EXTEND / OUTCOME-RECLASSIFY: budget exhaustion
+        # is capacity, not product defect. Placed after real-bug signals so a
+        # budget-exhausted run whose text carries a red gate remains triagierbar.
+        "iteration budget exhausted",
+    )),
     (HEILER_CLASS_TRANSIENT, (
         "dirty",
         "overlap",
@@ -11393,6 +11410,9 @@ _HEILER_TEXT_SIGNALS = (
         "checkout",
         "rate limit",
         "rate_limited",
+        # REASON-FIDELITY-S1: harness-protocol faults are operational, not
+        # product defects. Budget exhaustion is capacity above, not transient.
+        "protocol violation",
         "git",
         "branch",
     )),
@@ -11402,6 +11422,12 @@ _HEILER_OUTCOME_CLASS = {
     "spawn_retry": HEILER_CLASS_TRANSIENT,
     "spawn_failed": HEILER_CLASS_TRANSIENT,
     "rate_limited": HEILER_CLASS_TRANSIENT,
+    # REASON-FIDELITY-S1: terminal run outcomes that are operational/resource
+    # limits, not product defects. Mapped structurally so a settled block that
+    # carries one as its real ``trigger_outcome`` (now carried by the
+    # silent-block sweep) lands honestly instead of defaulting to real-bug.
+    "timed_out": HEILER_CLASS_TRANSIENT,
+    "reclaimed": HEILER_CLASS_TRANSIENT,
 }
 _HEILER_STALL_CLASS = {
     "scheduled_overdue": HEILER_CLASS_TRANSIENT,
@@ -11972,6 +11998,24 @@ def _is_funnel_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
         (created_by or "") in FUNNEL_CREATED_BY
         and not _task_has_parent(conn, row["id"])
     )
+
+
+def _is_strategist_root_task(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    """A self-improvement task the Stratege ingested under its own author.
+
+    Mirrors :func:`_is_funnel_root_task` as a ``created_by`` carve-out, but
+    deliberately WITHOUT the parentless guard: ``propose()`` ingests each PlanSpec
+    via ``ingest_planspec(author=STRATEGIST_AUTHOR)``, which stamps the WHOLE chain
+    — build subtasks AND the reviewer join — with ``STRATEGIST_CREATED_BY`` (unlike
+    the Funnel, whose build children are independent product work and must still
+    run/retry, hence its parent guard). The entire chain is therefore the
+    Stratege's own output. The silent-block sweep skips these so the
+    self-improvement loop never reads its own parked proposals back in as real-bug
+    product-defect signal (HEILER-SILENTBLOCK-REASON-FIDELITY-S1). Scoped strictly
+    to ``strategist-cron`` — real code tasks from any other author are untouched
+    (AC-2)."""
+    created_by = row["created_by"] if "created_by" in row.keys() else None
+    return (created_by or "") == STRATEGIST_CREATED_BY
 
 
 def _is_operator_held(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
@@ -13582,6 +13626,13 @@ def silent_block_task_ids(
     for row in rows:
         if row["id"] in escalated:
             continue
+        # STRATEGIST-META-CARVEOUT (HEILER-SILENTBLOCK-REASON-FIDELITY-S1):
+        # the Stratege's own ingested chains are excluded from BOTH the sweep
+        # and the ``silent_blocks`` metric (which shares this function), so the
+        # self-improvement loop never reads its own parked proposals back in as
+        # real-bug signal — and the metric never flags them as an uncovered gap.
+        if _is_strategist_root_task(conn, row):
+            continue
         if _block_is_settled(
             conn, row, now=ts, retry_limit=retry_limit,
             failure_limit=failure_limit, backoff_seconds=backoff_seconds,
@@ -13592,13 +13643,17 @@ def silent_block_task_ids(
 
 def _silent_block_escalation_payload(
     *, row: sqlite3.Row, reason: str, blocked_kind: str,
+    trigger_outcome: str = "blocked",
 ) -> dict:
     """``operator_escalation`` payload for a settled silent block.
 
     Shaped like :func:`_operator_escalation_payload` so the alert rule and the
     classification sweep read it uniformly: ``evidence`` carries the block
-    reason as ``last_error`` + ``trigger_outcome='blocked'`` so
-    :func:`_classify_escalation_payload` lands it in the same Heiler vocabulary.
+    reason as ``last_error`` + the REAL ``trigger_outcome`` (the genuine last
+    ended-run outcome — e.g. ``iteration_budget_exhausted`` / ``timed_out`` /
+    ``gave_up`` — not a hardcoded ``'blocked'``) so :func:`_classify_escalation_payload`
+    lands it in the right Heiler class instead of the real-bug default, and the
+    operator sees the actual reason (HEILER-SILENTBLOCK-REASON-FIDELITY-S1).
     """
     auto_retry_count = (
         int(row["auto_retry_count"] or 0)
@@ -13612,12 +13667,13 @@ def _silent_block_escalation_payload(
             "assignee": row["assignee"] if "assignee" in row.keys() else None,
         },
         "why_now": (
-            "settled block with no operator_escalation — the self-healing "
-            "retry lane will not (further) act on it"
+            f"settled block (last run outcome: {trigger_outcome}) with no "
+            "operator_escalation — the self-healing retry lane will not "
+            "(further) act on it"
         ),
         "attempts_already_made": auto_retry_count,
         "evidence": {
-            "trigger_outcome": "blocked",
+            "trigger_outcome": trigger_outcome,
             "last_error": (reason or "")[:500],
             "blocked_kind": blocked_kind,
             "source": SILENT_BLOCK_ESCALATION_SOURCE,
@@ -13677,8 +13733,20 @@ def escalate_silent_blocks_sweep(
             if row is None or row["status"] != "blocked":
                 continue  # unblocked between the scan and this txn
             blocked_run = _latest_blocked_run_for_auto_retry(conn, tid)
+            # REASON-FIDELITY (HEILER-SILENTBLOCK-REASON-FIDELITY-S1): the
+            # blocked-only query above misses the TRUE terminal outcome when a
+            # task settled via a non-blocked path (budget exhaustion, crash,
+            # timeout, raw flip). Pull the genuine last ended run for the real
+            # ``trigger_outcome`` + a message fallback so the classifier grips on
+            # the real reason instead of the real-bug default.
+            last_run = _latest_ended_run(conn, tid)
+            trigger_outcome = (
+                (last_run["outcome"] if last_run is not None else None)
+                or "blocked"
+            )
             run_id = (
-                int(blocked_run["id"]) if blocked_run is not None else None
+                int(blocked_run["id"]) if blocked_run is not None
+                else (int(last_run["id"]) if last_run is not None else None)
             )
             reason = ""
             if blocked_run is not None:
@@ -13686,16 +13754,25 @@ def escalate_silent_blocks_sweep(
                     (blocked_run["summary"] or "").strip()
                     or (blocked_run["error"] or "").strip()
                 )
+            if not reason and last_run is not None:
+                reason = (
+                    (last_run["summary"] or "").strip()
+                    or (last_run["error"] or "").strip()
+                )
             body_hash = _task_body_hash(row["body"])
             blocked_kind = _blocked_kind_for_auto_retry(
                 reason,
-                verdict=blocked_run["verdict"] if blocked_run is not None else None,
+                verdict=(
+                    blocked_run["verdict"] if blocked_run is not None
+                    else (last_run["verdict"] if last_run is not None else None)
+                ),
                 auto_retry_count=int(row["auto_retry_count"] or 0),
                 body_hash=body_hash,
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
             esc_payload = _silent_block_escalation_payload(
                 row=row, reason=reason, blocked_kind=blocked_kind,
+                trigger_outcome=trigger_outcome,
             )
             esc_event_id = _append_event(
                 conn, tid, OPERATOR_ESCALATION_EVENT, esc_payload,
@@ -14838,6 +14915,31 @@ def _latest_blocked_run_for_auto_retry(
           FROM task_runs
          WHERE task_id = ?
            AND outcome = 'blocked'
+           AND ended_at IS NOT NULL
+         ORDER BY ended_at DESC, id DESC
+         LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+
+
+def _latest_ended_run(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[sqlite3.Row]:
+    """The genuine most-recent *ended* run for a task, regardless of outcome.
+
+    Unlike :func:`_latest_blocked_run_for_auto_retry` (scoped to ``blocked``),
+    this surfaces the TRUE terminal outcome — ``gave_up`` /
+    ``iteration_budget_exhausted`` / ``timed_out`` / ``crashed`` / ``reclaimed`` —
+    for a task that settled via a non-blocked path. The silent-block sweep feeds
+    this outcome + message into the escalation payload so the Heiler classifier
+    grips on the real reason instead of defaulting to real-bug
+    (HEILER-SILENTBLOCK-REASON-FIDELITY-S1)."""
+    return conn.execute(
+        """
+        SELECT id, profile, summary, error, outcome, ended_at, verdict, metadata
+          FROM task_runs
+         WHERE task_id = ?
            AND ended_at IS NOT NULL
          ORDER BY ended_at DESC, id DESC
          LIMIT 1
