@@ -90,6 +90,17 @@ DEFAULT_PROTECT_LAST_N = 14
 # this length floor also skips any already-short summary/placeholder content.
 DEFAULT_MIN_ELIDE_CHARS = 1500
 
+# Cache-aware eliding for prompt-cached Claude lanes (coder-claude / premium).
+# The end-relative boundary (n - protect_last_n) slides forward ~2 messages per
+# turn, so a naive pass mutates a NEW deep tool body every turn — diverging the
+# Anthropic stable-prefix cache at that byte each turn (cache-read 0.1x flips to
+# cache-write 1.25x), which can RAISE real cost. Snapping the boundary down to a
+# multiple of this step makes it advance only once per `step` appended messages,
+# so the elided prefix is byte-identical across consecutive turns and the cache
+# keeps hitting; only the carried deep-history payload shrinks. Each worker turn
+# appends ~2 messages, so step 8 ≈ one boundary advance every ~4 turns.
+DEFAULT_CACHE_QUANTIZE_STEP = 8
+
 
 @dataclass(frozen=True)
 class ElideConfig:
@@ -99,6 +110,10 @@ class ElideConfig:
     protect_last_n: int
     min_elide_chars: int
     elidable_tools: FrozenSet[str]
+    # Whether prompt-cached Claude lanes get the cache-stable eliding branch.
+    cache_aware_enabled: bool = True
+    # Boundary-quantization step for the cache-aware branch (0/1 = off).
+    cache_quantize_step: int = DEFAULT_CACHE_QUANTIZE_STEP
 
 
 def _int_env(env: Mapping[str, str], key: str, default: int) -> int:
@@ -137,7 +152,48 @@ def tool_eliding_config(env: Optional[Mapping[str, str]] = None) -> ElideConfig:
         protect_last_n=_int_env(env, "HERMES_TOOL_ELIDE_PROTECT_N", DEFAULT_PROTECT_LAST_N),
         min_elide_chars=_int_env(env, "HERMES_TOOL_ELIDE_MIN_CHARS", DEFAULT_MIN_ELIDE_CHARS),
         elidable_tools=_tool_set_env(env, "HERMES_TOOL_ELIDE_TOOLS", DEFAULT_ELIDABLE_TOOLS),
+        # Cache-aware branch is on by default (a kill-switch, like the pass
+        # itself) so the top-burner Claude lanes actually get context reduction;
+        # the quantized boundary keeps it cache-safe. Disable instantly with
+        # HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED=1.
+        cache_aware_enabled=not is_truthy_value(
+            env.get("HERMES_TOOL_ELIDE_CACHE_AWARE_DISABLED")
+        ),
+        cache_quantize_step=_int_env(
+            env, "HERMES_TOOL_ELIDE_CACHE_STEP", DEFAULT_CACHE_QUANTIZE_STEP
+        ),
     )
+
+
+def cache_stable_boundary(n: int, protect_last_n: int, quantize_step: int) -> int:
+    """Exclusive upper index of the elidable region ``[0, boundary)``.
+
+    The plain end-relative boundary is ``n - protect_last_n``: it advances by the
+    ~2 messages every worker turn appends, so on a prompt-cached lane each turn
+    would newly elide a tool body deep inside the cached prefix and diverge the
+    Anthropic stable-prefix cache at that byte *every* turn.
+
+    When ``quantize_step > 1`` the boundary is snapped **down** to a multiple of
+    the step. It then advances only once per ``quantize_step`` appended messages,
+    so for the turns in between the elided prefix ``[0, boundary)`` is byte-
+    identical (same messages, same deterministic summaries, append-only history)
+    and the cache keeps hitting. The snapped boundary is always ``<=`` the raw
+    boundary, so the elided set is a strict subset of the naive one — the
+    protected tail and the in-progress trailing block are never touched. A raw
+    boundary below one full step yields ``0`` (short conversations elide nothing,
+    avoiding churn exactly where naive eliding would be net-negative).
+
+    ``quantize_step`` of 0 or 1 reproduces the plain end-relative boundary
+    (backward-compatible with the non-cache lane path). Returns ``<= 0`` to mean
+    "elide nothing".
+    """
+    protect_last_n = max(0, protect_last_n)
+    raw = n - protect_last_n
+    if quantize_step and quantize_step > 1:
+        if raw <= 0:
+            return 0
+        return (raw // quantize_step) * quantize_step
+    return raw
 
 
 def _build_call_id_index(messages: List[Dict[str, Any]]) -> Dict[str, Tuple[str, str]]:
@@ -166,6 +222,7 @@ def elide_stale_tool_results(
     protect_last_n: int = DEFAULT_PROTECT_LAST_N,
     min_elide_chars: int = DEFAULT_MIN_ELIDE_CHARS,
     elidable_tools: FrozenSet[str] = DEFAULT_ELIDABLE_TOOLS,
+    quantize_step: int = 0,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
     """Return a copy of ``messages`` with stale read-type tool bodies elided.
 
@@ -183,6 +240,12 @@ def elide_stale_tool_results(
     assistant↔tool pairing and message alternation stay valid. The input list
     and its dicts are never mutated.
 
+    ``quantize_step`` (cache-aware lanes, default 0 = off) snaps the elidable
+    boundary down to a multiple of the step via :func:`cache_stable_boundary`,
+    keeping the elided prefix byte-stable across turns so the Anthropic
+    stable-prefix cache is not broken. With ``quantize_step`` 0 or 1 the boundary
+    is the plain end-relative ``n - protect_last_n`` (unchanged behaviour).
+
     Returns ``(new_messages, elided_count, saved_chars)``.
     """
     if not messages:
@@ -193,7 +256,9 @@ def elide_stale_tool_results(
     # count >= len is treated as "protect all" by the boundary check below.
     protect_last_n = max(0, protect_last_n)
     n = len(messages)
-    boundary = n - protect_last_n  # indices [0, boundary) are elidable
+    # indices [0, boundary) are elidable. On cache lanes the boundary is
+    # quantized so it stays put across consecutive turns (cache-safe).
+    boundary = cache_stable_boundary(n, protect_last_n, quantize_step)
     if boundary <= 0:
         # Whole list protected — nothing to do. Still return a fresh list so
         # callers can treat the return as an independent copy uniformly.
