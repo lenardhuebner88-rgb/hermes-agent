@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { fetchJSON } from "@/lib/api";
 import { de } from "../../i18n/de";
 import { useCaptureTask } from "../../hooks/useControlData";
 import { usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../../lib/fleet";
@@ -128,14 +129,32 @@ function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChang
 
 function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?: (taskId: string) => void }) {
   const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
   const [method, setMethod] = useState<CaptureMethod>("lean");
   const [gate, setGate] = useState(false);
   const [reviewTier, setReviewTier] = useState<ReviewTier | "">("");
+  const [tierTouched, setTierTouched] = useState(false);
   const [injectScout, setInjectScout] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { state, error, capture, reset } = useCaptureTask(onCreated);
 
   useEffect(() => { if (hasFinePointer()) inputRef.current?.focus(); }, []);
+
+  // Make the self-gating default visible: propose the review tier from the
+  // deterministic risk heuristic over title+description. Debounced + best-effort;
+  // once the operator picks a tier (tierTouched) we stop proposing. The operator
+  // may always raise; a downgrade below the floor is gated at release.
+  const leversVisible = method === "park" || gate;
+  useEffect(() => {
+    if (!leversVisible || tierTouched || !title.trim()) return;
+    const handle = window.setTimeout(() => {
+      const qs = new URLSearchParams({ title: title.trim(), description: desc.trim() }).toString();
+      fetchJSON<{ tier?: ReviewTier }>(`/api/plugins/kanban/flow/suggest-tier?${qs}`)
+        .then((r) => { if (r?.tier) setReviewTier(r.tier); })
+        .catch(() => { /* suggestion is best-effort — leave the tier untouched */ });
+    }, 350);
+    return () => window.clearTimeout(handle);
+  }, [title, desc, leversVisible, tierTouched]);
 
   const busy = state === "busy";
   // park is operator-held already; the gate switch only applies to the two
@@ -144,7 +163,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   // The levers surface exactly where the operator looked for them: a gated chain
   // or a parked task. Auto (lean+auto) stays untouched — no autonomous-decompose
   // intent carrier. Scout is enabled only for a real gated chain.
-  const showLevers = method === "park" || gate;
+  const showLevers = leversVisible;
   const scoutEnabled = method !== "park" && gate;
   // The backend-driven path plans synchronously (LLM) — show a "planning" label.
   const planning = busy && usesFlowCaptureEndpoint(method, effectiveGate);
@@ -155,6 +174,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
     const levers: CaptureLevers = {
       reviewTier: showLevers ? reviewTier : "",
       injectScout: scoutEnabled && injectScout,
+      description: desc,
     };
     const res = await capture(title, method, effectiveGate, levers);
     if (res.ok) {
@@ -179,6 +199,14 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
         className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
       />
 
+      <textarea
+        value={desc}
+        onChange={(e) => { setDesc(e.target.value); if (state === "error") reset(); }}
+        placeholder={de.flow.capture.descriptionPlaceholder}
+        rows={2}
+        className="mt-2 w-full resize-y rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-sm text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+      />
+
       <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.methodLabel}>
         <ModeOption active={method === "lean"} onSelect={() => setMethod("lean")} title={de.flow.capture.methodLean} hint={de.flow.capture.methodLeanHint} />
         <ModeOption active={method === "document"} onSelect={() => setMethod("document")} title={de.flow.capture.methodDocument} hint={de.flow.capture.methodDocumentHint} />
@@ -190,7 +218,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
       {showLevers ? (
         <TierScoutControls
           reviewTier={reviewTier}
-          onTierChange={setReviewTier}
+          onTierChange={(t) => { setReviewTier(t); setTierTouched(true); }}
           injectScout={injectScout}
           onScoutChange={setInjectScout}
           scoutEnabled={scoutEnabled}

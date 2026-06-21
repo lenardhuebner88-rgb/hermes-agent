@@ -5520,6 +5520,10 @@ class FlowCaptureBody(BaseModel):
     # Both optional → a lever-less capture is byte-identical to today.
     review_tier: Optional[Literal["standard", "review", "critical"]] = None
     inject_scout: bool = False
+    # Optional short description: stored as the root body so the risk heuristic has
+    # substance (not just the title) when it auto-classifies the review tier. The
+    # capture sheet also feeds it to GET /flow/suggest-tier for the proposal.
+    description: Optional[ShortText] = None
 
 
 class FlowReleaseBody(BaseModel):
@@ -6281,6 +6285,17 @@ def _release_flow_gate(
     return result
 
 
+@router.get("/flow/suggest-tier")
+def flow_suggest_tier(title: str = Query(""), description: str = Query("")):
+    """Propose a review tier for the capture sheet from the deterministic risk
+    heuristic over title+description. The operator sees the proposal pre-filled
+    and may raise it freely (a downgrade below the floor needs a deliberate ack at
+    release). Self-gating default — the same classifier the resolver uses."""
+    from hermes_cli.control_plane_gate import classify_review_tier
+    spec = {"objective": title or "", "goal": description or "", "scope": description or ""}
+    return {"tier": classify_review_tier(spec)}
+
+
 @router.post("/tasks/flow-capture")
 def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
     """Create a root, PARK it in ``scheduled`` (invisible to the gateway's
@@ -6309,7 +6324,7 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
-            body=None,
+            body=(payload.description or None),
             assignee=None,
             created_by="dashboard",
             tenant=payload.tenant,

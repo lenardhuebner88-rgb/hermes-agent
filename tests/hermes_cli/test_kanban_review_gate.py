@@ -58,28 +58,49 @@ def gate_on(monkeypatch):
 # B-T5: effective review tier (explicit column wins; NULL → auto only if opt-in)
 # ---------------------------------------------------------------------------
 
-def test_effective_review_tier_explicit_wins_both_ways(kanban_home, monkeypatch):
-    """Explicit review_tier is authoritative up AND down; NULL → auto (auto_tier ON)."""
+def test_effective_review_tier_floor_explicit_raises_freely(kanban_home, monkeypatch):
+    """Auto-floor (2026-06-21 Vision-Pushback, ersetzt 'explizit gewinnt beide Wege'):
+    explicit may RAISE freely; a downgrade BELOW the hard-marker heuristic floor snaps
+    back up unless a deliberate ack is logged. NULL → heuristic self-classifies."""
     monkeypatch.setattr(
         kb, "_review_gate_config",
         lambda: {"verifier_profile": "verifier", "auto_tier": True},
     )
     with kb.connect() as conn:
-        # explicit UPGRADES a trivial task
+        # explicit UPGRADES a trivial task (above the standard floor) → wins
         t1 = kb.create_task(conn, title="trivial", assignee="coder", review_tier="critical")
         assert kb._effective_review_tier(conn, t1) == "critical"
-        # explicit DOWNGRADES an auto-critical task (operator override, both ways)
+        # explicit DOWNGRADE below the critical floor, NO ack → snaps up to the floor
         t2 = kb.create_task(conn, title="db change",
                             body="run a database migration and deploy",
                             assignee="coder", review_tier="standard")
-        assert kb._effective_review_tier(conn, t2) == "standard"
-        # NULL + auto_tier ON → auto decides (critical marker in body)
+        assert kb._effective_review_tier(conn, t2) == "critical"
+        # NULL + auto_tier ON → heuristic decides (critical marker in body)
         t3 = kb.create_task(conn, title="db change",
                             body="run a database migration", assignee="coder")
         assert kb._effective_review_tier(conn, t3) == "critical"
         # NULL, no markers → standard
         t4 = kb.create_task(conn, title="tweak copy", body="reword a label", assignee="coder")
         assert kb._effective_review_tier(conn, t4) == "standard"
+
+
+def test_effective_review_tier_floor_allows_acked_downgrade(kanban_home, monkeypatch):
+    """A logged review_tier_downgrade_ack lets an explicit below-floor value through —
+    the deliberate, audit-trailed operator decision."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="db change",
+                             body="run a database migration and deploy",
+                             assignee="coder", review_tier="standard")
+        # without ack: floor holds
+        assert kb._effective_review_tier(conn, tid) == "critical"
+        # log a deliberate downgrade ack → explicit standard now wins
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "review_tier_downgrade_ack", {"to_tier": "standard"})
+        assert kb._effective_review_tier(conn, tid) == "standard"
 
 
 def test_effective_review_tier_auto_off_is_byte_identical(kanban_home, monkeypatch):
@@ -133,6 +154,26 @@ def test_set_task_review_tier_roundtrip(kanban_home):
         assert kinds, "expected at least one review_tier_set event"
         # missing task → False, no raise
         assert kb.set_task_review_tier(conn, "t_doesnotexist", "review") is False
+
+
+def test_set_tier_below_floor_with_ack_records_event(kanban_home, monkeypatch):
+    """acknowledge_downgrade=True logs a review_tier_downgrade_ack so an explicit
+    below-floor tier actually takes effect; without it the safety floor holds."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="db change",
+                             body="run a database migration and deploy", assignee="coder")
+        # plain downgrade (no ack) → floor holds, downgrade has no effect
+        assert kb.set_task_review_tier(conn, tid, "standard") is True
+        assert kb._effective_review_tier(conn, tid) == "critical"
+        # acknowledged downgrade → standard now wins + ack event recorded
+        assert kb.set_task_review_tier(conn, tid, "standard", acknowledge_downgrade=True) is True
+        assert kb._effective_review_tier(conn, tid) == "standard"
+        acks = [e for e in kb.list_events(conn, tid) if e.kind == "review_tier_downgrade_ack"]
+        assert acks and acks[-1].payload["to_tier"] == "standard"
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +567,23 @@ def test_auto_scout_off_is_byte_identical(kanban_home):
         assert kb.set_task_review_tier(conn, tid, "critical") is True
         assert _scout_parents(conn, tid) == []
         assert kb.get_task(conn, tid).status == "ready"   # not demoted
+
+
+def test_heuristic_critical_injects_scout_without_explicit_column(kanban_home, monkeypatch):
+    """Self-gating: a task the heuristic rates critical (NO explicit review_tier
+    column) gets the scout when auto_tier + auto_scout are on. The resolver
+    (_effective_review_tier), not the raw column, drives the coupling — and the
+    heuristic value is never stamped into the column (Landmine 1)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "auto_scout_on_critical": True},
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="run database migration + deploy", assignee="coder")
+        assert kb.get_task(conn, tid).review_tier is None          # never stamped
+        assert kb._maybe_inject_critical_scout(conn, tid) is not None
+        assert kb.scout_predecessor_id(conn, tid) is not None
 
 
 def test_set_critical_injects_scout_predecessor_when_flag_on(kanban_home, auto_scout_on):

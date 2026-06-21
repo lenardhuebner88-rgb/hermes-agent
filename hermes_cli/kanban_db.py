@@ -6820,29 +6820,63 @@ def _task_plan_spec(task: "Task") -> dict:
 def _effective_review_tier(
     conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None
 ) -> str:
-    """Resolve a task's effective staged-review tier.
+    """Resolve a task's effective staged-review tier with a safety FLOOR.
 
-    An explicitly set ``tasks.review_tier`` column is authoritative in BOTH
-    directions (operator/PlanSpec override — up AND down; 'Spalte gesetzt =
-    bewusster Override', Grill-Entscheid 2). When the column is NULL the
-    auto-risk classifier decides ONLY if ``auto_tier`` is enabled in the
-    review-gate config; otherwise the tier is ``standard`` — byte-identical to
-    today's single-verifier behavior.
+    The deterministic risk heuristic (``classify_review_tier``) is a *floor* on the
+    hard-risk markers (migration/deploy/secret/auth/…): an operator/PlanSpec may
+    RAISE the tier freely via the explicit ``tasks.review_tier`` column, but a
+    downgrade BELOW the heuristic floor only takes effect when a deliberate
+    ``review_tier_downgrade_ack`` event is logged — otherwise the value snaps back
+    up to the floor. No silent under-gating of risky work (Vision-Pushback
+    2026-06-21; replaces the earlier 'explicit wins both ways' rule).
+
+    The heuristic runs only when ``auto_tier`` is enabled. The code default stays
+    opt-in/False (back-compat); the live ``~/.hermes/config.yaml`` sets it ON for
+    self-gating. With ``auto_tier`` OFF the floor is ``standard``, so every explicit
+    value wins — byte-identical to the pre-self-gating behavior.
     """
     task = get_task(conn, task_id)
     if task is None:
         return "standard"
-    explicit = (task.review_tier or "").strip().lower()
-    if explicit in _TIER_ORDER:
-        return explicit  # authoritative override, up AND down — always wins
     cfg = cfg if cfg is not None else _review_gate_config()
-    if not cfg.get("auto_tier"):
-        return "standard"  # opt-in OFF (default) → no auto-escalation
+    floor = "standard"
+    if cfg.get("auto_tier"):
+        try:
+            from hermes_cli.control_plane_gate import classify_review_tier
+            floor = classify_review_tier(_task_plan_spec(task))
+        except Exception:
+            floor = "standard"
+    explicit = (task.review_tier or "").strip().lower()
+    if explicit not in _TIER_ORDER:
+        return floor  # NULL/unknown column → heuristic self-classification
+    if _TIER_ORDER[explicit] >= _TIER_ORDER.get(floor, 0):
+        return explicit  # operator/PlanSpec may always raise (or match the floor)
+    if _review_tier_downgrade_acked(conn, task_id, explicit):
+        return explicit  # deliberate, audit-logged downgrade below the floor
+    return floor  # snap up — never silently under-gate a hard-risk task
+
+
+def _review_tier_downgrade_acked(
+    conn: sqlite3.Connection, task_id: str, target_tier: str
+) -> bool:
+    """True when the most recent ``review_tier_downgrade_ack`` event acknowledges
+    exactly ``target_tier`` — the audit-trailed permission for an explicit
+    below-floor downgrade. No event / mismatch → False (floor holds)."""
     try:
-        from hermes_cli.control_plane_gate import classify_review_tier
-        return classify_review_tier(_task_plan_spec(task))
-    except Exception:
-        return "standard"
+        row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'review_tier_downgrade_ack' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None or not row["payload"]:
+        return False
+    try:
+        data = json.loads(row["payload"])
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and str(data.get("to_tier", "")).strip().lower() == target_tier
 
 
 def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
@@ -19520,34 +19554,39 @@ def ensure_scout_predecessor(
 def _maybe_inject_critical_scout(
     conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None,
 ) -> Optional[str]:
-    """Phase-C-followup (a): couple ``scout`` to ``review_tier:critical``.
+    """Couple ``scout`` to a ``critical`` review tier — self-gating.
 
-    Gated by ``kanban.review_gate.auto_scout_on_critical`` (default OFF →
-    byte-identical to today). Fires only when the task's *explicit* review_tier
-    column is ``critical`` — exactly the two chokepoints that stamp it
-    (``set_task_review_tier`` and plan-ingest/decompose), not the submit-time
-    auto-classifier. Idempotent + guarded via :func:`ensure_scout_predecessor`.
-    Pass ``cfg`` to avoid re-reading the config in a per-child loop.
+    Gated by ``kanban.review_gate.auto_scout_on_critical``. Fires when the task's
+    *resolved* tier (``_effective_review_tier``) is ``critical`` — so it covers BOTH
+    an explicit ``review_tier:critical`` column AND a heuristic-critical task (no
+    column, ``auto_tier`` on). The resolver applies the safety floor, so a deliberate
+    acked downgrade out of critical correctly suppresses the scout. Idempotent +
+    guarded via :func:`ensure_scout_predecessor`. Pass ``cfg`` to avoid re-reading
+    the config in a per-child loop.
     """
     cfg = cfg if cfg is not None else _review_gate_config()
     if not cfg.get("auto_scout_on_critical", False):
         return None
-    task = get_task(conn, task_id)
-    if task is None or (task.review_tier or "").strip().lower() != "critical":
+    if _effective_review_tier(conn, task_id, cfg=cfg) != "critical":
         return None
     return ensure_scout_predecessor(conn, task_id)
 
 
 def set_task_review_tier(
     conn: sqlite3.Connection, task_id: str, tier: Optional[str],
+    *, acknowledge_downgrade: bool = False,
 ) -> bool:
-    """Phase C: set/clear ``tasks.review_tier`` — the operator override the
-    staged-review resolver treats as authoritative in both directions
-    (``_effective_review_tier``). ``tier=None``/leer löscht den Override (the
-    auto-risk classifier decides again). A non-empty value is normalised to the
-    canonical lowercase token and validated against ``_TIER_ORDER``; an unknown
-    tier raises ``ValueError`` rather than silently storing garbage. Greift ab
-    dem nächsten Submit; eine bereits eingefrorene Review-Kette bleibt unberührt.
+    """Set/clear ``tasks.review_tier`` — the operator override the staged-review
+    resolver reads. The resolver applies a safety FLOOR (``_effective_review_tier``):
+    a value below the hard-marker heuristic floor only takes effect when the operator
+    deliberately acknowledges the downgrade. Pass ``acknowledge_downgrade=True`` to
+    log a ``review_tier_downgrade_ack`` event (the audit-trailed permission); without
+    it a below-floor value is stored but the floor snaps the effective tier back up.
+
+    ``tier=None``/leer löscht den Override (auto-risk classifier decides again). A
+    non-empty value is normalised to the canonical lowercase token and validated
+    against ``_TIER_ORDER``; an unknown tier raises ``ValueError``. Greift ab dem
+    nächsten Submit; eine bereits eingefrorene Review-Kette bleibt unberührt.
 
     Returns False if the task doesn't exist.
     """
@@ -19564,6 +19603,8 @@ def set_task_review_tier(
         if cur.rowcount != 1:
             return False
         _append_event(conn, task_id, "review_tier_set", {"review_tier": value})
+        if value is not None and acknowledge_downgrade:
+            _append_event(conn, task_id, "review_tier_downgrade_ack", {"to_tier": value})
     # Phase-C-followup (a): couple scout to critical (flag-gated, default off →
     # byte-identical). Outside the write_txn — the scout's own create_task /
     # link_tasks open their own BEGIN IMMEDIATE, which is not re-entrant.
