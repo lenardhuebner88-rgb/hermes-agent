@@ -213,6 +213,62 @@ class TestApplyProfileOverrideHermesHomeGuard:
         assert result.endswith("coder")
         assert sys.argv == ["hermes", "chat", "-q", "hello"]
 
+    def test_memory_digest_profile_filter_is_left_for_subcommand(self, tmp_path, monkeypatch):
+        """`memory digest --profile all` is a digest filter, not HERMES_HOME."""
+        argv = ["hermes", "memory", "digest", "--profile", "all", "--limit", "5"]
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile=None,
+            argv=argv,
+        )
+
+        assert result is None
+        assert sys.argv == argv
+
+    def test_memory_digest_profile_equals_filter_is_left_for_subcommand(
+        self, tmp_path, monkeypatch
+    ):
+        """The digest parser also owns `--profile=<value>`."""
+        argv = ["hermes", "memory", "digest", "--profile=all", "--json"]
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile=None,
+            argv=argv,
+        )
+
+        assert result is None
+        assert sys.argv == argv
+
+    def test_top_level_profile_before_memory_digest_is_still_consumed(
+        self, tmp_path, monkeypatch
+    ):
+        """A real Hermes profile selector still works before the subcommand."""
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile="coder",
+            argv=[
+                "hermes",
+                "--profile",
+                "coder",
+                "memory",
+                "digest",
+                "--profile",
+                "all",
+            ],
+        )
+
+        assert result is not None
+        assert result.endswith("coder")
+        assert sys.argv == ["hermes", "memory", "digest", "--profile", "all"]
+
     def test_top_level_profile_after_value_flag_is_consumed(self, tmp_path, monkeypatch):
         """Top-level --profile still works after other top-level value flags."""
         result = _run_apply_profile_override(
