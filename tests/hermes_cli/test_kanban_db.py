@@ -2858,6 +2858,48 @@ def test_parked_then_unblocked_task_is_respawnable(kanban_home, monkeypatch):
         assert kb.check_respawn_guard(conn, tid) is None
 
 
+def test_summarize_dispatch_holds_empty_and_no_holds():
+    """B: nothing held → (0, {}, None), for both an empty list and a result
+    that spawned nothing but recorded no advisory holds (the genuine stuck
+    signal: total_held == 0)."""
+    assert kb.summarize_dispatch_holds([]) == (0, {}, None)
+    assert kb.summarize_dispatch_holds([kb.DispatchResult()]) == (0, {}, None)
+
+
+def test_summarize_dispatch_holds_single_bucket():
+    """B: one bucket → counts + dominant name it."""
+    res = kb.DispatchResult()
+    res.respawn_guarded = [("t1", "recent_success"), ("t2", "recent_success")]
+    total, counts, dominant = kb.summarize_dispatch_holds([res])
+    assert total == 2
+    assert counts == {"respawn_guarded": 2}
+    assert dominant == "respawn_guarded"
+
+
+def test_summarize_dispatch_holds_aggregates_and_picks_dominant():
+    """B: aggregate across passes (gateway is multi-board); dominant = the
+    bucket holding the most tasks."""
+    a = kb.DispatchResult()
+    a.skipped_repo_serialized = [("t1", "/repo")]
+    a.respawn_guarded = [("t2", "recent_success")]
+    b = kb.DispatchResult()
+    b.skipped_repo_serialized = [("t3", "/repo"), ("t4", "/repo")]
+    b.budget_held = [("t5", "premium", "daily_token_cap")]
+    total, counts, dominant = kb.summarize_dispatch_holds([a, b])
+    assert total == 5
+    assert counts == {"repo_serialized": 3, "respawn_guarded": 1, "budget_held": 1}
+    assert dominant == "repo_serialized"
+
+
+def test_summarize_dispatch_holds_ignores_none_and_non_hold_buckets():
+    """B: None entries are skipped; spawned / skipped_unassigned are NOT
+    expected-hold buckets (unassigned stays operator-actionable / stuck)."""
+    res = kb.DispatchResult()
+    res.spawned = [("t1", "a", "/ws")]
+    res.skipped_unassigned = ["t2"]
+    assert kb.summarize_dispatch_holds([None, res]) == (0, {}, None)
+
+
 def test_resolve_rate_limit_cooldown_handles_bad_env(monkeypatch):
     import hermes_cli.kanban_db as _kb
 

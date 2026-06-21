@@ -1827,6 +1827,10 @@ class GatewayKanbanWatchersMixin:
         HEALTH_WINDOW = 6
         bad_ticks = 0
         last_warn_at = 0
+        # When all ready work is held by the respawn guard, remember since when
+        # so a hold that never clears (a stuck guard) can be escalated. Reset
+        # to 0 whenever the held state clears or a different hold dominates.
+        respawn_held_since = 0
         # Avoid hot-looping corrupt-looking board DBs, but do not suppress
         # same-fingerprint retries forever: transient WAL/open races can
         # surface as "database disk image is malformed" for one tick.
@@ -2237,19 +2241,66 @@ class GatewayKanbanWatchersMixin:
                             res.promoted,
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
-                # Health telemetry (aggregate across boards)
+                # Health telemetry (aggregate across boards). Distinguish a
+                # genuine stuck dispatcher (broken venv / PATH / credentials)
+                # from an EXPECTED hold (repo-serialized / respawn-guarded /
+                # budget / role-fit / per-profile cap). The latter is not a
+                # profile-health problem and must NOT fire the misleading
+                # "check profile health" alarm. See summarize_dispatch_holds.
                 ready_pending = await asyncio.to_thread(_ready_nonempty, tick_boards)
                 if ready_pending and not any_spawned:
-                    bad_ticks += 1
+                    res_objs = [r for _slug, r in (results or []) if r is not None]
+                    total_held, hold_counts, dominant = (
+                        _kb.summarize_dispatch_holds(res_objs)
+                    )
+                    now = int(time.time())
+                    if total_held > 0:
+                        # Expected hold — reset the stuck counter, log quietly.
+                        bad_ticks = 0
+                        if dominant == "respawn_guarded":
+                            # Canary: a respawn-guard hold that never clears
+                            # smells like a stuck guard (e.g. a parked run
+                            # mis-stamped as recent_success). Escalate if it
+                            # persists past the guard success window.
+                            if respawn_held_since == 0:
+                                respawn_held_since = now
+                            elif (
+                                now - respawn_held_since
+                                >= _kb._RESPAWN_GUARD_SUCCESS_WINDOW
+                                and now - last_warn_at >= 300
+                            ):
+                                logger.warning(
+                                    "kanban dispatcher: %d ready task(s) "
+                                    "respawn-guarded for >%ds and never cleared "
+                                    "— possible stuck guard. holds=%s. Check "
+                                    "`hermes kanban list --status ready`.",
+                                    total_held,
+                                    _kb._RESPAWN_GUARD_SUCCESS_WINDOW,
+                                    hold_counts,
+                                )
+                                last_warn_at = now
+                        else:
+                            respawn_held_since = 0
+                        logger.info(
+                            "kanban dispatcher idle: %d ready task(s) held "
+                            "(%s) — expected, not stuck.",
+                            total_held, hold_counts,
+                        )
+                    else:
+                        # Genuinely unexplained non-spawn → real stuck signal.
+                        respawn_held_since = 0
+                        bad_ticks += 1
                 else:
                     bad_ticks = 0
+                    respawn_held_since = 0
                 if bad_ticks >= HEALTH_WINDOW:
                     now = int(time.time())
                     if now - last_warn_at >= 300:
                         logger.warning(
                             "kanban dispatcher stuck: ready queue non-empty for "
-                            "%d consecutive ticks but 0 workers spawned. Check "
-                            "profile health (venv, PATH, credentials) and "
+                            "%d consecutive ticks but 0 workers spawned, and no "
+                            "expected hold explains it. Check profile health "
+                            "(venv, PATH, credentials) and "
                             "`hermes kanban list --status ready`.",
                             bad_ticks,
                         )

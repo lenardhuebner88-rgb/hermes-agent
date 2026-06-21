@@ -14326,6 +14326,52 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return None
 
 
+# Advisory-hold dispatch buckets that EXPLAIN a "0 spawned but ready work
+# pending" tick as an expected hold (the task stays ``ready`` and dispatches
+# once the hold clears) rather than a profile-health failure. Each tuple is
+# ``(human label, DispatchResult attribute)``.
+_DISPATCH_HOLD_BUCKETS: tuple[tuple[str, str], ...] = (
+    ("repo_serialized", "skipped_repo_serialized"),
+    ("respawn_guarded", "respawn_guarded"),
+    ("budget_held", "budget_held"),
+    ("role_mismatch", "held_role_mismatch"),
+    ("per_profile_capped", "skipped_per_profile_capped"),
+)
+
+
+def summarize_dispatch_holds(
+    results: "list[DispatchResult]",
+) -> tuple[int, dict[str, int], Optional[str]]:
+    """Aggregate the advisory-hold buckets across one or more dispatch passes.
+
+    Returns ``(total_held, counts_by_label, dominant_label)``. Health telemetry
+    uses this to explain a tick that spawned nothing while ready work waited:
+    ``total_held > 0`` means the non-spawn is an EXPECTED hold (name the
+    dominant bucket) — every held task stays ``ready`` and dispatches once its
+    hold clears — NOT a "check profile health" stuck condition. ``total_held ==
+    0`` with ready work pending is the genuine stuck signal (broken venv / PATH
+    / credentials, or a task with no assignee). ``dominant_label`` is the bucket
+    holding the most tasks, ``None`` when nothing is held.
+
+    Heuristic: aggregate, not per-task — if ANY expected hold is present the
+    tick is treated as "held". A genuinely broken profile spawns nothing AND
+    populates no hold bucket (its tasks auto-block on spawn failure), so it
+    still surfaces as stuck. The >1h respawn-guard canary at the call sites is
+    the backstop for the residual masking risk.
+    """
+    counts: dict[str, int] = {}
+    for res in results:
+        if res is None:
+            continue
+        for label, attr in _DISPATCH_HOLD_BUCKETS:
+            vals = getattr(res, attr, None)
+            if vals:
+                counts[label] = counts.get(label, 0) + len(vals)
+    total = sum(counts.values())
+    dominant = max(counts, key=lambda k: counts[k]) if counts else None
+    return total, counts, dominant
+
+
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     """Return True iff there is at least one ready+assigned+unclaimed task
     whose assignee maps to a real Hermes profile.
