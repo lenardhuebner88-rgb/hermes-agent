@@ -86,7 +86,7 @@ import threading
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -2797,6 +2797,11 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
 
 
 _CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
+# Version-agnostic prefix: the classify-truncation (see ``_task_plan_spec``) must strip
+# ANY contract version (v1, v2, …), not only the exact current marker — otherwise a
+# future contract bump would slip its risky anti-scope text back into the heuristic and
+# re-open the over-classify false-green caught by dogfood 2026-06-21.
+_CODE_TASK_CONTRACT_MARKER_PREFIX = "## Hermes Coder Contract"
 _CODE_TASK_CONTRACT_EVENT = "code_task_contract_inferred"
 _NEEDS_CONTRACT_EVENT = "needs_contract"
 _NEEDS_CONTRACT_BLOCKED_EVENT = "needs_contract_blocked"
@@ -6843,14 +6848,14 @@ def _task_plan_spec(task: "Task") -> dict:
     """Adapt a Task into the plan_spec shape ``classify_review_tier`` reads.
 
     The body is truncated at the auto-injected coder-contract boilerplate
-    (``_CODE_TASK_CONTRACT_MARKER``): that scaffolding lists 'no deploy/migration/
-    secret' in its ANTI-scope, which the risk classifier would otherwise read as
-    risk markers and over-classify EVERY bodyless code task as critical (caught by
-    live dogfood 2026-06-21). Only the real user/orchestrator spec — which always
-    precedes the marker — feeds the heuristic.
+    (matched on ``_CODE_TASK_CONTRACT_MARKER_PREFIX`` so ANY contract version is
+    stripped): that scaffolding lists 'no deploy/migration/secret' in its ANTI-scope,
+    which the risk classifier would otherwise read as risk markers and over-classify
+    EVERY bodyless code task as critical (caught by live dogfood 2026-06-21). Only the
+    real user/orchestrator spec — which always precedes the marker — feeds the heuristic.
     """
     body = task.body or ""
-    marker_at = body.find(_CODE_TASK_CONTRACT_MARKER)
+    marker_at = body.find(_CODE_TASK_CONTRACT_MARKER_PREFIX)
     if marker_at != -1:
         body = body[:marker_at]
     return {
@@ -6888,6 +6893,12 @@ def _effective_review_tier(
             from hermes_cli.control_plane_gate import classify_review_tier
             floor = classify_review_tier(_task_plan_spec(task))
         except Exception:
+            # Fail open to the standard floor, but never silently: a broken classifier
+            # would otherwise down-gate every task to 'standard' with no operator signal.
+            _log.warning(
+                "review-tier classify failed for task %s; falling back to 'standard' "
+                "floor (heuristic temporarily disabled)", task_id, exc_info=True,
+            )
             floor = "standard"
     explicit = (task.review_tier or "").strip().lower()
     if explicit not in _TIER_ORDER:
@@ -19956,6 +19967,97 @@ def set_disposition_status(
         if cur.rowcount == 0:
             return None
     return get_disposition_item(conn, item_id)
+
+
+def dismiss_disposition_item(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    reason: str = "",
+    decided_by: str = "operator",
+) -> Optional[dict]:
+    """Dismiss a disposition-ledger item.
+
+    Sets ``status='dismissed'`` via :func:`set_disposition_status` and, when
+    *reason* is non-empty, appends a comment to the source task (best-effort:
+    a failure to write the comment does NOT roll back the dismiss).
+
+    Returns the updated item dict, or ``None`` if *item_id* does not exist.
+    """
+    item = get_disposition_item(conn, item_id)
+    if item is None:
+        return None
+    updated = set_disposition_status(
+        conn, item_id, status="dismissed", decided_by=decided_by
+    )
+    if reason.strip():
+        try:
+            add_comment(
+                conn,
+                item["source_task_id"],
+                author=decided_by,
+                body=f"[Disposition {item_id} verworfen] {reason.strip()}",
+            )
+        except Exception:
+            pass  # best-effort: dismiss is already stamped
+    return updated
+
+
+def create_fix_task_from_disposition(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    created_by: str = "operator-disposition",
+) -> Optional[dict]:
+    """Create a parked fix-task from an open disposition-ledger item.
+
+    * Fetches the item; returns ``None`` if it does not exist.
+    * Raises ``ValueError`` if the item is not in ``open`` status.
+    * Creates a geparkte (``triage``) fix-task — no auto-dispatch.
+    * Idempotent: ``idempotency_key=f"disposition-fix:{item_id}"`` means a
+      second call returns the same task id from ``create_task`` without
+      inserting a duplicate, and re-stamps item to ``task_created``.
+    * Sets item ``status='task_created'``.
+
+    Returns ``{"fix_task": <task dict>, "item": <updated item dict>}``.
+    """
+    item = get_disposition_item(conn, item_id)
+    if item is None:
+        return None
+    if item["status"] != "open":
+        raise ValueError(
+            f"disposition item {item_id!r} is not open "
+            f"(current status: {item['status']!r}); "
+            "only open items can generate a fix-task"
+        )
+    next_action: str = (item.get("next_action") or "").strip()
+    evidence: str = (item.get("evidence") or "").strip()
+    disposition: str = (item.get("disposition") or "").strip()
+    source_label = next_action or evidence or disposition or item_id
+    title = f"Fix: {source_label[:80]}"
+    body_lines = []
+    if next_action:
+        body_lines.append(f"Nächste Aktion: {next_action}")
+    if evidence:
+        body_lines.append(f"Evidenz: {evidence}")
+    body_lines.append(
+        f"\nAus Disposition-Item {item_id}, "
+        f"Quell-Task {item['source_task_id']}, "
+        f"typ={item.get('typ')}, severity={item.get('severity')}"
+    )
+    body = "\n".join(body_lines)
+    fix_task_id = create_task(
+        conn,
+        title=title,
+        body=body,
+        created_by=created_by,
+        triage=True,
+        idempotency_key=f"disposition-fix:{item_id}",
+    )
+    updated = set_disposition_status(conn, item_id, status="task_created", decided_by=created_by)
+    task_obj = get_task(conn, fix_task_id)
+    fix_task_dict = asdict(task_obj) if task_obj is not None else {"id": fix_task_id}
+    return {"fix_task": fix_task_dict, "item": updated}
 
 
 def supersede_disposition_item(

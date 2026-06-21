@@ -3712,6 +3712,10 @@ class FunnelDraftEditBody(BaseModel):
     operator_note: Optional[FreeText] = ""
 
 
+class DismissDispositionBody(BaseModel):
+    reason: str = ""
+
+
 @router.get("/funnel/drafts")
 def get_funnel_drafts(
     days: int = Query(30, ge=1, le=365),
@@ -3798,6 +3802,95 @@ def dismiss_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return {"ok": True, "task_id": task_id}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Disposition-item lifecycle (FRD Phase 3b) — inbox actions for the operator.
+#
+# Operator can list open items, accept, dismiss with a reason, or promote to a
+# parked (triage) fix-task. No auto-dispatch: the created task stays in triage
+# until the operator or a subsequent flow releases it.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/disposition-items")
+def get_disposition_items(
+    status: str = Query("open"),
+    board: Optional[str] = Query(None),
+):
+    """List disposition-ledger items filtered by status.
+
+    Pass ``status=all`` to retrieve every item regardless of lifecycle state.
+    Default is ``open`` (items awaiting operator decision).
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        effective_status: Optional[str] = None if status == "all" else status
+        return {"items": kanban_db.list_disposition_items(conn, status=effective_status)}
+    finally:
+        conn.close()
+
+
+@router.post("/disposition-items/{item_id}/accept")
+def accept_disposition_item(item_id: str, board: Optional[str] = Query(None)):
+    """Mark a disposition-ledger item as accepted by the operator."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        updated = kanban_db.set_disposition_status(
+            conn, item_id, status="accepted", decided_by="operator"
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"disposition item {item_id!r} not found")
+        return {"item": updated}
+    finally:
+        conn.close()
+
+
+@router.post("/disposition-items/{item_id}/dismiss")
+def dismiss_disposition_item(
+    item_id: str,
+    body: DismissDispositionBody,
+    board: Optional[str] = Query(None),
+):
+    """Dismiss a disposition-ledger item, optionally recording a reason.
+
+    The reason (if non-empty) is appended as a comment to the source task.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        updated = kanban_db.dismiss_disposition_item(conn, item_id, reason=body.reason)
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"disposition item {item_id!r} not found")
+        return {"item": updated}
+    finally:
+        conn.close()
+
+
+@router.post("/disposition-items/{item_id}/create-fix-task")
+def create_fix_task_from_disposition(item_id: str, board: Optional[str] = Query(None)):
+    """Create a parked fix-task from an open disposition-ledger item.
+
+    The resulting task lands in ``triage`` status (no auto-dispatch). The
+    disposition item transitions to ``task_created``. Idempotent: a second
+    call returns the same fix-task rather than creating a duplicate.
+
+    Returns 404 if the item does not exist; 409 if the item is not open.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            result = kanban_db.create_fix_task_from_disposition(conn, item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"disposition item {item_id!r} not found")
+        return {"fix_task": result["fix_task"], "item": result["item"]}
     finally:
         conn.close()
 

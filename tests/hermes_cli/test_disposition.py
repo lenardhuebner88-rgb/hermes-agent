@@ -380,3 +380,32 @@ def test_parse_truncation_marker_does_not_crash():
     metadata = {"disposition": {"__truncated__": True, "items": []}}
     result = d.parse_disposition(metadata)
     assert isinstance(result.items, list)
+
+
+# ---------------------------------------------------------------------------
+# severity — CHARACTERIZATION guards (pin the deliberately-soft Phase-0 behavior)
+#
+# severity is intentionally NOT enforced yet (Phase 4 will tighten it). These two
+# tests pin the current soft behavior so that the Phase-4 strictness change shows up
+# as a RED test here instead of slipping through as a silent false-green — the exact
+# failure mode that bit the review-tier classify boilerplate bug (dogfood 2026-06-21).
+# When Phase 4 lands, update these alongside the new strict-validation tests.
+# ---------------------------------------------------------------------------
+
+def test_validate_accepts_invalid_severity_currently():
+    """CHARACTERIZATION: validate_disposition does NOT yet check the severity enum —
+    an unknown severity passes as long as typ/disposition are valid."""
+    metadata = {"disposition": {"items": [
+        {"typ": "risk", "disposition": "done", "severity": "BOGUS", "evidence": "x"}]}}
+    ok, missing = d.validate_disposition(metadata)
+    assert ok is True
+    assert not any("severity" in m for m in missing)
+
+
+def test_parse_coerces_unknown_severity_to_none_currently():
+    """CHARACTERIZATION: parse_disposition silently coerces an *unknown* severity
+    VALUE to 'none' (not only an absent one). Pins the coercion path."""
+    result = d.parse_disposition({"disposition": {"items": [
+        {"typ": "risk", "disposition": "done", "severity": "BOGUS", "evidence": "x"}]}})
+    assert len(result.items) == 1
+    assert result.items[0].severity == "none"

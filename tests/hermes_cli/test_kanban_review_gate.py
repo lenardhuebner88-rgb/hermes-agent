@@ -138,6 +138,51 @@ def test_effective_review_tier_ignores_coder_contract_boilerplate(kanban_home, m
         assert kb._effective_review_tier(conn, risky) == "critical"
 
 
+def test_effective_review_tier_truncates_future_contract_versions(kanban_home, monkeypatch):
+    """Forward-compat: the classify-truncation must strip ANY coder-contract version,
+    not only the exact current marker string. A future ``v2`` contract whose anti-scope
+    still lists 'no deploy/migration/secret' would otherwise slip past a v1-only
+    ``str.find`` and re-open the false-green over-classify bug (dogfood 2026-06-21)."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "code_roles": frozenset({"coder", "premium"})},
+    )
+    with kb.connect() as conn:
+        # Real intent ('reword a label') precedes a *future* contract marker carrying
+        # the same risky anti-scope words. Truncation at the marker PREFIX must keep
+        # the goal benign → standard; a v1-only match leaves the risky words in → critical.
+        body = ("reword a label\n\n## Hermes Coder Contract v2\n"
+                "ANTI-scope: no deploy, no database migration, no secret access")
+        t = kb.create_task(conn, title="ui tweak", body=body, assignee="coder")
+        assert kb._effective_review_tier(conn, t) == "standard"
+
+
+def test_effective_review_tier_logs_when_classify_raises(kanban_home, monkeypatch, caplog):
+    """A crash in ``classify_review_tier`` is swallowed to a ``standard`` floor
+    (fail-open), but it must be LOGGED — otherwise a config error in the heuristic
+    would silently down-gate every task to standard with no operator-visible signal."""
+    import hermes_cli.control_plane_gate as cpg
+
+    def boom(_spec):
+        raise RuntimeError("classify exploded")
+
+    monkeypatch.setattr(cpg, "classify_review_tier", boom)
+    monkeypatch.setattr(
+        kb, "_review_gate_config",
+        lambda: {"verifier_profile": "verifier", "auto_tier": True,
+                 "code_roles": frozenset({"coder", "premium"})},
+    )
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="coder")
+        with caplog.at_level("WARNING"):
+            assert kb._effective_review_tier(conn, t) == "standard"  # fail-open floor
+        assert any(
+            "review" in r.message.lower() and "tier" in r.message.lower()
+            for r in caplog.records
+        ), f"expected a review-tier classify warning, got: {[r.message for r in caplog.records]}"
+
+
 # ---------------------------------------------------------------------------
 # C-T1: operator setter set_task_review_tier (mirror of set_task_model_override)
 # ---------------------------------------------------------------------------

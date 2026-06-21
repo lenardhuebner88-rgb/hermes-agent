@@ -63,6 +63,7 @@ import type { Epic, TaskDetailResponse } from "../lib/schemas";
 import { StaleBadge, StatusPill, ToneCallout } from "../components/atoms";
 import { TriageStrip } from "../components/TriageStrip";
 import { FunnelFreigaben } from "../components/FunnelFreigaben";
+import { DispositionLifecycle } from "../components/DispositionLifecycle";
 import { Hero } from "../components/Hero";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { FleetPod, FleetEmptyState, FleetPanel, RoleChip } from "../components/fleet/atoms";
@@ -2208,6 +2209,10 @@ export function FlowView() {
       {/* Funnel-Freigaben — fertige Drafts aus dem Wunsch-Trichter, die auf
           den Operator-Klick warten (Freigeben = Build-Task als Ketten-Kind). */}
       <FunnelFreigaben />
+
+      {/* Disposition-Items — offene Follow-ups & Risiken aus abgeschlossenen
+          Tasks, die auf eine Operator-Entscheidung warten (Phase 3b). */}
+      <DispositionLifecycle />
 
       {/* Worker-Strip — die absorbierte Flotte: Live-Läufe mit Laufzeit-Budget,
           Runaway-Wache und vollen Aktionen (alle confirm-gated). Ruht die
