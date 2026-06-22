@@ -29,7 +29,9 @@ AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 # Severity-derived iteration budget floor for code/test findings routed to Kanban.
 # These mirror the PlanSpec budget floors defined in plan_compiler.py
 # (_TURN_FLOOR_BY_REVIEW_TIER / _TURN_FLOOR_CONTRACT_DEPTH) and are a FLOOR:
-# "low"/unknown severity is omitted → None → the profile default of 90 turns is used.
+# only explicit "low" severity is omitted → .get() returns None → the profile
+# default of 90 turns is used. (Unknown/empty severity coalesces to "medium" in
+# _severity(), so it lands on the medium floor (150), not the default.)
 _SEVERITY_TO_MAX_ITERATIONS: dict[str, int] = {
     "critical": 220,
     "high": 180,
