@@ -1043,6 +1043,18 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["group_allow_admin_from"] = platform_cfg["group_allow_admin_from"]
                 if "group_user_allowed_commands" in platform_cfg:
                     bridged["group_user_allowed_commands"] = platform_cfg["group_user_allowed_commands"]
+                if plat == Platform.DISCORD:
+                    _platform_extra = (
+                        platform_cfg.get("extra")
+                        if isinstance(platform_cfg.get("extra"), dict)
+                        else {}
+                    )
+                    token_env = (
+                        platform_cfg["token_env"] if "token_env" in platform_cfg
+                        else _platform_extra.get("token_env")
+                    )
+                    if token_env is not None:
+                        bridged["token_env"] = str(token_env).strip()
                 if plat in {Platform.DISCORD, Platform.SLACK} and "channel_skill_bindings" in platform_cfg:
                     bridged["channel_skill_bindings"] = platform_cfg["channel_skill_bindings"]
                 if "channel_prompts" in platform_cfg:
@@ -1297,10 +1309,19 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
     
     # Discord
-    discord_token = os.getenv("DISCORD_BOT_TOKEN")
+    discord_config = config.platforms.get(Platform.DISCORD)
+    discord_token_env = ""
+    if discord_config and isinstance(discord_config.extra, dict):
+        discord_token_env = str(discord_config.extra.get("token_env") or "").strip()
+
+    discord_token = os.getenv(discord_token_env) if discord_token_env else None
+    if not discord_token:
+        discord_token = os.getenv("DISCORD_BOT_TOKEN")
     if discord_token:
         discord_config = _enable_from_env(Platform.DISCORD)
         discord_config.token = discord_token
+        if discord_token_env:
+            discord_config.extra["token_env"] = discord_token_env
     
     discord_home = os.getenv("DISCORD_HOME_CHANNEL")
     if discord_home and Platform.DISCORD in config.platforms:

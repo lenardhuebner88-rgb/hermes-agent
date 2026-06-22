@@ -7281,16 +7281,34 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
 
 
 def _is_connected(config) -> bool:
-    """Discord is considered connected when DISCORD_BOT_TOKEN is set.
+    """Discord is connected when the configured token env var is set.
 
-    Looks up via ``hermes_cli.gateway.get_env_value`` at call time (not via
-    the plugin's own bound import) so tests that patch ``gateway_mod.get_env_value``
-    — including ``test_setup_openclaw_migration`` — can suppress ambient
-    ``DISCORD_BOT_TOKEN`` env vars. Matches what the legacy
-    ``_PLATFORMS["discord"]`` dispatch did before this migration.
+    Profiles can set ``discord.token_env`` (bridged to ``PlatformConfig.extra``)
+    to use a token other than the legacy ``DISCORD_BOT_TOKEN``. Look up via
+    ``hermes_cli.gateway.get_env_value`` at call time so tests that patch
+    ``gateway_mod.get_env_value`` can suppress ambient env vars.
     """
     import hermes_cli.gateway as gateway_mod
-    return bool((gateway_mod.get_env_value("DISCORD_BOT_TOKEN") or "").strip())
+
+    token_env = "DISCORD_BOT_TOKEN"
+    try:
+        from gateway.config import Platform, PlatformConfig
+
+        if isinstance(config, PlatformConfig):
+            platform_cfg = config
+        else:
+            platform_cfg = getattr(config, "platforms", {}).get(Platform.DISCORD)
+        extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+        if isinstance(extra, dict):
+            token_env = str(extra.get("token_env") or token_env).strip() or "DISCORD_BOT_TOKEN"
+    except Exception:
+        token_env = "DISCORD_BOT_TOKEN"
+
+    if (gateway_mod.get_env_value(token_env) or "").strip():
+        return True
+    if token_env != "DISCORD_BOT_TOKEN":
+        return bool((gateway_mod.get_env_value("DISCORD_BOT_TOKEN") or "").strip())
+    return False
 
 
 def _build_adapter(config):

@@ -72,6 +72,42 @@ class TestPlatformConfigRoundtrip:
         assert restored.gateway_restart_notification is False
 
 
+class TestDiscordPluginConnectedCheck:
+    def test_uses_configured_token_env_from_gateway_config(self, monkeypatch):
+        from plugins.platforms.discord.adapter import _is_connected
+
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    extra={"token_env": "DISCORD_BOT_TOKEN_RESEARCH"},
+                ),
+            },
+        )
+
+        def fake_get_env_value(key):
+            return {"DISCORD_BOT_TOKEN_RESEARCH": "research-token"}.get(key)
+
+        monkeypatch.setattr("hermes_cli.gateway.get_env_value", fake_get_env_value)
+
+        assert _is_connected(config) is True
+
+    def test_uses_configured_token_env_from_platform_config(self, monkeypatch):
+        from plugins.platforms.discord.adapter import _is_connected
+
+        config = PlatformConfig(
+            enabled=True,
+            extra={"token_env": "DISCORD_BOT_TOKEN_RESEARCH"},
+        )
+
+        def fake_get_env_value(key):
+            return {"DISCORD_BOT_TOKEN_RESEARCH": "research-token"}.get(key)
+
+        monkeypatch.setattr("hermes_cli.gateway.get_env_value", fake_get_env_value)
+
+        assert _is_connected(config) is True
+
+
 class TestGetConnectedPlatforms:
     def test_returns_enabled_with_token(self):
         config = GatewayConfig(
@@ -546,6 +582,71 @@ class TestLoadGatewayConfig:
             "123456789012345678",
         ]
         assert os.environ.get("DISCORD_ALLOWED_USERS") == "123456789012345678"
+
+    def test_discord_token_env_from_top_level_config_selects_profile_token(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  token_env: DISCORD_BOT_TOKEN_RESEARCH\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "default-token")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN_RESEARCH", "research-token")
+
+        config = load_gateway_config()
+
+        discord = config.platforms[Platform.DISCORD]
+        assert discord.enabled is True
+        assert discord.token == "research-token"
+        assert discord.extra["token_env"] == "DISCORD_BOT_TOKEN_RESEARCH"
+
+    def test_discord_token_env_from_platform_extra_selects_profile_token(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  discord:\n"
+            "    extra:\n"
+            "      token_env: DISCORD_BOT_TOKEN_REVIEWER\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "default-token")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN_REVIEWER", "reviewer-token")
+
+        config = load_gateway_config()
+
+        discord = config.platforms[Platform.DISCORD]
+        assert discord.enabled is True
+        assert discord.token == "reviewer-token"
+        assert discord.extra["token_env"] == "DISCORD_BOT_TOKEN_REVIEWER"
+
+    def test_discord_token_env_falls_back_to_default_token_when_missing(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  token_env: DISCORD_BOT_TOKEN_RESEARCH\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "default-token")
+        monkeypatch.delenv("DISCORD_BOT_TOKEN_RESEARCH", raising=False)
+
+        config = load_gateway_config()
+
+        discord = config.platforms[Platform.DISCORD]
+        assert discord.enabled is True
+        assert discord.token == "default-token"
+        assert discord.extra["token_env"] == "DISCORD_BOT_TOKEN_RESEARCH"
 
     def test_bridges_quoted_false_platform_enabled_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
