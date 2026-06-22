@@ -676,10 +676,13 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
+        # max_tokens=None here means "caller didn't specify" → keep the existing
+        # output reservation. A switch that genuinely changes the output budget
+        # passes the new value explicitly. (#43547)
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
         self.threshold_tokens = self._compute_threshold_tokens(
-            context_length, self.threshold_percent, self.max_tokens
+            context_length, self.threshold_percent, self.max_tokens,
         )
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
@@ -829,7 +832,7 @@ class ContextCompressor(ContextEngine):
         # guards the degenerate case where the floor would equal/exceed the
         # window (small models), so auto-compression can still fire (#14690).
         self.threshold_tokens = self._compute_threshold_tokens(
-            self.context_length, threshold_percent, self.max_tokens
+            self.context_length, threshold_percent, self.max_tokens,
         )
         self.compression_count = 0
         # Derive token budgets: ratio is relative to the threshold, not total context
