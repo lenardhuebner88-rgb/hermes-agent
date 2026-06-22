@@ -31,6 +31,8 @@ _GATEWAY_LIFECYCLE_PATTERNS = re.compile(
     r"(\bhermes\b(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
     r"|(\bpython(?:3(?:\.\d+)?)?\s+-m\s+hermes_cli(?:\.main)?\b"
     r"(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
+    r"|(\bpython(?:3(?:\.\d+)?)?\s+\S*hermes_cli/main\.py\b"
+    r"(?=[^;&|<>`]*" + _GATEWAY_ACTION + r"))"
     r"|(launchctl\s+(kickstart|unload|load|stop|restart)\s+.*hermes)"
     r"|(systemctl\s+(-\S+\s+)*(restart|stop|start)\s+.*hermes)"
     r"|((p?kill|pgrep)\s+.*hermes)"

@@ -96,6 +96,12 @@ def test_guard_fires_on_module_gateway_restart():
     assert _contains_gateway_lifecycle_command(_strip_quotes(cmd)) is True
 
 
+def test_guard_fires_on_script_gateway_restart():
+    """Direct script entrypoints must be blocked like the installed CLI."""
+    cmd = "python3 ./hermes_cli/main.py --profile coder gateway stop"
+    assert _contains_gateway_lifecycle_command(_strip_quotes(cmd)) is True
+
+
 def test_guard_does_not_fire_on_quoted_python_dash_c():
     """Python -c with the pattern inside a quoted string must NOT be blocked."""
     cmd = 'python3 -c "print(\'systemctl restart hermes-gateway\')"'
