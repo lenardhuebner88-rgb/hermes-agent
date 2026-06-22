@@ -157,6 +157,28 @@ class TestWsTicketEndpoint:
             f"body[:200]={body[:200]!r})"
         )
 
+    def test_loopback_authenticated_can_mint(self, loopback_app):
+        """New loopback-mint branch: in loopback mode there is no session
+        cookie, but auth_middleware authenticates the X-Hermes-Session-Token
+        header. A request carrying the valid token mints a ticket (tagged
+        ``loopback``) so the SPA can use the ticket WS path without a cookie."""
+        r = loopback_app.post(
+            "/api/auth/ws-ticket",
+            headers={"X-Hermes-Session-Token": web_server._SESSION_TOKEN},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert isinstance(body["ticket"], str) and len(body["ticket"]) >= 32
+        assert body["ttl_seconds"] == 30
+
+    def test_loopback_unauthenticated_cannot_mint(self, loopback_app):
+        """Security pin: the loopback mint path must NOT be reachable without
+        the session token. auth_middleware rejects it (401) before the handler,
+        so no one on loopback can obtain a usable WS ticket without already
+        holding the token — the WS auth layer trusts that this gate holds."""
+        r = loopback_app.post("/api/auth/ws-ticket", follow_redirects=False)
+        assert r.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # _ws_auth_ok — unit-level (synthetic WebSocket-shaped object)
@@ -219,11 +241,26 @@ class TestWsAuthOkLoopback:
         ws = _fake_ws(query={})
         assert web_server._ws_auth_ok(ws) is False
 
-    def test_ticket_param_ignored_in_loopback(self, loopback_app):
-        # Even if someone sneaks a ticket through, loopback mode only
-        # cares about ?token=. A naked ticket isn't a token.
-        ticket = mint_ticket(user_id="u1", provider="stub")
+    def test_valid_ticket_accepted_in_loopback(self, loopback_app):
+        # New contract: the single-use ticket path works in ALL modes so the
+        # SPA can stop putting the long-lived _SESSION_TOKEN in the WS URL.
+        # A freshly minted ticket authenticates in loopback exactly as gated.
+        ticket = mint_ticket(user_id="loopback", provider="loopback")
         ws = _fake_ws(query={"ticket": ticket})
+        assert web_server._ws_auth_ok(ws) is True
+
+    def test_ticket_is_single_use_in_loopback(self, loopback_app):
+        # Single-use semantics hold in loopback too: the second upgrade with
+        # the same ticket is rejected.
+        ticket = mint_ticket(user_id="loopback", provider="loopback")
+        assert web_server._ws_auth_ok(_fake_ws(query={"ticket": ticket})) is True
+        assert web_server._ws_auth_ok(_fake_ws(query={"ticket": ticket})) is False
+
+    def test_invalid_ticket_rejected_in_loopback(self, loopback_app):
+        # A present-but-unknown ticket is rejected outright; it does NOT fall
+        # through to the legacy token path (presenting a ticket means it must
+        # be valid).
+        ws = _fake_ws(query={"ticket": "never-minted"})
         assert web_server._ws_auth_ok(ws) is False
 
 
@@ -301,12 +338,15 @@ class TestWsAuthOkGated:
         ws = _fake_ws(query={"internal": "not-the-internal-credential"})
         assert web_server._ws_auth_ok(ws) is False
 
-    def test_internal_credential_not_accepted_in_loopback(self, loopback_app):
-        """Outside gated mode, ?internal= is meaningless — only ?token= works.
-        A naked internal credential must not authenticate."""
+    def test_internal_credential_accepted_in_loopback(self, loopback_app):
+        """New contract: the process-lifetime internal credential authenticates
+        in ALL modes, including loopback. It is a server secret minted by the
+        process, never injected into the SPA, so accepting it on a loopback
+        bind (the more-trusted mode) is safe and lets server-spawned children
+        attach the same way regardless of the gate."""
         cred = internal_ws_credential()
         ws = _fake_ws(query={"internal": cred})
-        assert web_server._ws_auth_ok(ws) is False
+        assert web_server._ws_auth_ok(ws) is True
 
 
 class TestWsRequestIsAllowedGated:

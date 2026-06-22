@@ -11446,10 +11446,13 @@ async def get_models_analytics(days: int = 30, profile: Optional[str] = None):
 # WebSocket.  The browser renders the ANSI through xterm.js (see
 # web/src/pages/ChatPage.tsx).
 #
-# Auth: ``?token=<session_token>`` query param (browsers can't set
-# Authorization on the WS upgrade).  Same ephemeral ``_SESSION_TOKEN`` as
-# REST.  Localhost-only — we defensively reject non-loopback clients even
-# though uvicorn binds to 127.0.0.1.
+# Auth: ``?ticket=<single-use>`` query param (browsers can't set
+# Authorization on the WS upgrade).  The SPA mints a ticket via the
+# authenticated REST endpoint ``/api/auth/ws-ticket``; the ticket is
+# single-use, 30s TTL.  In loopback mode the legacy ``?token=<session_token>``
+# path is still accepted for backward compat (older SPA bundles, curl-ws).
+# Same ephemeral ``_SESSION_TOKEN`` as REST.  Localhost-only — we defensively
+# reject non-loopback clients even though uvicorn binds to 127.0.0.1.
 # ---------------------------------------------------------------------------
 
 # PTY bridge: POSIX uses pty_bridge (fcntl/termios/ptyprocess); native Windows
@@ -11625,60 +11628,64 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     ``internal``, ``token``, or ``none``) so the accepted path can log *how*
     a peer authed, not just that it did.
 
-    Loopback / ``--insecure``: legacy ``?token=<_SESSION_TOKEN>`` query
-    parameter, constant-time compared.
+    All modes accept (in priority order):
 
-    Gated (public bind, no ``--insecure``): one of two credentials —
-
-    * ``?ticket=<single-use>`` — a browser-minted, single-use, 30s-TTL ticket
-      consumed against the dashboard-auth ticket store. This is what the SPA
-      (and native clients) use.
     * ``?internal=<process-credential>`` — the process-lifetime internal
       credential, used only by WS clients the server spawns itself (the
       embedded-TUI PTY child attaching to ``/api/ws`` and ``/api/pub``). It
       is multi-use and never expires so the child can reconnect, and is never
       injected into the SPA — see ``dashboard_auth.ws_tickets`` for the
       threat model.
+    * ``?ticket=<single-use>`` — a browser-minted, single-use, 30s-TTL ticket
+      consumed against the dashboard-auth ticket store. This is what the SPA
+      (and native clients) use in ALL modes — loopback and gated — so the
+      long-lived ``_SESSION_TOKEN`` never appears in the WS URL.
 
-    The legacy ``?token=`` path is unconditionally rejected in gated mode
-    (the SPA bundle isn't carrying the token any longer, and a leaked
-    ``_SESSION_TOKEN`` must not grant WS access once the gate is engaged).
+    Loopback / ``--insecure`` additionally accepts the legacy
+    ``?token=<_SESSION_TOKEN>`` query parameter (constant-time compared) as a
+    backward-compat fallback for older SPA bundles and non-browser clients.
+    This fallback is deprecated; the current SPA always uses the ticket path.
+
+    In gated mode (public bind, no ``--insecure``) the legacy ``?token=``
+    path is unconditionally rejected — the SPA bundle isn't carrying the token
+    any longer, and a leaked ``_SESSION_TOKEN`` must not grant WS access once
+    the gate is engaged.
 
     Audit-logs the rejection so operators can debug "WS keeps closing"
     issues from the log.
     """
     auth_required = bool(getattr(app.state, "auth_required", False))
-    if auth_required:
-        # Lazy import — keeps this function importable in test harnesses
-        # that don't bring in the dashboard_auth layer.
-        from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
-        from hermes_cli.dashboard_auth.ws_tickets import (
-            TicketInvalid,
-            consume_internal_credential,
-            consume_ticket,
-        )
 
-        # Server-spawned children (PTY child → /api/ws, /api/pub) present the
-        # multi-use internal credential rather than a single-use ticket, so
-        # they survive reconnects and slow cold boots.
-        internal = ws.query_params.get("internal", "")
-        if internal:
-            try:
-                consume_internal_credential(internal)
-                return None, "internal"
-            except TicketInvalid as exc:
-                audit_log(
-                    AuditEvent.WS_TICKET_REJECTED,
-                    reason=f"internal: {exc}",
-                    ip=(ws.client.host if ws.client else ""),
-                    path=ws.url.path,
-                )
-                return "internal_invalid", "internal"
+    # Lazy import — keeps this function importable in test harnesses
+    # that don't bring in the dashboard_auth layer.
+    from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+    from hermes_cli.dashboard_auth.ws_tickets import (
+        TicketInvalid,
+        consume_internal_credential,
+        consume_ticket,
+    )
 
-        ticket = ws.query_params.get("ticket", "")
-        if not ticket:
-            return "no_credential", "none"
+    # Server-spawned children (PTY child → /api/ws, /api/pub) present the
+    # multi-use internal credential rather than a single-use ticket, so
+    # they survive reconnects and slow cold boots.
+    internal = ws.query_params.get("internal", "")
+    if internal:
+        try:
+            consume_internal_credential(internal)
+            return None, "internal"
+        except TicketInvalid as exc:
+            audit_log(
+                AuditEvent.WS_TICKET_REJECTED,
+                reason=f"internal: {exc}",
+                ip=(ws.client.host if ws.client else ""),
+                path=ws.url.path,
+            )
+            return "internal_invalid", "internal"
 
+    # Single-use ticket path — works in ALL modes so the SPA never needs
+    # to send the long-lived ``?token=<_SESSION_TOKEN>`` on the WS URL.
+    ticket = ws.query_params.get("ticket", "")
+    if ticket:
         try:
             consume_ticket(ticket)
             return None, "ticket"
@@ -11691,6 +11698,16 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
             )
             return "ticket_invalid", "ticket"
 
+    # In gated mode the legacy ?token= path is unconditionally rejected
+    # (the SPA bundle isn't carrying the token any longer, and a leaked
+    # ``_SESSION_TOKEN`` must not grant WS access once the gate is engaged).
+    if auth_required:
+        return "no_credential", "none"
+
+    # Loopback / --insecure: legacy ``?token=<_SESSION_TOKEN>`` query
+    # parameter accepted for backward compat with older SPA bundles and
+    # non-browser clients (curl-ws, sidecar URLs).  The current SPA always
+    # uses the ticket path above; this fallback will eventually be removed.
     token = ws.query_params.get("token", "")
     if not token:
         return "no_credential", "none"

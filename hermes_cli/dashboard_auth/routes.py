@@ -594,28 +594,45 @@ async def api_auth_me(request: Request):
 async def api_auth_ws_ticket(request: Request):
     """Mint a short-lived single-use ticket for the authenticated session.
 
-    Browsers cannot set ``Authorization`` on a WebSocket upgrade, so in
-    gated mode the SPA POSTs this endpoint to get a ``?ticket=`` value to
-    append to ``/api/pty``, ``/api/ws``, ``/api/pub``, or ``/api/events``.
+    Browsers cannot set ``Authorization`` on a WebSocket upgrade, so the
+    SPA POSTs this endpoint to get a ``?ticket=`` value to append to
+    ``/api/pty``, ``/api/ws``, ``/api/pub``, or ``/api/events``.
+
+    In gated mode the caller is identified by the session cookie set by
+    ``gated_auth_middleware`` (``request.state.session``).  In loopback
+    mode (no OAuth gate) the session cookie doesn't exist, but
+    ``auth_middleware`` has already verified the ``X-Hermes-Session-Token``
+    header — so we accept that as an alternative credential and mint a
+    ticket tagged as ``loopback``.  This lets the SPA always use the
+    ticket-based WS auth path and avoids sending the long-lived session
+    token as a ``?token=`` URL query parameter on every WebSocket upgrade.
 
     The ticket has a 30-second TTL and is single-use. Calling this endpoint
     multiple times in quick succession (e.g. one ticket per WS) is the
     expected pattern.
     """
     sess = getattr(request.state, "session", None)
-    if sess is None:
-        # Middleware should already have rejected, but check defensively.
-        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if sess is not None:
+        user_id = sess.user_id
+        provider = sess.provider
+    else:
+        # Loopback / --insecure mode: no session cookie, but auth_middleware
+        # has already validated the X-Hermes-Session-Token header and would
+        # have returned 401 if it was missing or invalid.  Tag the ticket as
+        # ``loopback`` so the WS auth path accepts it.
+        user_id = "loopback"
+        provider = "loopback"
 
     # Import here so the routes module stays usable in test contexts that
     # don't load the ticket store.
     from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_ticket
 
-    ticket = mint_ticket(user_id=sess.user_id, provider=sess.provider)
+    ticket = mint_ticket(user_id=user_id, provider=provider)
     audit_log(
         AuditEvent.WS_TICKET_MINTED,
-        provider=sess.provider,
-        user_id=sess.user_id,
+        provider=provider,
+        user_id=user_id,
         ip=_client_ip(request),
     )
     return {"ticket": ticket, "ttl_seconds": TTL_SECONDS}
