@@ -321,7 +321,7 @@ const ChainCostsLaneSchema = z.object({
   cost_effective_usd: z.coerce.number().catch(0),
   billing_neuralwatt_kwh: z.coerce.number().catch(0),
   billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
-}).passthrough();
+});
 
 export const ChainCostsResponseSchema = z.object({
   schema: z.string().catch("kanban-chain-costs-v1"),
@@ -338,7 +338,7 @@ export const ChainCostsResponseSchema = z.object({
     cost_effective_usd: z.coerce.number().catch(0),
     billing_neuralwatt_kwh: z.coerce.number().catch(0),
     billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
-  }).passthrough().catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, actual_cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, api_equivalent_usd: 0, cost_effective_usd: 0, billing_neuralwatt_kwh: 0, billing_neuralwatt_cost_usd: 0 }),
+  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, actual_cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, api_equivalent_usd: 0, cost_effective_usd: 0, billing_neuralwatt_kwh: 0, billing_neuralwatt_cost_usd: 0 }),
   // absteigend nach cost_usd (Backend-Garantie)
   by_lane: z.array(ChainCostsLaneSchema).catch([]),
 });

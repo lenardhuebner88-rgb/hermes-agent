@@ -69,8 +69,6 @@ describe("Cost schemas", () => {
         api_equivalent_usd: 0.9,
         cost_effective_usd: 0.9,
         billing_neuralwatt_kwh: 0.04,
-        billing_neuralwatt_charged_kwh: 0.03,
-        billing_neuralwatt_usd_per_kwh: 5,
         billing_neuralwatt_cost_usd: 0.15,
         run_count: 1,
       },
@@ -84,8 +82,6 @@ describe("Cost schemas", () => {
         api_equivalent_usd: 0.9,
         cost_effective_usd: 0.9,
         billing_neuralwatt_kwh: 0.04,
-        billing_neuralwatt_charged_kwh: 0.03,
-        billing_neuralwatt_usd_per_kwh: 5,
         billing_neuralwatt_cost_usd: 0.15,
         run_count: 1,
       }],
@@ -93,7 +89,7 @@ describe("Cost schemas", () => {
 
     expect(parsed.totals.actual_cost_usd).toBeCloseTo(0.15);
     expect(parsed.totals.api_equivalent_usd).toBeCloseTo(0.9);
-    expect(parsed.by_lane[0].billing_neuralwatt_charged_kwh).toBeCloseTo(0.03);
+    expect(parsed.by_lane[0].billing_neuralwatt_kwh).toBeCloseTo(0.04);
     expect(parsed.by_lane[0].billing_neuralwatt_cost_usd).toBeCloseTo(0.15);
   });
 });
