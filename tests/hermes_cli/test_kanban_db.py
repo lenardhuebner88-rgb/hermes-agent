@@ -8394,14 +8394,22 @@ def test_scheduled_overdue_failed_nudge_retries_then_escalates(
 # ---------------------------------------------------------------------------
 
 def _make_integration_parked_in_worktree(
-    conn, reason_suffix, *, repo="/srv/repo", root="t_chainroot",
+    conn,
+    reason_suffix,
+    *,
+    repo=None,
+    root="t_chainroot",
+    create_worktree=True,
 ):
     """A parked finalizer whose workspace_path is a provisioned chain worktree,
     so the non-transient branch can route a fixer into it."""
     tid = kb.create_task(conn, title="parked finalizer", assignee="coder")
     kb.claim_task(conn, tid)
     kb.block_task(conn, tid, reason=f"integration parked: {reason_suffix}")
-    wt = f"{repo}/.worktrees/kanban/{root}"
+    repo_path = Path(repo) if repo is not None else Path(os.environ["HERMES_HOME"]) / "repo"
+    wt = str(repo_path / ".worktrees" / "kanban" / root)
+    if create_worktree:
+        Path(wt).mkdir(parents=True, exist_ok=True)
     kb.set_workspace_path(conn, tid, wt)
     return tid, wt, root
 
@@ -8456,6 +8464,39 @@ def test_conflict_park_routes_bounded_fixer_not_escalation(
     assert f"kanban/{root}" in (child.body or "")   # chain branch in context
     child_kinds = [e.kind for e in kb.list_events(conn, child_id)]
     assert "conflict_fixer_for" in child_kinds
+
+
+def test_conflict_park_missing_worktree_escalates_not_fixer(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """A stale provisioned-path string is not enough to route a fixer.
+
+    Live failure evidence showed workers launched against
+    ``.worktrees/kanban/<root>`` paths that no longer existed, then failing with
+    ``fatal: cannot change to ...``. The sweep should page the operator instead
+    of creating another task pinned to a missing cwd.
+    """
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        missing_repo = tmp_path / "repo"
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn,
+            "merge conflict/failure (aborted): foo.py",
+            repo=str(missing_repo),
+            create_worktree=False,
+        )
+        calls = _patch_integrate(monkeypatch, [])
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        escalations = [k for k in kinds if k == kb.OPERATOR_ESCALATION_EVENT]
+
+    assert calls == []
+    assert task.status == "blocked"
+    assert len(escalations) == 1
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+    assert summary["conflict_fixer_dispatched"] == []
+    assert {"task_id": tid, "class": "integration_parked"} in summary["parked"]
 
 
 def test_conflict_park_fixer_not_stacked_while_in_flight(kanban_home, monkeypatch):

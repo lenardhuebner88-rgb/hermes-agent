@@ -13584,6 +13584,9 @@ def _maybe_route_conflict_park_fixer(
         _escalate({"attempts": retry_count or 1})
         return
     _repo_root, root_id, wt = provisioned
+    if not wt.is_dir():
+        _escalate({"attempts": retry_count or 1, "missing_worktree": str(wt)})
+        return
 
     prior = conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
