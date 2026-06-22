@@ -112,6 +112,32 @@ async def test_gateway_stop_releases_owned_scoped_locks_after_disconnect_error()
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_bounds_hung_adapter_disconnect(monkeypatch):
+    runner, adapter = make_restart_runner()
+    monkeypatch.setenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "0.01")
+    disconnect_started = asyncio.Event()
+
+    async def hang_disconnect():
+        disconnect_started.set()
+        await asyncio.Event().wait()
+
+    adapter.disconnect = hang_disconnect
+
+    with (
+        patch("gateway.status.remove_pid_file") as remove_pid_file,
+        patch("gateway.status.write_runtime_status"),
+        patch("gateway.status._get_process_start_time", return_value=12345),
+        patch("gateway.status.release_all_scoped_locks", return_value=0),
+    ):
+        await asyncio.wait_for(runner.stop(), timeout=0.5)
+
+    assert disconnect_started.is_set()
+    remove_pid_file.assert_called_once()
+    assert runner.adapters == {}
+    assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
     disconnect_mock = AsyncMock()
