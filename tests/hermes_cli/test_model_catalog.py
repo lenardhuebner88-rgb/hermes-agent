@@ -132,6 +132,84 @@ class TestFetchSuccess:
         assert fetch.call_count == 2
 
 
+class TestReadbackFallbackConsistency:
+    """Regression: after a successful fetch, ``_write_disk_cache`` is called
+    and then ``_read_disk_cache`` is used to get the fresh mtime.  If the
+    read-back returns ``(None, 0.0)`` (transient race, validation round-trip
+    difference, etc.), the old code set ``_catalog_cache_source_mtime = now``
+    — a value that never equals the real disk mtime, so every subsequent
+    call would see a mismatch and trigger a spurious re-fetch even though
+    the data was just fetched.  The fix: don't populate the in-process cache
+    at all when the read-back fails; return the fetched data and let the
+    next call re-read from disk normally.
+    """
+
+    def test_readback_failure_does_not_poison_cache(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        manifest = _valid_manifest()
+        fetch_count = 0
+
+        def fake_fetch(url, timeout):
+            nonlocal fetch_count
+            fetch_count += 1
+            return manifest
+
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            with patch.object(
+                model_catalog,
+                "_read_disk_cache",
+                return_value=(None, 0.0),
+            ):
+                # First call: fetch succeeds, write succeeds, but read-back
+                # returns (None, 0.0).  The caller should still get the data.
+                result = model_catalog.get_catalog(force_refresh=True)
+        assert result == manifest
+        assert fetch_count == 1
+
+        # The in-process cache must NOT have been populated with a bogus
+        # mtime.  _catalog_cache_source_mtime should still be 0.0 (the
+        # module-level default), not ``now``.
+        assert model_catalog._catalog_cache is None
+        assert model_catalog._catalog_cache_source_mtime == 0.0
+
+    def test_readback_failure_then_success_does_not_spurious_refetch(
+        self, isolated_home
+    ):
+        """After a read-back failure, the next non-forced call should read
+        from disk (which now succeeds) and cache it — NOT trigger a new
+        network fetch.  This is the core invariant the old code broke."""
+        from hermes_cli import model_catalog
+
+        manifest = _valid_manifest()
+        fetch_count = 0
+
+        def fake_fetch(url, timeout):
+            nonlocal fetch_count
+            fetch_count += 1
+            return manifest
+
+        # Phase 1: fetch + write succeed, but read-back fails.
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            with patch.object(
+                model_catalog,
+                "_read_disk_cache",
+                return_value=(None, 0.0),
+            ):
+                model_catalog.get_catalog(force_refresh=True)
+        assert fetch_count == 1, "first call should fetch once"
+
+        # Phase 2: read-back now works (simulating the transient race
+        # resolving).  The data is on disk and fresh, so this call should
+        # hit the disk cache — not the network.
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            model_catalog.get_catalog()  # no force_refresh
+        assert fetch_count == 1, (
+            "second call must not re-fetch after read-back failure; "
+            "it should read from disk"
+        )
+
+
 class TestFetchFailure:
     def test_network_failure_returns_empty_when_no_cache(self, isolated_home):
         from hermes_cli import model_catalog
