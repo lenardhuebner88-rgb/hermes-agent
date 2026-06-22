@@ -27,6 +27,14 @@ def test_disabled_when_flag_false():
     assert enabled is False
 
 
+def test_disabled_when_flag_string_false():
+    enabled, per_tick = _resolve_auto_decompose_settings(
+        lambda: {"kanban": {"auto_decompose": "false"}}
+    )
+    assert enabled is False
+    assert per_tick == 3
+
+
 def test_per_tick_respected_and_clamped():
     enabled, per_tick = _resolve_auto_decompose_settings(
         lambda: {"kanban": {"auto_decompose": True, "auto_decompose_per_tick": 7}}
