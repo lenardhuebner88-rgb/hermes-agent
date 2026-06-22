@@ -115,6 +115,57 @@ def test_decompose_persists_optional_child_review_tier(kanban_home):
     assert by_id[child_ids[1]] is None
 
 
+def test_decompose_persists_child_max_iterations(kanban_home):
+    """B1: decompose carries a derived/explicit child['max_iterations'] into the
+    tasks.max_iterations column (→ the worker's --max-turns). A child without it
+    stays NULL (falls through to the profile's agent.max_turns default)."""
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="budget floor")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "hard build", "max_iterations": 220},
+                {"title": "plain"},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        rows = conn.execute(
+            "SELECT id, max_iterations FROM tasks WHERE id IN (?, ?)",
+            tuple(child_ids),
+        ).fetchall()
+    by_id = {row["id"]: row["max_iterations"] for row in rows}
+    assert by_id[child_ids[0]] == 220
+    assert by_id[child_ids[1]] is None
+
+
+def test_decompose_ignores_invalid_child_max_iterations(kanban_home):
+    """B1: a non-positive / non-int max_iterations is coerced to NULL rather than
+    persisted, so a malformed value can never under-budget a worker to <1 turn."""
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="bad budget")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "zero", "max_iterations": 0},
+                {"title": "garbage", "max_iterations": "lots"},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        rows = conn.execute(
+            "SELECT id, max_iterations FROM tasks WHERE id IN (?, ?)",
+            tuple(child_ids),
+        ).fetchall()
+    by_id = {row["id"]: row["max_iterations"] for row in rows}
+    assert by_id[child_ids[0]] is None
+    assert by_id[child_ids[1]] is None
+
+
 def test_decompose_returns_none_when_task_missing(kanban_home):
     with kb.connect() as conn:
         result = kb.decompose_triage_task(

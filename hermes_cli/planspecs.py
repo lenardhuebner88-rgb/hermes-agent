@@ -270,6 +270,7 @@ def parse_binding_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS
             hints,
             plan_ac=plan_ac,
             planspec_source=str(resolved),
+            live_test_depth=live_test_depth,
         )
     except CompileBlocked as exc:
         raise PlanSpecBlocked(exc.findings) from exc

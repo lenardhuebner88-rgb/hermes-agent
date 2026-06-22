@@ -428,6 +428,36 @@ def test_ingest_planspec_root_has_freigabe_and_live_test_depth(
     )
 
 
+def test_ingest_contract_depth_planspec_gives_children_budget_floor(
+    kanban_home, tmp_path: Path
+):
+    """B1 end-to-end (the incident path): ingesting a `live_test_depth: contract`
+    PlanSpec must populate every child's tasks.max_iterations with the
+    contract-depth floor, so a hard contract-test build no longer dies at the
+    flat 90-turn default. The template carries no per-subtask review_tier, so the
+    floor here comes purely from the contract depth."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec_with_ac(plans_root)
+
+    result = planspecs.ingest_planspec(path, plans_root=plans_root)
+    child_ids = result["child_ids"]
+    assert len(child_ids) == 2
+
+    with kb.connect_closing() as conn:
+        rows = conn.execute(
+            "SELECT id, max_iterations FROM tasks WHERE id IN ({})".format(
+                ",".join("?" * len(child_ids))
+            ),
+            child_ids,
+        ).fetchall()
+    by_id = {row["id"]: row["max_iterations"] for row in rows}
+    for cid in child_ids:
+        assert by_id[cid] == 180, (
+            f"Child {cid}: expected contract-depth budget floor 180, got "
+            f"{by_id[cid]!r}"
+        )
+
+
 def test_ac_body_roundtrip_contract_is_locked(kanban_home):
     """#14 (round-trip altitude — locked characterization): a structured
     AcceptanceCriterion is threaded into a child BODY as a prose bullet

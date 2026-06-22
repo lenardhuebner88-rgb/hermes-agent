@@ -526,3 +526,144 @@ def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):
     assert payload["status"] == "GREEN"
     assert Path(payload["artifacts"]["contract"]).exists()
     assert Path(payload["artifacts"]["taskgraph_draft"]).name == "taskgraph.draft.yaml"
+
+
+# ---------------------------------------------------------------------------
+# B1: iteration-budget floor derived from task severity
+#
+# The flat agent.max_turns default (90) kills genuinely hard tasks mid-flight
+# (a `critical` multi-file build, or a `contract`-depth live-test slice): the
+# worker times out and the chain blocks. taskgraph_hints_to_children derives a
+# per-child max_iterations FLOOR from the signals that actually predict effort
+# (review_tier + live_test_depth). Floor semantics, strictly additive:
+#   * an explicit per-subtask max_iterations always wins;
+#   * an unmarked subtask emits no max_iterations field (default 90 unchanged).
+# ---------------------------------------------------------------------------
+
+
+def test_critical_review_tier_derives_max_iterations_floor():
+    """A `critical` review_tier subtask gets an elevated max_iterations floor so
+    a hard build does not die at the flat 90-turn default."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Hard build", "lane": "coder",
+                 "review_tier": "critical", "deps": []},
+            ],
+        }
+    )
+    assert children[0]["max_iterations"] == 220
+
+
+def test_review_tier_derives_moderate_floor():
+    """A `review` review_tier subtask gets a moderate floor (still above default)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder",
+                 "review_tier": "review", "deps": []},
+            ],
+        }
+    )
+    assert children[0]["max_iterations"] == 150
+
+
+def test_contract_live_test_depth_derives_floor_for_all_children():
+    """A `contract`-depth PlanSpec means every subtask must build/verify live
+    integration tests — a multi-iteration job — so each child gets the
+    contract-depth floor even without a per-subtask review_tier."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+                {"id": "S2", "title": "Verify", "lane": "verifier", "deps": ["S1"]},
+            ],
+        },
+        live_test_depth="contract",
+    )
+    assert children[0]["max_iterations"] == 180
+    assert children[1]["max_iterations"] == 180
+
+
+def test_max_iterations_floor_takes_max_of_signals():
+    """When both review_tier and live_test_depth apply, the floor is the MAX of
+    the two (critical=220 dominates contract=180)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Hard build", "lane": "coder",
+                 "review_tier": "critical", "deps": []},
+            ],
+        },
+        live_test_depth="contract",
+    )
+    assert children[0]["max_iterations"] == 220
+
+
+def test_explicit_subtask_max_iterations_always_wins():
+    """An explicit per-subtask max_iterations overrides the derived floor (even a
+    LOWER explicit value), so an operator/PlanSpec author keeps full control."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Hard build", "lane": "coder",
+                 "review_tier": "critical", "max_iterations": 300, "deps": []},
+                {"id": "S2", "title": "Capped", "lane": "coder",
+                 "review_tier": "critical", "max_iterations": 50, "deps": []},
+            ],
+        }
+    )
+    assert children[0]["max_iterations"] == 300
+    assert children[1]["max_iterations"] == 50
+
+
+def test_unmarked_subtask_has_no_max_iterations_field():
+    """Default path (no review_tier, no contract depth) emits no max_iterations
+    key at all — the child dict stays byte-identical to pre-B1 and the worker
+    falls through to the profile default (90)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+            ],
+        }
+    )
+    assert "max_iterations" not in children[0]
+
+
+def test_smoke_live_test_depth_does_not_raise_floor():
+    """Only `contract` depth raises the floor; a lighter `smoke` depth on an
+    unmarked subtask stays at the default (no field)."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {"id": "S1", "title": "Build", "lane": "coder", "deps": []},
+            ],
+        },
+        live_test_depth="smoke",
+    )
+    assert "max_iterations" not in children[0]
+
+
+def test_subtask_max_iterations_serialization_omits_when_unset():
+    """Like `kind`/`review_tier`, the opt-in max_iterations field must be dropped
+    from the serialized subtask when unset, so unmarked PlanSpecs stay
+    byte-identical; an explicit value IS emitted."""
+    unmarked = BindingSubtask(id="S1", title="Build", lane="coder")
+    assert "max_iterations" not in unmarked.model_dump(mode="json")
+    assert "max_iterations" not in unmarked.model_dump()
+    marked = BindingSubtask(id="S2", title="Build", lane="coder", max_iterations=220)
+    assert marked.model_dump(mode="json")["max_iterations"] == 220
+
+
+def test_subtask_max_iterations_must_be_positive():
+    """A non-positive explicit max_iterations is rejected at model validation."""
+    with pytest.raises(ValidationError):
+        BindingSubtask(id="S1", title="Build", lane="coder", max_iterations=0)

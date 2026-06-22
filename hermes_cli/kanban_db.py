@@ -3105,7 +3105,11 @@ CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
-    "coder": "default code implementation lane (OpenAI-Codex/GPT)",
+    # B2.2: do NOT hardcode a model/provider here. The `coder` lane resolves to
+    # whatever the lane config routes to (Codex, glm/neuralwatt, …), so the old
+    # "(OpenAI-Codex/GPT)" claim was actively misleading in the contract event
+    # (the incident run used glm-5.2-fast). Describe the lane's PURPOSE only.
+    "coder": "default code implementation lane (model resolved per lane config)",
     # coder-claude folds into premium (Phase A); kept for any pre-canonicalization
     # literal lookup. The canonical Claude coder reason lives on `premium`.
     "coder-claude": (
@@ -3259,6 +3263,17 @@ def _absolute_paths_from_text(text: Optional[str]) -> list[str]:
     paths: list[str] = []
     for match in re.finditer(r"(?<![\w.-])/(?:[^\s`'\"<>|;$]+)", text):
         raw = match.group(0).rstrip(".,);:]")
+        # B2.1: reject single-segment slash tokens scooped out of prose. The
+        # observed defect was a body mentioning the dispatcher action
+        # `action=="merged"/integration_merged` — the `/` after the closing
+        # quote passes the negative lookbehind, so `/integration_merged` was
+        # inferred as an allowed path. A genuine absolute repo/allowed path is
+        # always multi-segment (>=2 separators, e.g. /home/piet/repo/file.py);
+        # a lone `/<word>` is never a real workspace path, so drop it. When the
+        # body yields no plausible path the contract simply carries an empty
+        # allowed_paths and the worker falls back to the explicit workspace.
+        if raw.count("/") < 2:
+            continue
         if raw and raw not in seen:
             seen.add(raw)
             paths.append(raw)
@@ -3303,6 +3318,12 @@ def _code_task_contract_payload(
             "no deploy or runtime restart",
             "no DB schema migration",
         ],
+        # B2.3: `risk` is workspace blast-radius (a dir/worktree task can touch
+        # real files → medium; a scratch task → low). It is deliberately
+        # ORTHOGONAL to `review_tier`, which is review DEPTH (how adversarially
+        # the diff is gated), not write-risk. A `critical` review_tier on a
+        # scratch task is therefore consistent with risk "low" — they measure
+        # different axes and are not reconciled here by design.
         "risk": "medium" if workspace_kind in {"dir", "worktree"} else "low",
         "expected_gates": [
             "run the smallest relevant lint/type/test gate",
@@ -10263,13 +10284,28 @@ def decompose_triage_task(
             child_planspec_subtask_id = child.get("planspec_subtask_id")
             child_planspec_source = child.get("planspec_source")
             child_review_tier = child.get("review_tier")
+            # B1: per-child iteration budget (``--max-turns``) derived from task
+            # severity by taskgraph_hints_to_children, or an explicit PlanSpec
+            # override. Coerce to a positive int; anything else falls through to
+            # NULL → the profile's agent.max_turns default (unchanged behaviour).
+            child_max_iterations = child.get("max_iterations")
+            try:
+                child_max_iterations = (
+                    int(child_max_iterations)
+                    if child_max_iterations is not None
+                    and int(child_max_iterations) >= 1
+                    else None
+                )
+            except (TypeError, ValueError):
+                child_max_iterations = None
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, "
                 " acceptance_criteria, epic_id, kind, "
-                " planspec_subtask_id, planspec_source, review_tier) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " planspec_subtask_id, planspec_source, review_tier, "
+                " max_iterations) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -10287,6 +10323,7 @@ def decompose_triage_task(
                     child_planspec_subtask_id if isinstance(child_planspec_subtask_id, str) else None,
                     child_planspec_source if isinstance(child_planspec_source, str) else None,
                     (child_review_tier or "").strip().lower() or None if isinstance(child_review_tier, str) else None,
+                    child_max_iterations,
                 ),
             )
             _append_event(

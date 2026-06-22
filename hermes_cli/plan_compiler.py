@@ -59,6 +59,12 @@ class BindingSubtask(BaseModel):
     # ⇒ unset; threaded into the child only when non-empty, so unmarked subtasks
     # stay byte-identical. Validated against VALID_REVIEW_TIERS in the rubric.
     review_tier: str = ""
+    # B1: explicit per-subtask iteration budget (``--max-turns`` for the worker).
+    # Default None ⇒ unset; the floor derived from severity (review_tier /
+    # live_test_depth) applies instead. An explicit value always WINS over the
+    # derived floor, so a PlanSpec author/operator keeps full control. Dropped
+    # from serialization when None so unmarked subtasks stay byte-identical.
+    max_iterations: int | None = None
 
     @field_validator("id", "title", "lane")
     @classmethod
@@ -66,6 +72,15 @@ class BindingSubtask(BaseModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("must be a non-empty string")
         return value.strip()
+
+    @field_validator("max_iterations")
+    @classmethod
+    def _positive_max_iterations(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if int(value) < 1:
+            raise ValueError("max_iterations must be >= 1")
+        return int(value)
 
     @field_validator("deps")
     @classmethod
@@ -87,6 +102,8 @@ class BindingSubtask(BaseModel):
             data.pop("kind", None)
         if not str(data.get("review_tier") or "").strip():
             data.pop("review_tier", None)
+        if data.get("max_iterations") is None:
+            data.pop("max_iterations", None)
         return data
 
 
@@ -330,6 +347,44 @@ def _kind_for_planspec_lane(lane: str) -> str:
     return "code"
 
 
+# B1: iteration-budget floor derived from task severity.
+#
+# The flat ``agent.max_turns`` default (90, config.py) is applied to every task
+# regardless of difficulty. Genuinely hard tasks — a ``critical`` multi-file
+# build, or a ``contract``-depth live-test slice that must stand up real
+# integration tests — burn through 90 turns and time out, blocking the chain
+# (this is exactly how the LT1 concurrency-suite task died, twice). These
+# floors raise ``max_iterations`` (→ the worker's ``--max-turns``) for the
+# dimensions that actually predict iteration count. Tuned conservatively as a
+# multiple of the 90 default; promote to config if data warrants.
+#
+# Semantics are a strict, additive FLOOR:
+#   * an explicit per-subtask ``max_iterations`` always wins (even a lower one);
+#   * an unmarked subtask (no review_tier, no contract depth) gets no field, so
+#     the default 90 is unchanged and the child dict stays byte-identical.
+_TURN_FLOOR_BY_REVIEW_TIER: dict[str, int] = {"critical": 220, "review": 150}
+_TURN_FLOOR_CONTRACT_DEPTH = 180
+
+
+def _derive_max_iterations_floor(
+    review_tier: str | None,
+    live_test_depth: str | None,
+) -> int | None:
+    """Return the budget floor implied by severity signals, or ``None``.
+
+    The floor is the MAX over the applicable signals (a critical-tier subtask in
+    a contract-depth PlanSpec gets the higher of the two). Returns ``None`` when
+    no signal applies, so the caller emits no ``max_iterations`` field.
+    """
+    floors: list[int] = []
+    tier = (review_tier or "").strip().lower()
+    if tier in _TURN_FLOOR_BY_REVIEW_TIER:
+        floors.append(_TURN_FLOOR_BY_REVIEW_TIER[tier])
+    if (live_test_depth or "").strip().lower() == "contract":
+        floors.append(_TURN_FLOOR_CONTRACT_DEPTH)
+    return max(floors) if floors else None
+
+
 logger = logging.getLogger(__name__)
 
 # Strip a leading "AC"/"AC-"/"AC_" (with optional separators) from an AC id so an
@@ -446,6 +501,7 @@ def taskgraph_hints_to_children(
     *,
     plan_ac: "list[str | AcceptanceCriterion] | None" = None,
     planspec_source: "str | None" = None,
+    live_test_depth: "str | None" = None,
 ) -> list[dict[str, Any]]:
     """Translate binding frontmatter hints into kanban ``children``.
 
@@ -462,6 +518,11 @@ def taskgraph_hints_to_children(
         planspec_source: Absolute path of the originating ``.md`` file.
             Stored in each child dict as ``planspec_source`` so
             :func:`kanban_db.decompose_triage_task` can persist it.
+        live_test_depth: PlanSpec-level ``live_test_depth`` frontmatter value
+            (B1). A ``contract`` depth raises the per-child ``max_iterations``
+            floor for every subtask. ``None`` (the default) leaves the floor to
+            per-subtask ``review_tier`` only, so non-PlanSpec callers and lighter
+            depths stay byte-identical.
     """
     model = hints if isinstance(hints, TaskgraphHints) else TaskgraphHints.model_validate(hints)
     if not model.binding:
@@ -512,6 +573,18 @@ def taskgraph_hints_to_children(
             child["planspec_source"] = planspec_source
         if (task.review_tier or "").strip():
             child["review_tier"] = task.review_tier.strip().lower()
+        # B1: iteration-budget floor. An explicit per-subtask max_iterations
+        # always wins; otherwise derive a floor from severity (review_tier +
+        # contract-depth). Emit nothing when no signal applies, so unmarked
+        # subtasks stay byte-identical and fall through to the profile default.
+        if task.max_iterations is not None:
+            child["max_iterations"] = int(task.max_iterations)
+        else:
+            derived = _derive_max_iterations_floor(
+                child.get("review_tier"), live_test_depth
+            )
+            if derived is not None:
+                child["max_iterations"] = derived
         children.append(child)
     return children
 

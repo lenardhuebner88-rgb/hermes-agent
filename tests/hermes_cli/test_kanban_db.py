@@ -7141,6 +7141,71 @@ def test_code_task_safe_contract_is_auto_enriched_before_pickup(
     assert payload["allowed_paths"] == [str(repo)]
 
 
+# ---------------------------------------------------------------------------
+# B2: contract-inference hygiene (allowed_paths parser + reason_for_lane)
+# ---------------------------------------------------------------------------
+
+
+def test_absolute_paths_from_text_rejects_single_segment_prose_token():
+    """B2.1: the allowed-paths parser must not scoop a single-segment slash token
+    out of prose. The observed defect: a body mentioning the dispatcher action
+    `action=="merged"/integration_merged` produced allowed_paths
+    ['/integration_merged'] (the slash after the closing quote passed the
+    negative lookbehind). A 1-segment absolute token is never a real
+    repo/allowed path, so it is dropped."""
+    body = (
+        'The integrator returns action=="merged"/integration_merged when the '
+        "rebase applies cleanly; otherwise \"rebase_conflict\"/integration_parked."
+    )
+    paths = kb._absolute_paths_from_text(body)
+    assert "/integration_merged" not in paths
+    assert "/integration_parked" not in paths
+    assert paths == []
+
+
+def test_absolute_paths_from_text_keeps_real_multi_segment_paths():
+    """B2.1: genuine multi-segment absolute paths still survive (no regression for
+    real allowed-path extraction)."""
+    body = (
+        "Edit /home/piet/.hermes/hermes-agent/hermes_cli/kanban_db.py and the "
+        "test at /home/piet/.hermes/hermes-agent/tests/stress/conftest.py only."
+    )
+    paths = kb._absolute_paths_from_text(body)
+    assert "/home/piet/.hermes/hermes-agent/hermes_cli/kanban_db.py" in paths
+    assert "/home/piet/.hermes/hermes-agent/tests/stress/conftest.py" in paths
+
+
+def test_reason_for_lane_coder_makes_no_false_model_claim():
+    """B2.2: the `coder` lane reason must not assert a fixed model/provider — the
+    lane resolves to whatever the lane config routes to (e.g. glm/neuralwatt),
+    so the old hardcoded '(OpenAI-Codex/GPT)' was actively misleading."""
+    reason = kb._reason_for_lane("coder")
+    assert "OpenAI-Codex/GPT" not in reason
+    assert "OpenAI" not in reason and "GPT" not in reason
+    # the lane PURPOSE is still described
+    assert "code" in reason.lower()
+    # the canonical Claude lane reason is untouched (regression guard)
+    assert "chain-critical" in kb._reason_for_lane("premium")
+
+
+def test_code_task_contract_allowed_paths_excludes_prose_token():
+    """B2.1 end-to-end at the payload builder: a scratch code task whose body
+    mentions `"merged"/integration_merged` must NOT infer that prose token as an
+    allowed path."""
+    payload, _missing = kb._code_task_contract_payload(
+        assignee="coder",
+        workspace_kind="scratch",
+        workspace_path=None,
+        tenant="default",
+        body='returns action=="merged"/integration_merged on a clean rebase',
+        created_by="tester",
+        protected_funnel_root=False,
+        source="test",
+    )
+    assert "/integration_merged" not in payload["allowed_paths"]
+    assert "OpenAI" not in payload["reason_for_lane"]
+
+
 @pytest.mark.parametrize("assignee", ["reviewer", "critic", "research"])
 def test_3a_code_task_rejects_verdict_only_roles_at_create(
     kanban_home, assignee
