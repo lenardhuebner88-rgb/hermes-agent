@@ -643,6 +643,101 @@ def test_claude_worker_prompt_gates_git_contract(kanban_home, monkeypatch, tmp_p
     assert "git add -A" not in prompt_plain
 
 
+def test_claude_worker_prompt_includes_parent_results_and_role_history(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """AC-PROMPT-PARITY: the claude-CLI worker prompt must include parent
+    task results and cross-task role history, using the same renderers as
+    build_worker_context. A claude-CLI worker has no kanban tools, so
+    without this injection it would never see what its parents produced
+    or its own recent role continuity.
+    """
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 99
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    PARENT_SUMMARY = "Synthesized parent deliverable for handoff"
+    PARENT_META_KEY = "changed_files"
+    PARENT_META_VAL = "src/feature.py"
+    ROLE_HISTORY_TITLE = "Prior role-history task"
+    ROLE_HISTORY_SUMMARY = "Prior completed role-history summary line"
+
+    with kb.connect() as conn:
+        # --- Parent: completed with summary + metadata -----------------
+        pid = kb.create_task(conn, title="parent task", assignee="coder")
+        kb.claim_task(conn, pid)
+        kb.complete_task(
+            conn, pid,
+            summary=PARENT_SUMMARY,
+            metadata={PARENT_META_KEY: [PARENT_META_VAL]},
+        )
+
+        # --- Role history: a DIFFERENT completed task by same assignee -
+        rid = kb.create_task(conn, title=ROLE_HISTORY_TITLE, assignee="coder")
+        kb.claim_task(conn, rid)
+        kb.complete_task(conn, rid, summary=ROLE_HISTORY_SUMMARY)
+
+        # --- Child: the claude-CLI worker task -------------------------
+        tid = kb.create_task(conn, title="child claude task", assignee="coder")
+        kb.link_tasks(conn, pid, tid)
+        task = kb.get_task(conn, tid)
+
+    wt = tmp_path / "r" / ".worktrees" / "kanban" / "t_par"
+    wt.mkdir(parents=True)
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+
+    # Parent results: header + pid + summary + metadata string.
+    assert "## Parent task results" in prompt
+    assert pid in prompt
+    assert PARENT_SUMMARY in prompt
+    assert PARENT_META_VAL in prompt
+
+    # Role history: header + title + summary.
+    assert "## Recent work by @coder" in prompt
+    assert ROLE_HISTORY_TITLE in prompt
+    assert ROLE_HISTORY_SUMMARY in prompt
+
+
+def test_claude_worker_prompt_omits_handoff_sections_when_empty(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """AC-NO-REGRESSION: a claude-CLI task with no done parents and no
+    role history must produce a prompt WITHOUT the parent-results or
+    role-history sections — staying byte-compatible with the pre-parity
+    prompt for such tasks.
+    """
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 100
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="lonely task", assignee="coder")
+        task = kb.get_task(conn, tid)
+
+    wt = tmp_path / "r" / ".worktrees" / "kanban" / "t_lonely"
+    wt.mkdir(parents=True)
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+
+    assert "## Parent task results" not in prompt
+    assert "## Recent work by" not in prompt
+
+
 def test_complete_promotes_commit_hash_to_event(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder")
