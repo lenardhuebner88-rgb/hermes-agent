@@ -93,25 +93,56 @@ def test_no_idempotency_key_never_collides(kanban_home):
 # Spawn-failure circuit breaker
 # ---------------------------------------------------------------------------
 
-def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawnable):
-    """N consecutive spawn failures on the same task → auto_blocked."""
+def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawnable, monkeypatch):
+    """Spawn failures first consume the bounded transient-retry budget, THEN
+    count toward the circuit breaker and auto-block.
+
+    Post-f54686689 (`spawn_failed at dispatch` is a transient infra class): the
+    first ``TRANSIENT_RETRY_LIMIT`` (2) failures are recorded as transient
+    retries — ``consecutive_failures`` stays 0 and the task stays ready — each
+    spaced by the 300s transient backoff. Only once the budget is spent does
+    ``consecutive_failures`` grow and trip the guard at ``DEFAULT_FAILURE_LIMIT``
+    (2). Net: the breaker still trips, just after the transient budget."""
+    base = 1_800_000_000
+    clock = [base]
+    monkeypatch.setattr(kb.time, "time", lambda: clock[0])
+
     def _bad_spawn(task, ws):
         raise RuntimeError("no PATH")
 
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title="x", assignee="worker")
         assert kb.DEFAULT_FAILURE_LIMIT == 2
-        # One default-limit failure → still ready, counter grows.
+        assert kb.TRANSIENT_RETRY_LIMIT == 2
+        tid = kb.create_task(conn, title="x", assignee="worker")
+
+        # Budget attempt 1 → transient retry, breaker untouched.
         res1 = kb.dispatch_once(conn, spawn_fn=_bad_spawn)
         assert tid not in res1.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert task.transient_retry_count == 1
+
+        # Budget attempt 2 (past the 300s backoff) → still transient.
+        clock[0] += 301
+        kb.dispatch_once(conn, spawn_fn=_bad_spawn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert task.transient_retry_count == 2
+
+        # Budget spent → now the breaker counts (still below the limit).
+        clock[0] += 301
+        kb.dispatch_once(conn, spawn_fn=_bad_spawn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
         assert task.consecutive_failures == 1
 
-        # Second default-limit failure trips the guard.
-        res2 = kb.dispatch_once(conn, spawn_fn=_bad_spawn)
-        assert tid in res2.auto_blocked
+        # Limit reached → auto-blocked.
+        clock[0] += 301
+        res4 = kb.dispatch_once(conn, spawn_fn=_bad_spawn)
+        assert tid in res4.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert task.consecutive_failures >= 2
@@ -120,14 +151,18 @@ def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawna
         conn.close()
 
 
-def test_successful_spawn_does_not_reset_failure_counter(kanban_home, all_assignees_spawnable):
-    """Under unified consecutive-failure counting, a successful spawn
-    does NOT reset the counter — past failures stay on the books until
-    a successful completion. This is by design: it prevents a task
-    that keeps timing out after spawn from looping forever.
-    (Pre-unification behaviour was to reset on spawn success; see the
-    complete_task reset for the replacement point.)
+def test_successful_spawn_does_not_reset_failure_counter(kanban_home, all_assignees_spawnable, monkeypatch):
+    """A successful spawn does NOT reset the retry bookkeeping — past
+    attempts stay on the books until a successful *completion* (or operator
+    unblock). Post-f54686689 the spawn-dispatch failures are counted as
+    transient retries (``transient_retry_count``), not ``consecutive_failures``,
+    until the budget is spent; a subsequent successful spawn does not wipe that
+    counter (only ``complete_task`` / unblock resets it).
     """
+    base = 1_800_000_000
+    clock = [base]
+    monkeypatch.setattr(kb.time, "time", lambda: clock[0])
+
     calls = [0]
     def _flaky_spawn(task, ws):
         calls[0] += 1
@@ -138,19 +173,23 @@ def test_successful_spawn_does_not_reset_failure_counter(kanban_home, all_assign
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        # Two failures + one success.
+        # Two transient failures (spaced past the backoff) + one success.
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
-        kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
-        task = kb.get_task(conn, tid)
-        assert task.consecutive_failures == 2
+        clock[0] += 301
         kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
         task = kb.get_task(conn, tid)
-        # Counter STAYS at 2 — spawn succeeded but run isn't complete yet.
-        assert task.consecutive_failures == 2
-        assert task.last_failure_error is not None
-        # Task is now running with a pid.
+        assert task.transient_retry_count == 2
+        assert task.consecutive_failures == 0
+
+        clock[0] += 301
+        kb.dispatch_once(conn, spawn_fn=_flaky_spawn, failure_limit=5)
+        task = kb.get_task(conn, tid)
+        # Spawn succeeded → running, but the retry bookkeeping is NOT reset
+        # (only a successful completion / unblock resets it).
         assert task.status == "running"
         assert task.worker_pid == 99999
+        assert task.transient_retry_count == 2
+        assert task.consecutive_failures == 0
     finally:
         conn.close()
 
@@ -331,9 +370,14 @@ def test_max_retries_none_falls_through_to_dispatcher_limit(kanban_home, all_ass
         conn.close()
 
 
-def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spawnable):
-    """`dir:` workspace with no path should fail workspace resolution AND
-    count against the failure budget — not just crash the tick."""
+def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spawnable, monkeypatch):
+    """A `dir:` workspace with no path fails workspace resolution. Post-f54686689
+    this dispatch-side failure routes through the bounded transient-retry budget
+    first (like a spawn failure), then counts against the breaker and blocks —
+    it does not just crash the tick."""
+    base = 1_800_000_000
+    clock = [base]
+    monkeypatch.setattr(kb.time, "time", lambda: clock[0])
     conn = kb.connect()
     try:
         # Manually insert a broken task: dir workspace but workspace_path is NULL
@@ -347,17 +391,25 @@ def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spa
             conn.execute(
                 "UPDATE tasks SET workspace_path = NULL WHERE id = ?", (tid,),
             )
-        res = kb.dispatch_once(conn, failure_limit=3)
-        task = kb.get_task(conn, tid)
-        assert task.consecutive_failures == 1
-        assert task.status == "ready"
-        assert task.last_failure_error and "workspace" in task.last_failure_error
-        # Run twice more → auto-blocked.
+        # First failure → transient retry, breaker untouched.
         kb.dispatch_once(conn, failure_limit=3)
-        res = kb.dispatch_once(conn, failure_limit=3)
+        task = kb.get_task(conn, tid)
+        assert task.transient_retry_count == 1
+        assert task.consecutive_failures == 0
+        assert task.status == "ready"
+
+        # Exhaust the budget, then the breaker counts to the limit (3) and blocks.
+        res = None
+        for _ in range(8):
+            clock[0] += 301
+            res = kb.dispatch_once(conn, failure_limit=3)
+            if kb.get_task(conn, tid).status == "blocked":
+                break
         assert tid in res.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
+        assert task.consecutive_failures >= 3
+        assert task.last_failure_error and "workspace" in task.last_failure_error
     finally:
         conn.close()
 
@@ -1239,16 +1291,26 @@ def test_recompute_ready_emits_promoted_not_ready(kanban_home):
         conn.close()
 
 
-def test_spawn_failure_circuit_breaker_emits_gave_up(kanban_home, all_assignees_spawnable):
+def test_spawn_failure_circuit_breaker_emits_gave_up(kanban_home, all_assignees_spawnable, monkeypatch):
+    """The breaker emits ``gave_up`` when it trips — after the transient-retry
+    budget is spent (post-f54686689) and ``consecutive_failures`` reaches the
+    limit. The transient budget is exercised first (``transient_retry`` events)."""
+    base = 1_800_000_000
+    clock = [base]
+    monkeypatch.setattr(kb.time, "time", lambda: clock[0])
+
     def _bad(task, ws):
         raise RuntimeError("nope")
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(5):
-            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
-        events = kb.list_events(conn, tid)
-        kinds = [e.kind for e in events]
+        for _ in range(8):
+            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=2)
+            if kb.get_task(conn, tid).status == "blocked":
+                break
+            clock[0] += 301
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "transient_retry" in kinds  # budget exercised before the breaker
         assert "gave_up" in kinds
         assert "spawn_auto_blocked" not in kinds
     finally:
@@ -1644,24 +1706,31 @@ def test_run_on_block_with_reason(kanban_home):
         conn.close()
 
 
-def test_run_on_spawn_failure_records_failed_runs(kanban_home, all_assignees_spawnable):
-    """Each spawn_failed event closes a run with outcome='spawn_failed',
-    and the Nth failure closes a run with outcome='gave_up'."""
+def test_run_on_spawn_failure_records_failed_runs(kanban_home, all_assignees_spawnable, monkeypatch):
+    """Post-f54686689 each dispatch attempt closes a run: the first
+    ``TRANSIENT_RETRY_LIMIT`` (2) spawn failures close runs with
+    outcome='transient_retry'; once the budget is spent a failure closes a run
+    with outcome='spawn_failed', and the breaker-tripping one closes a run with
+    outcome='gave_up'."""
+    base = 1_800_000_000
+    clock = [base]
+    monkeypatch.setattr(kb.time, "time", lambda: clock[0])
+
     def _bad(task, ws):
         raise RuntimeError("no PATH")
 
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        for _ in range(5):
-            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
+        for _ in range(8):
+            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=2)
+            if kb.get_task(conn, tid).status == "blocked":
+                break
+            clock[0] += 301
 
         runs = kb.list_runs(conn, tid)
-        # 5 claim attempts → 5 runs. Final one is gave_up, earlier ones
-        # are spawn_failed.
-        assert len(runs) == 5
-        assert runs[-1].outcome == "gave_up"
-        assert all(r.outcome == "spawn_failed" for r in runs[:-1])
+        outcomes = [r.outcome for r in runs]
+        assert outcomes == ["transient_retry", "transient_retry", "spawn_failed", "gave_up"]
         assert runs[-1].error and "no PATH" in runs[-1].error
     finally:
         conn.close()
