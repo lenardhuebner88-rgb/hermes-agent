@@ -12,6 +12,46 @@ _BACKSPACE_CHARS = {"\b", "\x7f"}
 _ENTER_CHARS = {"\r", "\n"}
 _EOF_CHARS = {"\x04", "\x1a"}
 
+# Terminator bytes for CSI (\x1b[...) and SS3 (\x1b O...) escape sequences.
+# A CSI/SS3 sequence ends at the first byte in the range 0x40–0x7E.
+_CSI_TERMINATORS = set(chr(c) for c in range(0x40, 0x7F))
+
+# Introducer bytes that follow \x1b to form a multi-byte escape sequence.
+_ESCAPE_INTRODUCERS = frozenset({"[", "O"})
+
+
+def _drain_escape_sequence(read_char: Callable[[], str]) -> str | None:
+    """Consume the remaining bytes of a terminal escape sequence.
+
+    Called after an initial ``\\x1b`` has been read.  Terminals send
+    multi-byte sequences for navigation keys (arrows, Delete, Home, End)
+    such as ``\\x1b[A`` (Up) or ``\\x1b[3~`` (Delete).  Only swallowing the
+    leading ``\\x1b`` leaves the suffix (``[A``, ``3~``) to be treated as
+    secret text, corrupting the entered value.
+
+    If the byte following ``\\x1b`` is not a CSI/SS3 introducer (``[`` or
+    ``O``), it's likely the next legitimate keystroke (e.g. a lone Escape
+    followed by Enter).  In that case the byte is returned to the caller
+    for normal processing.  ``None`` is returned when all sequence bytes
+    were consumed.
+    """
+    nxt = read_char()
+    if nxt == "":
+        # Bare ESC with nothing queued behind it — nothing to return.
+        return None
+    if nxt in _ESCAPE_INTRODUCERS:
+        # CSI (ESC [) or SS3 (ESC O) sequence — consume until a terminator.
+        # The introducer ('[' or 'O') itself is in the 0x40–0x7E range but
+        # is NOT a terminator; start scanning from the byte after it.
+        nxt = read_char()
+        while nxt != "":
+            if nxt in _CSI_TERMINATORS:
+                return None
+            nxt = read_char()
+        return None
+    # Not part of a recognised escape sequence — hand it back to the caller.
+    return nxt
+
 
 def _collect_masked_input(
     read_char: Callable[[], str],
@@ -24,8 +64,13 @@ def _collect_masked_input(
     value: list[str] = []
     write(prompt)
 
+    pending: str | None = None
     while True:
-        ch = read_char()
+        if pending is not None:
+            ch = pending
+            pending = None
+        else:
+            ch = read_char()
         if ch == "":
             write("\r\n")
             raise EOFError
@@ -44,8 +89,12 @@ def _collect_masked_input(
                 write("\b \b")
             continue
         if ch == "\x1b":
-            # Ignore escape itself. Terminals commonly send escape-prefixed
-            # navigation/delete sequences; they should not become secret text.
+            # Consume the full escape-prefixed sequence so navigation bytes
+            # don't become secret text. If the byte after ESC isn't a
+            # sequence introducer, it's returned for normal processing.
+            leftover = _drain_escape_sequence(read_char)
+            if leftover is not None:
+                pending = leftover
             continue
 
         value.append(ch)
