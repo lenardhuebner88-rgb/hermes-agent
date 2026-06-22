@@ -11,11 +11,29 @@ import datetime as _dt
 import sys
 from pathlib import Path
 
+import pytest
+
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import autoresearch_v2_nightly as nightly  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_live_state(monkeypatch, tmp_path):
+    """Keep EVERY nightly test off the live proposal store, kanban DB, and
+    strategist state. ``_proposals_dir()`` resolves CWD-based, so HERMES_HOME alone
+    does NOT isolate the backlog — a test running the real reconciler (e.g.
+    ``nightly.main()`` with ``_run_reconciler`` unmocked) would mutate the live
+    77-proposal store. Regression fence for the 2026-06-22 incident."""
+    audit = tmp_path / "skill-audit"
+    audit.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(audit))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_DIGEST_PATH", str(tmp_path / "digest.json"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_RECONCILE_SUMMARY_PATH", str(tmp_path / "last-reconcile.json"))
+    monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", str(tmp_path / "vetoed_levers.json"))
 
 
 # ---------------------------------------------------------------- rotation
@@ -127,6 +145,24 @@ def test_test_foundry_lane_always_dry_run(monkeypatch):
     nightly.run_test_foundry_lane(["a", "b"], max_mutants=15)
     assert seen and all(item["apply"] is False for item in seen)  # never writes a branch
     assert all(item["max_mutants"] == 15 for item in seen)
+
+
+def test_nightly_tests_isolate_the_live_proposal_store():
+    """Regression guard for the 2026-06-22 incident: a nightly test ran
+    ``nightly.main()`` with the REAL reconciler (``_run_reconciler`` unmocked).
+    ``_proposals_dir()`` resolves CWD-based — HERMES_HOME only isolates the kanban
+    DB — so the real reconcile mutated the LIVE 77-proposal backlog into a
+    half-processed state with dangling task refs. The module-level autouse fixture
+    must keep the proposal store pointed at a tmp dir so no test can leak again."""
+    import tempfile
+
+    from hermes_cli import autoresearch_proposals as proposals
+
+    pdir = str(proposals._proposals_dir())
+    assert pdir.startswith(tempfile.gettempdir()), (
+        f"nightly tests resolve to a non-tmp proposal store ({pdir}) — the live "
+        "backlog is reachable; the isolation fixture is missing or broken."
+    )
 
 
 def test_main_isolates_a_lane_crash(monkeypatch, capsys):

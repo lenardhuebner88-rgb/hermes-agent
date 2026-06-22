@@ -12,6 +12,22 @@ from hermes_cli import autoresearch_runs
 _ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_live_state(tmp_path, monkeypatch):
+    """Keep EVERY test off the live proposal store / kanban DB / strategist state.
+    ``_proposals_dir()`` resolves CWD-based, so HERMES_HOME alone does NOT isolate
+    the backlog — a test running the real reconciler (``main()`` with
+    ``_run_reconciler`` unmocked, e.g. test_nightly_main_routes_by_lane) would
+    mutate the live 77-proposal store. Regression fence for the 2026-06-22 incident."""
+    iso = tmp_path / "_iso"
+    (iso / "skill-audit").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(iso / ".hermes"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(iso / "skill-audit"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_DIGEST_PATH", str(iso / "digest.json"))
+    monkeypatch.setenv("HERMES_AUTORESEARCH_RECONCILE_SUMMARY_PATH", str(iso / "last-reconcile.json"))
+    monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", str(iso / "vetoed_levers.json"))
+
+
 @pytest.fixture()
 def audit(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path))
