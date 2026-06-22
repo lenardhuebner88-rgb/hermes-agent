@@ -135,6 +135,27 @@ async def test_gateway_stop_drains_running_agents_before_disconnect():
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_does_not_count_gracefully_drained_agents_as_restart_failures():
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    runner._increment_restart_failure_counts = MagicMock()
+
+    running_agent = MagicMock()
+    runner._running_agents = {"session": running_agent}
+
+    async def finish_agent():
+        await asyncio.sleep(0.05)
+        runner._running_agents.clear()
+
+    asyncio.create_task(finish_agent())
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    runner._increment_restart_failure_counts.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_interrupts_after_drain_timeout():
     runner, adapter = make_restart_runner()
     runner._restart_drain_timeout = 0.05

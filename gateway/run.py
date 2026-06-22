@@ -6752,6 +6752,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 _sk, _e,
                             )
 
+            _interrupted_session_keys: set[str] = set()
             if timed_out:
                 logger.warning(
                     "Gateway drain timed out after %.1fs with %d active agent(s); interrupting remaining work.",
@@ -6785,6 +6786,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 for _sk, _agent in list(self._running_agents.items()):
                     if _agent is _AGENT_PENDING_SENTINEL:
                         continue
+                    _interrupted_session_keys.add(_sk)
                     try:
                         self.session_store.mark_resume_pending(_sk, _resume_reason)
                     except Exception as _e:
@@ -6989,8 +6991,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # for sessions that were running.  If a session hits the
             # threshold (3 consecutive restarts while active), the next
             # startup auto-suspends it — breaking the loop.
-            if active_agents:
-                self._increment_restart_failure_counts(set(active_agents.keys()))
+            if _interrupted_session_keys:
+                self._increment_restart_failure_counts(_interrupted_session_keys)
 
             if self._restart_requested and self._restart_command_source is None:
                 try:
