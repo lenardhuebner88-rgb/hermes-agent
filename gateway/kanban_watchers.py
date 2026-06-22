@@ -667,6 +667,23 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
+def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
+    """Parse config booleans from YAML/env-shaped values."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
     """Take an exclusive, non-blocking advisory lock for the sole dispatcher.
 
@@ -760,7 +777,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: cannot load config (%s); disabled", exc)
             return
         kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-        if not kanban_cfg.get("dispatch_in_gateway", True):
+        if not _coerce_config_bool(
+            kanban_cfg.get("dispatch_in_gateway", True), default=True
+        ):
             logger.info(
                 "kanban notifier: disabled via config kanban.dispatch_in_gateway=false"
             )
@@ -1626,7 +1645,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: cannot load config (%s); disabled", exc)
             return
         kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-        if not kanban_cfg.get("dispatch_in_gateway", True):
+        if not _coerce_config_bool(
+            kanban_cfg.get("dispatch_in_gateway", True), default=True
+        ):
             logger.info(
                 "kanban dispatcher: disabled via config kanban.dispatch_in_gateway=false"
             )
@@ -1738,7 +1759,9 @@ class GatewayKanbanWatchersMixin:
             )
             failure_limit = _kb.DEFAULT_FAILURE_LIMIT
 
-        auto_retry_blocked = bool(kanban_cfg.get("auto_retry_blocked", False))
+        auto_retry_blocked = _coerce_config_bool(
+            kanban_cfg.get("auto_retry_blocked", False), default=False
+        )
         raw_auto_retry_backoff = kanban_cfg.get(
             "auto_retry_blocked_backoff_seconds",
             _kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
@@ -1810,7 +1833,9 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
-        serialize_by_repo = bool(kanban_cfg.get("serialize_by_repo", True))
+        serialize_by_repo = _coerce_config_bool(
+            kanban_cfg.get("serialize_by_repo", True), default=True
+        )
         if not serialize_by_repo:
             logger.info("kanban dispatcher: serialize_by_repo=False (per-repo lock OFF)")
 
