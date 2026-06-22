@@ -6943,7 +6943,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
             )
 
-            from gateway.status import remove_pid_file, release_gateway_runtime_lock
+            from gateway.status import (
+                _get_process_start_time,
+                release_all_scoped_locks,
+                remove_pid_file,
+                release_gateway_runtime_lock,
+            )
+            try:
+                _released_locks = release_all_scoped_locks(
+                    owner_pid=os.getpid(),
+                    owner_start_time=_get_process_start_time(os.getpid()),
+                )
+                if _released_locks:
+                    logger.info(
+                        "Released %d scoped lock(s) owned by this gateway during shutdown.",
+                        _released_locks,
+                    )
+            except Exception as _e:
+                logger.debug("Scoped lock cleanup during shutdown failed: %s", _e)
             remove_pid_file()
             release_gateway_runtime_lock()
 

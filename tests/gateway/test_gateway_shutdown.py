@@ -92,6 +92,26 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_releases_owned_scoped_locks_after_disconnect_error():
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock(side_effect=RuntimeError("disconnect wedged"))
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch("gateway.status._get_process_start_time", return_value=12345),
+        patch("gateway.status.release_all_scoped_locks", return_value=2) as release_locks,
+    ):
+        await runner.stop()
+
+    release_locks.assert_called_once_with(
+        owner_pid=gateway_run.os.getpid(),
+        owner_start_time=12345,
+    )
+    assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
     disconnect_mock = AsyncMock()
