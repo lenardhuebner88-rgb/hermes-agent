@@ -716,26 +716,44 @@ def test_artifact_policy_missing_message_names_recovery():
     [
         "screenshots/login.png",
         "screenshots/nested/dialog.png",
-        "playwright/.auth/state.json",
-        "playwright/.auth/user.json",
     ],
 )
 def test_common_visual_qa_dirs_are_preservable(path):
-    # Regression: screenshots/ and playwright/.auth/ are emitted by common
-    # visual-QA tooling. They must preserve to the Vault receipt, not park as
-    # DIRTY_WORKTREE just because they sit outside the original 5 prefixes.
+    # Regression: screenshots/ is emitted by common visual-QA tooling.
+    # It must preserve to the Vault receipt, not park as DIRTY_WORKTREE
+    # just because it sits outside the original 5 prefixes.
     assert kwt._is_preservable_artifact_path(path) is True
     assert kwt._classify_dirty_paths([path]) == kwt.PRESERVABLE_ARTIFACTS_CLASS
 
 
-def test_screenshots_and_auth_classify_as_preservable_together():
-    paths = ["screenshots/home.png", "playwright/.auth/state.json"]
+@pytest.mark.parametrize(
+    "path",
+    [
+        "playwright/.auth/state.json",
+        "playwright/.auth/user.json",
+        "playwright/.auth/subdir/token.json",
+    ],
+)
+def test_playwright_auth_dir_is_neither_preserved_nor_parked(path):
+    # Secret-safety regression: playwright/.auth/ holds storageState
+    # (session tokens). It must NOT be preservable (would copy secrets to
+    # the Vault via shutil.copy2) and must NOT park as DIRTY_WORKTREE.
+    # Instead it is ignored entirely by dirty_files().
+    assert kwt._is_preservable_artifact_path(path) is False
+    assert kwt._is_ignorable_dirty_path(path) is True
+
+
+def test_screenshots_classify_as_preservable():
+    paths = ["screenshots/home.png", "screenshots/error.png"]
     assert kwt._classify_dirty_paths(paths) == kwt.PRESERVABLE_ARTIFACTS_CLASS
 
 
-def test_new_preservable_prefixes_are_in_allowlist():
-    assert "screenshots/" in kwt._PRESERVABLE_ARTIFACT_PREFIXES
-    assert "playwright/.auth/" in kwt._PRESERVABLE_ARTIFACT_PREFIXES
+def test_playwright_auth_does_not_park_dirty_worktree():
+    # When playwright/.auth/ is the only dirty path, dirty_files() filters
+    # it out entirely → empty list → no DIRTY_WORKTREE classification.
+    assert kwt.dirty_files.__name__  # sanity: function exists
+    assert kwt._is_ignorable_dirty_path("playwright/.auth/state.json")
+    assert kwt._is_ignorable_dirty_path("playwright/.auth/subdir/token.json")
 
 
 def test_preservable_screenshots_with_source_change_still_parks():

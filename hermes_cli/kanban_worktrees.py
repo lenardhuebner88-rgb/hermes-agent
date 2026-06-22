@@ -53,6 +53,11 @@ WORKTREES_NAMESPACE = "kanban"
 # provisioner plants (never committed).
 _IGNORED_DIRTY_PREFIXES = (
     f"{WORKTREES_DIRNAME}/",
+    # Playwright storageState dir: holds session tokens / auth secrets.
+    # Must NEVER be preserved to the Vault receipt tree (secret leak).
+    # Ignored from dirty-file detection so it doesn't park the chain
+    # either — it's a tool byproduct like node_modules.
+    "playwright/.auth/",
 )
 _IGNORED_DIRTY_PATHS = (
     ".deliverable.md",
@@ -88,16 +93,15 @@ _PRESERVABLE_ARTIFACT_PREFIXES = (
     "test-results/",
     "visual-qa/",
     "artifacts/",
-    # Common visual-QA output dirs: bare `screenshots/` (Playwright/Cypress
-    # screenshot dumps) and `playwright/.auth/` (Playwright storageState).
-    # These previously parked as DIRTY_WORKTREE; preserve them to the receipt
-    # tree instead. NOTE: `playwright/.auth/` may hold auth storageState
-    # (session tokens) — Playwright's convention is to gitignore it, which keeps
-    # it invisible to `dirty_files()` (porcelain WITHOUT --ignored). This entry
-    # only does work for a repo that did NOT gitignore it; see the dispatch
-    # disposition for the secret-persistence caveat.
+    # Common visual-QA output dir: bare `screenshots/` (Playwright/Cypress
+    # screenshot dumps). Previously parked as DIRTY_WORKTREE; preserve to the
+    # receipt tree instead.
+    #
+    # NOTE: `playwright/.auth/` is deliberately NOT here — it holds auth
+    # storageState (session tokens). Preserving it would copy secrets into
+    # the Vault receipt tree via shutil.copy2. It is ignored in dirty_files()
+    # via _IGNORED_DIRTY_PREFIXES instead, so it neither parks nor preserves.
     "screenshots/",
-    "playwright/.auth/",
 )
 _ARTIFACT_LIKE_PREFIXES = _PRESERVABLE_ARTIFACT_PREFIXES + (
     "blob-report/",
