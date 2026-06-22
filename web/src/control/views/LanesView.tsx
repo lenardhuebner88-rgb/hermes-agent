@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowDown, ArrowUp, Check, ClipboardCheck, Lock, Plus, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Check, ClipboardCheck, Lock, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Led, StatusPill, ToneCallout } from "../components/atoms";
 import { FleetEmptyState, FleetPanel } from "../components/fleet/atoms";
@@ -24,6 +24,7 @@ import {
   profilesFromEditorRows,
   smokeCheckLaneConfig,
   updateLane,
+  runLaneAuthSmoke,
   FALLBACK_MODELS,
   type EditorRow,
   type LaneFallbackProvider,
@@ -32,10 +33,20 @@ import {
   type OpenRouterModelImportResult,
   type OpenRouterModelImportStatus,
   type LaneSpawnCheckResult,
+  type LaneAuthSmokeResponse,
+  type LaneAuthSmokeResult,
+  type LaneAuthSmokeScope,
+  type LaneAuthSmokeSummary,
   type LaneSpawnHealth,
   type LaneSpawnHealthStatus,
   type LanesResponse,
 } from "./lanes/api";
+import {
+  authSmokeButtonLabel,
+  authSmokeDisabled,
+  authSmokeRenderableResults,
+  laneAuthSmokeTone,
+} from "./lanes/authSmoke";
 
 // Lane strings live here (not in i18n/de.ts) so this feature touches no
 // shared files a parallel session may be editing.
@@ -66,6 +77,28 @@ const t = {
   workerCheck: "Worker-Check",
   workerCheckRunning: "Prüfe …",
   smokeOk: "Worker-Check ok",
+  authDirtyHint: "Ungespeicherte Aenderungen: erst uebernehmen, dann Auth pruefen.",
+  authCheckSummary: (ok: number, total: number) => `${ok}/${total} Live OK`,
+  authScopeSummary: (checked: number, total: number) => `${checked}/${total} Rollen geprueft`,
+  authExact: "Antwort exakt",
+  authExactViaFallback: "Exakte Antwort ueber Fallback",
+  authNotExact: "Antwort nicht exakt",
+  authDecisionReady: "Lane einsatzbereit",
+  authDecisionRestricted: "Lane eingeschraenkt",
+  authDecisionBlocked: "Lane blockiert",
+  authFallbackActive: "Fallback aktiv",
+  authUnchecked: (n: number) => `${n} nicht geprueft`,
+  authSkipped: (n: number) => `${n} uebersprungen`,
+  authBlocked: (n: number) => `${n} blockiert`,
+  authFallbackCount: (n: number) => `${n} Fallback`,
+  authStatusOk: "Live OK",
+  authStatusFallback: "Fallback",
+  authStatusAuth: "Auth Fehler",
+  authStatusQuota: "Quota/Rate",
+  authStatusTimeout: "Timeout",
+  authStatusConfig: "Config",
+  authStatusSkipped: "Skipped",
+  authStatusError: "Fehler",
   smokeWarn: "Worker-Check warnt",
   smokeError: "Worker-Check Fehler",
   smokeUnavailable: "Worker-Check nicht verfügbar",
@@ -284,6 +317,7 @@ interface EditorActions {
   onCreate: (name: string, rows: EditorRow[]) => void;
   onDelete: (lane: Lane) => void;
   onImportOpenRouterModels: (rawText: string) => Promise<OpenRouterModelImportResult>;
+  onRunAuthSmoke: (laneId: string) => Promise<LaneAuthSmokeResponse>;
 }
 
 type RowCheckState =
@@ -303,6 +337,67 @@ function rowSmokeLabel(state: RowCheckState): string {
   if (state.status === "healthy") return t.smokeOk;
   if (state.status === "unhealthy" || state.status === "unknown") return t.smokeWarn;
   return t.smokeError;
+}
+
+function laneAuthSmokeLabel(result: LaneAuthSmokeResult): string {
+  if (result.status === "ok") return t.authStatusOk;
+  if (result.status === "fallback") return t.authStatusFallback;
+  if (result.status === "auth_error") return t.authStatusAuth;
+  if (result.status === "quota_or_rate_limit") return t.authStatusQuota;
+  if (result.status === "timeout") return t.authStatusTimeout;
+  if (result.status === "config_error") return t.authStatusConfig;
+  if (result.status === "skipped") return t.authStatusSkipped;
+  return t.authStatusError;
+}
+
+function laneAuthSmokeReason(result: LaneAuthSmokeResult): string {
+  if (result.reason) return result.reason;
+  const observed = `${result.observed_provider ?? "-"}/${result.observed_model ?? "-"}`;
+  return `requested ${result.requested_provider || "-"}/${result.requested_model || "-"}; observed ${observed}`;
+}
+
+function authSmokeDecisionLabel(summary: LaneAuthSmokeSummary | null): string {
+  if (!summary) return "";
+  if (summary.decision === "ready") return t.authDecisionReady;
+  if (summary.decision === "restricted") return t.authDecisionRestricted;
+  return t.authDecisionBlocked;
+}
+
+function authSmokeDecisionTone(summary: LaneAuthSmokeSummary | null): "emerald" | "amber" | "red" {
+  if (summary?.decision === "ready") return "emerald";
+  if (summary?.decision === "restricted") return "amber";
+  return "red";
+}
+
+function authSmokeExactLabel(result: LaneAuthSmokeResult): string | null {
+  if (result.status === "skipped" || result.status === "config_error") return null;
+  if (result.response_exact && result.fallback_activated) return t.authExactViaFallback;
+  return result.response_exact ? t.authExact : t.authNotExact;
+}
+
+function authSmokeUncheckedCount(summary: LaneAuthSmokeSummary | null): number {
+  if (!summary) return 0;
+  return Math.max(0, summary.total_role_count - summary.checked_role_count);
+}
+
+function authSmokeSummaryParts(summary: LaneAuthSmokeSummary | null): string {
+  if (!summary) return "";
+  const unchecked = authSmokeUncheckedCount(summary);
+  return [
+    `${summary.ok_count} OK`,
+    summary.blocking_roles.length > 0 ? t.authBlocked(summary.blocking_roles.length) : null,
+    summary.fallback_roles.length > 0 ? t.authFallbackCount(summary.fallback_roles.length) : null,
+    summary.skipped_roles.length > 0 ? t.authSkipped(summary.skipped_roles.length) : null,
+    unchecked > 0 ? t.authUnchecked(unchecked) : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function authSmokeSortRank(result: LaneAuthSmokeResult): number {
+  if (["auth_error", "quota_or_rate_limit", "timeout", "config_error", "error"].includes(result.status)) return 0;
+  if (result.status === "fallback" || result.fallback_activated) return 1;
+  if (result.status === "ok") return 2;
+  if (result.status === "skipped") return 4;
+  return 3;
 }
 
 function importStatusTone(status: OpenRouterModelImportStatus): "emerald" | "amber" | "red" | "zinc" {
@@ -389,12 +484,18 @@ export function LanesEditor({
   lane,
   busy,
   actions,
+  initialAuthSmokeResults = [],
+  initialAuthSmokeSummary = null,
+  initialAuthSmokeScope = null,
   initialPendingDelete = null,
 }: {
   data: LanesResponse;
   lane: Lane;
   busy: boolean;
   actions: EditorActions;
+  initialAuthSmokeResults?: LaneAuthSmokeResult[];
+  initialAuthSmokeSummary?: LaneAuthSmokeSummary | null;
+  initialAuthSmokeScope?: LaneAuthSmokeScope | null;
   initialPendingDelete?: string | null;
 }) {
   const models = data.models && data.models.length > 0 ? data.models : FALLBACK_MODELS;
@@ -412,6 +513,11 @@ export function LanesEditor({
     () => Object.fromEntries(rows.map((row) => [row.profile, laneEntryWarnings(row)])),
     [rows],
   );
+  const [authSmokeRunning, setAuthSmokeRunning] = useState(false);
+  const [authSmokeResults, setAuthSmokeResults] = useState<LaneAuthSmokeResult[]>(initialAuthSmokeResults);
+  const [authSmokeSummary, setAuthSmokeSummary] = useState<LaneAuthSmokeSummary | null>(initialAuthSmokeSummary);
+  const [authSmokeScope, setAuthSmokeScope] = useState<LaneAuthSmokeScope | null>(initialAuthSmokeScope);
+  const [authSmokeError, setAuthSmokeError] = useState<string | null>(null);
   const warningEntries = useMemo(
     () => rows.flatMap((row) => rowWarnings[row.profile].map((text) => ({ profile: row.profile, text }))),
     [rows, rowWarnings],
@@ -443,6 +549,27 @@ export function LanesEditor({
   ]
     .filter(Boolean)
     .join(" · ");
+  const authSmokeVisibleResults = authSmokeRenderableResults(authSmokeResults, {
+    running: authSmokeRunning,
+    error: authSmokeError,
+  });
+  const authSmokeSortedResults = useMemo(
+    () => [...authSmokeVisibleResults].sort((a, b) => authSmokeSortRank(a) - authSmokeSortRank(b)),
+    [authSmokeVisibleResults],
+  );
+  const isAuthSmokeDisabled = authSmokeDisabled({
+    busy,
+    running: authSmokeRunning,
+    hasLaneId: Boolean(lane.id),
+    dirty,
+  });
+
+  const clearAuthSmokeForDraftEdit = useCallback(() => {
+    setAuthSmokeResults([]);
+    setAuthSmokeSummary(null);
+    setAuthSmokeScope(null);
+    setAuthSmokeError(t.authDirtyHint);
+  }, []);
 
   const runRowCheck = useCallback(async (row: EditorRow) => {
     const entry = resolveRowCheckEntry(row, data);
@@ -491,12 +618,13 @@ export function LanesEditor({
       prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)),
     );
     setDirty(true);
+    clearAuthSmokeForDraftEdit();
     setRowChecks((prev) => {
       const next = { ...prev };
       delete next[profile];
       return next;
     });
-  }, []);
+  }, [clearAuthSmokeForDraftEdit]);
 
   const updateFallback = useCallback((
     profile: string,
@@ -513,12 +641,13 @@ export function LanesEditor({
       }),
     );
     setDirty(true);
+    clearAuthSmokeForDraftEdit();
     setRowChecks((prev) => {
       const next = { ...prev };
       delete next[profile];
       return next;
     });
-  }, []);
+  }, [clearAuthSmokeForDraftEdit]);
 
   const seedFallback = useCallback((row: EditorRow): LaneFallbackProvider | null => {
     const existing = row.defaultFallbackProviders[0];
@@ -563,6 +692,25 @@ export function LanesEditor({
     }
   }, [actions, openRouterPaste]);
 
+  const runAuthSmoke = useCallback(async () => {
+    setAuthSmokeRunning(true);
+    setAuthSmokeError(null);
+    setAuthSmokeResults([]);
+    setAuthSmokeSummary(null);
+    setAuthSmokeScope(null);
+    try {
+      const result = await actions.onRunAuthSmoke(lane.id);
+      setAuthSmokeResults(result.results);
+      setAuthSmokeSummary(result.summary ?? null);
+      setAuthSmokeScope(result.scope ?? null);
+    } catch (e) {
+      setAuthSmokeResults([]);
+      setAuthSmokeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthSmokeRunning(false);
+    }
+  }, [actions, lane.id]);
+
   const removeFallback = useCallback((profile: string, index: number) => {
     setRows((prev) =>
       prev.map((row) =>
@@ -572,12 +720,14 @@ export function LanesEditor({
       ),
     );
     setDirty(true);
+    clearAuthSmokeForDraftEdit();
+
     setRowChecks((prev) => {
       const next = { ...prev };
       delete next[profile];
       return next;
     });
-  }, []);
+  }, [clearAuthSmokeForDraftEdit]);
 
   const moveFallback = useCallback((profile: string, index: number, delta: -1 | 1) => {
     setRows((prev) =>
@@ -592,12 +742,13 @@ export function LanesEditor({
       }),
     );
     setDirty(true);
+    clearAuthSmokeForDraftEdit();
     setRowChecks((prev) => {
       const next = { ...prev };
       delete next[profile];
       return next;
     });
-  }, []);
+  }, [clearAuthSmokeForDraftEdit]);
 
   return (
     <div className="space-y-4">
@@ -655,6 +806,70 @@ export function LanesEditor({
 
       {/* Standardansicht: ein Dropdown pro Rolle. */}
       <FleetPanel eyebrow={t.modelsTitle} meta={profilesMeta}>
+        <div className="mb-3 space-y-2 border-b border-[var(--hc-border)] pb-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button
+              size="sm"
+              ghost
+              className="hc-hit justify-center"
+              disabled={isAuthSmokeDisabled}
+              onClick={() => void runAuthSmoke()}
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              {authSmokeButtonLabel(dirty, authSmokeRunning)}
+            </Button>
+            {authSmokeSummary ? (
+              <span className="text-xs hc-dim">
+                {authSmokeSummaryParts(authSmokeSummary)}
+              </span>
+            ) : authSmokeVisibleResults.length > 0 ? (
+              <span className="text-xs hc-dim">
+                {t.authCheckSummary(authSmokeVisibleResults.filter((result) => result.status === "ok").length, authSmokeVisibleResults.length)}
+              </span>
+            ) : null}
+          </div>
+          {authSmokeError ? <ToneCallout tone="red">{authSmokeError}</ToneCallout> : null}
+          {authSmokeSummary ? (
+            <ToneCallout tone={authSmokeDecisionTone(authSmokeSummary)}>
+              <span className="block font-medium">{authSmokeDecisionLabel(authSmokeSummary)}</span>
+              <span className="block text-xs hc-soft">{authSmokeSummary.recommended_next_action}</span>
+              <span className="block text-xs hc-dim">
+                {authSmokeScope
+                  ? t.authScopeSummary(authSmokeScope.checked_role_count, authSmokeScope.total_role_count)
+                  : t.authScopeSummary(authSmokeSummary.checked_role_count, authSmokeSummary.total_role_count)}
+              </span>
+            </ToneCallout>
+          ) : null}
+          {authSmokeVisibleResults.length > 0 ? (
+            <ul className="divide-y divide-[var(--hc-border)] border-y border-[var(--hc-border)] text-xs">
+              {authSmokeSortedResults.map((result) => {
+                const observed = `${result.observed_provider ?? "-"}/${result.observed_model ?? "-"}`;
+                const exactLabel = authSmokeExactLabel(result);
+                return (
+                  <li
+                    key={`${result.role}:${result.requested_provider}:${result.requested_model}`}
+                    className="grid gap-2 py-2 sm:grid-cols-[minmax(0,110px)_auto_minmax(0,1fr)] sm:items-start"
+                  >
+                    <span className="min-w-0 break-words font-medium text-white">{result.role}</span>
+                    <span className="flex flex-wrap gap-1">
+                      <StatusPill tone={laneAuthSmokeTone(result.status)} label={laneAuthSmokeLabel(result)} size="sm" />
+                      {result.fallback_activated ? (
+                        <StatusPill tone="amber" label={t.authFallbackActive} size="sm" />
+                      ) : null}
+                    </span>
+                    <span className="min-w-0 space-y-0.5 break-words hc-soft">
+                      <span className="block">
+                        {result.requested_provider || "-"}/{result.requested_model || "-"} -&gt; {observed}
+                      </span>
+                      {exactLabel ? <span className="block">{exactLabel}</span> : null}
+                      <span className="block hc-dim">{laneAuthSmokeReason(result)}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+        </div>
         <ul className="space-y-3">
           {rows.map((row) => {
             const ready = readiness[row.profile];
@@ -1265,6 +1480,7 @@ export function LanesView(_props: { density?: Density }) {
         setBusy(false);
       }
     },
+    onRunAuthSmoke: (laneId) => runLaneAuthSmoke({ laneId, timeoutSeconds: 45 }),
   };
 
   return (

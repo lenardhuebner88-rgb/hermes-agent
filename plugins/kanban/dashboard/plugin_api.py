@@ -3179,6 +3179,298 @@ _OPENROUTER_MODEL_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*(?::[A-Za-z0-9._+-]+)?$"
 )
 _OPENROUTER_IMPORT_LIMIT = 25
+LANES_AUTH_SMOKE_ROLE_LIMIT = 12
+
+class LaneAuthSmokeBody(BaseModel):
+    lane_id: Optional[ShortText] = None
+    roles: Optional[list[ShortText]] = None
+    timeout_seconds: Optional[int] = 45
+
+
+_LANES_PROVIDER_RE = re.compile(r"provider=([A-Za-z0-9_.:/-]+)")
+_LANES_MODEL_RE = re.compile(r"model=([^\s,]+)")
+_LANES_SESSION_RE = re.compile(r"session=([A-Za-z0-9_.:-]+)|\[([A-Za-z0-9_.:-]+)\]")
+_LANES_AUTH_RE = re.compile(
+    r"\b(401|403)\b|missing bearer|unauthorized|invalid api|empty API key|authentication",
+    re.IGNORECASE,
+)
+_LANES_QUOTA_RE = re.compile(
+    r"\b(402|429)\b|quota|rate limit|RESOURCE_EXHAUSTED",
+    re.IGNORECASE,
+)
+_LANES_TIMEOUT_RE = re.compile(r"timeout|timed out", re.IGNORECASE)
+_LANES_SECRET_TEXT_RE = re.compile(
+    r"(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s,;]+|"
+    r"(bearer\s+)[^\s,;]+|"
+    r"(token\s+)[^\s,;]+|"
+    r"([\"']?(?:api[_-]?key|token|secret)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;]+[\"']?|"
+    r"([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|KEY)=)[^\s,;]+|"
+    r"((?:sk-proj|sk|ghp)[_-][A-Za-z0-9_-]+)"
+)
+
+
+def _parse_lanes_auth_smoke_log(
+    lines: list[str],
+    *,
+    session_id: Optional[str] = None,
+) -> dict[str, object]:
+    scoped_lines = [line for line in lines if session_id and session_id in line] if session_id else list(lines)
+    if session_id and not scoped_lines:
+        scoped_lines = list(lines)
+
+    observed_provider: Optional[str] = None
+    observed_model: Optional[str] = None
+    parsed_session_id: Optional[str] = session_id
+    fallback_activated = False
+    error_class: Optional[str] = None
+
+    for line in scoped_lines:
+        if "fallback" in line.lower():
+            fallback_activated = True
+        provider_match = _LANES_PROVIDER_RE.search(line)
+        if provider_match:
+            observed_provider = provider_match.group(1)
+        model_match = _LANES_MODEL_RE.search(line)
+        if model_match:
+            observed_model = model_match.group(1)
+        session_match = _LANES_SESSION_RE.search(line)
+        if session_match and not parsed_session_id:
+            parsed_session_id = session_match.group(1) or session_match.group(2)
+        if _LANES_AUTH_RE.search(line):
+            error_class = "auth_error"
+        elif _LANES_QUOTA_RE.search(line):
+            error_class = "quota_or_rate_limit"
+        elif _LANES_TIMEOUT_RE.search(line):
+            error_class = "timeout"
+
+    return {
+        "observed_provider": observed_provider,
+        "observed_model": observed_model,
+        "fallback_activated": fallback_activated,
+        "error_class": error_class,
+        "session_id": parsed_session_id,
+    }
+
+
+def _redact_lanes_auth_smoke_text(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        for prefix in match.groups():
+            if prefix:
+                lowered = prefix.lower()
+                if lowered.startswith(("sk-", "sk_", "sk-proj", "ghp_", "ghp-")):
+                    return "<redacted>"
+                return f"{prefix}<redacted>"
+        return "<redacted>"
+
+    return _LANES_SECRET_TEXT_RE.sub(repl, text)
+
+
+def _build_lanes_auth_smoke_command(
+    *,
+    python_bin: str,
+    profile: str,
+    provider: str,
+    model: str,
+    token: str,
+) -> list[str]:
+    return [
+        python_bin,
+        "-m",
+        "hermes_cli.main",
+        "--profile",
+        profile,
+        "chat",
+        "-q",
+        f"Reply exactly {token}",
+        "--max-turns",
+        "1",
+        "-Q",
+        "--ignore-rules",
+        "--source",
+        "lanes-auth-smoke",
+        "--provider",
+        provider,
+        "--model",
+        model,
+    ]
+
+
+def _derive_lanes_auth_smoke_status(
+    *,
+    returncode: int | str,
+    response_exact: bool,
+    requested_provider: str,
+    requested_model: str,
+    observed_provider: Optional[str],
+    observed_model: Optional[str],
+    fallback_activated: bool,
+    error_class: Optional[str],
+) -> str:
+    if error_class:
+        return error_class
+    if returncode == "timeout":
+        return "timeout"
+    if fallback_activated:
+        return "fallback"
+    if observed_provider and observed_provider != requested_provider:
+        return "fallback"
+    if observed_model and observed_model != requested_model:
+        return "fallback"
+    if returncode == 0 and response_exact and observed_provider == requested_provider and observed_model == requested_model:
+        return "ok"
+    return "error"
+
+
+def _explain_lanes_auth_smoke_result(
+    *,
+    status: str,
+    requested_provider: str,
+    requested_model: str,
+    observed_provider: Optional[str],
+    observed_model: Optional[str],
+    response_exact: bool,
+    fallback_activated: bool,
+    error_class: Optional[str],
+) -> str:
+    observed = f"{observed_provider or '-'}/{observed_model or '-'}"
+    parts = [
+        f"requested {requested_provider or '-'}/{requested_model or '-'}",
+        f"observed {observed}",
+        "exact response" if response_exact else "response was not exact",
+    ]
+    if fallback_activated or status == "fallback":
+        parts.append("fallback activated")
+    if error_class:
+        parts.append(f"error_class={error_class}")
+    return "; ".join(parts)
+
+
+def _summarize_lanes_auth_smoke(
+    results: list[dict[str, object]],
+    *,
+    total_role_count: int,
+    checked_role_count: int,
+    truncated: bool,
+) -> dict[str, object]:
+    blocking_statuses = {"auth_error", "quota_or_rate_limit", "timeout", "config_error", "error"}
+    blocking_roles = [
+        str(item.get("role") or item.get("profile") or "unknown")
+        for item in results
+        if item.get("status") in blocking_statuses
+    ]
+    fallback_roles = [
+        str(item.get("role") or item.get("profile") or "unknown")
+        for item in results
+        if bool(item.get("fallback_activated")) or item.get("status") == "fallback"
+    ]
+    skipped_roles = [
+        str(item.get("role") or item.get("profile") or "unknown")
+        for item in results
+        if item.get("status") == "skipped"
+    ]
+    ok_count = sum(1 for item in results if item.get("status") == "ok")
+
+    if not results:
+        decision = "blocked"
+        next_action = "Keine Rollen geprüft; Lane-Konfiguration oder Profilkatalog prüfen."
+    elif blocking_roles:
+        decision = "blocked"
+        first = blocking_roles[0]
+        next_action = f"{first.capitalize()} zuerst reparieren oder bewusst auf ein funktionierendes Modell umstellen."
+    elif fallback_roles:
+        decision = "restricted"
+        first = fallback_roles[0]
+        next_action = f"{first.capitalize()} verwendet Fallback; requested/observed Route prüfen."
+    elif skipped_roles or truncated or checked_role_count < total_role_count:
+        decision = "restricted"
+        next_action = "Nicht geprüfte oder übersprungene Rollen vor Live-Freigabe bewusst bewerten."
+    else:
+        decision = "ready"
+        next_action = "Lane kann nach kontrolliertem Dashboard-Respawn erneut produktiv verifiziert werden."
+
+    return {
+        "decision": decision,
+        "safe_to_activate": decision == "ready",
+        "ok_count": ok_count,
+        "blocking_roles": blocking_roles,
+        "fallback_roles": fallback_roles,
+        "skipped_roles": skipped_roles,
+        "checked_role_count": checked_role_count,
+        "total_role_count": total_role_count,
+        "truncated": truncated,
+        "recommended_next_action": next_action,
+    }
+
+
+def _select_lanes_auth_smoke_roles(
+    lane: dict[str, object],
+    requested_roles: list[str] | None,
+    catalog: list[dict],
+) -> list[dict[str, object]]:
+    lane_profiles = lane.get("profiles") if isinstance(lane, dict) else {}
+    if not isinstance(lane_profiles, dict):
+        lane_profiles = {}
+    catalog_by_name = {
+        str(item.get("name") or ""): item
+        for item in catalog
+        if str(item.get("name") or "").strip()
+    }
+
+    requested = [str(role).strip() for role in (requested_roles or []) if str(role).strip()]
+    if requested:
+        names = requested
+    else:
+        names = list(catalog_by_name)
+        names.extend(name for name in lane_profiles if name not in catalog_by_name)
+
+    results: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        lane_entry = lane_profiles.get(name) if isinstance(lane_profiles.get(name), dict) else {}
+        catalog_entry = catalog_by_name.get(name, {})
+        runtime = str(lane_entry.get("worker_runtime") or catalog_entry.get("worker_runtime") or "hermes")
+        provider = lane_entry.get("provider")
+        if provider is None:
+            provider = catalog_entry.get("default_provider")
+        model = lane_entry.get("model")
+        if model is None:
+            model = catalog_entry.get("default_model")
+        results.append({
+            "role": name,
+            "profile": name,
+            "runtime": runtime,
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+        })
+    return results
+
+
+def _lanes_auth_smoke_profile_log_path(profile: str) -> Path:
+    try:
+        from hermes_cli.profiles import resolve_profile_env
+
+        return Path(resolve_profile_env(profile)) / "logs" / "agent.log"
+    except Exception:
+        return Path.home() / ".hermes" / "profiles" / profile / "logs" / "agent.log"
+
+
+def _count_lanes_auth_smoke_log_lines(path: Path) -> int:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for _ in handle)
+    except FileNotFoundError:
+        return 0
+
+
+def _read_lanes_auth_smoke_log_lines(path: Path, start_line: int) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read().splitlines()[start_line:]
+    except FileNotFoundError:
+        return []
 
 
 def _normalize_openrouter_import_token(value: object) -> str:
@@ -3418,6 +3710,191 @@ def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
         "reason": "Hermes worker profile is available",
         "dispatcher_path": dispatcher_path,
         "resolved_model": resolved_model,
+    }
+
+def _extract_lanes_auth_smoke_session_id(text: str, lines: list[str], *, token: str) -> Optional[str]:
+    for line in lines:
+        if token not in line and "lanes-auth-smoke" not in line:
+            continue
+        match = _LANES_SESSION_RE.search(line)
+        if match:
+            return match.group(1) or match.group(2)
+    match = _LANES_SESSION_RE.search(text)
+    if match:
+        return match.group(1) or match.group(2)
+    for line in reversed(lines):
+        match = _LANES_SESSION_RE.search(line)
+        if match:
+            return match.group(1) or match.group(2)
+    return None
+
+
+def _lanes_auth_smoke_response_exact(stdout: str, token: str) -> bool:
+    for line in stdout.splitlines():
+        cleaned = line.strip().strip("`\"'")
+        if cleaned == token:
+            return True
+    return stdout.strip().strip("`\"'") == token
+
+
+def _run_single_lanes_auth_smoke(role: dict[str, object], *, timeout_seconds: int) -> dict[str, object]:
+    import secrets
+    import subprocess
+    import sys
+
+    profile = str(role.get("profile") or role.get("role") or "").strip()
+    provider = str(role.get("provider") or "").strip()
+    model = str(role.get("model") or "").strip()
+    runtime = str(role.get("runtime") or "hermes").strip()
+    role_name = str(role.get("role") or profile or "unknown")
+
+    base = {
+        "role": role_name,
+        "profile": profile,
+        "runtime": runtime,
+        "requested_provider": provider,
+        "requested_model": model,
+        "observed_provider": None,
+        "observed_model": None,
+        "response_exact": False,
+        "fallback_activated": False,
+        "auth_ok": False,
+        "session_id": None,
+    }
+    if runtime != "hermes":
+        return {
+            **base,
+            "status": "skipped",
+            "error_class": None,
+            "reason": "unsupported runtime for auth smoke",
+        }
+    if not profile or not provider or not model:
+        return {
+            **base,
+            "status": "config_error",
+            "error_class": "missing_profile_provider_or_model",
+            "reason": "missing profile, provider, or model",
+        }
+
+    agent_root = Path(__file__).resolve().parents[3]
+    log_path = _lanes_auth_smoke_profile_log_path(profile)
+    before_lines = _count_lanes_auth_smoke_log_lines(log_path)
+    token = f"lanes-auth-smoke-{profile}-{secrets.token_hex(3)}"
+    command = _build_lanes_auth_smoke_command(
+        python_bin=sys.executable,
+        profile=profile,
+        provider=provider,
+        model=model,
+        token=token,
+    )
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(agent_root),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+        )
+        returncode: int | str = completed.returncode
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        returncode = "timeout"
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else "timeout"
+
+    new_lines = _read_lanes_auth_smoke_log_lines(log_path, before_lines)
+    session_id = _extract_lanes_auth_smoke_session_id(stdout + "\n" + stderr, new_lines, token=token)
+    parsed = _parse_lanes_auth_smoke_log(new_lines, session_id=session_id)
+    response_exact = _lanes_auth_smoke_response_exact(stdout, token)
+    status = _derive_lanes_auth_smoke_status(
+        returncode=returncode,
+        response_exact=response_exact,
+        requested_provider=provider,
+        requested_model=model,
+        observed_provider=parsed["observed_provider"],
+        observed_model=parsed["observed_model"],
+        fallback_activated=bool(parsed["fallback_activated"]),
+        error_class=parsed["error_class"],
+    )
+    reason = _explain_lanes_auth_smoke_result(
+        status=status,
+        requested_provider=provider,
+        requested_model=model,
+        observed_provider=parsed["observed_provider"],
+        observed_model=parsed["observed_model"],
+        response_exact=response_exact,
+        fallback_activated=bool(parsed["fallback_activated"]),
+        error_class=parsed["error_class"],
+    )
+
+    return {
+        **base,
+        "observed_provider": parsed["observed_provider"],
+        "observed_model": parsed["observed_model"],
+        "response_exact": response_exact,
+        "fallback_activated": parsed["fallback_activated"],
+        "auth_ok": status == "ok",
+        "status": status,
+        "error_class": parsed["error_class"],
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "session_id": parsed["session_id"] or session_id,
+        "reason": reason,
+        "observed_response": _redact_lanes_auth_smoke_text(stdout.strip()[:300]),
+        "stderr_preview": _redact_lanes_auth_smoke_text(stderr.strip()[:300]),
+    }
+
+
+@router.post("/lanes/auth-smoke")
+def lane_auth_smoke_endpoint(
+    payload: LaneAuthSmokeBody,
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    board = _resolve_board(board)
+    timeout_seconds = min(max(int(payload.timeout_seconds or 45), 5), 60)
+    conn = _conn(board=board)
+    try:
+        lanes = kanban_db.list_lanes(conn)
+        lane = None
+        if payload.lane_id:
+            lane = next((item for item in lanes if item.get("id") == payload.lane_id), None)
+        else:
+            lane = next((item for item in lanes if item.get("active")), None)
+        if lane is None:
+            raise HTTPException(status_code=404, detail="lane_not_found")
+    finally:
+        conn.close()
+
+    profiles = _lane_profile_catalog()
+    requested_roles = payload.roles or []
+    all_roles = _select_lanes_auth_smoke_roles(lane, requested_roles, profiles)
+    truncated = len(all_roles) > LANES_AUTH_SMOKE_ROLE_LIMIT
+    roles = all_roles[:LANES_AUTH_SMOKE_ROLE_LIMIT]
+    results = [
+        _run_single_lanes_auth_smoke(role, timeout_seconds=timeout_seconds)
+        for role in roles
+    ]
+    summary = _summarize_lanes_auth_smoke(
+        results,
+        total_role_count=len(all_roles),
+        checked_role_count=len(results),
+        truncated=truncated,
+    )
+    return {
+        "ok": bool(results) and all(item.get("status") in {"ok", "skipped"} for item in results),
+        "lane_id": lane.get("id"),
+        "source": "lanes-auth-smoke",
+        "scope": {
+            "requested_roles": requested_roles,
+            "checked_role_count": len(results),
+            "total_role_count": len(all_roles),
+            "truncated": truncated,
+            "role_limit": LANES_AUTH_SMOKE_ROLE_LIMIT,
+        },
+        "summary": summary,
+        "results": results,
     }
 
 

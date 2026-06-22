@@ -10,6 +10,7 @@ import {
   laneEntryWarnings,
   laneChoiceWarning,
   laneProfileSpawnHealth,
+  runLaneAuthSmoke,
   modelLabel,
   modelsForProvider,
   persistLaneModels,
@@ -91,6 +92,51 @@ describe("lanes api client", () => {
       model: "gpt-5.5",
     });
   });
+
+  it("runLaneAuthSmoke posts lane, roles, and bounded timeout to auth-smoke", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ok: true,
+      lane_id: "lane_1",
+      source: "lanes-auth-smoke",
+      scope: {
+        requested_roles: ["reviewer"],
+        checked_role_count: 1,
+        total_role_count: 1,
+        truncated: false,
+        role_limit: 12,
+      },
+      summary: {
+        decision: "ready",
+        safe_to_activate: true,
+        ok_count: 1,
+        blocking_roles: [],
+        fallback_roles: [],
+        skipped_roles: [],
+        checked_role_count: 1,
+        total_role_count: 1,
+        truncated: false,
+        recommended_next_action: "Lane kann nach kontrolliertem Dashboard-Respawn erneut produktiv verifiziert werden.",
+      },
+      results: [],
+    }));
+
+    const result = await runLaneAuthSmoke({ laneId: "lane_1", roles: ["reviewer"], timeoutSeconds: 30 });
+
+    expect(result.source).toBe("lanes-auth-smoke");
+    expect(result.summary).toBeDefined();
+    expect(result.summary?.decision).toBe("ready");
+    expect(result.scope).toBeDefined();
+    expect(result.scope?.checked_role_count).toBe(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/plugins/kanban/lanes/auth-smoke");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      lane_id: "lane_1",
+      roles: ["reviewer"],
+      timeout_seconds: 30,
+    });
+  });
+
 
   it("importOpenRouterModels posts pasted ids to the smoke/admit endpoint", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({

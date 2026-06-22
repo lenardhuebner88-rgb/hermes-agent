@@ -43,6 +43,23 @@ def _load_plugin_router():
     return mod.router
 
 
+def _load_plugin_module_for_lanes_auth_smoke():
+    """Load a fresh plugin module for pure helper tests."""
+    repo_root = Path(__file__).resolve().parents[2]
+    plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
+
+    spec = importlib.util.spec_from_file_location(
+        "hermes_dashboard_plugin_kanban_lanes_auth_smoke_test", plugin_file,
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+
 def _configure_dashboard_ws(monkeypatch, *, token="secret-xyz", bound_host=None, auth_required=False):
     from hermes_cli import web_server
 
@@ -99,6 +116,255 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
         "include_kanban_status": True,
         "board": None,
     }]
+
+
+# ---------------------------------------------------------------------------
+# POST /lanes/auth-smoke pure helpers
+# ---------------------------------------------------------------------------
+
+
+def test_lanes_auth_smoke_parser_scopes_provider_model_to_session_and_no_fallback():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    lines = [
+        "2026-06-21 INFO [older] agent.conversation_loop: API call #1: model=wrong provider=wrong",
+        "2026-06-21 INFO [session_abc] agent.turn_context: conversation turn: session=session_abc model=z-ai/glm-5.2 provider=openrouter",
+        "2026-06-21 INFO [session_abc] agent.conversation_loop: API call #1: model=z-ai/glm-5.2 provider=openrouter",
+        "2026-06-21 INFO [session_abc] agent.conversation_loop: Turn ended: reason=text_response model=z-ai/glm-5.2 session=session_abc",
+    ]
+
+    result = plugin_api._parse_lanes_auth_smoke_log(lines, session_id="session_abc")
+
+    assert result["observed_provider"] == "openrouter"
+    assert result["observed_model"] == "z-ai/glm-5.2"
+    assert result["fallback_activated"] is False
+    assert result["error_class"] is None
+    assert result["session_id"] == "session_abc"
+
+
+def test_lanes_auth_smoke_parser_detects_fallback_and_errors():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+
+    fallback = plugin_api._parse_lanes_auth_smoke_log([
+        "provider=openrouter model=bad/model",
+        "Fallback activated: provider=openai-codex model=gpt-5.5",
+        "provider=openai-codex model=gpt-5.5 response complete",
+    ])
+    auth = plugin_api._parse_lanes_auth_smoke_log(["401 Missing bearer/basic"])
+    quota = plugin_api._parse_lanes_auth_smoke_log(["429 RESOURCE_EXHAUSTED quota"])
+
+    assert fallback["observed_provider"] == "openai-codex"
+    assert fallback["observed_model"] == "gpt-5.5"
+    assert fallback["fallback_activated"] is True
+    assert auth["error_class"] == "auth_error"
+    assert quota["error_class"] == "quota_or_rate_limit"
+
+
+def test_lanes_auth_smoke_command_is_bounded_and_profile_scoped():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+
+    command = plugin_api._build_lanes_auth_smoke_command(
+        python_bin="/home/piet/.hermes/hermes-agent/venv/bin/python",
+        profile="reviewer",
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        token="lanes-auth-smoke-reviewer-abc123",
+    )
+
+    assert command[:5] == [
+        "/home/piet/.hermes/hermes-agent/venv/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "--profile",
+        "reviewer",
+    ]
+    assert "chat" in command
+    assert "--max-turns" in command
+    assert "1" in command
+    assert "--ignore-rules" in command
+    assert "--source" in command
+    assert "lanes-auth-smoke" in command
+    assert "--provider" in command
+    assert "openrouter" in command
+    assert "--model" in command
+    assert "z-ai/glm-5.2" in command
+
+
+def test_lanes_auth_smoke_redacts_sensitive_text():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    text = "401 OPENROUTER_API_KEY=sk-secret bearer abc token xyz"
+
+    redacted = plugin_api._redact_lanes_auth_smoke_text(text)
+
+    assert "sk-secret" not in redacted
+    assert "bearer abc" not in redacted.lower()
+    assert "token xyz" not in redacted.lower()
+
+
+def test_lanes_auth_smoke_status_and_reasoning_are_honest():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+
+    ok = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="openrouter",
+        requested_model="z-ai/glm-5.2",
+        observed_provider="openrouter",
+        observed_model="z-ai/glm-5.2",
+        fallback_activated=False,
+        error_class=None,
+    )
+    fallback = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="openrouter",
+        requested_model="bad/model",
+        observed_provider="openai-codex",
+        observed_model="gpt-5.5",
+        fallback_activated=True,
+        error_class=None,
+    )
+    reason = plugin_api._explain_lanes_auth_smoke_result(
+        status="fallback",
+        requested_provider="openrouter",
+        requested_model="bad/model",
+        observed_provider="openai-codex",
+        observed_model="gpt-5.5",
+        response_exact=True,
+        fallback_activated=True,
+        error_class=None,
+    )
+
+    assert ok == "ok"
+    assert fallback == "fallback"
+    assert "requested openrouter/bad/model" in reason
+    assert "observed openai-codex/gpt-5.5" in reason
+    assert "fallback activated" in reason
+
+
+def test_lanes_auth_smoke_selects_effective_catalog_roles_and_skips_claude_runtime():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    lane = {
+        "id": "lane_1",
+        "profiles": {
+            "reviewer": {"worker_runtime": "hermes", "provider": "openrouter", "model": "z-ai/glm-5.2"},
+            "premium": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
+        },
+    }
+    catalog = [
+        {"name": "coder", "worker_runtime": "hermes", "default_provider": "openai-codex", "default_model": "gpt-5.4-mini"},
+        {"name": "reviewer", "worker_runtime": "hermes", "default_provider": "openai-codex", "default_model": "gpt-5.5"},
+        {"name": "premium", "worker_runtime": "claude-cli", "default_model": "claude-opus-4-8"},
+    ]
+
+    results = plugin_api._select_lanes_auth_smoke_roles(lane, [], catalog)
+
+    assert [row["role"] for row in results] == ["coder", "reviewer", "premium"]
+    assert results[0]["runtime"] == "hermes"
+    assert results[0]["provider"] == "openai-codex"
+    assert results[0]["model"] == "gpt-5.4-mini"
+    assert results[1]["provider"] == "openrouter"
+    assert results[1]["model"] == "z-ai/glm-5.2"
+    assert results[2]["runtime"] == "claude-cli"
+
+
+def test_lanes_auth_smoke_builds_blocking_summary_and_scope_counts():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    results = [
+        {"role": "coder", "status": "ok", "fallback_activated": False},
+        {"role": "research", "status": "quota_or_rate_limit", "fallback_activated": True},
+        {"role": "premium", "status": "skipped", "fallback_activated": False},
+    ]
+
+    summary = plugin_api._summarize_lanes_auth_smoke(
+        results,
+        total_role_count=5,
+        checked_role_count=3,
+        truncated=False,
+    )
+
+    assert summary["safe_to_activate"] is False
+    assert summary["decision"] == "blocked"
+    assert summary["blocking_roles"] == ["research"]
+    assert summary["fallback_roles"] == ["research"]
+    assert summary["skipped_roles"] == ["premium"]
+    assert summary["checked_role_count"] == 3
+    assert summary["total_role_count"] == 5
+    assert "Research" in summary["recommended_next_action"]
+
+
+def test_lanes_auth_smoke_pure_fallback_is_restricted_not_blocked():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+
+    summary = plugin_api._summarize_lanes_auth_smoke(
+        [{"role": "coder", "status": "fallback", "fallback_activated": True}],
+        total_role_count=1,
+        checked_role_count=1,
+        truncated=False,
+    )
+
+    assert summary["safe_to_activate"] is False
+    assert summary["decision"] == "restricted"
+    assert summary["blocking_roles"] == []
+    assert summary["fallback_roles"] == ["coder"]
+
+
+def test_lanes_auth_smoke_empty_summary_is_not_ok():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+
+    summary = plugin_api._summarize_lanes_auth_smoke(
+        [],
+        total_role_count=0,
+        checked_role_count=0,
+        truncated=False,
+    )
+
+    assert summary["safe_to_activate"] is False
+    assert summary["decision"] == "blocked"
+    assert summary["blocking_roles"] == []
+    assert "Keine Rollen" in summary["recommended_next_action"]
+
+
+def test_lanes_auth_smoke_limits_roles_server_side():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    lane = {"id": "lane_1", "profiles": {}}
+    catalog = [
+        {
+            "name": f"role{i}",
+            "worker_runtime": "hermes",
+            "default_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        }
+        for i in range(plugin_api.LANES_AUTH_SMOKE_ROLE_LIMIT + 3)
+    ]
+
+    roles = plugin_api._select_lanes_auth_smoke_roles(lane, [], catalog)
+    truncated = len(roles) > plugin_api.LANES_AUTH_SMOKE_ROLE_LIMIT
+
+    assert len(roles) == plugin_api.LANES_AUTH_SMOKE_ROLE_LIMIT + 3
+    assert truncated is True
+
+
+def test_lanes_auth_smoke_redacts_common_secret_shapes():
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    text = (
+        "Authorization: Basic abc123 "
+        "Authorization: Bearer sk-proj-123 "
+        '"api_key": "sk-secret-json" '
+        "OPENROUTER_API_KEY=sk-secret-env "
+        "token: ghp_secret "
+        "GITHUB_TOKEN=GHP-UPPER "
+        "standalone ghp-secret"
+    )
+
+    redacted = plugin_api._redact_lanes_auth_smoke_text(text)
+
+    assert "abc123" not in redacted
+    assert "sk-proj-123" not in redacted
+    assert "sk-secret-json" not in redacted
+    assert "sk-secret-env" not in redacted
+    assert "ghp_secret" not in redacted
+    assert "GHP-UPPER" not in redacted
+    assert "ghp-secret" not in redacted
 
 
 # ---------------------------------------------------------------------------

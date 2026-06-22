@@ -21,6 +21,66 @@ export interface LaneSpawnCheckResult extends LaneSpawnHealth {
   resolved_model: string | null;
 }
 
+export type LaneAuthSmokeStatus =
+  | "ok"
+  | "fallback"
+  | "auth_error"
+  | "quota_or_rate_limit"
+  | "timeout"
+  | "config_error"
+  | "error"
+  | "skipped";
+
+export interface LaneAuthSmokeResult {
+  role: string;
+  profile: string;
+  runtime: LaneRuntime | string;
+  requested_provider: string;
+  requested_model: string;
+  observed_provider?: string | null;
+  observed_model?: string | null;
+  response_exact?: boolean;
+  fallback_activated?: boolean;
+  auth_ok?: boolean;
+  status: LaneAuthSmokeStatus;
+  error_class?: string | null;
+  duration_ms?: number;
+  session_id?: string | null;
+  reason?: string | null;
+  observed_response?: string;
+  stderr_preview?: string;
+}
+
+export interface LaneAuthSmokeScope {
+  requested_roles: string[];
+  checked_role_count: number;
+  total_role_count: number;
+  truncated: boolean;
+  role_limit: number;
+}
+
+export interface LaneAuthSmokeSummary {
+  decision: "ready" | "restricted" | "blocked";
+  safe_to_activate: boolean;
+  ok_count: number;
+  blocking_roles: string[];
+  fallback_roles: string[];
+  skipped_roles: string[];
+  checked_role_count: number;
+  total_role_count: number;
+  truncated: boolean;
+  recommended_next_action: string;
+}
+
+export interface LaneAuthSmokeResponse {
+  ok: boolean;
+  lane_id: string;
+  source: "lanes-auth-smoke";
+  scope?: LaneAuthSmokeScope;
+  summary?: LaneAuthSmokeSummary;
+  results: LaneAuthSmokeResult[];
+}
+
 export type OpenRouterModelImportStatus =
   | "admitted"
   | "already_configured"
@@ -347,6 +407,22 @@ export function smokeCheckLaneConfig(
       worker_runtime: entry.worker_runtime,
       provider: entry.provider ?? null,
       model: entry.model ?? null,
+    }),
+  });
+}
+
+export function runLaneAuthSmoke(input: {
+  laneId: string;
+  roles?: string[];
+  timeoutSeconds?: number;
+}): Promise<LaneAuthSmokeResponse> {
+  return fetchJSON<LaneAuthSmokeResponse>(`${BASE}/auth-smoke`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      lane_id: input.laneId,
+      roles: input.roles ?? [],
+      timeout_seconds: input.timeoutSeconds ?? 45,
     }),
   });
 }

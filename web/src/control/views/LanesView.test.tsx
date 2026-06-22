@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LanesEditor } from "./LanesView";
-import type { LanesResponse } from "./lanes/api";
+import {
+  authSmokeButtonLabel,
+  authSmokeDisabled,
+  authSmokeRenderableResults,
+  laneAuthSmokeTone,
+} from "./lanes/authSmoke";
+import type { LaneAuthSmokeResult, LaneAuthSmokeScope, LaneAuthSmokeSummary, LanesResponse } from "./lanes/api";
 
 const fixture: LanesResponse = {
   count: 2,
@@ -73,6 +79,7 @@ const noopActions = {
     configured: ["xiaomi/mimo-v2.5"],
     results: [{ id: "xiaomi/mimo-v2.5", status: "admitted" as const, reason: "Smoke ok; added to config" }],
   })),
+  onRunAuthSmoke: vi.fn(async () => ({ ok: true, lane_id: "lane_1", source: "lanes-auth-smoke" as const, results: [] })),
 };
 
 describe("LanesEditor (routing cards)", () => {
@@ -109,6 +116,158 @@ describe("LanesEditor (routing cards)", () => {
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
     expect(html.match(/Worker-Check/g)).toHaveLength(2);
+  });
+
+  it("zeigt manuellen Auth-Check mit Live-Status und Reasoning", () => {
+    const authSmokeResults: LaneAuthSmokeResult[] = [
+      {
+        role: "coder",
+        profile: "coder",
+        runtime: "hermes",
+        requested_provider: "openrouter",
+        requested_model: "qwen/qwen3.7-max",
+        observed_provider: "openrouter",
+        observed_model: "qwen/qwen3.7-max",
+        response_exact: true,
+        fallback_activated: false,
+        auth_ok: true,
+        status: "ok",
+        reason: "requested openrouter/qwen/qwen3.7-max; observed openrouter/qwen/qwen3.7-max; exact response",
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} initialAuthSmokeResults={authSmokeResults} />,
+    );
+
+    expect(html).toContain("Auth pruefen");
+    expect(html).toContain("Live OK");
+    expect(html).toContain("Antwort exakt");
+    expect(html).toContain("requested openrouter/qwen/qwen3.7-max");
+    expect(html).toContain("observed openrouter/qwen/qwen3.7-max");
+  });
+
+  it("macht Auth-Smoke bei ungespeicherten Aenderungen ehrlich", () => {
+    expect(authSmokeButtonLabel(false, false)).toBe("Auth pruefen");
+    expect(authSmokeButtonLabel(false, true)).toBe("Auth prueft...");
+    expect(authSmokeButtonLabel(true, false)).toBe("Gespeicherte Lane pruefen");
+    expect(authSmokeDisabled({ busy: false, running: false, hasLaneId: true, dirty: true })).toBe(true);
+  });
+
+  it("blendet alte Auth-Smoke-Ergebnisse waehrend neuem Lauf oder Fehler aus", () => {
+    const oldResults: LaneAuthSmokeResult[] = [
+      {
+        role: "coder",
+        profile: "coder",
+        runtime: "hermes",
+        requested_provider: "neuralwatt",
+        requested_model: "glm-5.2-fast",
+        observed_provider: "neuralwatt",
+        observed_model: "glm-5.2-fast",
+        response_exact: true,
+        fallback_activated: false,
+        auth_ok: true,
+        status: "ok",
+      },
+    ];
+
+    expect(authSmokeRenderableResults(oldResults, { running: true, error: null })).toEqual([]);
+    expect(authSmokeRenderableResults(oldResults, { running: false, error: "network failed" })).toEqual([]);
+    expect(authSmokeRenderableResults(oldResults, { running: false, error: null })).toEqual(oldResults);
+  });
+
+  it("markiert blockierende Auth-Smoke-Status rot", () => {
+    expect(laneAuthSmokeTone("auth_error")).toBe("red");
+    expect(laneAuthSmokeTone("quota_or_rate_limit")).toBe("red");
+    expect(laneAuthSmokeTone("timeout")).toBe("red");
+    expect(laneAuthSmokeTone("config_error")).toBe("red");
+    expect(laneAuthSmokeTone("error")).toBe("red");
+  });
+
+  it("zeigt Auth-Smoke als Operator-Entscheidung mit Scope und Fallback-Badge", () => {
+    const authSmokeResults: LaneAuthSmokeResult[] = [
+      {
+        role: "coder",
+        profile: "coder",
+        runtime: "hermes",
+        requested_provider: "neuralwatt",
+        requested_model: "glm-5.2-fast",
+        observed_provider: "neuralwatt",
+        observed_model: "glm-5.2-fast",
+        response_exact: true,
+        fallback_activated: false,
+        auth_ok: true,
+        status: "ok",
+        reason: "requested neuralwatt/glm-5.2-fast; observed neuralwatt/glm-5.2-fast; exact response",
+      },
+      {
+        role: "research",
+        profile: "research",
+        runtime: "hermes",
+        requested_provider: "gemini",
+        requested_model: "gemini-3.5-flash",
+        observed_provider: "openai-codex",
+        observed_model: "gpt-5.4",
+        response_exact: true,
+        fallback_activated: true,
+        auth_ok: false,
+        status: "quota_or_rate_limit",
+        error_class: "quota_or_rate_limit",
+        reason: "requested gemini/gemini-3.5-flash; observed openai-codex/gpt-5.4; exact response; fallback activated; error_class=quota_or_rate_limit",
+      },
+      {
+        role: "premium",
+        profile: "premium",
+        runtime: "claude-cli",
+        requested_provider: "",
+        requested_model: "claude-opus-4-8",
+        response_exact: false,
+        fallback_activated: false,
+        auth_ok: false,
+        status: "skipped",
+        reason: "unsupported runtime for auth smoke",
+      },
+    ];
+    const summary: LaneAuthSmokeSummary = {
+      decision: "blocked",
+      safe_to_activate: false,
+      ok_count: 1,
+      blocking_roles: ["research"],
+      fallback_roles: ["research"],
+      skipped_roles: ["premium"],
+      checked_role_count: 3,
+      total_role_count: 5,
+      truncated: false,
+      recommended_next_action: "Research zuerst reparieren oder bewusst auf ein funktionierendes Modell umstellen.",
+    };
+    const scope: LaneAuthSmokeScope = {
+      requested_roles: [],
+      checked_role_count: 3,
+      total_role_count: 5,
+      truncated: false,
+      role_limit: 12,
+    };
+    const html = renderToStaticMarkup(
+      <LanesEditor
+        data={fixture}
+        lane={fixture.lanes[0]}
+        busy={false}
+        actions={noopActions}
+        initialAuthSmokeResults={authSmokeResults}
+        initialAuthSmokeSummary={summary}
+        initialAuthSmokeScope={scope}
+      />,
+    );
+
+    expect(html).toContain("Lane blockiert");
+    expect(html).toContain("1 OK");
+    expect(html).toContain("1 blockiert");
+    expect(html).toContain("1 Fallback");
+    expect(html).toContain("1 uebersprungen");
+    expect(html).toContain("2 nicht geprueft");
+    expect(html).toContain("3/5 Rollen geprueft");
+    expect(html).toContain("Fallback aktiv");
+    expect(html).toContain("Exakte Antwort ueber Fallback");
+    expect(html).not.toContain("premium</span><span class=\"block\">Antwort nicht exakt");
   });
 
   it("warnt bei identischem Primary/Fallback, sperrt den Speicher-Knopf aber nicht mehr", () => {
