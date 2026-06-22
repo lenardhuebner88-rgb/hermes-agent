@@ -7066,6 +7066,65 @@ def test_create_task_code_role_gets_coder_contract(
     assert "Completion metadata:" in task.body
 
 
+def test_code_task_contract_body_has_no_duplicate_workspace_or_assignee_lines(
+    kanban_home, tmp_path
+):
+    """Contract body must have exactly one Workspace: and one Assignee: line (no Repo/workspace, no Assignee/lane)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="fix the bug",
+            body="Do the work.",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.body is not None
+    body = task.body
+    workspace_lines = [ln for ln in body.splitlines() if ln.startswith("- Workspace:")]
+    assignee_lines = [ln for ln in body.splitlines() if ln.startswith("- Assignee:")]
+    assert len(workspace_lines) == 1, f"Expected exactly 1 Workspace: line, got: {workspace_lines}"
+    assert len(assignee_lines) == 1, f"Expected exactly 1 Assignee: line, got: {assignee_lines}"
+    assert not any("Repo/workspace:" in ln for ln in body.splitlines()), (
+        "Duplicate 'Repo/workspace:' line found in contract body"
+    )
+    assert not any("Assignee/lane:" in ln for ln in body.splitlines()), (
+        "Duplicate 'Assignee/lane:' line found in contract body"
+    )
+
+
+def test_code_task_contract_body_risk_is_low_for_scratch_workspace(kanban_home):
+    """A scratch-workspace task's contract body Risk line must say 'low', not 'medium'."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="analyse scratch results",
+            body="Run some analysis.",
+            assignee="coder",
+            workspace_kind="scratch",
+        )
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.body is not None
+    body = task.body
+    risk_lines = [ln for ln in body.splitlines() if ln.startswith("- Risk:")]
+    assert risk_lines, "No Risk: line found in contract body"
+    assert "low" in risk_lines[0], (
+        f"Expected 'low' risk for scratch workspace, got: {risk_lines[0]}"
+    )
+    assert "medium" not in risk_lines[0], (
+        f"scratch-workspace body should say 'low' not 'medium': {risk_lines[0]}"
+    )
+
+
+
 def test_create_task_non_code_role_body_unchanged(kanban_home, monkeypatch):
     monkeypatch.setattr(
         kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}

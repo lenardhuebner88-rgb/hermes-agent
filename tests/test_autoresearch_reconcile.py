@@ -158,6 +158,71 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
 
 
 
+def test_critical_severity_proposal_routes_with_max_iterations_220(reconcile_env):
+    """A critical-severity code finding must be created with max_iterations=220."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "code-critical",
+        mode="code",
+        finding_id="F-CRIT",
+        target="hermes_cli/dispatcher.py",
+        target_path="hermes_cli/dispatcher.py",
+        title="Critical data loss risk",
+        category="bug_risk",
+        theme="data-loss",
+        subsystem="dispatcher",
+        severity="critical",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        rows = conn.execute(
+            "SELECT id, max_iterations FROM tasks WHERE idempotency_key = ?",
+            ("autoresearch:F-CRIT",),
+        ).fetchall()
+
+    assert summary["routed_to_kanban"] == 1
+    assert summary["new_tasks"] == 1
+    assert len(rows) == 1
+    assert rows[0]["max_iterations"] == 220, (
+        f"Expected max_iterations=220 for critical severity, got {rows[0]['max_iterations']}"
+    )
+
+
+def test_low_severity_proposal_routes_with_max_iterations_none(reconcile_env):
+    """A low-severity code finding must be created with max_iterations=None (inherits profile default)."""
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "code-low",
+        mode="code",
+        finding_id="F-LOW",
+        target="hermes_cli/utils.py",
+        target_path="hermes_cli/utils.py",
+        title="Minor style issue",
+        category="style",
+        theme="style-nit",
+        subsystem="utils",
+        severity="low",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn, min_task_severity="low")
+        rows = conn.execute(
+            "SELECT id, max_iterations FROM tasks WHERE idempotency_key = ?",
+            ("autoresearch:F-LOW",),
+        ).fetchall()
+
+    assert summary["routed_to_kanban"] == 1
+    assert summary["new_tasks"] == 1
+    assert len(rows) == 1
+    assert rows[0]["max_iterations"] is None, (
+        f"Expected max_iterations=None for low severity, got {rows[0]['max_iterations']}"
+    )
+
+
+
 def test_vetoed_autoresearch_signal_is_suppressed(reconcile_env):
     from hermes_cli import autoresearch_reconcile as reconcile
 

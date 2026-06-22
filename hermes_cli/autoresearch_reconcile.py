@@ -26,6 +26,16 @@ DEFAULT_MAX_NEW_TASKS = 5
 CREATED_BY = "autoresearch"
 AUTORESEARCH_VETO_PREFIX = "autoresearch:"
 
+# Severity-derived iteration budget floor for code/test findings routed to Kanban.
+# These mirror the PlanSpec budget floors defined in plan_compiler.py
+# (_TURN_FLOOR_BY_REVIEW_TIER / _TURN_FLOOR_CONTRACT_DEPTH) and are a FLOOR:
+# "low"/unknown severity is omitted → None → the profile default of 90 turns is used.
+_SEVERITY_TO_MAX_ITERATIONS: dict[str, int] = {
+    "critical": 220,
+    "high": 180,
+    "medium": 150,
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -114,6 +124,7 @@ def _proposal_body(proposal: dict[str, Any]) -> str:
 def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
     idem = "autoresearch:" + _finding_id(proposal)
     existing = _task_for_idempotency(conn, idem)
+    max_iter = _SEVERITY_TO_MAX_ITERATIONS.get(_severity(proposal))
     task_id = kb.create_task(
         conn,
         title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
@@ -124,6 +135,7 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
         priority=_priority(proposal),
         initial_status="running",
         kind="code",
+        max_iterations=max_iter,
     )
     return task_id, existing is None
 

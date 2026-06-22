@@ -3200,14 +3200,13 @@ def _with_code_task_contract(
     workspace = workspace_path or "Hermes-managed scratch workspace"
     tenant_label = (tenant or "default").strip() or "default"
     reason_for_lane = _reason_for_lane(assignee)
+    _risk = "medium" if workspace_kind in {"dir", "worktree"} else "low"
     contract = "".join(
         [
             f"{_CODE_TASK_CONTRACT_MARKER}\n",
             f"- Assignee: {assignee}\n",
             f"- Tenant: {tenant_label}\n",
             f"- Workspace: {workspace_kind}:{workspace}\n",
-            f"- Repo/workspace: {workspace_kind}:{workspace}\n",
-            f"- Assignee/lane: {assignee}\n",
             f"- Reason for lane: {reason_for_lane}.\n",
             (
                 "- Allowed paths: use the explicit workspace path and any "
@@ -3215,23 +3214,20 @@ def _with_code_task_contract(
                 "ambiguous.\n"
             ),
             (
-                "- Anti-scope: no unrelated cleanup, broad rewrites, push, "
+                "- Anti-scope: edit only files required for this card; "
+                "no unrelated cleanup, broad rewrites, push, "
                 "deploy, runtime restart, or schema migration.\n"
             ),
-            "- Risk: medium unless the task body states a narrower verified risk.\n",
+            f"- Risk: {_risk} unless the task body states a narrower verified risk.\n",
             (
                 "- Expected gates: smallest relevant lint/type/test gate; "
                 "use SELF_VERIFY_LIMITED if a safe worktree-targeted gate is "
-                "not possible.\n"
+                "not possible; if a gate is skipped, state why.\n"
             ),
             (
                 "- Escalation triggers: missing workspace, unclear allowed paths, "
                 "failing required gate, open coordination overlap, or required "
                 "secret/runtime/deploy action.\n"
-            ),
-            (
-                "- Scope: edit only files required for this card; "
-                "do not broaden into unrelated cleanup.\n"
             ),
             (
                 "- Forbidden: no git push/deploy/destructive FS/DB schema changes; "
@@ -3242,10 +3238,6 @@ def _with_code_task_contract(
                 "(e.g. next/tsc/node_modules), restore them with the project "
                 "lockfile when safe, otherwise block with exact evidence instead "
                 "of reverting unrelated work.\n"
-            ),
-            (
-                "- Tests: run the smallest relevant lint/build/test gate; "
-                "if skipped, state why.\n"
             ),
             (
                 "- Completion metadata: summarize changed paths, commands run, "
