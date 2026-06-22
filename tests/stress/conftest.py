@@ -4,10 +4,35 @@ These tests are slow (30s+), spawn subprocesses, and are not run by
 default. Enable via `pytest --run-stress` or by running the scripts
 directly.
 
-The scripts are primarily __main__-executable entry points; pytest
-isn't expected to collect individual test functions from them.
+Two categories live here:
+
+1. ``__main__``-executable scripts (no top-level ``def test_``) — these
+   are listed in ``_SCRIPT_FILES`` and excluded from pytest collection
+   so they don't cause import-time side effects or empty-suite noise.
+2. Proper pytest test modules (``test_*.py`` with ``def test_``) — these
+   ARE collected, but skipped unless ``--run-stress`` is passed.
 """
 import pytest
+
+# Files that are scripts, not pytest-collectable test modules.
+# They have no top-level ``def test_`` and are meant to be run via
+# ``python tests/stress/<name>.py``.
+_SCRIPT_FILES = {
+    "test_concurrency.py",
+    "test_concurrency_parent_gate.py",
+    "test_concurrency_mixed.py",
+    "test_concurrency_reclaim_race.py",
+    "test_benchmarks.py",
+    "test_atypical_scenarios.py",
+    "test_subprocess_e2e.py",
+    "test_property_fuzzing.py",
+}
+
+# Build collect_ignore_glob dynamically: always ignore scripts,
+# and ignore proper test modules unless --run-stress is active.
+# (When --run-stress IS active, test modules are collected and the
+# pytest_collection_modifyitems hook below does NOT skip them.)
+collect_ignore_glob = list(_SCRIPT_FILES)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -28,10 +53,3 @@ def pytest_addoption(parser):
         default=False,
         help="Run the stress/battle-test suite (slow, spawns subprocesses).",
     )
-
-
-collect_ignore_glob = [
-    # The stress scripts have top-level code and hard-coded paths; they're
-    # meant to run as `python tests/stress/<name>.py`, not as pytest modules.
-    "*.py",
-]
