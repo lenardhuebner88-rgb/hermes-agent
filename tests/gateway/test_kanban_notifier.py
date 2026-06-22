@@ -50,13 +50,14 @@ def _create_completed_subscription(
     chat_id="chat-1",
     *,
     title="notify once",
+    result=None,
     metadata=None,
 ):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title=title, assignee="worker")
         kb.add_notify_sub(conn, task_id=tid, platform=platform, chat_id=chat_id)
-        kb.complete_task(conn, tid, summary=summary, metadata=metadata)
+        kb.complete_task(conn, tid, result=result, summary=summary, metadata=metadata)
         return tid
     finally:
         conn.close()
@@ -871,9 +872,16 @@ def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
 
     receipt_dir = tmp_path / "receipts"
     monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(receipt_dir))
+    detailed_result = (
+        "Step 1: implementation completed with evidence. "
+        "Step 2: targeted tests passed and the changed behavior was verified. "
+        "Step 3: reviewer-facing handoff includes files changed, commands run, "
+        "and residual risk, so the receipt contains a real result over 200 characters."
+    )
 
     tid = _create_completed_subscription(
-        summary="Alles erledigt: Feature gebaut und getestet.",
+        summary="Kurz erledigt.",
+        result=detailed_result,
         title="ship the receipt feature",
     )
 
@@ -889,7 +897,9 @@ def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
     content = receipt.read_text(encoding="utf-8")
     assert tid in content
     assert "ship the receipt feature" in content
-    assert "Alles erledigt" in content
+    assert "Step-Ledger" in content
+    assert detailed_result in content
+    assert "Kurz erledigt." in content
 
 
 def test_auto_receipt_fail_soft_unwritable_dir(tmp_path, monkeypatch):

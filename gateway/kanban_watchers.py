@@ -574,7 +574,7 @@ _AUTO_RECEIPT_DEFAULT_DIR = "/home/piet/vault/03-Agents/Hermes/receipts/auto"
 
 
 def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary: Optional[str] = None) -> None:
-    """K12: write a tiny Markdown receipt for a task that reached ``done``.
+    """K12: write a Markdown receipt for a task that reached ``done``.
 
     FAIL-SOFT by contract: a missing/unwritable vault dir or any other error
     is swallowed (logged at debug) so the notifier tick continues uninterrupted
@@ -592,7 +592,9 @@ def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary:
         assignee = getattr(task, "assignee", None) or "unbekannt"
         status = getattr(task, "status", None) or "done"
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")
-        body = (summary or "").strip()
+        summary_body = (summary or "").strip()
+        result_body = str(getattr(task, "result", "") or "").strip()
+        body = result_body if len(result_body) > len(summary_body) else summary_body
 
         lines = [
             "---",
@@ -609,7 +611,15 @@ def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary:
             "",
             f"Task `{task_id}` reached terminal **{status}** "
             f"(assignee: {assignee}, board: {board_slug or '—'}) at {ts}.",
+            "",
+            "## Step-Ledger",
+            "",
+            f"- Terminal status observed: `{status}`.",
+            f"- Assignee: `{assignee}`.",
+            f"- Board: `{board_slug or '—'}`.",
         ]
+        if summary_body:
+            lines += ["", "## Kurzfassung", "", summary_body]
         if body:
             lines += ["", "## Ergebnis", "", body]
         lines.append("")
