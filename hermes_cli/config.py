@@ -2410,6 +2410,31 @@ DEFAULT_CONFIG = {
         # otherwise saturate one profile's local model / API quota /
         # browser pool while leaving other profiles idle.
         "max_in_progress_per_profile": None,
+        # Per-repo concurrency cap (replaces the old binary repo-lock).
+        # When serialize_by_repo is true (default), the dispatcher tracks how
+        # many non-terminal tasks share a resolved repo_root and refuses to
+        # spawn a new task for that repo when the count is at the cap. The
+        # deferred task stays ``ready`` and surfaces as a ``repo_serialized``
+        # skip row, re-evaluated each tick.
+        #   serialize_by_repo: false → per-repo cap is a strict no-op (no
+        #     repo tracking at all). true (default) → cap is enforced.
+        #   max_concurrent_per_repo: the cap value. 1 (default) reproduces
+        #     the original binary-serialize behaviour. N>1 allows up to N
+        #     non-terminal tasks on the same repo_root before serializing.
+        # Rollback: set back to 1 (or serialize_by_repo: false). Enabling or
+        # raising the cap is a conscious operator step that takes effect on
+        # the next gateway/dispatcher tick — no schema migration required.
+        # IMPORTANT: the repo cap is applied AFTER max_in_progress_per_profile.
+        # With the live default per_profile=1, raising the repo cap above 1
+        # is a no-op for single-lane profiles — it only yields parallelism
+        # when same-repo tasks fan out across disjoint lanes (e.g.
+        # coder + coder-claude), or when max_in_progress_per_profile is also
+        # raised to >= the repo cap. Otherwise the per-profile cap binds
+        # first and the repo cap never engages. Conflict-fixer tasks
+        # (idempotency-key conflict-fixer:*) are exempt and can always
+        # claim even when the repo is full.
+        "serialize_by_repo": True,
+        "max_concurrent_per_repo": 1,
         # C1 budget gate (N-C1). Both OFF by default (None) — the dispatcher
         # never holds a task on budget unless the operator sets a positive
         # value, so the no-cap path is byte-identical to the pre-C1 dispatcher.

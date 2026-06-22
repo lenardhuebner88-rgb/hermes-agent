@@ -578,6 +578,106 @@ def test_conflict_fixer_exempt_from_repo_serialization_lock(
     assert parent not in spawned
 
 
+def test_repo_cap_default_one_byte_identical(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """Default (kein max_concurrent_per_repo) == Cap 1 == heutiges serialize."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        a = kb.create_task(conn, title="a", assignee="coder",
+                           workspace_kind="dir", workspace_path=str(repo))
+        b = kb.create_task(conn, title="b", assignee="coder",
+                           workspace_kind="dir", workspace_path=str(repo))
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn, serialize_by_repo=True)
+
+    assert len([t for t in (a, b) if t in spawned]) == 1
+    assert len(res.skipped_repo_serialized) == 1
+
+
+def test_repo_cap_two_allows_two_then_serializes(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """Cap=2 lässt zwei Same-Repo-Tasks parallel zu, serialisiert den dritten."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        ids = [kb.create_task(conn, title=f"t{i}", assignee="coder",
+                              workspace_kind="dir", workspace_path=str(repo))
+               for i in range(3)]
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn,
+            serialize_by_repo=True, max_concurrent_per_repo=2,
+        )
+
+    assert len([t for t in ids if t in spawned]) == 2
+    assert len(res.skipped_repo_serialized) == 1
+
+
+def test_conflict_fixer_exempt_under_full_cap(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """Fixer bricht den Repo-Cap auch wenn er voll ausgeschöpft ist."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        # Zwei blockierte Tasks füllen Cap=2 voll.
+        for i in range(2):
+            bid = kb.create_task(conn, title=f"blk{i}", assignee="coder",
+                                 workspace_kind="dir", workspace_path=str(repo))
+            assert kb.block_task(conn, bid, reason="integration parked")
+        fixer = kb.create_task(
+            conn, title="Konflikt-Fixer", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+            idempotency_key="conflict-fixer:t_parent:1",
+        )
+        normal = kb.create_task(conn, title="normal", assignee="coder",
+                                workspace_kind="dir", workspace_path=str(repo))
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn,
+            serialize_by_repo=True, max_concurrent_per_repo=2,
+        )
+
+    serialized = [t[0] for t in res.skipped_repo_serialized]
+    assert fixer in spawned, "Fixer muss den vollen Cap brechen"
+    assert normal not in spawned and normal in serialized
+
+
+def test_serialize_off_ignores_cap(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """serialize_by_repo=False bleibt No-Op, egal welcher Cap."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
+    spawned = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect() as conn:
+        ids = [kb.create_task(conn, title=f"t{i}", assignee="coder",
+                              workspace_kind="dir", workspace_path=str(repo))
+               for i in range(3)]
+        res = kb.dispatch_once(
+            conn, spawn_fn=fake_spawn,
+            serialize_by_repo=False, max_concurrent_per_repo=2,
+        )
+
+    assert len([t for t in ids if t in spawned]) == 3
+    assert res.skipped_repo_serialized == []
+
+
 def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_WORKER_ISOLATION", raising=False)
     assert kwt.isolation_mode() == "off"

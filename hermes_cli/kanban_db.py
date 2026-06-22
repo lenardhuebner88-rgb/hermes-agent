@@ -16181,6 +16181,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     serialize_by_repo: bool = True,
+    max_concurrent_per_repo: int = 1,
     daily_token_cap_per_profile: Optional[int] = None,
     daily_cost_cap_usd: Optional[float] = None,
     per_task_input_token_cap: Optional[int] = None,
@@ -16221,6 +16222,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             serialize_by_repo=serialize_by_repo,
+            max_concurrent_per_repo=max_concurrent_per_repo,
             daily_token_cap_per_profile=daily_token_cap_per_profile,
             daily_cost_cap_usd=daily_cost_cap_usd,
             per_task_input_token_cap=per_task_input_token_cap,
@@ -16243,6 +16245,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             serialize_by_repo=serialize_by_repo,
+            max_concurrent_per_repo=max_concurrent_per_repo,
             daily_token_cap_per_profile=daily_token_cap_per_profile,
             daily_cost_cap_usd=daily_cost_cap_usd,
             per_task_input_token_cap=per_task_input_token_cap,
@@ -16265,6 +16268,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     serialize_by_repo: bool = True,
+    max_concurrent_per_repo: int = 1,
     daily_token_cap_per_profile: Optional[int] = None,
     daily_cost_cap_usd: Optional[float] = None,
     per_task_input_token_cap: Optional[int] = None,
@@ -16407,7 +16411,8 @@ def _dispatch_once_locked(
     # 'blocked' is the fix for the 0167-0171 wave (a task parked in review/blocked
     # must keep holding its repo so N+1 never branches from a stale main).
     # Empty set + flag off => strict no-op.
-    _repo_locked: set[str] = set()
+    _max_per_repo = max(1, int(max_concurrent_per_repo or 1))
+    _repo_count: dict[str, int] = {}
     if serialize_by_repo:
         for irow in conn.execute(
             "SELECT workspace_kind, workspace_path FROM tasks "
@@ -16415,7 +16420,7 @@ def _dispatch_once_locked(
         ):
             _rr = _repo_root_for_row(irow["workspace_kind"], irow["workspace_path"])
             if _rr:
-                _repo_locked.add(_rr)
+                _repo_count[_rr] = _repo_count.get(_rr, 0) + 1
 
     # C1 (N-C1) budget gate preflight. Caps default OFF (None) → both branches
     # are skipped, ``_budget_capped_profiles`` stays empty and
@@ -16643,7 +16648,7 @@ def _dispatch_once_locked(
                         _per_profile_running.get(claimed.assignee, 0) + 1
                     )
                 if serialize_by_repo and _cand_repo:
-                    _repo_locked.add(_cand_repo)
+                    _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
             except Exception as exc:
                 # Mirror the local-spawn failure path: release the claim,
                 # count the failure, auto-block after the limit. A missing
@@ -16731,7 +16736,7 @@ def _dispatch_once_locked(
             and str(row["idempotency_key"]).startswith(CONFLICT_FIXER_IDEM_PREFIX)
         )
         if (
-            serialize_by_repo and _cand_repo and _cand_repo in _repo_locked
+            serialize_by_repo and _cand_repo and _repo_count.get(_cand_repo, 0) >= _max_per_repo
             and not _is_conflict_fixer
         ):
             result.skipped_repo_serialized.append((row["id"], _cand_repo))
@@ -16856,7 +16861,7 @@ def _dispatch_once_locked(
                     _per_profile_running.get(row_assignee, 0) + 1
                 )
             if serialize_by_repo and _cand_repo:
-                _repo_locked.add(_cand_repo)
+                _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -16953,7 +16958,7 @@ def _dispatch_once_locked(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
             if serialize_by_repo and _cand_repo:
-                _repo_locked.add(_cand_repo)
+                _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
         except Exception as exc:
             # spawn_fn raised (fork/exec blip) — transient infra class: bounded
             # transient retry before escalating (HEILER-TRANSIENT-RETRY-BUDGET-S1).
