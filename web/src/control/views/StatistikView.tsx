@@ -408,19 +408,14 @@ export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnR
 // Tabelle der abgeschlossenen Ketten (aus RunSummary.roots). Bei Auswahl einer
 // Zeile wird die by_lane-Aufschlüsselung via useHermesChainCosts geladen.
 
-function fmtUsd(value: number | null | undefined): string {
-  return value != null && value > 0 ? `$${value.toFixed(2)}` : "—";
-}
-
-function fmtKwh(value: number | null | undefined): string {
-  return value != null && value > 0 ? value.toFixed(4) : "—";
-}
-
-export function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
+function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
   const { by_lane, totals } = costs;
   if (by_lane.length === 0) return null;
-  const totalApiEquivalent = totals.api_equivalent_usd || totals.cost_usd_equivalent;
-  const totalRate = totals.billing_neuralwatt_usd_per_kwh;
+  const totalEffective = formatEffectiveCost({
+    cost_usd: totals.cost_usd,
+    cost_effective_usd: totals.cost_effective_usd,
+    tokens: totals.input_tokens + totals.output_tokens,
+  });
   return (
     <div className="mt-2 space-y-1">
       <p className="text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
@@ -437,26 +432,23 @@ export function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
         </thead>
         <tbody>
           {by_lane.map((l) => {
-            const apiEquivalent = l.api_equivalent_usd || l.cost_usd_equivalent;
-            const rate = l.billing_neuralwatt_usd_per_kwh;
+            const laneEff = formatEffectiveCost({
+              cost_usd: l.cost_usd,
+              cost_effective_usd: l.cost_effective_usd,
+              tokens: l.input_tokens + l.output_tokens,
+            });
             return (
               <tr key={l.profile} className="border-b border-[var(--hc-border)] last:border-0">
                 <td className="hc-mono py-1 pr-2 text-[var(--hc-text)]">{l.profile}</td>
                 <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
                   {fmtTokens(l.input_tokens + l.output_tokens)}
                 </td>
-                <td className="py-1 pr-2 text-right tabular-nums">
-                  <div className="hc-mono text-[var(--hc-text)]">{fmtUsd(l.actual_cost_usd)}</div>
-                  {apiEquivalent > 0 ? (
-                    <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                      {de.ketten.chainCostsApiEquivalent} {fmtUsd(apiEquivalent)}
-                    </div>
-                  ) : null}
-                  {l.billing_neuralwatt_charged_kwh > 0 && rate != null ? (
-                    <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                      {de.ketten.chainCostsNeuralwattBasis} {fmtKwh(l.billing_neuralwatt_charged_kwh)} kWh × ${rate.toFixed(2)}/kWh
-                    </div>
-                  ) : null}
+                <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
+                  {laneEff.estimated ? (
+                    <span title={de.ketten.costEstimatedTooltip}>{laneEff.text}</span>
+                  ) : (
+                    laneEff.text
+                  )}
                 </td>
                 <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{l.run_count}</td>
               </tr>
@@ -469,18 +461,12 @@ export function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
             <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text-soft)]">
               {fmtTokens(totals.input_tokens + totals.output_tokens)}
             </td>
-            <td className="py-1 pr-2 text-right tabular-nums">
-              <div className="hc-mono text-[var(--hc-text)]">{fmtUsd(totals.actual_cost_usd)}</div>
-              {totalApiEquivalent > 0 ? (
-                <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                  {de.ketten.chainCostsApiEquivalent} {fmtUsd(totalApiEquivalent)}
-                </div>
-              ) : null}
-              {totals.billing_neuralwatt_charged_kwh > 0 && totalRate != null ? (
-                <div className="hc-mono text-[10px] text-[var(--hc-text-dim)]">
-                  {de.ketten.chainCostsNeuralwattBasis} {fmtKwh(totals.billing_neuralwatt_charged_kwh)} kWh × ${totalRate.toFixed(2)}/kWh
-                </div>
-              ) : null}
+            <td className="hc-mono py-1 pr-2 text-right tabular-nums text-[var(--hc-text)]">
+              {totalEffective.estimated ? (
+                <span title={de.ketten.costEstimatedTooltip}>{totalEffective.text}</span>
+              ) : (
+                totalEffective.text
+              )}
             </td>
             <td className="hc-mono py-1 text-right tabular-nums text-[var(--hc-text-dim)]">{totals.run_count}</td>
           </tr>
@@ -508,7 +494,15 @@ function ChainCostsRow({
     ? chainCosts.data.totals.input_tokens + chainCosts.data.totals.output_tokens
     : null;
 
-  const costDisplay = root.cost_usd != null ? fmtUsd(root.cost_usd) : null;
+  // Zeige cost_effective_usd wenn vorhanden, sonst cost_usd; null = kein Wert.
+  const effectiveForRoot = formatEffectiveCost({
+    cost_usd: root.cost_usd ?? 0,
+    cost_effective_usd: root.cost_effective_usd ?? 0,
+    tokens: totalTokens ?? 0,
+  });
+  const costDisplay = root.cost_effective_usd != null || root.cost_usd != null
+    ? effectiveForRoot
+    : null;
 
   return (
     <div className="border-b border-[var(--hc-border)] last:border-0">
@@ -525,7 +519,9 @@ function ChainCostsRow({
           {totalTokens != null ? fmtTokens(totalTokens) : "—"}
         </span>
         <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text)]">
-          {costDisplay == null ? "—" : costDisplay}
+          {costDisplay == null ? "—" : costDisplay.estimated ? (
+            <span title={de.ketten.costEstimatedTooltip}>{costDisplay.text}</span>
+          ) : costDisplay.text}
         </span>
         <span
           aria-hidden="true"
@@ -552,7 +548,7 @@ function ChainCostsRow({
 
 export function ChainCostsSection({
   roots,
-  totalCostEffectiveUsd: _totalCostEffectiveUsd,
+  totalCostEffectiveUsd,
 }: {
   roots: RunSummaryRoot[];
   totalCostEffectiveUsd: number | null;
@@ -563,7 +559,14 @@ export function ChainCostsSection({
     setSelectedId((prev) => (prev === id ? null : id));
   }
 
-  const metaText = de.ketten.chainCostsMeta;
+  // Gesamt-Kennzahl für den Section-Meta (zeigt geschätzten Gesamtwert wenn vorhanden).
+  const totalEff =
+    totalCostEffectiveUsd != null
+      ? formatEffectiveCost({ cost_usd: 0, cost_effective_usd: totalCostEffectiveUsd, tokens: 1 })
+      : null;
+  const metaText = totalEff && totalEff.text !== "—"
+    ? `${de.ketten.chainCostsMeta} · ${de.ketten.chainCostsTotal} ${totalEff.text}`
+    : de.ketten.chainCostsMeta;
 
   return (
     <>

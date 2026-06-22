@@ -873,22 +873,20 @@ export const de = {
     checkedAt: (label: string) => `aktualisiert vor ${label}`,
     costNone: "keine Kostendaten",
     // Statistik-Tab: Kosten pro Kette
-    chainCostsTitle: "Kostenaufschlüsselung pro Kette",
-    chainCostsMeta: "abgeschlossene Roots · Ist-$ + API-Äquivalent je Lane",
+    chainCostsTitle: "Kosten pro Kette",
+    chainCostsMeta: "abgeschlossene Roots · Gesamt$ + Token-Aufschlüsselung je Lane",
     chainCostsEmpty: "Noch keine abgeschlossenen Ketten mit Kostenstempel.",
     chainCostsColChain: "Kette",
-    chainCostsColCost: "Ist-$",
+    chainCostsColCost: "Gesamt $",
     chainCostsColTokens: "Tokens",
     chainCostsColRuns: "Runs",
-    chainCostsLaneTitle: "Kostenaufschlüsselung je Lane",
+    chainCostsLaneTitle: "Kosten je Lane",
     chainCostsLoadError: "Kosten konnten nicht geladen werden.",
-    chainCostsTotal: "Ist-Kosten",
+    chainCostsTotal: "Gesamt ca.",
     // "gesch." marker tooltip — erscheint auf Abo-Schätzwert-Zellen
     costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
-    chainCostsApiEquivalent: "API-Äquivalent",
-    chainCostsNeuralwattBasis: "Neuralwatt-Basis",
     // Legende unterhalb der Lane-Tabelle
-    chainCostsCostLegend: "Neuralwatt-kWh ist Abrechnungsbasis, kein eigener Kostenposten. Ist-$ enthält abgerechnete API-Kosten plus kWh-basierte Neuralwatt-Kosten. API-Äquivalent bleibt ein separater Abo-/Schätzwert.",
+    chainCostsCostLegend: "$ = geschätzter API-Gegenwert; Abo-Arbeit (claude & Codex) kostet real 0 $ — der Wert zeigt, was dieselben Tokens auf der gemeteren API gekostet hätten (Tokens × models.dev-Preis bzw. Session-Schätzung). 'gesch.' markiert Abo-Schätzwerte.",
     // Kette-Summary (zwischen Selector und Pipeline)
     summaryEyebrow: "Kette · Fortschritt",
     summaryProgress: (done: number, total: number, running: number, waiting: number) =>
