@@ -3598,6 +3598,66 @@ def test_worker_context_worker_slim_uses_tighter_caps(kanban_home):
     assert "[truncated," in slim
 
 
+def _seed_completed_run(conn, task_id, profile, ended_at, summary):
+    """Insert a completed task_runs row for role-history."""
+    conn.execute(
+        """
+        INSERT INTO task_runs (
+            task_id, profile, status, started_at, ended_at, outcome, summary
+        ) VALUES (?, ?, 'done', ?, ?, 'completed', ?)
+        """,
+        (task_id, profile, ended_at - 1, ended_at, summary),
+    )
+
+
+def test_worker_context_recent_work_tenant_scoped(kanban_home):
+    """AC-TENANT-SCOPED: on a multi-tenant board the recent-work section
+    must only surface completed runs for the active tenant, not cross-tenant."""
+    with kb.connect() as conn:
+        # Two tenants, same assignee, completed runs in both.
+        t_a1 = kb.create_task(conn, title="tenant-A task 1", assignee="coder", tenant="tenantA")
+        t_a2 = kb.create_task(conn, title="tenant-A task 2", assignee="coder", tenant="tenantA")
+        t_b1 = kb.create_task(conn, title="tenant-B task", assignee="coder", tenant="tenantB")
+        now = 1_800_000_000
+        _seed_completed_run(conn, t_a1, "coder", now + 10, "SUMMARY_TENANT_A1")
+        _seed_completed_run(conn, t_a2, "coder", now + 20, "SUMMARY_TENANT_A2")
+        _seed_completed_run(conn, t_b1, "coder", now + 30, "SUMMARY_TENANT_B")
+        conn.commit()
+        ctx_a = kb.build_worker_context(conn, t_a1)
+    # Extract just the "Recent work" section.
+    rw_start = ctx_a.find("## Recent work by @coder")
+    rw_section = ctx_a[rw_start:] if rw_start >= 0 else ""
+    assert rw_section, "Recent work section should be present"
+    # Tenant A's other task surfaces in recent work.
+    assert "SUMMARY_TENANT_A2" in rw_section
+    assert "tenant-A task 2" in rw_section
+    # Cross-tenant history must NOT leak into tenant A's worker context.
+    assert "SUMMARY_TENANT_B" not in rw_section
+    assert "tenant-B task" not in rw_section
+
+
+def test_worker_context_recent_work_untenanted_stable(kanban_home):
+    """AC-UNTENANTED-STABLE: on an untenanted board the recent-work output
+    is byte-identical to the pre-fix behavior (no tenant filter applied)."""
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="task-1", assignee="coder")
+        t2 = kb.create_task(conn, title="task-2", assignee="coder")
+        now = 1_800_000_000
+        _seed_completed_run(conn, t1, "coder", now + 10, "SUMMARY_ONE")
+        _seed_completed_run(conn, t2, "coder", now + 20, "SUMMARY_TWO")
+        conn.commit()
+        ctx = kb.build_worker_context(conn, t2)
+    # Extract just the "Recent work" section.
+    rw_start = ctx.find("## Recent work by @coder")
+    rw_section = ctx[rw_start:] if rw_start >= 0 else ""
+    assert rw_section, "Recent work section should be present"
+    # The other task's completed run surfaces (no tenant scoping on untenanted board).
+    assert "SUMMARY_ONE" in rw_section
+    assert "task-1" in rw_section
+    # The current task t2 is excluded from its own recent-work (r.task_id != ?).
+    assert "SUMMARY_TWO" not in rw_section
+
+
 # ---------------------------------------------------------------------------
 # F4: operator directives (kind='directive')
 # ---------------------------------------------------------------------------
