@@ -88,12 +88,21 @@ _PRESERVABLE_ARTIFACT_PREFIXES = (
     "test-results/",
     "visual-qa/",
     "artifacts/",
+    # Common visual-QA output dirs: bare `screenshots/` (Playwright/Cypress
+    # screenshot dumps) and `playwright/.auth/` (Playwright storageState).
+    # These previously parked as DIRTY_WORKTREE; preserve them to the receipt
+    # tree instead. NOTE: `playwright/.auth/` may hold auth storageState
+    # (session tokens) — Playwright's convention is to gitignore it, which keeps
+    # it invisible to `dirty_files()` (porcelain WITHOUT --ignored). This entry
+    # only does work for a repo that did NOT gitignore it; see the dispatch
+    # disposition for the secret-persistence caveat.
+    "screenshots/",
+    "playwright/.auth/",
 )
 _ARTIFACT_LIKE_PREFIXES = _PRESERVABLE_ARTIFACT_PREFIXES + (
     "blob-report/",
     "coverage/",
     "htmlcov/",
-    "screenshots/",
 )
 _ARTIFACT_LIKE_SUFFIXES = (
     ".gif",

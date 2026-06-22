@@ -711,6 +711,41 @@ def test_artifact_policy_missing_message_names_recovery():
     assert "extend the artifact policy" in recovery
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "screenshots/login.png",
+        "screenshots/nested/dialog.png",
+        "playwright/.auth/state.json",
+        "playwright/.auth/user.json",
+    ],
+)
+def test_common_visual_qa_dirs_are_preservable(path):
+    # Regression: screenshots/ and playwright/.auth/ are emitted by common
+    # visual-QA tooling. They must preserve to the Vault receipt, not park as
+    # DIRTY_WORKTREE just because they sit outside the original 5 prefixes.
+    assert kwt._is_preservable_artifact_path(path) is True
+    assert kwt._classify_dirty_paths([path]) == kwt.PRESERVABLE_ARTIFACTS_CLASS
+
+
+def test_screenshots_and_auth_classify_as_preservable_together():
+    paths = ["screenshots/home.png", "playwright/.auth/state.json"]
+    assert kwt._classify_dirty_paths(paths) == kwt.PRESERVABLE_ARTIFACTS_CLASS
+
+
+def test_new_preservable_prefixes_are_in_allowlist():
+    assert "screenshots/" in kwt._PRESERVABLE_ARTIFACT_PREFIXES
+    assert "playwright/.auth/" in kwt._PRESERVABLE_ARTIFACT_PREFIXES
+
+
+def test_preservable_screenshots_with_source_change_still_parks():
+    # Counter-metric guardrail (AC-2): broadening the preserve allowlist must
+    # NOT cause genuine uncommitted source changes to be cleaned away — a mix of
+    # a preservable screenshot and a real .py edit still parks as DIRTY_WORKTREE.
+    paths = ["screenshots/home.png", "hermes_cli/kanban_db.py"]
+    assert kwt._classify_dirty_paths(paths) == kwt.DIRTY_WORKTREE_CLASS
+
+
 # ---------------------------------------------------------------------------
 # Package 1A — default quick gate web quality checks
 # ---------------------------------------------------------------------------
