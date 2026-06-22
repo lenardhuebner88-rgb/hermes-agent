@@ -27,7 +27,12 @@ ServiceManagerKind = Literal["systemd", "launchd", "windows", "s6", "none"]
 # directory at ``<scandir>/gateway-<profile>/``. We reject anything that
 # could traverse paths, span filesystems, or break s6's own naming rules.
 _VALID_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_MAX_PROFILE_LEN = 251  # s6-svscan default name_max
+# Prefix prepended to profile names to form the s6 service directory name
+# (``gateway-<profile>``). Defined here — before _MAX_PROFILE_LEN — because
+# the validator must subtract its length from the s6 name_max to keep the
+# full service-dir name within the limit.
+S6_SERVICE_PREFIX = "gateway-"
+_MAX_PROFILE_LEN = 251 - len(S6_SERVICE_PREFIX)  # s6-svscan default name_max
 
 
 def validate_profile_name(name: str) -> None:
@@ -332,7 +337,6 @@ def get_service_manager() -> ServiceManager:
 # tmpfs and is the directory s6-svscan watches. Writes here trigger
 # automatic supervision on the next rescan.
 S6_DYNAMIC_SCANDIR = Path("/run/service")
-S6_SERVICE_PREFIX = "gateway-"
 
 
 def _profile_dir_for_gateway_service(name: str) -> Path:

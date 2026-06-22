@@ -56,6 +56,27 @@ def test_validate_profile_name_rejects_invalid(bad: str) -> None:
         validate_profile_name(bad)
 
 
+def test_validate_profile_name_boundary_accounts_for_gateway_prefix() -> None:
+    """The s6 service directory is ``gateway-<profile>``, so the profile
+    name max length must be ``s6_name_max - len("gateway-")`` = 243.
+
+    A 251-char profile name produces a 259-char service directory name
+    that exceeds s6's name_max of 251 — the validator must catch this
+    BEFORE the service dir is created.
+    """
+    from hermes_cli.service_manager import _MAX_PROFILE_LEN, S6_SERVICE_PREFIX
+
+    # The max accounts for the prefix length.
+    assert _MAX_PROFILE_LEN == 251 - len(S6_SERVICE_PREFIX)
+
+    # Exactly at the limit: accepted.
+    validate_profile_name("a" * _MAX_PROFILE_LEN)
+
+    # One over the limit: rejected.
+    with pytest.raises(ValueError, match="too long"):
+        validate_profile_name("a" * (_MAX_PROFILE_LEN + 1))
+
+
 # ---------------------------------------------------------------------------
 # detect_service_manager
 # ---------------------------------------------------------------------------
