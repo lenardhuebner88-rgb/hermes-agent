@@ -624,6 +624,40 @@ def test_worker_scope_contract_validator_rejects_broad_allowed_tools():
     assert "broad" in report.issues[0].reason
 
 
+def test_worker_scope_contract_validator_accepts_valid_contract():
+    """Positive-path coverage for WorkerScopeContractReport.ok.
+
+    The existing rejection test only exercises ``ok is False`` for non-empty
+    issue lists.  A valid worker-lane child with a well-formed scope_contract
+    and only known allowed_tools must yield ``issues == []`` so ``ok is True``.
+    Without this assertion, mutation-testing survivors on ``return not
+    self.issues`` (line 655) go undetected because the True branch is never
+    observed.
+    """
+    children = [{
+        "title": "safe worker",
+        "body": (
+            "scope_contract:\n"
+            "  version: 2\n"
+            "  allowed_tools:\n"
+            "    - kanban_show\n"
+            "    - kanban_complete\n"
+            "    - kanban_block\n"
+            "    - kanban_comment\n"
+            "    - read_file\n"
+            "    - terminal\n"
+            "completion_policy:\n"
+            "  require_scope_attestation: true\n"
+        ),
+        "assignee": "coder",
+    }]
+
+    report = decomp.validate_worker_scope_contracts(children)
+
+    assert report.issues == []
+    assert report.ok is True
+
+
 def test_decompose_blocks_before_db_insert_when_worker_contract_invalid(kanban_home, monkeypatch):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="block invalid worker", triage=True)
