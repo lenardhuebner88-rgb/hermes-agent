@@ -1122,7 +1122,204 @@ def test_cli_gate_fix_check_idle_when_legacy_log_differs(
 
 
 # ---------------------------------------------------------------------------
-# Leaker cause-purity (GREEN-GATE-LEAKER-CAUSE-PURITY-S1)
+# N-of-M persistent-red triage (GREEN-GATE-PERSISTENT-RED-TRIAGE-S1)
+#
+# Orthogonal to derive_consecutive_red_cause (same-cause): fires when the head
+# is red AND >=N reds in the last M nights, REGARDLESS of whether the first_fail
+# cause changed between nights. The changing-cause case is exactly what the
+# same-cause path skips, leaving the operator with a persistent red head and no
+# triage item. The fingerprint is the CURRENT red file set, so re-runs dedup.
+# ---------------------------------------------------------------------------
+
+def test_persistent_red_triage_none_on_green_head():
+    records = [
+        _red("2026-06-19", gate="python", detail="boom"),
+        _red("2026-06-20", gate="python", detail="boom"),
+        _rec("2026-06-21", "pass"),
+    ]
+    assert vm.derive_persistent_red_triage(records) is None
+
+
+def test_persistent_red_triage_none_on_single_red():
+    # AC-2 guard: a single isolated flake-night must NOT fire
+    records = [
+        _rec("2026-06-19", "pass"),
+        _rec("2026-06-20", "pass"),
+        _red("2026-06-21", gate="python", detail="boom"),
+    ]
+    assert vm.derive_persistent_red_triage(records) is None
+
+
+def test_persistent_red_triage_fires_on_two_of_three_changing_causes():
+    # AC-1: head red AND >=2 reds in last 3 nights, with DIFFERENT first_fail
+    # causes — exactly what derive_consecutive_red_cause skips.
+    records = [
+        _rec("2026-06-19", "pass"),
+        _red("2026-06-20", gate="python", detail="assertion error in test_alpha"),
+        _red("2026-06-21", gate="python", detail="import error in module_beta"),
+    ]
+    cause = vm.derive_persistent_red_triage(records)
+    assert cause is not None
+    assert cause["gate"] == "python"
+    assert cause["red_count"] == 2
+    assert cause["window"] == 3
+    assert "2026-06-21" in cause["dates"]
+    assert "2026-06-20" in cause["dates"]
+
+
+def test_persistent_red_triage_fingerprint_stable_on_same_red_files():
+    # AC-2 dedup: same red file set on follow-up night → same fingerprint
+    detail = (
+        "=== 2 files with test failures (2 tests failed) ===\n"
+        "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+        "  tests/tools/test_voice_mode.py  (1 test failed)\n"
+    )
+    records_a = [
+        _red("2026-06-20", gate="python", detail=detail),
+        _red("2026-06-21", gate="python", detail=detail),
+    ]
+    records_b = [
+        _red("2026-06-20", gate="python", detail=detail),
+        _red("2026-06-21", gate="python", detail=detail),
+        _red("2026-06-22", gate="python", detail=detail),  # third night, same set
+    ]
+    fp_a = vm.derive_persistent_red_triage(records_a)["fingerprint"]
+    fp_b = vm.derive_persistent_red_triage(records_b)["fingerprint"]
+    assert fp_a == fp_b  # identical file set → identical fingerprint → dedup
+
+
+def test_persistent_red_triage_fingerprint_changes_when_red_files_change():
+    # When the red file set changes (a new test broke), the fingerprint must
+    # change so a fresh triage chain opens — the operator SHOULD see a new item.
+    detail_a = (
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+    )
+    detail_b = (
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/tools/test_voice_mode.py  (1 test failed)\n"
+    )
+    records = [
+        _red("2026-06-20", gate="python", detail=detail_a),
+        _red("2026-06-21", gate="python", detail=detail_b),  # different file
+    ]
+    cause = vm.derive_persistent_red_triage(records)
+    assert cause is not None
+    fp_head = cause["fingerprint"]
+    # Swap the head's detail to a different file set
+    records2 = [
+        _red("2026-06-20", gate="python", detail=detail_b),
+        _red("2026-06-21", gate="python", detail=detail_a),
+    ]
+    cause2 = vm.derive_persistent_red_triage(records2)
+    assert cause2 is not None
+    assert fp_head != cause2["fingerprint"]
+
+
+def test_persistent_red_triage_min_reds_override():
+    records = [
+        _rec("2026-06-19", "pass"),
+        _red("2026-06-20", gate="python", detail="boom"),
+        _red("2026-06-21", gate="python", detail="boom"),
+    ]
+    # min_reds=3 → not enough reds in the window
+    assert vm.derive_persistent_red_triage(records, min_reds=3) is None
+    # min_reds=1 → fires
+    assert vm.derive_persistent_red_triage(records, min_reds=1) is not None
+
+
+def test_persistent_red_triage_fires_with_all_three_red():
+    records = [
+        _red("2026-06-19", gate="build", detail="tsc error"),
+        _red("2026-06-20", gate="build", detail="tsc error"),
+        _red("2026-06-21", gate="build", detail="tsc error"),
+    ]
+    cause = vm.derive_persistent_red_triage(records)
+    assert cause is not None
+    assert cause["red_count"] == 3
+    assert cause["window"] == 3
+
+
+def test_persistent_red_triage_empty_ledger():
+    assert vm.derive_persistent_red_triage([]) is None
+
+
+def test_cli_triage_check_dry_run(tmp_path, monkeypatch, state_dir, capsys):
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="assert boom in test_alpha",
+    )
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="import error in module_beta",
+    )
+    rc = _run_cli(["vision", "triage-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is True
+    assert out["gate"] == "python"
+    assert out["red_count"] == 2
+    assert out["window"] == 3
+    assert out["ingested"]["dry_run"] is True
+
+
+def test_cli_triage_check_idle_on_green_head(tmp_path, monkeypatch, state_dir, capsys):
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result("pass", ts="2026-06-21T03:00:00+00:00")
+    rc = _run_cli(["vision", "triage-check", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is False
+    assert out["ingested"] is None
+
+
+def test_cli_triage_check_idle_on_single_isolated_red(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """AC-2 guard: a single isolated flake-night must NOT open a triage spec."""
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result("pass", ts="2026-06-20T03:00:00+00:00")
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python", first_fail_detail="assert boom",
+    )
+    rc = _run_cli(["vision", "triage-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is False
+
+
+def test_cli_triage_check_fires_on_changing_causes(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """AC-1 E2E: two red nights with DIFFERENT first_fail causes — the exact
+    case the same-cause path skips, and this triage path must catch."""
+    db_path = tmp_path / "kanban.db"
+    vm.record_gate_result(
+        "fail", ts="2026-06-20T03:00:00+00:00",
+        first_fail_gate="python",
+        first_fail_detail=(
+            "=== 1 files with test failures (1 tests failed) ===\n"
+            "  tests/agent/test_copilot_acp_client.py  (1 test failed)\n"
+        ),
+    )
+    vm.record_gate_result(
+        "fail", ts="2026-06-21T03:00:00+00:00",
+        first_fail_gate="python",
+        first_fail_detail=(
+            "=== 1 files with test failures (1 tests failed) ===\n"
+            "  tests/tools/test_voice_mode.py  (1 test failed)\n"
+        ),
+    )
+    rc = _run_cli(["vision", "triage-check", "--dry-run", "--json"], monkeypatch, db_path)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is True
+    assert out["red_count"] == 2
+    assert "tests/tools/test_voice_mode.py" in out["red_files"]
+
+
 #
 # A red gate's first_fail must name a real (in-isolation reproducible) failure,
 # never a test-isolation leaker. The ledger entry carries the demoted leaker

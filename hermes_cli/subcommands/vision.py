@@ -126,6 +126,53 @@ def build_vision_parser(subparsers) -> None:
     )
     gatefix.add_argument("--json", action="store_true", help="Emit JSON output")
 
+    # --- triage-check (GREEN-GATE-PERSISTENT-RED-TRIAGE-S1) ---
+    triage = sub.add_parser(
+        "triage-check",
+        help=(
+            "Open a HELD Triage-PlanSpec when the green-gate is red >=N of M "
+            "nights, regardless of first_fail cause (changing-cause trigger)"
+        ),
+        description=(
+            "Bounded, idempotent N-of-M persistent-red triage: when the most "
+            "recent recorded night is red AND >= --min-reds of the last "
+            "--window recorded nights are red — REGARDLESS of whether the "
+            "first_fail cause changed between nights — ingest a single "
+            "freigabe:operator (HELD) Triage-PlanSpec listing the CURRENTLY "
+            "red test files. Orthogonal to gate-fix-check (which requires the "
+            "SAME first_fail cause on consecutive nights); the two paths "
+            "produce distinct keys so neither double-ingests. Never "
+            "auto-releases, never deploys; re-running on the same red file set "
+            "dedups (no spam). Idle when the head is green or fewer than "
+            "--min-reds reds are in the window. Intended to run right after "
+            "gate-fix-check in the nightly heartbeat."
+        ),
+    )
+    triage.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
+    triage.add_argument(
+        "--min-reds",
+        type=int,
+        default=strategist.GATE_TRIAGE_MIN_REDS,
+        help="Red nights required in the window to open a triage-PlanSpec (default 2)",
+    )
+    triage.add_argument(
+        "--window",
+        type=int,
+        default=strategist.GATE_TRIAGE_WINDOW,
+        help="Number of recent nights to examine (default 3)",
+    )
+    triage.add_argument(
+        "--out-dir",
+        default=None,
+        help="Directory for the drafted triage-PlanSpec markdown (default: <hermes-home>/state/strategist/specs)",
+    )
+    triage.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Detect only; do not write or ingest a PlanSpec",
+    )
+    triage.add_argument("--json", action="store_true", help="Emit JSON output")
+
     # --- metrics-snapshot ---
     snapshot = sub.add_parser(
         "metrics-snapshot",
@@ -323,6 +370,36 @@ def vision_command(args: argparse.Namespace) -> int:
             print(
                 f"gate-fix-check: gate '{result['gate']}' red {result['red_nights']} nights → "
                 f"{verb} fix-PlanSpec {ingested.get('key')} → root {ingested.get('root_task_id')}"
+            )
+        return 0
+
+    if action == "triage-check":
+        result = strategist.run_persistent_red_triage(args)
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if not result.get("triggered"):
+            print(f"triage-check: idle — {result.get('reason')}")
+            return 0
+        ingested = result.get("ingested") or {}
+        if ingested.get("dry_run"):
+            print(
+                f"triage-check (dry-run): would open HELD Triage-PlanSpec "
+                f"{result['key']} for gate '{result['gate']}' "
+                f"({result['red_count']} red of {result['window']} nights, "
+                f"fingerprint {result['fingerprint']})"
+            )
+        elif result.get("ingest_error"):
+            print(
+                f"triage-check: detection fired for gate '{result['gate']}' but ingest "
+                f"was blocked — {'; '.join(result['ingest_error'].get('findings', []))}"
+            )
+        else:
+            verb = "already held (dedup)" if ingested.get("already_ingested") else "ingested HELD"
+            print(
+                f"triage-check: gate '{result['gate']}' red {result['red_count']} of "
+                f"{result['window']} nights → {verb} Triage-PlanSpec "
+                f"{ingested.get('key')} → root {ingested.get('root_task_id')}"
             )
         return 0
 

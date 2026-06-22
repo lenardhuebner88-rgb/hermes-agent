@@ -667,6 +667,49 @@ def test_gate_fix_distinct_cause_opens_second_chain(board_home):
         assert len(strategist_surface.held_operator_proposals(conn)) == 2
 
 
+def test_persistent_red_triage_is_idempotent_while_window_ramps(board_home):
+    """AC-2 (persistent-red path): re-running while the SAME red file set persists
+    but the window count ramps (2-of-3 → 3-of-3) must dedup to the same chain —
+    NOT a supersede-conflict. Regression guard: the rendered triage spec must not
+    interpolate the volatile red_count, or the content hash drifts as the window
+    grows and the follow-up night returns an ingest_error instead of the
+    documented ``already_ingested``."""
+    out_dir = board_home / "specs"
+    detail = (
+        "=== 1 files with test failures (1 tests failed) ===\n"
+        "  tests/tools/test_voice_mode.py  (1 test failed)\n"
+    )
+    first = _gate_records(
+        ("2026-06-20", "python", detail),
+        ("2026-06-21", "python", detail),
+    )
+    r1 = strategist.propose_persistent_red_triage(
+        board=None, out_dir=out_dir, gate_records=first
+    )
+
+    third = first + [
+        {
+            "date": "2026-06-22",
+            "result": "fail",
+            "ts": "2026-06-22T03:00:00+00:00",
+            "first_fail": {"gate": "python", "detail": detail},
+        }
+    ]
+    r2 = strategist.propose_persistent_red_triage(
+        board=None, out_dir=out_dir, gate_records=third
+    )
+
+    assert r1["triggered"] is True
+    assert r2["triggered"] is True
+    assert r2["red_count"] == 3  # detection still sees the growing window
+    assert r1["key"] == r2["key"]  # stable identity across the volatile count
+    assert r1["ingested"]["already_ingested"] is False
+    assert r2["ingested"]["already_ingested"] is True  # was a conflict pre-fix
+    assert r1["ingested"]["root_task_id"] == r2["ingested"]["root_task_id"]
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
 # --------------------------------------------------------------------------- #
 # GREEN-GATE-AUTOHEAL-LEGACY-NIGHT-S1 — log-backfill a legacy un-attributed
 # predecessor so the live 06-20/06-21 red series self-heals

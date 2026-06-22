@@ -25,6 +25,7 @@ sandboxes) write to a temp dir instead of the live state.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -337,6 +338,15 @@ GATE_FIX_MIN_NIGHTS = 2
 # we read the TAIL of that night's gate log (the failure summary sits at the end)
 # and compare failing-test signatures. Both reads are bounded so a pathological
 # log can never balloon the walk.
+
+# Persistent-red N-of-M triage (GREEN-GATE-PERSISTENT-RED-TRIAGE-S1):
+# When the head is red AND >=N of the last M recorded nights are red (regardless
+# of whether the first_fail cause is the same), open exactly one HELD
+# triage-PlanSpec listing the currently-red test files. This is orthogonal to
+# the same-cause path above: it catches *changing-cause* persistent reds that
+# same-cause dedup would miss.
+GATE_TRIAGE_MIN_REDS = 2  # AC-2: never fire on a single isolated flake-night
+GATE_TRIAGE_WINDOW = 3  # examine the last M nights (2 of 3)
 GREEN_GATE_LOG_DIR_ENV = "GREEN_GATE_LOG_DIR"
 GATE_LOG_BACKFILL_MAX_BYTES = 256 * 1024  # tail we read from a legacy gate log
 GATE_BACKFILL_MAX_FILES = 200  # cap failing-file tokens parsed from one log
@@ -645,6 +655,77 @@ def derive_consecutive_red_cause(
         "detail": target_cause["detail"] if target_cause else "",
         "red_nights": len(matched),
         "dates": matched,
+    }
+
+
+def derive_persistent_red_triage(
+    records: list[dict],
+    *,
+    min_reds: int = GATE_TRIAGE_MIN_REDS,
+    window: int = GATE_TRIAGE_WINDOW,
+) -> Optional[dict]:
+    """N-of-M persistent-red triage trigger (GREEN-GATE-PERSISTENT-RED-TRIAGE-S1).
+
+    Orthogonal to :func:`derive_consecutive_red_cause` (which requires the SAME
+    first_fail fingerprint on consecutive nights): this fires when the head is
+    red AND >= ``min_reds`` of the last ``window`` recorded nights are red —
+    regardless of whether the first_fail cause changed between nights. The
+    changing-cause case is exactly what the same-cause path deliberately skips,
+    leaving the operator with a persistent red head and no triage item.
+
+    Returns ``None`` (idle) when:
+      - the head night is green (no red head to triage), or
+      - fewer than ``min_reds`` reds in the window (isolated flake — AC-2 guard).
+
+    When triggered, returns::
+
+        {
+            "gate": <str>,            # the head night's gate
+            "red_files": set[str],    # currently-red test files from head first_fail
+            "fingerprint": <str>,     # sha1 of the sorted red_files set (dedup key)
+            "red_count": <int>,       # reds in the window
+            "window": <int>,          # M
+            "dates": [<str>, ...],    # dates of the red nights in the window
+        }
+
+    The ``fingerprint`` is a pure function of the CURRENT red file set (not the
+    historical causes), so re-runs / follow-up nights with the same red file set
+    produce the same fingerprint and the ingest dedups — no spam (AC-2).
+    """
+    if not records:
+        return None
+    recent = list(records[-window:]) if window > 0 else list(records)
+    if not recent:
+        return None
+    head = recent[-1]
+    if str(head.get("result", "")).lower() != "fail":
+        return None
+    reds = [r for r in recent if str(r.get("result", "")).lower() == "fail"]
+    if len(reds) < min_reds:
+        return None
+    # ``detail`` and ``gate`` live under the record's ``first_fail`` payload
+    # (mirrors derive_consecutive_red_cause, which reads first_fail["detail"]).
+    # Reading them top-level would always miss → empty file set + "unknown" gate.
+    head_first_fail = head.get("first_fail") or {}
+    head_files = _extract_failing_test_files(head_first_fail.get("detail"))
+    # Fingerprint the CURRENT red file set — the dedup axis. Two runs whose head
+    # night shows the same red files produce the same fingerprint, so the ingest
+    # reports already_ingested instead of opening a second chain (AC-2). When the
+    # red file set changes (a new test broke, a different subset is red), the
+    # fingerprint changes and a fresh triage chain opens — correct: the operator
+    # SHOULD see a new item for a new failure pattern.
+    fingerprint_source = "|".join(sorted(head_files)) if head_files else (
+        str(head_first_fail.get("gate") or "unknown")
+    )
+    fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
+    red_dates = [str(r.get("date") or r.get("epoch") or "?") for r in reds]
+    return {
+        "gate": str(head_first_fail.get("gate") or "unknown"),
+        "red_files": head_files,
+        "fingerprint": fingerprint,
+        "red_count": len(reds),
+        "window": window,
+        "dates": red_dates,
     }
 
 

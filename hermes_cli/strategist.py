@@ -72,6 +72,17 @@ STRATEGIST_AUTHOR = kanban_db.STRATEGIST_CREATED_BY
 # operator surface (which gates on freigabe:operator + scheduled, not author).
 GATE_FIX_AUTHOR = "green-gate-autoheal"
 
+# GREEN-GATE-PERSISTENT-RED-TRIAGE-S1: a distinct author for the N-of-M
+# persistent-red triage specs (changing causes — not same-cause). Same
+# rationale as GATE_FIX_AUTHOR: kept separate from STRATEGIST_AUTHOR so
+# ``reflect`` never reflects on an autoheal hold. The held triage spec still
+# surfaces on the G1 operator surface (freigabe:operator + scheduled).
+GATE_TRIAGE_AUTHOR = "green-gate-persistent-red-triage"
+
+# Re-export the N-of-M triage defaults so the CLI layer has one import site.
+GATE_TRIAGE_MIN_REDS = vision_metrics.GATE_TRIAGE_MIN_REDS
+GATE_TRIAGE_WINDOW = vision_metrics.GATE_TRIAGE_WINDOW
+
 # Re-export the default streak threshold so the CLI layer has one import site.
 GATE_FIX_MIN_NIGHTS = vision_metrics.GATE_FIX_MIN_NIGHTS
 
@@ -319,6 +330,89 @@ def _gate_fix_lever(cause: dict[str, Any]) -> Lever:
         counter_risk=0.3,
         signal_strength=1.0,
         source="gate-autoheal",
+    )
+
+
+def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
+    """Build the held triage-PlanSpec lever for N-of-M persistent red nights.
+
+    Driven by :func:`vision_metrics.derive_persistent_red_triage`. Orthogonal to
+    :func:`_gate_fix_lever`: that one fires on consecutive SAME-cause nights;
+    this one fires when the head is red AND >=N reds in the last M nights —
+    REGARDLESS of whether the first_fail cause changed between nights. The
+    changing-cause case is exactly what the same-cause path skips, leaving the
+    operator with a persistent red head and no triage item (AC-1).
+
+    The lever's identity (``key`` → spec filename) is a pure function of the
+    CURRENT red file set (the head night's failing files), so re-running on a
+    follow-up night with the same red files renders byte-identical markdown and
+    the ingest dedups (``already_ingested``) — no spam (AC-2). When the red file
+    set changes (a new test broke), the fingerprint changes and a fresh triage
+    chain opens — correct: the operator SHOULD see a new item for a new failure
+    pattern. The volatile red-count / dates are deliberately NOT rendered, so
+    the content hash that backs idempotency cannot drift while the window grows.
+    """
+    gate = str(cause.get("gate") or "unknown").strip().lower() or "unknown"
+    fingerprint = str(cause.get("fingerprint") or gate)
+    red_files = cause.get("red_files") or set()
+    token = _cost_lane_token(gate) or "UNKNOWN"
+    # Short, stable digest of the file-set fingerprint so two distinct red-file
+    # sets on the same gate get distinct keys while an identical set keys
+    # identically (idempotent). Deterministic (sha1) — safe for idempotency.
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
+    key = f"GATE-TRIAGE-{token}-{digest}"
+    file_list = ", ".join(sorted(red_files)) if red_files else "(unbekannt)"
+    return Lever(
+        key=key,
+        title=(
+            f"Persistente rote Naechte am Gate '{gate}' triagieren "
+            f"(wechselnde Ursachen)"
+        ),
+        lane="premium",
+        target_metric=(
+            f"green_gate_streak entroeten, indem persistente Roete IMMER autonom "
+            f"in handelbare Arbeit muendet: bei rotem Kopf UND >=N roten Naechten "
+            f"im letzten-M-Fenster (egal ob gleiche oder wechselnde first_fail-"
+            f"Ursache) wird eine konsolidierte HELD Triage-PlanSpec eroeffnet, "
+            f"die die aktuell roten Test-Dateien auflistet"
+        ),
+        roi=(
+            "hoch: ein seit mehreren Naechten roter green-gate mit "
+            "wechselnden Ursachen ist ein chronisches Problem, das der "
+            "same-cause-Pfad gezielt ueberspringt; konsolidierte Triage stellt "
+            "sicher, dass 0 Naechte mit streak=0 ohne offenes Triage-Item "
+            "dastehen"
+        ),
+        counter_metric=(
+            "darf NICHT bei einer einzelnen isolierten Flake-Nacht feuern und "
+            "darf nicht spammen: Trigger nur wenn Kopf rot UND >=N reds im "
+            "M-Fenster; Dedup ueber den Fingerprint des aktuell roten Datei-"
+            "Sets, sodass Re-Runs mit gleichem Set keine zweite PlanSpec "
+            "oeffnen (Duplicate-PlanSpec-Rate muss 0 bleiben). Der bestehende "
+            "same-cause-Pfad bleibt unveraendert (keine Doppel-Ingest)"
+        ),
+        rationale=(
+            # Render only STABLE fields (gate + the sorted red-file set, which is
+            # the fingerprint axis). The volatile red-count / window are kept OUT
+            # of the spec body on purpose: PlanSpec ingest dedups on the content
+            # hash, so interpolating a count that climbs while the window ramps
+            # (2-of-3 → 3-of-3) would drift the hash and turn a same-file-set
+            # re-run into a conflict instead of an idempotent already_ingested.
+            # Mirrors _gate_fix_lever, which renders only stable fields too.
+            f"Der naechtliche green-gate-Heartbeat ist am Gate '{gate}' an "
+            f"mehreren der letzten Naechte rot (wechselnde first_fail-Ursachen "
+            f"— der same-cause-Pfad greift nicht). aktuell rote Test-Dateien: "
+            f"{file_list}. Diese HELD, operator-gated Triage-PlanSpec wurde "
+            f"automatisch eroeffnet, damit die chronische Roete nicht "
+            f"unbemerkt auf green_gate_streak=0 stehen bleibt. Vorgehen: die "
+            f"aufgezaehlten roten Test-Dateien reproduzieren, die jeweiligen "
+            f"Defekte beheben, und das betroffene Gate lokal gruen fahren."
+        ),
+        gain_weight=1.0,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=1.0,
+        source="gate-persistent-red-triage",
     )
 
 
@@ -985,6 +1079,95 @@ def propose_gate_fix(
     return summary
 
 
+def propose_persistent_red_triage(
+    *,
+    board: Optional[str] = None,
+    out_dir: Path,
+    gate_records: Optional[list[dict[str, Any]]] = None,
+    min_reds: int = GATE_TRIAGE_MIN_REDS,
+    window: int = GATE_TRIAGE_WINDOW,
+    do_ingest: bool = True,
+) -> dict[str, Any]:
+    """GREEN-GATE-PERSISTENT-RED-TRIAGE-S1 — open a HELD Triage-PlanSpec for
+    persistent red nights with CHANGING causes.
+
+    Bounded + idempotent: reads the green-gate ledger, and ONLY when the most
+    recent recorded night is red AND >= ``min_reds`` of the last ``window``
+    recorded nights are red — regardless of whether the first_fail cause
+    changed between nights — does it ingest a single ``freigabe:operator``
+    (HELD) Triage-PlanSpec listing the CURRENTLY red test files (AC-1).
+    Never auto-deploy, never auto-release. Re-running while the same red file
+    set persists hits the ingest idempotency key and reports
+    ``already_ingested`` instead of minting a second chain (AC-2). When the head
+    is green or fewer than ``min_reds`` reds are in the window it is a no-op
+    (``triggered: False``) — idle is correct, and a single isolated flake-night
+    is deliberately NOT triage-opening (AC-2 guard).
+
+    Orthogonal to :func:`propose_gate_fix` (same-cause path): that one fires on
+    consecutive SAME-cause nights; this one fires on N-of-M red nights with
+    any-cause. The two paths produce distinct keys (``GATE-FIX-*`` vs
+    ``GATE-TRIAGE-*``) so a night that matches both opens both — a same-cause
+    fix-PlanSpec AND a persistent-red triage-PlanSpec, each HELD for the
+    operator. They are different lenses (one names a recurring cause to fix, the
+    other flags a persistently-red head), not duplicates; within each path the
+    fingerprint/key dedup prevents re-opening the SAME spec on re-runs. The
+    existing same-cause path remains UNCHANGED (AC-2:
+    no Doppel-Ingest).
+    """
+    if gate_records is None:
+        gate_records = vision_metrics.read_gate_records()
+    cause = vision_metrics.derive_persistent_red_triage(
+        gate_records, min_reds=min_reds, window=window
+    )
+    if cause is None:
+        return {
+            "mode": "gate-triage",
+            "triggered": False,
+            "reason": (
+                f"kein persistenter roter Kopf (Kopf gruen oder < "
+                f"{min_reds} rote von {window} Naechten)"
+            ),
+            "ingested": None,
+        }
+
+    lever = _persistent_red_triage_lever(cause)
+    summary: dict[str, Any] = {
+        "mode": "gate-triage",
+        "triggered": True,
+        "gate": cause["gate"],
+        "fingerprint": cause["fingerprint"],
+        "red_count": cause["red_count"],
+        "window": cause["window"],
+        "red_files": sorted(cause["red_files"]),
+        "dates": cause["dates"],
+        "key": lever.key,
+    }
+
+    if not do_ingest:
+        summary["ingested"] = {"key": lever.key, "title": lever.title, "dry_run": True}
+        return summary
+
+    spec_path = _write_spec(out_dir, lever)
+    try:
+        result = planspecs.ingest_planspec(
+            spec_path, board=board, author=GATE_TRIAGE_AUTHOR, plans_root=Path(out_dir)
+        )
+    except planspecs.PlanSpecBlocked as exc:
+        summary["ingested"] = None
+        summary["ingest_error"] = {"key": lever.key, "findings": exc.findings}
+        return summary
+
+    summary["ingested"] = {
+        "key": lever.key,
+        "title": lever.title,
+        "root_task_id": result.get("root_task_id"),
+        "subtask_count": result.get("subtask_count"),
+        "freigabe": result.get("freigabe"),
+        "already_ingested": result.get("already_ingested", False),
+    }
+    return summary
+
+
 def _key_from_title(title: Optional[str]) -> Optional[str]:
     """Recover the lever key from a ``PlanSpec <KEY>: ...`` root title."""
     if not title:
@@ -1328,6 +1511,25 @@ def run_gate_fix(args) -> dict[str, Any]:
         min_nights=getattr(args, "min_nights", GATE_FIX_MIN_NIGHTS),
         do_ingest=not getattr(args, "dry_run", False),
         night_log_reader=vision_metrics.default_night_log_reader(),
+    )
+
+
+def run_persistent_red_triage(args) -> dict[str, Any]:
+    """CLI adapter: resolve defaults from the runtime layout, then triage-check.
+
+    GREEN-GATE-PERSISTENT-RED-TRIAGE-S1 — the N-of-M changing-cause trigger,
+    orthogonal to :func:`run_gate_fix` (same-cause). When the head is red AND
+    >=N reds in the last M nights, ingests a single HELD Triage-PlanSpec
+    listing the currently-red test files; idempotent on the file-set fingerprint.
+    """
+    state_dir = default_state_dir()
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
+    return propose_persistent_red_triage(
+        board=getattr(args, "board", None),
+        out_dir=out_dir,
+        min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
+        window=getattr(args, "window", GATE_TRIAGE_WINDOW),
+        do_ingest=not getattr(args, "dry_run", False),
     )
 
 
