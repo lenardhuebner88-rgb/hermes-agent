@@ -287,6 +287,60 @@ def test_list_planspecs_filters_valid_and_limits_server_side(tmp_path: Path):
     ]
 
 
+
+def test_list_planspecs_bounds_ingest_precheck_after_filters_and_limit(
+    tmp_path: Path, monkeypatch
+):
+    """The dashboard list is polled frequently; precheck must not scan every
+    binding PlanSpec before scope/search/limit are applied."""
+    plans_root = tmp_path / "03-Agents"
+    alpha = _write_planspec(plans_root, "2026-06-16-alpha.md")
+    _write_planspec(plans_root, "2026-06-16-beta.md")
+    _write_display_plangate(plans_root)
+    seen: list[str] = []
+
+    def fake_validate(path: Path, *, plans_root: Path = planspecs.DEFAULT_PLANS_ROOT):
+        seen.append(Path(path).name)
+        return {"disposition": "clean", "would_block": False, "findings": []}
+
+    monkeypatch.setattr(planspecs, "validate_planspec", fake_validate)
+
+    records = planspecs.list_planspecs(
+        plans_root=plans_root, scope="all", valid=True, search="alpha", limit=1
+    )
+
+    assert [item["path"] for item in records] == [str(alpha.resolve(strict=False))]
+    assert seen == ["2026-06-16-alpha.md"]
+    assert records[0]["ingest_disposition"] == "clean"
+    assert records[0]["ingest_would_block"] is False
+
+def test_list_planspecs_includes_ingest_precheck_fields(tmp_path: Path):
+    """list_planspecs records carry ingest_disposition, ingest_would_block, and
+    ingest_findings so the dashboard can show inline blockers before the
+    operator clicks the Kanban button."""
+    plans_root = tmp_path / "03-Agents"
+    open_path = _write_planspec(plans_root, "2026-06-16-open.md")
+    display_path = _write_display_plangate(plans_root)
+
+    records = planspecs.list_planspecs(plans_root=plans_root, scope="all")
+
+    by_name = {item["filename"]: item for item in records}
+    # Binding + valid spec: precheck ran, so disposition is not the default
+    open_rec = by_name["2026-06-16-open.md"]
+    assert open_rec["binding"] is True
+    assert open_rec["valid"] is True
+    assert "ingest_disposition" in open_rec
+    assert "ingest_would_block" in open_rec
+    assert "ingest_findings" in open_rec
+    assert isinstance(open_rec["ingest_findings"], list)
+    # Non-binding display-only spec: never ingestable from list
+    display_rec = by_name["2026-06-16-abo-limits.md"]
+    assert display_rec["binding"] is False
+    assert display_rec["ingest_disposition"] == "not_ingestable"
+    assert display_rec["ingest_would_block"] is True
+    assert display_rec["ingest_findings"] == []
+
+
 def test_list_planspecs_searches_topic_filename_agent_and_path(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     alpha = _write_planspec(plans_root, "2026-06-16-alpha.md")

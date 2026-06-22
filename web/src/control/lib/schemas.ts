@@ -156,6 +156,9 @@ export const PlanSpecRecordSchema = z.object({
   kanban_child_blocked: z.coerce.number().catch(0),
   kanban_child_running: z.coerce.number().catch(0),
   kanban_ingested_at: z.coerce.number().nullable().catch(null),
+  ingest_disposition: z.string().catch("not_ingestable"),
+  ingest_would_block: z.coerce.boolean().catch(true),
+  ingest_findings: z.array(z.string()).catch([]),
   errors: z.array(z.string()).catch([]),
 });
 

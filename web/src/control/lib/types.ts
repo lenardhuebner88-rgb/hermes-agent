@@ -118,6 +118,9 @@ export interface PlanSpecRecord {
   kanban_child_blocked: number;
   kanban_child_running: number;
   kanban_ingested_at: number | null;
+  ingest_disposition: string;
+  ingest_would_block: boolean;
+  ingest_findings: string[];
   errors: string[];
 }
 

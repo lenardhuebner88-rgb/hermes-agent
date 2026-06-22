@@ -270,8 +270,8 @@ function planSpecKanbanProgress(item: PlanSpecRecord): string | null {
 
 function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void }) {
   const [planspecSearch, setPlanspecSearch] = useState("");
-  const [validOnly, setValidOnly] = useState(false);
-  const plans = usePlanSpecs({ scope: "all", limit: 8, valid: validOnly ? true : null, search: planspecSearch });
+  const [openOnly, setOpenOnly] = useState(false);
+  const plans = usePlanSpecs({ scope: openOnly ? "open" : "all", limit: 8, search: planspecSearch });
   const [plansOpen, setPlansOpen] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [errorByPath, setErrorByPath] = useState<Record<string, string>>({});
@@ -280,7 +280,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
   const detail = usePlanSpecDetail(detailItem?.path ?? null);
   const items = plans.data?.planspecs ?? [];
   const openCount = items.filter((item) => item.open).length;
-  const hasFilters = Boolean(planspecSearch.trim()) || validOnly;
+  const hasFilters = Boolean(planspecSearch.trim()) || openOnly;
 
   const setRowError = useCallback((path: string, message: string | null) => {
     setErrorByPath((current) => {
@@ -386,11 +386,11 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
         <label className="inline-flex min-h-11 items-center gap-2 rounded-md border border-[var(--hc-border)] px-3 text-sm hc-soft">
           <input
             type="checkbox"
-            checked={validOnly}
-            onChange={(event) => setValidOnly(event.target.checked)}
+            checked={openOnly}
+            onChange={(event) => setOpenOnly(event.target.checked)}
             className="h-4 w-4 accent-[var(--hc-accent-text)]"
           />
-          Nur gültige
+          Nur offene
         </label>
       </div>
       {plans.error ? <ToneCallout tone="amber">{plans.error}</ToneCallout> : null}
@@ -407,6 +407,8 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
           const kanbanLabel = planSpecKanbanLabel(item);
           const kanbanProgress = planSpecKanbanProgress(item);
           const kanbanTone = planSpecKanbanTone(item.kanban_state);
+          const ingestBlocked = item.ingest_would_block;
+          const ingestBlockerReason = ingestBlocked && item.ingest_findings.length > 0 ? item.ingest_findings[0] : null;
           return (
             <div key={item.path} className="min-w-0 rounded-[12px] border border-[var(--hc-border)] bg-[var(--hc-panel)] p-3 sm:p-[14px]">
               <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
@@ -433,7 +435,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
               <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
                 <button
                   type="button"
-                  disabled={closed || !item.valid || ingestBusy || promptBusy || closeBusy}
+                  disabled={closed || !item.valid || ingestBlocked || ingestBusy || promptBusy || closeBusy}
                   onClick={() => void ingest(item)}
                   className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] px-3 text-sm text-[var(--hc-accent-text)] transition hover:brightness-110 disabled:opacity-40 sm:min-h-9 sm:justify-start"
                   aria-label={`PlanSpec ${item.topic} in Kanban umsetzen`}
@@ -441,6 +443,7 @@ function PlanSpecHub({ onIngested }: { onIngested: (rootTaskId: string) => void 
                   {ingestBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
                   Kanban
                 </button>
+                {ingestBlocked && ingestBlockerReason && !closed ? <p className="col-span-2 break-words text-[0.7rem] text-amber-300/80 sm:col-span-1">⚠ {ingestBlockerReason}</p> : null}
                 <button
                   type="button"
                   disabled={!item.valid || ingestBusy || promptBusy || closeBusy}

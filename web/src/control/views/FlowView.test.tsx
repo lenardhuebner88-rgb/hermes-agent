@@ -204,17 +204,19 @@ describe("FlowView mobile compaction + scroll stability (Variante B)", () => {
     expect(src).toMatch(/flex min-w-0 flex-wrap items-center gap-2 rounded-md border/);
   });
 
-  it("keeps the PlanSpec hub all-scoped and readable on phones", () => {
+  it("keeps the PlanSpec hub default all-scoped with open-filter and readable on phones", () => {
     expect(src).toMatch(/Planspec-Hub/);
     expect(src).toMatch(/offen · Vault/);
     expect(src).toMatch(/PlanSpecSearch/);
-    expect(src).toMatch(/Nur gültige/);
-    expect(src).toMatch(/usePlanSpecs\(\{ scope: "all", limit: 8, valid: validOnly \? true : null, search: planspecSearch \}\)/);
+    expect(src).toMatch(/Nur offene/);
+    expect(src).toMatch(/usePlanSpecs\(\{ scope: openOnly \? "open" : "all", limit: 8, search: planspecSearch \}\)/);
     expect(src).toMatch(/items\.filter\(\(item\) => item\.open\)\.length/);
     expect(src).toMatch(/planSpecClosedDispositionLabel\(item\)/);
     expect(src).toMatch(/planSpecIsClosed\(item\)/);
-    expect(src).toMatch(/disabled=\{closed \|\| !item\.valid \|\| ingestBusy \|\| promptBusy \|\| closeBusy\}/);
+    expect(src).toMatch(/disabled=\{closed \|\| !item\.valid \|\| ingestBlocked \|\| ingestBusy \|\| promptBusy \|\| closeBusy\}/);
     expect(src).toMatch(/disabled=\{closed \|\| ingestBusy \|\| promptBusy \|\| closeBusy\}/);
+    expect(src).toMatch(/ingest_would_block/);
+    expect(src).toMatch(/ingest_findings/);
     expect(src).not.toMatch(/plans\.data\?\.planspecs \?\? \[\]\)\.slice\(0, 8\)/);
     expect(src).toMatch(/aria-expanded=\{plansOpen\}/);
     expect(src).toMatch(/PlanSpecs/);

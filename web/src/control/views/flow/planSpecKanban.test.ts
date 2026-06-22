@@ -26,6 +26,9 @@ function record(overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
     kanban_child_blocked: 0,
     kanban_child_running: 0,
     kanban_ingested_at: null,
+    ingest_disposition: "clean",
+    ingest_would_block: false,
+    ingest_findings: [],
     ...overrides,
   };
 }

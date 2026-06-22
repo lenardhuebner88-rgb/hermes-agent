@@ -118,6 +118,37 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
     }]
 
 
+def test_planspecs_endpoint_surfaces_ingest_precheck_fields(monkeypatch, client):
+    """The /planspecs endpoint must pass through ingest_disposition,
+    ingest_would_block, and ingest_findings so the dashboard can show
+    inline ingest blockers before the operator clicks Kanban."""
+    from hermes_cli import planspecs
+
+    def fake_list_planspecs(**kwargs):
+        return [{
+            "path": "/tmp/binding.md",
+            "valid": True,
+            "open": True,
+            "binding": True,
+            "ingest_disposition": "invalid",
+            "ingest_would_block": True,
+            "ingest_findings": ["placeholder residue in section B1-S2"],
+            "errors": [],
+        }]
+
+    monkeypatch.setattr(planspecs, "list_planspecs", fake_list_planspecs)
+
+    response = client.get("/api/plugins/kanban/planspecs?scope=all")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    rec = body["planspecs"][0]
+    assert rec["ingest_disposition"] == "invalid"
+    assert rec["ingest_would_block"] is True
+    assert rec["ingest_findings"] == ["placeholder residue in section B1-S2"]
+
+
 # ---------------------------------------------------------------------------
 # POST /lanes/auth-smoke pure helpers
 # ---------------------------------------------------------------------------

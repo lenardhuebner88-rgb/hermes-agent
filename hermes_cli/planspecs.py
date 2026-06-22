@@ -431,6 +431,12 @@ def list_planspecs(
                 record_errors.append("display-only: taskgraph_hints.binding is missing; Kanban ingest disabled")
             if kanban_state_error:
                 record_errors.append(f"kanban status unavailable: {kanban_state_error}")
+            # Fill conservative defaults first.  The read-only ingest precheck is
+            # intentionally applied after scope/search/limit below, so a dashboard
+            # poll validates only the records it will actually return.
+            ingest_disposition: str = "not_ingestable"
+            ingest_would_block = True
+            ingest_findings: list[str] = []
             records.append(
                 {
                     "path": str(path.resolve(strict=False)),
@@ -458,6 +464,9 @@ def list_planspecs(
                     "kanban_child_blocked": (kanban_state or {}).get("child_blocked", 0),
                     "kanban_child_running": (kanban_state or {}).get("child_running", 0),
                     "kanban_ingested_at": (kanban_state or {}).get("ingested_at"),
+                    "ingest_disposition": ingest_disposition,
+                    "ingest_would_block": ingest_would_block,
+                    "ingest_findings": ingest_findings,
                     "errors": record_errors,
                 }
             )
@@ -476,6 +485,9 @@ def list_planspecs(
                     "valid": False,
                     "open": False,
                     "closed_reason": "invalid PlanSpec",
+                    "ingest_disposition": "invalid",
+                    "ingest_would_block": True,
+                    "ingest_findings": [],
                     "errors": [str(exc)],
                 }
             )
@@ -489,6 +501,21 @@ def list_planspecs(
     records.sort(key=lambda item: (item["open"] is False, item["valid"] is False, item["path"]), reverse=False)
     if limit and limit > 0:
         records = records[:limit]
+    # Read-only ingest precheck: run validate_planspec only on returned binding
+    # specs so the dashboard can surface disposition / blocker findings without
+    # turning a short, 15s-polled list request into a full-repository scan.
+    for item in records:
+        if not item.get("binding") or not item.get("valid"):
+            continue
+        try:
+            precheck = validate_planspec(Path(str(item["path"])), plans_root=plans_root)
+            item["ingest_disposition"] = str(precheck.get("disposition") or "invalid")
+            item["ingest_would_block"] = bool(precheck.get("would_block", True))
+            item["ingest_findings"] = list(precheck.get("findings") or [])
+        except Exception as exc:  # pragma: no cover - defensive
+            item["ingest_disposition"] = "invalid"
+            item["ingest_would_block"] = True
+            item["ingest_findings"] = [f"precheck unavailable: {exc}"]
     return records
 
 
