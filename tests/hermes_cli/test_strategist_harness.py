@@ -362,6 +362,44 @@ def test_reflect_reads_approved_and_vetoed(board_home, tmp_path):
     assert "AUTON-UPLIFT" in vetoed_set
 
 
+
+
+def test_reflect_records_autoresearch_veto_signal(board_home, tmp_path):
+    # Drive the SANCTIONED veto path end-to-end: the reconciler creates the
+    # escalation, the real operator veto (kb.veto_operator_escalation) writes the
+    # freigabe_vetoed event. No raw event injection — the test exercises the same
+    # path the Dashboard/API uses, so it can't go green on an unreachable state.
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        task_id = reconcile._escalate(
+            conn,
+            {
+                "id": "p1",
+                "finding_id": "p1",
+                "title": "Autoresearch silent except finding",
+                "mode": "code",
+                "severity": "high",
+                "subsystem": "auth",
+                "theme": "silent-except",
+                "status": "proposed",
+            },
+            reason="operator review required",
+        )
+        assert kb.veto_operator_escalation(conn, task_id, author="operator") is True
+
+    notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
+    with kb.connect() as conn:
+        result = strategist.reflect(conn, since=0, notes_path=notes_path)
+
+    assert result["note"]["vetoed"] == 1
+    assert result["note"]["vetoed_autoresearch_signals"] == ["silent-except"]
+    assert result["note"]["vetoed_levers"] == ["autoresearch:silent-except"]
+    assert result["vetoed"][0]["source"] == "autoresearch"
+    vetoed_set = json.loads((notes_path.parent / "vetoed_levers.json").read_text(encoding="utf-8"))
+    assert "autoresearch:silent-except" in vetoed_set
+
+
 def test_vetoed_lever_is_suppressed_on_next_propose(board_home, monkeypatch, tmp_path):
     _patch_budget(monkeypatch, 20.0)
     notes_dir = tmp_path / "notes"

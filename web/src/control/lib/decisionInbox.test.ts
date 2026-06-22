@@ -249,6 +249,101 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[0].ageSeconds).toBeUndefined();
   });
 
+
+
+  it("labels autoresearch and strategist escalations by source", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        {
+          kind: "operator_escalation",
+          task_id: "ar-1",
+          title: "Autoresearch finding",
+          reason: "needs review",
+          age_seconds: 12,
+          suggested_command: null,
+          operator_escalation: {
+            task: { id: "ar-1" },
+            source: "autoresearch",
+            signal_key: "silent-except",
+            why_now: "route needs operator",
+            attempts_already_made: 1,
+            evidence: {},
+            recommended_human_action: "review",
+            blocked_action_boundary: [],
+          },
+        },
+        {
+          kind: "operator_escalation",
+          task_id: "st-1",
+          title: "Strategist hold",
+          reason: "needs intent",
+          age_seconds: 10,
+          suggested_command: null,
+          operator_escalation: {
+            task: { id: "st-1" },
+            source: "strategist",
+            signal_key: "lever-budget",
+            why_now: "hold needs operator",
+            attempts_already_made: 1,
+            evidence: {},
+            recommended_human_action: "decide",
+            blocked_action_boundary: [],
+          },
+        },
+      ],
+    });
+
+    const ar = items.find((i) => i.key === "kanban:operator_escalation:ar-1");
+    const st = items.find((i) => i.key === "kanban:operator_escalation:st-1");
+    expect(ar?.why).toContain("Autoresearch-Eskalation");
+    expect(ar?.why).toContain("Signal silent-except");
+    expect(st?.why).toContain("Strategist-Hold");
+    expect(st?.why).toContain("Signal lever-budget");
+  });
+
+  it("wires the inline veto only for autoresearch escalations with a signal", () => {
+    const mk = (taskId: string, source: string, signal: string | null) => ({
+      kind: "operator_escalation" as const,
+      task_id: taskId,
+      title: taskId,
+      reason: "x",
+      age_seconds: 1,
+      suggested_command: null,
+      operator_escalation: {
+        task: { id: taskId },
+        source,
+        signal_key: signal,
+        why_now: "",
+        attempts_already_made: 1,
+        evidence: {},
+        recommended_human_action: "",
+        blocked_action_boundary: [],
+      },
+    });
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        mk("ar-1", "autoresearch", "silent-except"),
+        mk("st-1", "strategist", "lever-budget"),
+        mk("ar-2", "autoresearch", null),
+      ],
+    });
+    const at = (k: string) => items.find((i) => i.key === `kanban:operator_escalation:${k}`);
+    // autoresearch + signal → vetoable via the escalation veto path
+    expect(at("ar-1")?.vetoEscalationTaskId).toBe("ar-1");
+    // strategist holds use the /strategist veto path, not this one
+    expect(at("st-1")?.vetoEscalationTaskId).toBeUndefined();
+    // autoresearch without a signal has nothing for reflect to learn → no veto
+    expect(at("ar-2")?.vetoEscalationTaskId).toBeUndefined();
+  });
+
   it("ranks operator escalation above generic blocked rows", () => {
     const items = buildDecisionInbox({
       proposals: [],

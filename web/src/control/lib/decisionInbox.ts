@@ -43,6 +43,12 @@ export interface InboxItem {
    *  Inline-Repair ("Repair starten": POST /tasks/<id>/repair → blocked→done)
    *  am CommandHome frei. */
   repairTaskId?: string;
+  /** Naht 3: nur für Autoresearch-Eskalationen MIT signal_key gesetzt — schaltet
+   *  den Inline-Veto ("Signal künftig unterdrücken": POST
+   *  /tasks/<id>/veto-escalation → archiviert + freigabe_vetoed → der Stratege
+   *  lernt via reflect, das Signal nicht mehr hochzuspülen) frei. Strategen-Holds
+   *  nutzen den /strategist-Veto-Pfad, nicht diesen. */
+  vetoEscalationTaskId?: string;
 }
 
 export interface InboxSummary {
@@ -110,6 +116,18 @@ function interventionWeight(tone: ToneName): number {
   if (tone === "red") return 88;
   if (tone === "amber") return 68;
   return 50;
+}
+
+function operatorEscalationLabel(d: KanbanDecision): string {
+  const source = d.operator_escalation?.source;
+  if (source === "autoresearch") return "Autoresearch-Eskalation";
+  if (source === "strategist") return "Strategist-Hold";
+  return KANBAN_KIND_LABELS.operator_escalation;
+}
+
+function operatorEscalationSignal(d: KanbanDecision): string | null {
+  const signal = d.operator_escalation?.signal_key?.trim();
+  return signal ? `Signal ${signal}` : null;
 }
 
 // FO backlog: only items that represent a fresh operator decision earn a row.
@@ -197,12 +215,13 @@ export function buildDecisionInbox(input: {
   for (const d of input.kanbanDecisions ?? []) {
     if (!d.task_id) continue;
     const meta = KANBAN_KIND_META[d.kind] ?? { weight: 50, tone: "cyan" as ToneName };
-    const label = KANBAN_KIND_LABELS[d.kind] ?? d.kind;
+    const label = d.kind === "operator_escalation" ? operatorEscalationLabel(d) : (KANBAN_KIND_LABELS[d.kind] ?? d.kind);
+    const signal = d.kind === "operator_escalation" ? operatorEscalationSignal(d) : null;
     items.push({
       key: `kanban:${d.kind}:${d.task_id}`,
       surface: "kanban",
       title: d.title || d.task_id,
-      why: [label, d.reason].filter(Boolean).join(" · "),
+      why: [label, signal, d.reason].filter(Boolean).join(" · "),
       nextAction: d.suggested_command || "Im Board entscheiden",
       tone: meta.tone,
       // Deep-link to the task in the Board/backlog tab (reads ?focus).
@@ -218,6 +237,14 @@ export function buildDecisionInbox(input: {
       // R1: a posted-but-uncompleted deliverable has ONE dominant resolution —
       // close the missing kanban_complete step — so it earns its inline repair.
       ...(d.kind === "deliverable_posted_not_completed" ? { repairTaskId: d.task_id } : {}),
+      // Naht 3: an Autoresearch escalation carrying a signal can be vetoed inline —
+      // archive it AND teach reflect to suppress the signal. Strategist holds and
+      // signal-less escalations get no veto here (they resolve via other paths).
+      ...(d.kind === "operator_escalation" &&
+      d.operator_escalation?.source === "autoresearch" &&
+      d.operator_escalation?.signal_key?.trim()
+        ? { vetoEscalationTaskId: d.task_id }
+        : {}),
     });
   }
 

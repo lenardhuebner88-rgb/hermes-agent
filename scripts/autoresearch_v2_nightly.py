@@ -23,7 +23,10 @@ Discord line instead.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
+import time
 import traceback
 from datetime import date as date_cls
 from datetime import datetime, timezone
@@ -35,6 +38,8 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from hermes_cli import autoresearch_proposals as _proposals  # noqa: E402
+from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
 from hermes_cli import deep_audit, test_foundry  # noqa: E402
 
 # Operator-assigned report channel (override with --channel-id / env at the unit).
@@ -51,6 +56,28 @@ _SKIP_TAGS = (
     ("no files resolved", "skip:no-files"),
     ("baseline tests failed", "skip:red-baseline"),
 )
+
+
+def _env_float(name: str, default: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def _budget_exhausted(started: float, budget_seconds: float) -> bool:
+    return budget_seconds > 0 and (time.monotonic() - started) >= budget_seconds
+
+
+def _circuit_open(failures: int, threshold: int) -> bool:
+    return threshold > 0 and failures >= threshold
+
+
+def _lane_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 def day_of_year(when: date_cls | None = None) -> int:
@@ -156,6 +183,12 @@ def _tf_line(tf: list[dict[str, Any]] | None, error: str | None = None) -> str:
     return f"🧪 Test-Foundry · {', '.join(parts)} · {_fmt_tok(total)} tok"
 
 
+def _run_reconciler() -> dict:
+    summary = reconciler.reconcile_proposals()
+    print(json.dumps({"lane": "reconcile", **summary}, indent=2, ensure_ascii=False))
+    return summary
+
+
 def build_summary(
     when: date_cls,
     da: dict[str, Any] | None,
@@ -213,11 +246,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tf-targets", type=int, default=DEFAULT_TF_TARGETS)
     parser.add_argument("--tf-mutants", type=int, default=DEFAULT_TF_MUTANTS)
     parser.add_argument("--da-max-files", type=int, default=DEFAULT_DA_MAX_FILES)
+    parser.add_argument("--wall-clock-budget-seconds", type=float, default=None)
+    parser.add_argument("--circuit-breaker-threshold", type=int, default=2)
     args = parser.parse_args(argv)
 
     when = _parse_date(args.date)
     day = day_of_year(when)
     lanes = {lane.strip() for lane in args.lanes.split(",") if lane.strip()}
+    started = time.monotonic()
+    budget_seconds = args.wall_clock_budget_seconds
+    if budget_seconds is None:
+        budget_seconds = _env_float("AR_V2_WALL_CLOCK_BUDGET_SECONDS", 0.0)
+    circuit_failures = 0
 
     da_summary: dict[str, Any] | None = None
     tf_summary: list[dict[str, Any]] | None = None
@@ -225,26 +265,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if "deep-audit" in lanes:
         subsystem = select_subsystem(list(deep_audit.SUBSYSTEM_GLOBS.keys()), day)
-        try:
-            da_summary = run_deep_audit_lane(subsystem, max_files=args.da_max_files)
-        except Exception as exc:  # one lane must never kill the other / the report
-            traceback.print_exc()
-            da_summary = {"subsystem": subsystem, "error": f"{type(exc).__name__}: {exc}"}
+        if _budget_exhausted(started, budget_seconds):
+            da_summary = {"subsystem": subsystem, "error": "Wall-clock budget exhausted before Deep-Audit"}
+        else:
+            try:
+                da_summary = run_deep_audit_lane(subsystem, max_files=args.da_max_files)
+            except Exception as exc:  # one lane must never kill the other / the report
+                traceback.print_exc()
+                circuit_failures += 1
+                da_summary = {"subsystem": subsystem, "error": _lane_error(exc)}
 
     if "test-foundry" in lanes:
-        targets = select_targets(test_foundry.curated_targets(), day, args.tf_targets)
-        try:
-            tf_summary = run_test_foundry_lane(targets, max_mutants=args.tf_mutants)
-        except Exception as exc:
-            traceback.print_exc()
-            tf_error = f"{type(exc).__name__}: {exc}"
+        if _circuit_open(circuit_failures, args.circuit_breaker_threshold):
+            tf_error = "Circuit breaker open before Test-Foundry"
+        elif _budget_exhausted(started, budget_seconds):
+            tf_error = "Wall-clock budget exhausted before Test-Foundry"
+        else:
+            targets = select_targets(test_foundry.curated_targets(), day, args.tf_targets)
+            try:
+                tf_summary = run_test_foundry_lane(targets, max_mutants=args.tf_mutants)
+            except Exception as exc:
+                traceback.print_exc()
+                circuit_failures += 1
+                tf_error = _lane_error(exc)
 
     # Quellen-Hygiene: alte reverted/crashed proposed auto-skippen + done/skipped
     # archivieren. Laeuft nightly mit, damit gate.phase-Zombies und alte proposed
     # nicht unbegrenzt akkumulieren (kein eigener Service noetig).
     try:
-        from hermes_cli import autoresearch_proposals as _proposals
-
         prune_summary = _proposals.prune_proposals()
         print(
             f"[autoresearch-v2-nightly] prune: {prune_summary.get('auto_skipped', 0)} auto-skipped, "
@@ -253,6 +301,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # Hygiene darf den Report nie killen
         traceback.print_exc()
         print(f"[autoresearch-v2-nightly] prune fehlgeschlagen: {exc}", file=sys.stderr)
+
+    try:
+        _run_reconciler()
+    except Exception as exc:  # Reconcile darf den Report nie killen
+        traceback.print_exc()
+        print(f"[autoresearch-v2-nightly] reconcile fehlgeschlagen: {exc}", file=sys.stderr)
 
     message = build_summary(when, da_summary, tf_summary, tf_error=tf_error)
     print(message)

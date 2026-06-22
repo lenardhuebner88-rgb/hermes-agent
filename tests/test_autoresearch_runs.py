@@ -105,3 +105,14 @@ def test_nightly_main_routes_by_lane(monkeypatch):
     assert mod.main() == 0 and called["lane"] == "code"
     monkeypatch.setattr(mod, "_is_code_night", lambda: False)
     assert mod.main() == 0 and called["lane"] == "skill"
+
+
+def test_nightly_main_runs_reconciler_after_lane(monkeypatch):
+    mod = _load_nightly()
+    order = []
+    monkeypatch.setattr(mod, "_is_code_night", lambda: True)
+    monkeypatch.setattr(mod, "_run_code_night", lambda: order.append("code") or 0)
+    monkeypatch.setattr(mod, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+
+    assert mod.main() == 0
+    assert order == ["code", "reconcile"]

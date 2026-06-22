@@ -30,6 +30,7 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
 
 import autoresearch_request as arr  # noqa: E402
 import run_autoresearch_request as runner  # noqa: E402
+from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
 
 
 def _is_code_night() -> bool:
@@ -65,9 +66,21 @@ def _run_code_night() -> int:
     return 0
 
 
+def _run_reconciler() -> dict:
+    summary = reconciler.reconcile_proposals()
+    print(json.dumps({"lane": "reconcile", **summary}, indent=2, ensure_ascii=False))
+    return summary
+
+
 def main() -> int:
-    """Rotating, unattended, dry-run coverage: alternate skill long-tail / code scan."""
-    return _run_code_night() if _is_code_night() else _run_skill_night()
+    """Rotating, unattended coverage, followed by proposal reconciliation."""
+    rc = _run_code_night() if _is_code_night() else _run_skill_night()
+    try:
+        _run_reconciler()
+    except Exception as exc:
+        print(f"[autoresearch-nightly] reconciler failed: {exc}", file=sys.stderr)
+        return rc or 1
+    return rc
 
 
 if __name__ == "__main__":

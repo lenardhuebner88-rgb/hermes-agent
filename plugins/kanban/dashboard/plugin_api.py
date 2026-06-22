@@ -3991,6 +3991,28 @@ def veto_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
+@router.post("/tasks/{task_id}/veto-escalation")
+def veto_operator_escalation_route(task_id: str, board: Optional[str] = Query(None)):
+    """Veto an Autoresearch operator-escalation → archive it AND record the
+    veto so the strategist's reflect learns to suppress the signal (Naht 3).
+
+    Wraps :func:`kanban_db.veto_operator_escalation`. Source-guard: 409 unless
+    *task_id* is a blocked escalation whose ``operator_escalation`` payload has
+    ``source="autoresearch"`` — a stalled-worker block is not vetoable here."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        vetoed = kanban_db.veto_operator_escalation(conn, task_id, author="operator")
+        if not vetoed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{task_id} ist keine verwerfbare Autoresearch-Eskalation",
+            )
+        return {"ok": True, "task_id": task_id, "vetoed": True}
+    finally:
+        conn.close()
+
+
 # ── Manuelle Trigger: Stratege (propose) + Gutachter (Bewerter) ──────────────
 # Zwei operator-getriggerte Jobs für die /control-Buttons. Auth läuft über die
 # globale ``auth_middleware`` (Worker ohne Session-Token können NICHT triggern).

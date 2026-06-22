@@ -144,3 +144,91 @@ def test_main_isolates_a_lane_crash(monkeypatch, capsys):
     assert rc == 0  # report still produced despite the crash
     assert "Deep-Audit" in out and "FEHLER" in out  # crash surfaced, not swallowed
     assert "Test-Foundry" in out and "(+1)" in out  # other lane still ran
+
+
+def test_main_runs_reconciler_after_prune_before_summary(monkeypatch):
+    order = []
+
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", lambda *_a, **_k: order.append("deep-audit") or _da())
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", lambda *_a, **_k: order.append("test-foundry") or [_tf("x.py")])
+    monkeypatch.setattr(nightly, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+
+    def fake_prune():
+        order.append("prune")
+        return {"auto_skipped": 0, "archived": 0}
+
+    def fake_build_summary(*args, **kwargs):
+        order.append("summary")
+        return "summary"
+
+    monkeypatch.setattr(nightly._proposals, "prune_proposals", fake_prune, raising=False)
+    monkeypatch.setattr(nightly, "build_summary", fake_build_summary)
+
+    assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
+    assert order == ["deep-audit", "test-foundry", "prune", "reconcile", "summary"]
+
+
+
+def test_main_wall_clock_budget_skips_remaining_lanes_but_keeps_report(monkeypatch):
+    order = []
+    ticks = iter([0.0, 0.0, 2.0])
+
+    monkeypatch.setattr(nightly.time, "monotonic", lambda: next(ticks, 2.0))
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", lambda *_a, **_k: order.append("deep-audit") or _da())
+
+    def unexpected_tf(*_a, **_k):
+        raise AssertionError("test-foundry must not run after the wall-clock budget is exhausted")
+
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", unexpected_tf)
+
+    def fake_prune():
+        order.append("prune")
+        return {"auto_skipped": 0, "archived": 0}
+
+    monkeypatch.setattr(nightly._proposals, "prune_proposals", fake_prune, raising=False)
+    monkeypatch.setattr(nightly, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+
+    def fake_build_summary(*args, **kwargs):
+        order.append("summary")
+        assert kwargs["tf_error"].startswith("Wall-clock budget exhausted")
+        return "summary"
+
+    monkeypatch.setattr(nightly, "build_summary", fake_build_summary)
+
+    assert nightly.main([
+        "--no-send",
+        "--date", "2026-06-04",
+        "--wall-clock-budget-seconds", "1",
+    ]) == 0
+    assert order == ["deep-audit", "prune", "reconcile", "summary"]
+
+
+def test_main_circuit_breaker_skips_remaining_lanes_but_keeps_hygiene(monkeypatch):
+    order = []
+
+    def boom_da(*_a, **_k):
+        order.append("deep-audit")
+        raise RuntimeError("deep-audit exploded")
+
+    def unexpected_tf(*_a, **_k):
+        raise AssertionError("test-foundry must not run while the circuit breaker is open")
+
+    monkeypatch.setattr(nightly, "run_deep_audit_lane", boom_da)
+    monkeypatch.setattr(nightly, "run_test_foundry_lane", unexpected_tf)
+    monkeypatch.setattr(nightly._proposals, "prune_proposals", lambda: order.append("prune") or {"auto_skipped": 0, "archived": 0}, raising=False)
+    monkeypatch.setattr(nightly, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+
+    def fake_build_summary(_when, da_summary, _tf_summary, *, tf_error=None):
+        order.append("summary")
+        assert da_summary["error"].startswith("RuntimeError")
+        assert tf_error == "Circuit breaker open before Test-Foundry"
+        return "summary"
+
+    monkeypatch.setattr(nightly, "build_summary", fake_build_summary)
+
+    assert nightly.main([
+        "--no-send",
+        "--date", "2026-06-04",
+        "--circuit-breaker-threshold", "1",
+    ]) == 0
+    assert order == ["deep-audit", "prune", "reconcile", "summary"]
