@@ -4705,6 +4705,30 @@ def test_respawn_guard_recent_success(kanban_home):
     assert reason == "recent_success"
 
 
+def test_respawn_guard_newer_timeout_supersedes_recent_success(kanban_home):
+    """A newer failed attempt must clear the prior success guard.
+
+    Regression evidence from the live board: a task had earlier completed runs,
+    then a newer timeout requeued it to ready; dispatch still emitted
+    respawn_guarded/recent_success and left the task idle.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="timeout-after-success", assignee="alice")
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at) "
+            "VALUES (?, 'done', 'completed', ?, ?)",
+            (t, now - 600, now - 540),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at) "
+            "VALUES (?, 'failed', 'timed_out', ?, ?)",
+            (t, now - 120, now - 60),
+        )
+        reason = kb.check_respawn_guard(conn, t)
+    assert reason is None
+
+
 def test_respawn_guard_rejected_verdict_allows_fix_run(kanban_home):
     """K3 regression: a verifier REQUEST_CHANGES on the latest run invalidates
     recent_success — the review happened and DEMANDED a fix run. Without this

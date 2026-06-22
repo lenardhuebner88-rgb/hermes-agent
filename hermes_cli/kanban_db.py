@@ -15005,7 +15005,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     latest_run = conn.execute(
         "SELECT outcome, ended_at FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
+        "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     if (
@@ -15052,7 +15052,10 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     if err and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
-    # 3. Completed run within guard window — proof of recent success.
+    # 3. Latest completed run within guard window — proof of recent success.
+    #    Older successful proof must not mask a newer failed attempt; otherwise
+    #    a timed-out retry can requeue the task to ``ready`` and then get held
+    #    idle by the previous success window.
     #    K8 exemption: a native workflow task (``workflow_template_id`` set)
     #    that is ``ready`` is mid-chain — its most recent completed run belongs
     #    to the PREVIOUS step, and the workflow exists precisely to auto-advance
@@ -15078,7 +15081,10 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
             and latest_verdict["verdict"]
             and str(latest_verdict["verdict"]).upper() == "REQUEST_CHANGES"
         )
-        if not rejected:
+        latest_completed = (
+            latest_run is not None and latest_run["outcome"] == "completed"
+        )
+        if latest_completed and not rejected:
             cutoff = now - _RESPAWN_GUARD_SUCCESS_WINDOW
             recent = conn.execute(
                 "SELECT ended_at FROM task_runs "
