@@ -104,7 +104,7 @@ except ImportError:
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
-    except Exception:
+    except ImportError:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
             f"Install with: {sys.executable} -m pip install 'fastapi' 'uvicorn[standard]'"
