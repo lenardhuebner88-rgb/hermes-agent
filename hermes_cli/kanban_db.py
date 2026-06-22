@@ -3525,6 +3525,11 @@ def create_task(
         raise ValueError("max_iterations must be >= 1")
     if max_continuations is not None and int(max_continuations) < 0:
         raise ValueError("max_continuations must be >= 0")
+    review_tier_value = (review_tier or "").strip().lower() or None
+    if review_tier_value is not None and review_tier_value not in _TIER_ORDER:
+        raise ValueError(
+            f"unknown review_tier {review_tier_value!r}; expected one of {sorted(_TIER_ORDER)}"
+        )
     parents = tuple(p for p in parents if p)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
@@ -3742,7 +3747,7 @@ def create_task(
                         (model_override or "").strip() or None,
                         freigabe,
                         live_test_depth,
-                        (review_tier or "").strip().lower() or None,
+                        review_tier_value,
                     ),
                 )
                 for pid in parents:

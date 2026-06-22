@@ -91,6 +91,12 @@ def test_create_task_persists_and_reads_review_tier(kanban_home):
         assert kb.get_task(conn, tid2).review_tier is None
 
 
+def test_create_task_rejects_unknown_review_tier(kanban_home):
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="unknown review_tier"):
+            kb.create_task(conn, title="bad tier", assignee="coder", review_tier="bogus")
+
+
 _PLANSPEC_COLS = [
     "planspec_subtask_id",
     "planspec_source",
