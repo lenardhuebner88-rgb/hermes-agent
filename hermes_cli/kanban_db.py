@@ -19438,21 +19438,48 @@ def runs_daily(conn: sqlite3.Connection, *, days: int = 30) -> dict:
 def _empty_cost_bucket() -> dict:
     return {
         "runs": 0,
+        # Raw metered/API dollars stamped on task_runs.cost_usd. Subscription
+        # lanes intentionally stamp 0 here; their API-equivalent is separate.
         "cost_usd": None,
+        # Back-compat name kept for existing clients; ``api_equivalent_usd`` is
+        # the explicit Statistik label used by the control UI.
         "cost_usd_equivalent": None,
+        "api_equivalent_usd": None,
+        # True billable operator spend: raw API dollars + Neuralwatt kWh cost.
+        # It deliberately excludes subscription API-equivalent dollars.
+        "actual_cost_usd": None,
+        "billing_neuralwatt_kwh": None,
+        "billing_neuralwatt_cost_usd": None,
         "input_tokens": None,
         "output_tokens": None,
     }
 
 
-def _cost_bucket_add(bucket: dict, *, cost, equiv, tokens_in, tokens_out) -> None:
+def _cost_bucket_add(
+    bucket: dict, *, cost, equiv, tokens_in, tokens_out,
+    neuralwatt_kwh=None, neuralwatt_cost=None,
+) -> None:
     bucket["runs"] += 1
     if cost is not None:
-        bucket["cost_usd"] = round((bucket["cost_usd"] or 0.0) + float(cost), 6)
+        raw = float(cost)
+        bucket["cost_usd"] = round((bucket["cost_usd"] or 0.0) + raw, 6)
+        bucket["actual_cost_usd"] = round((bucket["actual_cost_usd"] or 0.0) + raw, 6)
     if equiv is not None:
+        eq = float(equiv)
         bucket["cost_usd_equivalent"] = round(
-            (bucket["cost_usd_equivalent"] or 0.0) + float(equiv), 6
+            (bucket["cost_usd_equivalent"] or 0.0) + eq, 6
         )
+        bucket["api_equivalent_usd"] = round((bucket["api_equivalent_usd"] or 0.0) + eq, 6)
+    if neuralwatt_kwh is not None:
+        bucket["billing_neuralwatt_kwh"] = round(
+            (bucket["billing_neuralwatt_kwh"] or 0.0) + float(neuralwatt_kwh), 6
+        )
+    if neuralwatt_cost is not None:
+        nw_cost = float(neuralwatt_cost)
+        bucket["billing_neuralwatt_cost_usd"] = round(
+            (bucket["billing_neuralwatt_cost_usd"] or 0.0) + nw_cost, 6
+        )
+        bucket["actual_cost_usd"] = round((bucket["actual_cost_usd"] or 0.0) + nw_cost, 6)
     if tokens_in is not None:
         bucket["input_tokens"] = (bucket["input_tokens"] or 0) + int(tokens_in)
     if tokens_out is not None:
@@ -19744,12 +19771,27 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         (window_start,),
     ).fetchall():
         equiv = None
+        neuralwatt_kwh = None
+        neuralwatt_cost = None
         if row["metadata"]:
             try:
                 meta = json.loads(row["metadata"])
-                raw = meta.get("cost_usd_equivalent") if isinstance(meta, dict) else None
-                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                    equiv = float(raw)
+                if isinstance(meta, dict):
+                    raw = meta.get("cost_usd_equivalent")
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        equiv = float(raw)
+                    energy = meta.get("energy")
+                    if isinstance(energy, dict):
+                        raw_kwh = energy.get("energy_kwh")
+                        raw_rate = energy.get("usd_per_kwh")
+                        if (
+                            isinstance(raw_kwh, (int, float))
+                            and not isinstance(raw_kwh, bool)
+                            and isinstance(raw_rate, (int, float))
+                            and not isinstance(raw_rate, bool)
+                        ):
+                            neuralwatt_kwh = float(raw_kwh)
+                            neuralwatt_cost = float(raw_kwh) * float(raw_rate)
             except (ValueError, TypeError):
                 pass
         kwargs = {
@@ -19757,6 +19799,8 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             "equiv": equiv,
             "tokens_in": row["input_tokens"],
             "tokens_out": row["output_tokens"],
+            "neuralwatt_kwh": neuralwatt_kwh,
+            "neuralwatt_cost": neuralwatt_cost,
         }
         _cost_bucket_add(totals_window, **kwargs)
         if int(row["ended_at"]) >= today_start:
@@ -19766,7 +19810,7 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         _cost_bucket_add(bucket, **kwargs)
 
     def _burn(b: dict) -> float:
-        return (b["cost_usd"] or 0.0) + (b["cost_usd_equivalent"] or 0.0)
+        return b["actual_cost_usd"] or 0.0
 
     profile_rows = [
         {"profile": name, "subscription": _profile_subscription(name), **bucket}

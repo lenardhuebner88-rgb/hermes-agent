@@ -91,6 +91,18 @@ def _write_profile_config(kanban_home: Path, name: str, text: str) -> Path:
     return config_path
 
 
+def test_lane_model_catalog_marks_cloud_max_models_selectable(plugin_module, monkeypatch):
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", lambda _out, _seen: None)
+
+    models = plugin_module._lane_model_catalog([])
+
+    by_id = {row["id"]: row for row in models if row.get("runtime") == "claude-cli"}
+    assert by_id["claude-opus-4-8"]["provider"] is None
+    assert by_id["claude-opus-4-8"]["group"] == "Claude (Max-Abo)"
+    assert by_id["claude-opus-4-8"]["locked"] is False
+    assert by_id["claude-sonnet-4-6"]["locked"] is False
+    assert by_id["claude-fable-5"]["locked"] is True
+
 def test_persist_hermes_branch_writes_model_default_and_provider(kanban_home, client):
     _write_profile_config(
         kanban_home,
@@ -144,6 +156,107 @@ def test_persist_claude_cli_branch_writes_claude_model_and_runtime(kanban_home, 
     active = next(l for l in data["lanes"] if l["active"])
     assert active["profiles"]["premium"]["worker_runtime"] == "claude-cli"
     assert active["profiles"]["premium"]["model"] == "claude-opus-4-8"
+
+
+def test_persist_can_switch_coder_to_claude_max_runtime(kanban_home, client):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: neuralwatt\n  default: glm-5.2-fast\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={"profiles": {"coder": {"worker_runtime": "claude-cli", "provider": None, "model": "claude-opus-4-8"}}},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["written"] == ["coder"]
+    assert data["failed"] == []
+
+    cfg_path = kanban_home / "profiles" / "coder" / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["worker_runtime"] == "claude-cli"
+    assert cfg["claude_model"] == "claude-opus-4-8"
+
+    active = next(l for l in data["lanes"] if l["active"])
+    assert active["profiles"]["coder"] == {
+        "worker_runtime": "claude-cli",
+        "provider": None,
+        "model": "claude-opus-4-8",
+        "fallback_providers": [],
+    }
+
+
+def test_lane_model_catalog_does_not_alias_cloud_max_to_hermes_profile_default(plugin_module, monkeypatch):
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", lambda _out, _seen: None)
+
+    models = plugin_module._lane_model_catalog([
+        {
+            "name": "coder",
+            "worker_runtime": "hermes",
+            "default_model": "claude-opus-4-8",
+            "default_provider": "openrouter",
+        },
+    ])
+
+    assert not any(
+        row.get("id") == "claude-opus-4-8"
+        and row.get("runtime") == "hermes"
+        and row.get("provider") == "openrouter"
+        for row in models
+    )
+
+
+def test_lane_model_catalog_filters_cloud_max_from_openrouter_extras(plugin_module, monkeypatch):
+    def fake_openrouter_extras(out, seen):
+        plugin_module._append_lane_model_option(
+            out,
+            seen,
+            model="claude-opus-4-8",
+            runtime="hermes",
+            group="OpenRouter",
+            provider="openrouter",
+        )
+        plugin_module._append_lane_model_option(
+            out,
+            seen,
+            model="qwen/qwen3.7-max",
+            runtime="hermes",
+            group="OpenRouter",
+            provider="openrouter",
+        )
+
+    monkeypatch.setattr(plugin_module, "_append_openrouter_extra_model_options", fake_openrouter_extras)
+
+    models = plugin_module._lane_model_catalog([])
+    assert not any(row.get("id") == "claude-opus-4-8" and row.get("runtime") == "hermes" for row in models)
+    assert any(row.get("id") == "qwen/qwen3.7-max" and row.get("provider") == "openrouter" for row in models)
+
+
+def test_persist_rejects_cloud_max_model_on_hermes_provider(kanban_home, client):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openrouter\n  default: qwen/qwen3.7-max\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={"profiles": {"coder": {"worker_runtime": "hermes", "provider": "openrouter", "model": "claude-opus-4-8"}}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "model runtime mismatch"
+    assert response.json()["detail"]["models"] == [
+        {
+            "profile": "coder",
+            "model": "claude-opus-4-8",
+            "expected_runtime": "claude-cli",
+            "worker_runtime": "hermes",
+        },
+    ]
 
 
 def test_persist_runtime_switch_flips_worker_runtime(kanban_home, client):

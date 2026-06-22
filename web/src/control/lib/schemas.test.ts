@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -15,6 +15,86 @@ describe("FlowReleaseResponseSchema", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.released).toBe(2);
     expect(parsed.released_ids).toEqual(["t_a", "t_b"]);
+  });
+});
+
+describe("Cost schemas", () => {
+  it("keeps actual USD, API-equivalent USD and Neuralwatt billing basis separate for runs costs", () => {
+    const parsed = parseOrThrow(RunsCostsResponseSchema, {
+      days: 7,
+      now: 100,
+      today: {
+        runs: 2,
+        cost_usd: 0.25,
+        actual_cost_usd: 0.35,
+        cost_usd_equivalent: 1.5,
+        api_equivalent_usd: 1.5,
+        billing_neuralwatt_kwh: 0.02,
+        billing_neuralwatt_cost_usd: 0.1,
+        input_tokens: 1600,
+        output_tokens: 320,
+      },
+      window: { runs: 0 },
+      profiles: [{
+        profile: "neuralwatt",
+        runs: 1,
+        cost_usd: 0,
+        actual_cost_usd: 0.1,
+        cost_usd_equivalent: 0,
+        api_equivalent_usd: 0,
+        billing_neuralwatt_kwh: 0.02,
+        billing_neuralwatt_cost_usd: 0.1,
+        input_tokens: 600,
+        output_tokens: 120,
+      }],
+    }, "runs-costs");
+
+    expect(parsed.today.actual_cost_usd).toBeCloseTo(0.35);
+    expect(parsed.today.api_equivalent_usd).toBeCloseTo(1.5);
+    expect(parsed.today.billing_neuralwatt_kwh).toBeCloseTo(0.02);
+    expect(parsed.today.billing_neuralwatt_cost_usd).toBeCloseTo(0.1);
+    expect(parsed.profiles[0].actual_cost_usd).toBeCloseTo(0.1);
+  });
+
+  it("preserves Neuralwatt cost basis on chain cost lanes and totals", () => {
+    const parsed = parseOrThrow(ChainCostsResponseSchema, {
+      schema: "kanban-chain-costs-v1",
+      root_id: "t_root",
+      totals: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.04,
+        billing_neuralwatt_charged_kwh: 0.03,
+        billing_neuralwatt_usd_per_kwh: 5,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      },
+      by_lane: [{
+        profile: "neuralwatt",
+        input_tokens: 100,
+        output_tokens: 20,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.04,
+        billing_neuralwatt_charged_kwh: 0.03,
+        billing_neuralwatt_usd_per_kwh: 5,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      }],
+    }, "chain-costs");
+
+    expect(parsed.totals.actual_cost_usd).toBeCloseTo(0.15);
+    expect(parsed.totals.api_equivalent_usd).toBeCloseTo(0.9);
+    expect(parsed.by_lane[0].billing_neuralwatt_charged_kwh).toBeCloseTo(0.03);
+    expect(parsed.by_lane[0].billing_neuralwatt_cost_usd).toBeCloseTo(0.15);
   });
 });
 

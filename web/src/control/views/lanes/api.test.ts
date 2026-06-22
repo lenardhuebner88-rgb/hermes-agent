@@ -182,6 +182,7 @@ describe("lanes api client", () => {
 
 const MODELS: LaneModelOption[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
   { id: "glm-5.2-fast", label: "GLM 5.2 Fast", runtime: "hermes", group: "Neuralwatt", provider: "neuralwatt" },
   { id: "qwen/qwen3.7-max", label: "Qwen 3.7 Max", runtime: "hermes", group: "OpenRouter", provider: "openrouter" },
@@ -349,5 +350,29 @@ describe("editor rows", () => {
         fallback_providers: [],
       },
     });
+  });
+
+  it("keeps ordinary profiles on claude-cli when a Claude Max model is selected", () => {
+    const cloudMaxLane: Lane = {
+      ...lane,
+      profiles: {
+        coder: { worker_runtime: "claude-cli", provider: null, model: "claude-opus-4-8", fallback_providers: [] },
+        altprofil: { worker_runtime: "hermes", provider: "neuralwatt", model: "glm-5.2-fast", fallback_providers: [] },
+      },
+    };
+
+    const rows = editorRows(cloudMaxLane, catalog, MODELS);
+    const coder = rows.find((row) => row.profile === "coder");
+
+    expect(coder).toMatchObject({
+      profile: "coder",
+      worker_runtime: "claude-cli",
+      provider: null,
+      model: "claude-opus-4-8",
+      choice: "claude-cli|claude-opus-4-8",
+    });
+    expect(laneEntryWarnings(coder!)).toEqual([]);
+    expect(profilesFromEditorRows(rows).coder).toEqual({ worker_runtime: "claude-cli", model: "claude-opus-4-8" });
+    expect(profilesFromEditorRows(rows).altprofil).toMatchObject({ worker_runtime: "hermes", provider: "neuralwatt", model: "glm-5.2-fast" });
   });
 });

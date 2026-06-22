@@ -1342,8 +1342,8 @@ def test_runs_daily_value_classes(client):
 
 
 def test_runs_costs_today_window_and_profiles(client):
-    """F4: Kosten heute vs. Fenster + Top-Profile; Subscription-Runs zählen
-    über metadata.cost_usd_equivalent, ungestempelte (Verifier-)Runs als 0."""
+    """F4: Kosten heute vs. Fenster + Top-Profile; echte Kosten bleiben von
+    Abo/API-Äquivalenten und Neuralwatt-Abrechnungsbasis getrennt."""
     now = int(time.time())
     yesterday = now - 26 * 3600
     conn = kb.connect()
@@ -1360,6 +1360,13 @@ def test_runs_costs_today_window_and_profiles(client):
                         cost=0.0, tokens_in=5000, tokens_out=900,
                         metadata={"billing_mode": "subscription_included",
                                   "cost_usd_equivalent": 1.5})
+            # Neuralwatt-Lane: kWh wird in echte USD-Kosten umgerechnet, aber
+            # bleibt als Abrechnungsbasis getrennt sichtbar.
+            _insert_run(conn, t, profile="neuralwatt", outcome="completed",
+                        started_at=now - 450, ended_at=now,
+                        cost=0.0, tokens_in=600, tokens_out=120,
+                        metadata={"provider": "neuralwatt",
+                                  "energy": {"energy_kwh": 0.02, "usd_per_kwh": 5.0}})
             # Verifier ohne Stamps: zählt als Run, kostet nichts.
             _insert_run(conn, t, profile="verifier", outcome="completed",
                         started_at=now - 400, ended_at=now)
@@ -1373,23 +1380,38 @@ def test_runs_costs_today_window_and_profiles(client):
     data = client.get("/api/plugins/kanban/runs/costs?days=7").json()
     assert data["days"] == 7
     assert data["today"]["cost_usd"] == 0.25
+    assert data["today"]["actual_cost_usd"] == pytest.approx(0.35)
     assert data["today"]["cost_usd_equivalent"] == 1.5
-    assert data["today"]["runs"] == 3
+    assert data["today"]["api_equivalent_usd"] == 1.5
+    assert data["today"]["billing_neuralwatt_kwh"] == pytest.approx(0.02)
+    assert data["today"]["billing_neuralwatt_cost_usd"] == pytest.approx(0.10)
+    assert data["today"]["runs"] == 4
     assert data["window"]["cost_usd"] == 0.3
-    assert data["window"]["input_tokens"] == 6400
+    assert data["window"]["actual_cost_usd"] == pytest.approx(0.4)
+    assert data["window"]["input_tokens"] == 7000
     by_profile = {p["profile"]: p for p in data["profiles"]}
     assert by_profile["coder"]["cost_usd"] == 0.3
+    assert by_profile["coder"]["actual_cost_usd"] == pytest.approx(0.3)
     assert by_profile["coder"]["runs"] == 2
     assert by_profile["premium"]["cost_usd"] == 0.0
     assert by_profile["premium"]["cost_usd_equivalent"] == 1.5
+    assert by_profile["premium"]["actual_cost_usd"] == pytest.approx(0.0)
+    assert by_profile["neuralwatt"]["cost_usd"] == 0.0
+    assert by_profile["neuralwatt"]["actual_cost_usd"] == pytest.approx(0.1)
+    assert by_profile["neuralwatt"]["billing_neuralwatt_kwh"] == pytest.approx(0.02)
+    assert by_profile["neuralwatt"]["billing_neuralwatt_cost_usd"] == pytest.approx(0.1)
     assert by_profile["verifier"]["cost_usd"] is None
+    assert by_profile["verifier"]["actual_cost_usd"] is None
     assert by_profile["verifier"]["runs"] == 1
-    # Sortierung: höchster Burn (Dollar + Äquivalent) zuerst.
-    assert data["profiles"][0]["profile"] == "premium"
-    assert data["profiles"][1]["profile"] == "coder"
+    # Sortierung: tatsächliche Kosten zuerst; Abo/API-Äquivalent sortiert nicht
+    # vor echte Rechnungswerte.
+    assert data["profiles"][0]["profile"] == "coder"
+    assert data["profiles"][1]["profile"] == "neuralwatt"
+    assert data["profiles"][2]["profile"] == "premium"
     # Fenster-Schnitt: days=1 sieht den gestrigen Run nicht mehr.
     narrow = client.get("/api/plugins/kanban/runs/costs?days=1").json()
     assert narrow["window"]["cost_usd"] == 0.25
+    assert narrow["window"]["actual_cost_usd"] == pytest.approx(0.35)
     # Jede Profilzeile trägt das (server-aufgelöste) Abo-Lane-Feld mit.
     assert all("subscription" in p for p in data["profiles"])
 

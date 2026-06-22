@@ -313,6 +313,10 @@ export interface LaneBurn {
   tokens: number;
   /** ≈ API-Wert (echte $ + Subscription-Äquivalent); null wenn ungestampt. */
   costEquivalent: number | null;
+  /** Tatsächliche Kosten inkl. kWh-basierter Neuralwatt-Abrechnung. */
+  actualCostUsd: number | null;
+  neuralwattKwh: number | null;
+  neuralwattCostUsd: number | null;
   /** metered $-Rohkomponente (p.cost_usd); null wenn ungestampt. Abo-Lanes
    *  stempeln hier ehrliche 0 (K17) → der Renderer leitet daraus den
    *  "gesch."-Schätzwert-Marker via formatEffectiveCost ab. */
@@ -350,11 +354,17 @@ export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
     .map((p) => {
       const tokens = (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
       const cost = (p.cost_usd ?? 0) + (p.cost_usd_equivalent ?? 0);
+      const actualCost = p.actual_cost_usd ?? p.cost_usd ?? null;
+      const neuralwattKwh = p.billing_neuralwatt_kwh ?? null;
+      const neuralwattCostUsd = p.billing_neuralwatt_cost_usd ?? null;
       return {
         profile: p.profile,
         label: profileLabel[p.profile] ?? p.profile,
         tokens,
         costEquivalent: cost > 0 ? cost : null,
+        actualCostUsd: actualCost,
+        neuralwattKwh,
+        neuralwattCostUsd,
         costUsd: p.cost_usd,
         runs: p.runs,
       };

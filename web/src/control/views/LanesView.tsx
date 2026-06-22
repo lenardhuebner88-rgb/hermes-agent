@@ -142,6 +142,7 @@ const t = {
   savePermanently: "Dauerhaft speichern",
   divergenceHint: (model: string) => `läuft aktuell auf ${model}`,
   meteredBadge: "OpenRouter (metered)",
+  cloudMaxBadge: "Claude Max / claude -p",
   meteredHint: "Diese Rolle läuft über OpenRouter — kostet echte Credits (kein Abo-Kontingent).",
 };
 
@@ -179,7 +180,12 @@ function modelWithProviderLabel(provider: string | null | undefined, model: stri
 }
 
 /** Effektiver Provider einer Zeile: Lane-Override gewinnt über Profil-Default. */
+function rowUsesClaudeCli(row: EditorRow): boolean {
+  return row.worker_runtime === "claude-cli";
+}
+
 function rowUsesOpenRouter(row: EditorRow): boolean {
+  if (rowUsesClaudeCli(row)) return false;
   return (row.provider ?? row.defaultProvider) === "openrouter";
 }
 
@@ -446,8 +452,9 @@ function rowReadiness(
 }
 
 function resolveRowCheckEntry(row: EditorRow, data: LanesResponse) {
+  if (rowUsesClaudeCli(row)) return { worker_runtime: "claude-cli" as const, provider: null, model: row.model };
   if (row.locked) return { worker_runtime: row.worker_runtime, provider: null, model: row.model };
-  if (row.provider || row.model) return { worker_runtime: "hermes" as const, provider: row.provider, model: row.model };
+  if (row.provider || row.model) return { worker_runtime: row.worker_runtime, provider: row.provider, model: row.model };
   const profile = data.profiles.find((p) => p.name === row.profile);
   if (!profile) return null;
   return { worker_runtime: profile.worker_runtime, provider: profile.default_provider ?? null, model: profile.default_model ?? null };
@@ -459,6 +466,11 @@ function hasLaneOverride(row: EditorRow): boolean {
 
 function configPreview(row: EditorRow): string | null {
   if (row.locked || !hasLaneOverride(row)) return null;
+  if (rowUsesClaudeCli(row)) {
+    const lines = ["worker_runtime: claude-cli"];
+    if (row.model) lines.push(`claude_model: ${row.model}`);
+    return lines.join("\n");
+  }
   const provider = row.provider ?? row.defaultProvider;
   const model = row.model;
   const lines = ["model:"];
@@ -899,6 +911,11 @@ export function LanesEditor({
                             {t.profileDefault}
                           </span>
                         )}
+                        {rowUsesClaudeCli(row) ? (
+                          <span className="inline-flex max-w-full items-center truncate rounded-full border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[11px] leading-4 text-violet-100">
+                            {t.cloudMaxBadge}
+                          </span>
+                        ) : null}
                         {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
                       </div>
                       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs hc-dim">
@@ -950,9 +967,14 @@ export function LanesEditor({
                       const activeLane = data.lanes.find((l) => l.active) ?? lane;
                       const activeEntry = activeLane.profiles[row.profile];
                       const activeModel = activeEntry?.model ?? profileModel;
-                      const activeProvider = activeEntry?.provider ?? profile?.default_provider;
+                      const activeRuntime = activeEntry?.worker_runtime ?? profile?.worker_runtime;
+                      const activeProvider = activeRuntime === "claude-cli"
+                        ? null
+                        : activeEntry?.provider ?? profile?.default_provider;
                       const activeLabel = activeModel
-                        ? modelWithProviderLabel(activeProvider, modelLabel(activeModel, models), models)
+                        ? activeRuntime === "claude-cli"
+                          ? modelLabel(activeModel, models)
+                          : modelWithProviderLabel(activeProvider, modelLabel(activeModel, models), models)
                         : permanentLabel;
                       const differs = activeModel && profileModel && activeModel !== profileModel;
                       return (
@@ -1053,8 +1075,9 @@ export function LanesEditor({
             const override = hasLaneOverride(row);
             const warnings = rowWarnings[row.profile] ?? [];
             const preview = configPreview(row);
-            const activeProvider = row.provider ?? row.defaultProvider;
+            const activeProvider = rowUsesClaudeCli(row) ? null : row.provider ?? row.defaultProvider;
             const activeModelLabel = row.model ? modelLabel(row.model, models) : row.defaultLabel;
+            const activeRuntimeLabel = rowUsesClaudeCli(row) ? t.cloudMaxBadge : null;
             return (
             <li
               key={row.profile}
@@ -1082,6 +1105,7 @@ export function LanesEditor({
                             {t.profileDefault}
                           </span>
                         )}
+                        {activeRuntimeLabel ? <StatusPill tone="zinc" label={activeRuntimeLabel} size="sm" /> : null}
                         {rowUsesOpenRouter(row) ? <MeteredBadge /> : null}
                         {!rowChecks[row.profile] ? <StatusPill tone="zinc" label={t.smokePending} size="sm" /> : null}
                       </div>
@@ -1109,6 +1133,7 @@ export function LanesEditor({
                   <div>
                     <div className="hc-type-label">{t.laneOverride}</div>
                     <div className="mt-1 break-words text-white">
+                      {activeRuntimeLabel ? `${activeRuntimeLabel} / ` : ""}
                       {activeProvider ? `${providerLabel(activeProvider, models)} / ` : ""}
                       {activeModelLabel}
                     </div>
@@ -1121,7 +1146,7 @@ export function LanesEditor({
                     <ProviderSelect
                       value={row.provider}
                       models={models}
-                      disabled={busy || row.locked}
+                      disabled={busy || row.locked || rowUsesClaudeCli(row)}
                       label={`Provider für ${row.profile}`}
                       onChange={(provider) =>
                         updateRow(row.profile, {
@@ -1135,21 +1160,40 @@ export function LanesEditor({
                   </label>
                   <label className="min-w-0">
                     <span className="hc-type-label">Model</span>
-                    <ModelSelect
-                      provider={row.provider ?? row.defaultProvider}
-                      value={row.model}
-                      models={models}
-                      disabled={busy || row.locked}
-                      label={`Modell für ${row.profile}`}
-                      defaultLabel={row.defaultLabel}
-                      onChange={(model) =>
-                        updateRow(row.profile, {
-                          worker_runtime: "hermes",
-                          model,
-                          choice: model ? `hermes|${model}` : row.provider ? "hermes|" : "",
-                        })
-                      }
-                    />
+                    {rowUsesClaudeCli(row) ? (
+                      <SimpleModelSelect
+                        value={row.choice}
+                        defaultLabel={row.defaultLabel}
+                        models={models}
+                        disabled={busy || row.locked}
+                        label={`Modell für ${row.profile}`}
+                        onChange={(choice) => {
+                          const entry = entryFromChoice(choice);
+                          updateRow(row.profile, {
+                            choice,
+                            worker_runtime: entry?.worker_runtime ?? row.worker_runtime,
+                            provider: null,
+                            model: entry?.model ?? null,
+                          });
+                        }}
+                      />
+                    ) : (
+                      <ModelSelect
+                        provider={row.provider ?? row.defaultProvider}
+                        value={row.model}
+                        models={models}
+                        disabled={busy || row.locked}
+                        label={`Modell für ${row.profile}`}
+                        defaultLabel={row.defaultLabel}
+                        onChange={(model) =>
+                          updateRow(row.profile, {
+                            worker_runtime: "hermes",
+                            model,
+                            choice: model ? `hermes|${model}` : row.provider ? "hermes|" : "",
+                          })
+                        }
+                      />
+                    )}
                   </label>
                   <Button
                     size="sm"
@@ -1166,7 +1210,7 @@ export function LanesEditor({
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="hc-type-label">{t.fallbackLabel}</span>
-                    {!row.locked ? (
+                    {!row.locked && !rowUsesClaudeCli(row) ? (
                       <Button
                         size="sm"
                         ghost
@@ -1179,7 +1223,7 @@ export function LanesEditor({
                       </Button>
                     ) : null}
                   </div>
-                  {row.fallbackProviders.length === 0 ? (
+                  {row.fallbackProviders.length === 0 && !rowUsesClaudeCli(row) ? (
                     <div className="text-xs hc-dim">{t.fallbackMissing}</div>
                   ) : (
                     <ul className="space-y-2">
@@ -1191,7 +1235,7 @@ export function LanesEditor({
                           <ProviderSelect
                             value={fallback.provider}
                             models={models}
-                            disabled={busy || row.locked}
+                            disabled={busy || row.locked || rowUsesClaudeCli(row)}
                             label={`Fallback-Provider ${idx + 1} für ${row.profile}`}
                             onChange={(provider) =>
                               updateFallback(row.profile, idx, {
@@ -1204,7 +1248,7 @@ export function LanesEditor({
                             provider={fallback.provider}
                             value={fallback.model}
                             models={models}
-                            disabled={busy || row.locked}
+                            disabled={busy || row.locked || rowUsesClaudeCli(row)}
                             label={`Fallback-Modell ${idx + 1} für ${row.profile}`}
                             defaultLabel="automatisch"
                             onChange={(model) => updateFallback(row.profile, idx, { model: model ?? "" })}
@@ -1213,7 +1257,7 @@ export function LanesEditor({
                             <button
                               type="button"
                               aria-label={`Fallback ${idx + 1} nach oben`}
-                              disabled={busy || row.locked || idx === 0}
+                              disabled={busy || row.locked || rowUsesClaudeCli(row) || idx === 0}
                               onClick={() => moveFallback(row.profile, idx, -1)}
                               className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
                             >
@@ -1222,7 +1266,7 @@ export function LanesEditor({
                             <button
                               type="button"
                               aria-label={`Fallback ${idx + 1} nach unten`}
-                              disabled={busy || row.locked || idx === row.fallbackProviders.length - 1}
+                              disabled={busy || row.locked || rowUsesClaudeCli(row) || idx === row.fallbackProviders.length - 1}
                               onClick={() => moveFallback(row.profile, idx, 1)}
                               className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
                             >
@@ -1231,7 +1275,7 @@ export function LanesEditor({
                             <button
                               type="button"
                               aria-label={`Fallback ${idx + 1} entfernen`}
-                              disabled={busy || row.locked}
+                              disabled={busy || row.locked || rowUsesClaudeCli(row)}
                               onClick={() => removeFallback(row.profile, idx)}
                               className="hc-hit inline-flex w-9 items-center justify-center rounded-md border border-[var(--hc-border)] text-xs hc-dim disabled:opacity-40"
                             >
@@ -1445,11 +1489,17 @@ export function LanesView(_props: { density?: Density }) {
         const profiles: Record<string, import("./lanes/api").LanePersistProfileEntry> = {};
         for (const row of rows) {
           if (!row.choice && !row.provider && !row.model) continue;
-          profiles[row.profile] = {
-            worker_runtime: row.worker_runtime ?? "hermes",
-            provider: row.provider,
-            model: row.model ?? "",
-          };
+          profiles[row.profile] = row.worker_runtime === "claude-cli"
+            ? {
+                worker_runtime: "claude-cli",
+                provider: null,
+                model: row.model ?? "",
+              }
+            : {
+                worker_runtime: "hermes",
+                provider: row.provider,
+                model: row.model ?? "",
+              };
         }
         if (Object.keys(profiles).length === 0) return;
         const result = await persistLaneModels(profiles);

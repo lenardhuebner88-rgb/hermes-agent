@@ -313,10 +313,16 @@ const ChainCostsLaneSchema = z.object({
   input_tokens: z.coerce.number().catch(0),
   output_tokens: z.coerce.number().catch(0),
   cost_usd: z.coerce.number().catch(0),
+  actual_cost_usd: z.coerce.number().catch(0),
   run_count: z.coerce.number().catch(0),
   // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
   cost_usd_equivalent: z.coerce.number().catch(0),
+  api_equivalent_usd: z.coerce.number().catch(0),
   cost_effective_usd: z.coerce.number().catch(0),
+  billing_neuralwatt_kwh: z.coerce.number().catch(0),
+  billing_neuralwatt_charged_kwh: z.coerce.number().catch(0),
+  billing_neuralwatt_usd_per_kwh: z.coerce.number().nullable().catch(null),
+  billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
 });
 
 export const ChainCostsResponseSchema = z.object({
@@ -326,11 +332,17 @@ export const ChainCostsResponseSchema = z.object({
     input_tokens: z.coerce.number().catch(0),
     output_tokens: z.coerce.number().catch(0),
     cost_usd: z.coerce.number().catch(0),
+    actual_cost_usd: z.coerce.number().catch(0),
     run_count: z.coerce.number().catch(0),
     // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
     cost_usd_equivalent: z.coerce.number().catch(0),
+    api_equivalent_usd: z.coerce.number().catch(0),
     cost_effective_usd: z.coerce.number().catch(0),
-  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, cost_effective_usd: 0 }),
+    billing_neuralwatt_kwh: z.coerce.number().catch(0),
+    billing_neuralwatt_charged_kwh: z.coerce.number().catch(0),
+    billing_neuralwatt_usd_per_kwh: z.coerce.number().nullable().catch(null),
+    billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
+  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, actual_cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, api_equivalent_usd: 0, cost_effective_usd: 0, billing_neuralwatt_kwh: 0, billing_neuralwatt_charged_kwh: 0, billing_neuralwatt_usd_per_kwh: null, billing_neuralwatt_cost_usd: 0 }),
   // absteigend nach cost_usd (Backend-Garantie)
   by_lane: z.array(ChainCostsLaneSchema).catch([]),
 });
@@ -1297,6 +1309,12 @@ const CostBucketSchema = z.object({
   runs: z.coerce.number().catch(0),
   cost_usd: nullableNumber,
   cost_usd_equivalent: nullableNumber,
+  api_equivalent_usd: nullableNumber,
+  actual_cost_usd: nullableNumber,
+  billing_neuralwatt_kwh: nullableNumber,
+  billing_neuralwatt_charged_kwh: nullableNumber,
+  billing_neuralwatt_usd_per_kwh: nullableNumber,
+  billing_neuralwatt_cost_usd: nullableNumber,
   input_tokens: nullableNumber,
   output_tokens: nullableNumber,
 });

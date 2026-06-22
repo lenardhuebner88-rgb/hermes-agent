@@ -401,13 +401,36 @@ describe("LanesEditor (routing cards)", () => {
     expect(html).not.toContain("OpenRouter (metered)");
   });
 
-  it("zeigt Fallback-Kette, Claude-CLI-Lock und Preview-only Config", () => {
+  it("zeigt Claude-Max-Routing fuer normale Rollen klar und nicht als OpenRouter", () => {
+    const cloudMaxData: LanesResponse = {
+      ...fixture,
+      lanes: [{
+        ...fixture.lanes[0],
+        profiles: {
+          coder: { worker_runtime: "claude-cli", provider: null, model: "claude-opus-4-8", fallback_providers: [] },
+        },
+      }],
+    };
+
+    const html = renderToStaticMarkup(
+      <LanesEditor data={cloudMaxData} lane={cloudMaxData.lanes[0]} busy={false} actions={noopActions} />,
+    );
+
+    expect(html).toContain("Claude Max / claude -p");
+    expect(html).toContain("Aktiv in Lane: Claude Opus 4.8");
+    expect(html).toMatch(/Provider [^"]*coder" disabled=""/);
+    expect(html).not.toContain("OpenRouter (metered)");
+    expect(html).not.toContain("Fallback fehlt");
+    expect(html).not.toContain("Fallback hinzuf");
+  });
+
+  it("zeigt Fallback-Kette, Claude-Max-Badge und Preview-only Config", () => {
     const html = renderToStaticMarkup(
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
     );
     expect(html).toContain("Fallbacks");
-    expect(html).toContain("Sicheren Fallback hinzufügen");
-    expect(html).toContain("Claude-CLI — später");
+    expect(html).toContain("Sicheren Fallback hinzuf");
+    expect(html).toContain("Claude Max / claude -p");
     expect(html).toContain("Dauerhaft setzen (Preview)");
     expect(html).toContain("Preview · würde ändern");
     expect(html).toContain("fallback_providers:");

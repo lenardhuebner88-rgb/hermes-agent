@@ -2860,10 +2860,11 @@ def close_epic_endpoint(
 
 _LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = (
     {"id": "claude-fable-5", "label": "Claude Fable 5 (gesperrt)", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
-    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
-    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": True},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
+    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
 )
+_LANE_CLAUDE_CLI_MODEL_IDS = {str(item["id"]) for item in _LANE_CLAUDE_CLI_MODELS}
 
 
 def _lane_provider_label(provider_id: str, provider_row: dict[str, Any] | None = None) -> str:
@@ -2908,6 +2909,8 @@ def _append_lane_model_option(
 ) -> None:
     model = (model or "").strip()
     if not model:
+        return
+    if runtime == "hermes" and model in _LANE_CLAUDE_CLI_MODEL_IDS:
         return
     provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
     key = (model, provider, runtime)
@@ -2956,8 +2959,8 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
     """Provider-aware model list for Lanes.
 
     Hermes-runtime rows come from the shared inventory/model-catalog substrate
-    used by the main picker. Claude-CLI rows stay visible but locked because
-    ``claude -p`` routing is deliberately out of scope for this slice.
+    used by the main picker. Claude-CLI rows are explicit Cloud Max choices;
+    selecting them must route through ``claude -p`` rather than an API provider.
     """
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None, str]] = set()
@@ -2971,7 +2974,7 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
             runtime="claude-cli",
             group=str(item["group"]),
             provider=None,
-            locked=True,
+            locked=bool(item.get("locked")),
             source="claude-cli",
         )
 
@@ -3023,6 +3026,8 @@ def _lane_model_catalog(profiles: list[dict]) -> list[dict]:
             if not model:
                 continue
             runtime = "claude-cli" if prof.get("worker_runtime") == "claude-cli" else "hermes"
+            if runtime == "hermes" and model in _LANE_CLAUDE_CLI_MODEL_IDS:
+                continue
             group = "Claude (Max-Abo)" if runtime == "claude-cli" else "API-Modelle"
             _append_lane_model_option(
                 out,
@@ -4064,13 +4069,36 @@ def persist_lane_models_endpoint(
             )
 
         bad_models: list[dict[str, str]] = []
+        bad_runtime_models: list[dict[str, str]] = []
+        bad_claude_providers: list[dict[str, str]] = []
         for name, entry in payload.profiles.items():
             if entry.model not in known_models:
                 bad_models.append({"profile": name, "model": entry.model})
+                continue
+            model_runtime = _lane_model_runtime(entry.model, catalog_profiles, models)
+            if model_runtime and model_runtime != entry.worker_runtime:
+                bad_runtime_models.append({
+                    "profile": name,
+                    "model": entry.model,
+                    "expected_runtime": model_runtime,
+                    "worker_runtime": entry.worker_runtime,
+                })
+            if entry.worker_runtime == "claude-cli" and entry.provider:
+                bad_claude_providers.append({"profile": name, "provider": str(entry.provider)})
         if bad_models:
             raise HTTPException(
                 status_code=400,
                 detail={"error": "unknown models", "models": bad_models},
+            )
+        if bad_runtime_models:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "model runtime mismatch", "models": bad_runtime_models},
+            )
+        if bad_claude_providers:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "claude-cli provider must be empty", "profiles": bad_claude_providers},
             )
 
         lanes = kanban_db.list_lanes(conn)

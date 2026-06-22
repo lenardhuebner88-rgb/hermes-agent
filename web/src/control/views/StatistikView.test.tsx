@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   BudgetLedgerSection,
+  ChainCostsLaneTable,
   EffizienzSection,
   ErrorTaxonomySection,
   LatencySection,
@@ -14,6 +15,7 @@ import type {
   AccountUsageProvider,
   AccountUsageWindow,
   CostProfileRow,
+  ChainCostsResponse,
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
@@ -93,6 +95,12 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
     runs: 0,
     cost_usd: null,
     cost_usd_equivalent: null,
+    actual_cost_usd: null,
+    api_equivalent_usd: null,
+    billing_neuralwatt_kwh: null,
+    billing_neuralwatt_charged_kwh: null,
+    billing_neuralwatt_usd_per_kwh: null,
+    billing_neuralwatt_cost_usd: null,
     input_tokens: null,
     output_tokens: null,
     ...over,
@@ -332,6 +340,52 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("600");
     // i18n kicker.
     expect(html).toContain("Zeit-Trend");
+  });
+});
+
+describe("ChainCostsLaneTable", () => {
+  it("renders actual USD as primary cost and Neuralwatt kWh only as billing basis", () => {
+    const costs: ChainCostsResponse = {
+      schema: "kanban-chain-costs-v1",
+      root_id: "t_root",
+      totals: {
+        input_tokens: 1200,
+        output_tokens: 300,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.04,
+        billing_neuralwatt_charged_kwh: 0.03,
+        billing_neuralwatt_usd_per_kwh: 5,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      },
+      by_lane: [{
+        profile: "neuralwatt",
+        input_tokens: 1200,
+        output_tokens: 300,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.04,
+        billing_neuralwatt_charged_kwh: 0.03,
+        billing_neuralwatt_usd_per_kwh: 5,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      }],
+    };
+
+    const html = renderToStaticMarkup(<ChainCostsLaneTable costs={costs} />);
+    expect(html).toContain("Kostenaufschlüsselung je Lane");
+    expect(html).toContain("$0.15");
+    expect(html).toContain("API-Äquivalent");
+    expect(html).toContain("0.0300 kWh × $5.00/kWh");
+    expect(html).toContain("Neuralwatt-kWh ist Abrechnungsbasis");
+    expect(html).not.toContain("$0.90 gesch.</span></td>");
   });
 });
 

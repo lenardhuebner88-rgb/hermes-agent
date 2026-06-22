@@ -297,11 +297,19 @@ export interface ChainCostsLane {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number;
+  /** Tatsächliche Kosten inkl. kWh-basierter Neuralwatt-Abrechnung. */
+  actual_cost_usd: number;
   run_count: number;
   /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
   cost_usd_equivalent: number;
+  /** Alias für cost_usd_equivalent, damit echte Kosten und API-Wert klar getrennt bleiben. */
+  api_equivalent_usd: number;
   /** Effektive Kosten; 0 wenn nicht gestempelt. */
   cost_effective_usd: number;
+  billing_neuralwatt_kwh: number;
+  billing_neuralwatt_charged_kwh: number;
+  billing_neuralwatt_usd_per_kwh: number | null;
+  billing_neuralwatt_cost_usd: number;
 }
 
 export interface ChainCostsResponse {
@@ -311,11 +319,17 @@ export interface ChainCostsResponse {
     input_tokens: number;
     output_tokens: number;
     cost_usd: number;
+    actual_cost_usd: number;
     run_count: number;
     /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
     cost_usd_equivalent: number;
+    api_equivalent_usd: number;
     /** Effektive Kosten; 0 wenn nicht gestempelt. */
     cost_effective_usd: number;
+    billing_neuralwatt_kwh: number;
+    billing_neuralwatt_charged_kwh: number;
+    billing_neuralwatt_usd_per_kwh: number | null;
+    billing_neuralwatt_cost_usd: number;
   };
   by_lane: ChainCostsLane[];
 }

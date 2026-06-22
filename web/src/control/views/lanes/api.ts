@@ -456,7 +456,7 @@ export function persistLaneModels(
 /** Fallback catalog when the backend payload carries no `models` yet. */
 export const FALLBACK_MODELS: LaneModelOption[] = [
   { id: "claude-fable-5", label: "Claude Fable 5 (gesperrt)", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: true },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
   { id: "glm-5.2-fast", label: "GLM 5.2 Fast", runtime: "hermes", group: "Neuralwatt", provider: "neuralwatt" },
 ];
@@ -561,20 +561,24 @@ export function editorRows(
   models: LaneModelOption[],
 ): EditorRow[] {
   const known = new Set(catalog.map((p) => p.name));
-  const rows: EditorRow[] = catalog.map((p) => ({
-    profile: p.name,
-    description: p.description,
-    defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
-    defaultProvider: p.default_provider ?? null,
-    defaultFallbackProviders: cloneFallbacks(p.fallback_providers),
-    worker_runtime: p.worker_runtime,
-    provider: lane.profiles[p.name]?.provider ?? null,
-    model: lane.profiles[p.name]?.model ?? null,
-    fallbackProviders: cloneFallbacks(lane.profiles[p.name]?.fallback_providers),
-    locked: p.locked === true || p.worker_runtime === "claude-cli",
-    lockedReason: p.locked_reason ?? (p.worker_runtime === "claude-cli" ? "Claude-CLI / claude -p excluded from this slice" : null),
-    choice: choiceFromEntry(lane.profiles[p.name]),
-  }));
+  const rows: EditorRow[] = catalog.map((p) => {
+    const entry = lane.profiles[p.name];
+    const runtime = entry?.worker_runtime ?? p.worker_runtime;
+    return {
+      profile: p.name,
+      description: p.description,
+      defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
+      defaultProvider: p.default_provider ?? null,
+      defaultFallbackProviders: cloneFallbacks(p.fallback_providers),
+      worker_runtime: runtime,
+      provider: runtime === "claude-cli" ? null : entry?.provider ?? null,
+      model: entry?.model ?? null,
+      fallbackProviders: runtime === "claude-cli" ? [] : cloneFallbacks(entry?.fallback_providers),
+      locked: p.locked === true,
+      lockedReason: p.locked_reason ?? null,
+      choice: choiceFromEntry(entry),
+    };
+  });
   const extras = Object.keys(lane.profiles)
     .filter((name) => !known.has(name))
     .sort((a, b) => a.localeCompare(b));
@@ -616,9 +620,12 @@ export function profilesFromEditorRows(
       fallbackProviders.length > 0 ||
       row.choice !== "";
     if (!hasStructuredOverride) continue;
-    if (row.locked) {
+    if (row.locked || row.worker_runtime === "claude-cli") {
       const entry = entryFromChoice(row.choice);
-      if (entry !== null) out[row.profile] = entry;
+      out[row.profile] = entry ?? {
+        worker_runtime: "claude-cli",
+        model: row.model,
+      };
       continue;
     }
     out[row.profile] = {
@@ -633,7 +640,7 @@ export function profilesFromEditorRows(
 
 export function laneEntryWarnings(row: EditorRow): string[] {
   const warnings: string[] = [];
-  if (row.locked) {
+  if (row.locked || row.worker_runtime === "claude-cli") {
     if (row.fallbackProviders.length > 0 || row.provider) {
       warnings.push("Claude-CLI fallback editing is not supported.");
     }

@@ -257,6 +257,12 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
     runs: 0,
     cost_usd: null,
     cost_usd_equivalent: null,
+    api_equivalent_usd: null,
+    actual_cost_usd: null,
+    billing_neuralwatt_kwh: null,
+    billing_neuralwatt_charged_kwh: null,
+    billing_neuralwatt_usd_per_kwh: null,
+    billing_neuralwatt_cost_usd: null,
     input_tokens: null,
     output_tokens: null,
     ...over,
@@ -401,6 +407,28 @@ describe("laneBurn", () => {
     });
     expect(eff.estimated).toBe(false);
     expect(eff.text).not.toContain("gesch.");
+  });
+
+  it("keeps actual cost separate from API-equivalent and Neuralwatt billing basis", () => {
+    const rows = laneBurn([
+      costRow({
+        profile: "coder",
+        input_tokens: 400,
+        output_tokens: 100,
+        runs: 1,
+        cost_usd: 0,
+        actual_cost_usd: 0.1,
+        cost_usd_equivalent: 0.8,
+        api_equivalent_usd: 0.8,
+        billing_neuralwatt_kwh: 0.02,
+        billing_neuralwatt_cost_usd: 0.1,
+      }),
+    ]);
+
+    expect(rows[0].actualCostUsd).toBeCloseTo(0.1, 5);
+    expect(rows[0].costEquivalent).toBeCloseTo(0.8, 5);
+    expect(rows[0].neuralwattKwh).toBeCloseTo(0.02, 5);
+    expect(rows[0].neuralwattCostUsd).toBeCloseTo(0.1, 5);
   });
 });
 
