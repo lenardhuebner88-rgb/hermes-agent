@@ -138,6 +138,43 @@ async def test_gateway_stop_bounds_hung_adapter_disconnect(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_uses_global_adapter_disconnect_budget(monkeypatch):
+    runner, adapter = make_restart_runner()
+    monkeypatch.setenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "0.05")
+    starts: list[str] = []
+
+    def _hang_disconnect(name: str):
+        async def _inner():
+            starts.append(name)
+            await asyncio.Event().wait()
+
+        return _inner
+
+    adapter.disconnect = _hang_disconnect("telegram")
+    discord_adapter = make_restart_runner()[1]
+    discord_adapter.disconnect = _hang_disconnect("discord")
+    slack_adapter = make_restart_runner()[1]
+    slack_adapter.disconnect = _hang_disconnect("slack")
+    runner.adapters = {
+        Platform.TELEGRAM: adapter,
+        Platform.DISCORD: discord_adapter,
+        Platform.SLACK: slack_adapter,
+    }
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch("gateway.status._get_process_start_time", return_value=12345),
+        patch("gateway.status.release_all_scoped_locks", return_value=0),
+    ):
+        await asyncio.wait_for(runner.stop(), timeout=0.12)
+
+    assert starts == ["telegram"]
+    assert runner.adapters == {}
+    assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
     disconnect_mock = AsyncMock()

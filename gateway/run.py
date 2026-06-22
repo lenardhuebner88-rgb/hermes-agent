@@ -2978,7 +2978,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if mode in {"voice_only", "all"} and key.startswith(prefix)
             )
 
-    async def _safe_adapter_disconnect(self, adapter, platform) -> None:
+    async def _safe_adapter_disconnect(
+        self,
+        adapter,
+        platform,
+        *,
+        timeout: Optional[float] = None,
+        skip_if_no_budget: bool = False,
+    ) -> None:
         """Call adapter.disconnect() defensively, swallowing any error.
 
         Used when adapter.connect() failed or raised — the adapter may
@@ -2989,9 +2996,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Must tolerate partial-init state and never raise, since callers
         use it inside error-handling blocks.
         """
-        timeout = self._adapter_disconnect_timeout_secs()
+        if timeout is None:
+            timeout = self._adapter_disconnect_timeout_secs()
         try:
             if timeout <= 0:
+                if skip_if_no_budget:
+                    logger.warning(
+                        "Skipping %s adapter disconnect; global adapter disconnect budget is exhausted",
+                        platform.value if platform is not None else "adapter",
+                    )
+                    return
                 await adapter.disconnect()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
@@ -3022,6 +3036,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else:
                 return max(0.0, timeout)
         return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+
+    def _remaining_adapter_disconnect_budget(self, deadline: Optional[float]) -> Optional[float]:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - asyncio.get_running_loop().time())
 
     def _platform_connect_timeout_secs(self) -> float:
         """Return the per-platform connect timeout used during startup/retry."""
@@ -6841,13 +6860,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     self._cleanup_agent_resources(_agent)
 
+            _disconnect_timeout = self._adapter_disconnect_timeout_secs()
+            _disconnect_deadline = (
+                asyncio.get_running_loop().time() + _disconnect_timeout
+                if _disconnect_timeout > 0 else None
+            )
+
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()
                 try:
                     await adapter.cancel_background_tasks()
                 except Exception as e:
                     logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-                await self._safe_adapter_disconnect(adapter, platform)
+                await self._safe_adapter_disconnect(
+                    adapter,
+                    platform,
+                    timeout=self._remaining_adapter_disconnect_budget(_disconnect_deadline),
+                    skip_if_no_budget=_disconnect_deadline is not None,
+                )
                 logger.info(
                     "✓ %s disconnect phase finished (%.2fs)",
                     platform.value,
@@ -6861,7 +6891,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         await adapter.cancel_background_tasks()
                     except Exception as e:
                         logger.debug("✗ %s bg-cancel error (profile %s): %s", platform.value, _prof, e)
-                    await self._safe_adapter_disconnect(adapter, platform)
+                    await self._safe_adapter_disconnect(
+                        adapter,
+                        platform,
+                        timeout=self._remaining_adapter_disconnect_budget(_disconnect_deadline),
+                        skip_if_no_budget=_disconnect_deadline is not None,
+                    )
                     logger.info("✓ %s disconnect phase finished (profile: %s)", platform.value, _prof)
                 _amap.clear()
             if hasattr(self, "_profile_adapters"):
