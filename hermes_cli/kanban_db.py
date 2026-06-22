@@ -16874,6 +16874,31 @@ def _claude_profile_model(hermes_home: Optional[str]) -> Optional[str]:
         return None
 
 
+def _claude_profile_instructions(hermes_home: Optional[str], *, max_chars: int = 12000) -> str:
+    """Return profile SOUL instructions for claude-CLI workers, fail-soft.
+
+    Claude-CLI workers do not enter ``hermes -p <profile> chat``, so the normal
+    Hermes profile system prompt would otherwise be skipped. Loading SOUL.md here
+    keeps profile hardening (scope contracts, worker discipline, cost guards) active
+    for the Max-subscription worker path too.
+    """
+    try:
+        if not hermes_home:
+            return ""
+        soul_path = os.path.join(hermes_home, "SOUL.md")
+        if not os.path.isfile(soul_path):
+            return ""
+        with open(soul_path, "r", encoding="utf-8") as fh:
+            text = fh.read().strip()
+        if not text:
+            return ""
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "\n[SOUL.md truncated by dispatcher]"
+        return text
+    except Exception:
+        return ""
+
+
 # --- Worker env allowlist (security hardening S1) -------------------------
 #
 # Workers are spawned with broad autonomy (the claude-CLI lane even runs
@@ -17013,9 +17038,17 @@ def _spawn_claude_worker(
             comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
     except Exception:
         comment_block = ""
+    profile_instructions = _claude_profile_instructions(env.get("HERMES_HOME"))
+    profile_block = (
+        "Profile instructions (SOUL.md):\n"
+        f"{profile_instructions}\n\n"
+        if profile_instructions
+        else ""
+    )
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
+        f"{profile_block}"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
         f"{comment_block}"
