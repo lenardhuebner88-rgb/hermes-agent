@@ -18642,14 +18642,29 @@ def build_worker_context(
     # most recent 5 completed runs, excluding this task so the retry
     # section above isn't duplicated. Safe on assignee=None (skipped).
     if task.assignee:
-        role_rows = conn.execute(
-            "SELECT t.id, t.title, r.summary, r.ended_at "
-            "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.profile = ? AND r.task_id != ? "
-            "  AND r.outcome = 'completed' "
-            "ORDER BY r.ended_at DESC LIMIT ?",
-            (task.assignee, task_id, role_history_limit),
-        ).fetchall()
+        # Tenant scoping: when the current task carries a tenant, restrict
+        # role-history to the same tenant so multi-tenant boards don't leak
+        # cross-tenant completed runs.  When the task has no tenant (the
+        # common/untenanted case) no filter is added, preserving
+        # byte-identical output.
+        if task.tenant:
+            role_rows = conn.execute(
+                "SELECT t.id, t.title, r.summary, r.ended_at "
+                "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
+                "WHERE r.profile = ? AND r.task_id != ? "
+                "  AND r.outcome = 'completed' AND t.tenant = ? "
+                "ORDER BY r.ended_at DESC LIMIT ?",
+                (task.assignee, task_id, task.tenant, role_history_limit),
+            ).fetchall()
+        else:
+            role_rows = conn.execute(
+                "SELECT t.id, t.title, r.summary, r.ended_at "
+                "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
+                "WHERE r.profile = ? AND r.task_id != ? "
+                "  AND r.outcome = 'completed' "
+                "ORDER BY r.ended_at DESC LIMIT ?",
+                (task.assignee, task_id, role_history_limit),
+            ).fetchall()
         if role_rows:
             lines.append(f"## Recent work by @{task.assignee}")
             for row in role_rows:
