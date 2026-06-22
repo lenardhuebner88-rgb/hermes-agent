@@ -60,6 +60,22 @@ _VALID_TASK_KINDS = frozenset({"code", "research", "review", "ops", "text", "ana
 _MIN_VERDICTS_FOR_APPROVED = 5
 
 
+def _coerce_config_bool(value, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 _SYSTEM_PROMPT = """You are the Kanban decomposer for the Hermes Agent board.
 
 A user dropped a rough idea into the Triage column. Your job is to break it
@@ -1132,7 +1148,9 @@ def decompose_task(
     orchestrator = _resolve_orchestrator_profile(cfg)
     default_assignee = _resolve_default_assignee(cfg)
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-    auto_promote = bool(kanban_cfg.get("auto_promote_children", True))
+    auto_promote = _coerce_config_bool(
+        kanban_cfg.get("auto_promote_children", True), default=True
+    )
     roster, valid_names = _build_roster()
     try:
         with kb.connect_closing() as conn:
