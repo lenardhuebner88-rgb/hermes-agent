@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1786,3 +1787,43 @@ def test_fix_pipeline_emits_no_flat_scaffold_proposal(tmp_home, monkeypatch):
     # No scaffold placeholder block anywhere in the produced text.
     assert "autoresearch-scaffold" not in proposal["after_text"]
     assert "autoresearch-scaffold" not in proposal["new_text"]
+
+
+# ===========================================================================
+# scan_open_scaffolds: file-size guard prevents unbounded reads
+# ===========================================================================
+def test_scan_open_scaffolds_skips_oversized_skill_md(tmp_home, monkeypatch):
+    """A SKILL.md larger than _MAX_SCAN_FILE_BYTES is skipped, not read into memory."""
+    from hermes_cli import autoresearch_view as ar_view
+
+    skills_root = Path(os.environ["HERMES_SKILLS_ROOT"])
+
+    # Low limit: 0.5 MiB → a file slightly over that triggers the guard.
+    monkeypatch.setattr(ar_view, "_MAX_SCAN_FILE_BYTES", 512 * 1024)
+
+    big_body = "<!-- autoresearch-scaffold -->\n" + "x" * (600 * 1024)
+    _write_skill(skills_root, "big-skill", big_body)
+
+    result = ar_view.scan_open_scaffolds()
+    assert result["count"] == 0
+    assert result["open_scaffolds"] == []
+
+
+def test_scan_open_scaffolds_finds_normal_sized_scaffold_skill(tmp_home):
+    """A SKILL.md within the size limit and carrying a scaffold marker is found."""
+    from hermes_cli import autoresearch_view as ar_view
+
+    skills_root = Path(os.environ["HERMES_SKILLS_ROOT"])
+
+    body = (
+        "# Mini\n\n"
+        "<!-- autoresearch-scaffold -->\n"
+        "document the **When to Use / Wann verwenden** of `mini`\n"
+    )
+    _write_skill(skills_root, "mini", body)
+
+    result = ar_view.scan_open_scaffolds()
+    assert result["count"] >= 1
+    scaffold = result["open_scaffolds"][0]
+    assert scaffold["skill"] == "mini"
+    assert "When to Use" in scaffold["section"]

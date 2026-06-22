@@ -74,6 +74,12 @@ _DATA_SCRIPT_RE = re.compile(
 _SCAFFOLD_MARKER = "autoresearch-scaffold"
 _SCAFFOLD_TODO_RE = re.compile(r"document the \*\*(?P<section>[^*]+)\*\* of `(?P<skill>[^`]+)`")
 
+# Upper bound on file size before reading for scaffold scanning and dashboard
+# inventory extraction.  Skills root and audit-dir contents are trusted but
+# a stray symlink or corrupted file could be arbitrarily large; refusing to
+# read beyond this avoids unbounded memory use in the scan loop.
+_MAX_SCAN_FILE_BYTES = 4 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Path resolution (env-overridable so tests can point at a tmp dir)
@@ -280,6 +286,8 @@ def _embedded_inventory(audit_dir: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
+        if path.stat().st_size > _MAX_SCAN_FILE_BYTES:
+            return None
         match = _DATA_SCRIPT_RE.search(path.read_text(encoding="utf-8", errors="replace"))
         if not match:
             return None
@@ -340,6 +348,8 @@ def scan_open_scaffolds() -> dict[str, Any]:
             if any(part.startswith(".") for part in rel_parts):
                 continue
             try:
+                if path.stat().st_size > _MAX_SCAN_FILE_BYTES:
+                    continue
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
