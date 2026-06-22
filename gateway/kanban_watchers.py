@@ -1777,7 +1777,23 @@ class GatewayKanbanWatchersMixin:
         if not serialize_by_repo:
             logger.info("kanban dispatcher: serialize_by_repo=False (per-repo lock OFF)")
 
-        max_concurrent_per_repo = int(kanban_cfg.get("max_concurrent_per_repo", 1) or 1)
+        raw_max_concurrent_per_repo = kanban_cfg.get("max_concurrent_per_repo", 1)
+        try:
+            max_concurrent_per_repo = int(raw_max_concurrent_per_repo or 1)
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: invalid kanban.max_concurrent_per_repo=%r; "
+                "using default 1",
+                raw_max_concurrent_per_repo,
+            )
+            max_concurrent_per_repo = 1
+        if max_concurrent_per_repo < 1:
+            logger.warning(
+                "kanban dispatcher: kanban.max_concurrent_per_repo=%r is below 1; "
+                "using default 1",
+                raw_max_concurrent_per_repo,
+            )
+            max_concurrent_per_repo = 1
 
         # Read C1 budget caps (N-C1). Both default OFF (None) — the dispatcher
         # never holds on budget unless the operator sets a positive value, so

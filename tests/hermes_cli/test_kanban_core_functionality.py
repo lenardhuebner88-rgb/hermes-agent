@@ -3855,6 +3855,72 @@ def test_gateway_dispatcher_watcher_env_truthy_uses_config(monkeypatch):
     )
 
 
+def test_gateway_dispatcher_invalid_repo_cap_uses_default(
+    kanban_home, monkeypatch, caplog
+):
+    """Bad kanban.max_concurrent_per_repo config must not kill the dispatcher."""
+    import asyncio
+    import logging
+
+    from gateway.run import GatewayRunner
+    import hermes_cli.config as _cfg_mod
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    captured = {}
+
+    monkeypatch.setattr(
+        _cfg_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+                "max_concurrent_per_repo": "many",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "list_boards",
+        lambda include_archived=False: [{"slug": kb.DEFAULT_BOARD}],
+    )
+
+    def _dispatch_once(conn, **kwargs):
+        captured.update(kwargs)
+        runner._running = False
+        return SimpleNamespace(
+            spawned=[],
+            reclaimed=0,
+            crashed=[],
+            timed_out=[],
+            promoted=0,
+            auto_blocked=[],
+        )
+
+    async def _sleep(_delay):
+        return None
+
+    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
+    monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        asyncio.run(
+            asyncio.wait_for(
+                runner._kanban_dispatcher_watcher(),
+                timeout=3.0,
+            )
+        )
+
+    assert captured["max_concurrent_per_repo"] == 1
+    assert any(
+        "invalid kanban.max_concurrent_per_repo='many'; using default 1"
+        in record.getMessage()
+        for record in caplog.records
+    )
+
+
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
 def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     monkeypatch, tmp_path, caplog, corrupt_exc
