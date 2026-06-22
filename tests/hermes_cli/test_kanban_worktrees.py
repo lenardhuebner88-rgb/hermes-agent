@@ -643,6 +643,142 @@ def test_claude_worker_prompt_gates_git_contract(kanban_home, monkeypatch, tmp_p
     assert "git add -A" not in prompt_plain
 
 
+def test_claude_worker_prompt_includes_parent_results(kanban_home, monkeypatch, tmp_path):
+    """A claude-CLI worker has no kanban_show, so parent task results must be
+    baked into the prompt — using the same renderer as the Hermes worker path
+    so both runtimes show identical parent-results context."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent job", assignee="researcher")
+        child = kb.create_task(
+            conn, title="child impl", assignee="coder", parents=[parent],
+        )
+        kb.claim_task(conn, parent)
+        kb.complete_task(conn, parent, summary="authoritative parent result")
+        task = kb.get_task(conn, child)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    assert "## Parent task results" in prompt
+    assert "authoritative parent result" in prompt
+    assert f"### {parent}" in prompt
+
+
+def test_claude_worker_prompt_labels_scout_parent_advisory(kanban_home, monkeypatch, tmp_path):
+    """A scout parent's result must render under '## Advisory scout notes' with
+    the source-of-truth warning in the claude-CLI prompt — same as the Hermes
+    worker path — so a claude-CLI coder treats scout recon as hints, not a
+    committed parent outcome it must follow."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with kb.connect() as conn:
+        scout = kb.create_task(conn, title="Scout: recon", assignee="scout")
+        child = kb.create_task(
+            conn, title="impl", assignee="coder", parents=[scout],
+        )
+        kb.claim_task(conn, scout)
+        kb.complete_task(conn, scout, summary="advisory recon hint")
+        task = kb.get_task(conn, child)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    assert "## Advisory scout notes" in prompt
+    assert "source of truth" in prompt.lower()
+    assert "advisory recon hint" in prompt
+    assert "## Parent task results" not in prompt
+    assert f"### {scout} (scout)" in prompt
+
+
+def test_claude_worker_prompt_includes_tenant_scoped_role_history(
+    kanban_home, monkeypatch, tmp_path,
+):
+    """The claude-CLI prompt must include tenant-scoped recent-work history
+    so the worker gets role continuity — but must NOT leak cross-tenant
+    summaries, matching the Hermes worker path's tenant isolation."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with kb.connect() as conn:
+        a = kb.create_task(conn, title="A job", assignee="coder", tenant="tenant-a")
+        kb.claim_task(conn, a)
+        kb.complete_task(conn, a, summary="did the tenant-A thing")
+        b = kb.create_task(conn, title="B job", assignee="coder", tenant="tenant-b")
+        kb.claim_task(conn, b)
+        kb.complete_task(conn, b, summary="did the tenant-B thing")
+        new_a = kb.create_task(
+            conn, title="A followup", assignee="coder", tenant="tenant-a",
+        )
+        task = kb.get_task(conn, new_a)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    assert "## Recent work by @coder" in prompt
+    assert "did the tenant-A thing" in prompt
+    # cross-tenant contamination must not leak into the claude-CLI prompt
+    assert "did the tenant-B thing" not in prompt
+    assert "NOT this" in prompt
+
+
+def test_claude_worker_prompt_no_parent_block_when_orphaned(kanban_home, monkeypatch, tmp_path):
+    """A task with no done parents emits no parent-results block — the prompt
+    stays lean and byte-identical to the pre-parity status quo for orphan
+    tasks."""
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = list(cmd)
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="orphan", assignee="coder")
+        task = kb.get_task(conn, tid)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    kb._spawn_claude_worker(
+        task, str(wt), env={"PATH": "/usr/bin"}, board="default",
+    )
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    assert "## Parent task results" not in prompt
+    assert "## Advisory scout notes" not in prompt
+
+
 def test_complete_promotes_commit_hash_to_event(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="coder")
