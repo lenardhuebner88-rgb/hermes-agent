@@ -115,6 +115,25 @@ def test_decompose_persists_optional_child_review_tier(kanban_home):
     assert by_id[child_ids[1]] is None
 
 
+def test_decompose_rejects_unknown_child_review_tier(kanban_home):
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="bad review tier")
+        with pytest.raises(ValueError, match="unknown review_tier"):
+            kb.decompose_triage_task(
+                conn,
+                tid,
+                root_assignee="orchestrator",
+                children=[{"title": "typoed tier", "review_tier": "criticall"}],
+                author="decomposer",
+            )
+
+        assert kb.get_task(conn, tid).status == "triage"
+        assert (
+            conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0]
+            == 0
+        )
+
+
 def test_decompose_persists_child_max_iterations(kanban_home):
     """B1: decompose carries a derived/explicit child['max_iterations'] into the
     tasks.max_iterations column (→ the worker's --max-turns). A child without it

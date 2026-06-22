@@ -10193,6 +10193,14 @@ def decompose_triage_task(
                 )
             if p == idx:
                 raise ValueError(f"child[{idx}] cannot list itself as a parent")
+        review_tier = child.get("review_tier")
+        if isinstance(review_tier, str):
+            review_tier_value = review_tier.strip().lower() or None
+            if review_tier_value is not None and review_tier_value not in _TIER_ORDER:
+                raise ValueError(
+                    f"unknown review_tier {review_tier_value!r}; "
+                    f"expected one of {sorted(_TIER_ORDER)}"
+                )
 
     # Detect cycles in the sibling parent graph (Kahn's topological sort).
     # link_tasks() calls _would_cycle() for every new edge; here we check
