@@ -94,12 +94,42 @@ call `complete` earlier / guarantee it on budget-exhaustion; surface "deliverabl
 completed" as a distinct, recoverable state (don't treat it as a hard failure).
 
 ### F6 — Same-repo code tasks fully serialize (LOW, by-design)
-**Symptom.** `per_profile=1` + `repo_serialized` ⇒ all hermes-repo code tasks run one-at-a-time
-(coder and coder-claude did NOT run concurrently); Wave-2's 5 children took ~30 min serial.
-**Evidence.** `repo_serialized` events; `max_in_progress_per_profile=1` in gateway.log.
-**Fix.** Intentional (avoids git/worktree contention). For scale, consider limited concurrency
-across disjoint-file tasks now that F-spawn-resilience reduces the contention risk. Note for
-throughput planning, not a bug.
+**Status 2026-06-22 RESOLVED.** The binary repo-lock was replaced with a counting
+per-repo cap. Two config keys now control same-repo concurrency under
+`kanban:` in `config.yaml`:
+
+- `serialize_by_repo` (default `true`): feature switch. `false` = the per-repo
+  cap is a strict no-op (no repo tracking at all).
+- `max_concurrent_per_repo` (default `1`): the cap value. `1` reproduces the
+  original binary-serialize behaviour (today's default). `N>1` allows up to N
+  non-terminal tasks on the same resolved repo_root before further ready tasks
+  for that repo are deferred to the next dispatcher tick.
+
+Three-value semantics: **off** (`serialize_by_repo: false`) / **serial=1**
+(default, `serialize_by_repo: true` + cap `1`) / **bounded=N** (`true` + cap
+`N>1`). Rollback = set `max_concurrent_per_repo` back to `1` (or
+`serialize_by_repo: false` to disable entirely); takes effect on the next
+gateway/dispatcher tick — enabling or raising the cap is a conscious operator
+step that requires no schema migration. Conflict-fixer tasks (idempotency-key
+`conflict-fixer:*`) are exempt from the cap and can always claim even when the
+repo is full.
+
+**Important interaction.** The repo cap is applied AFTER `max_in_progress_per_profile`.
+With the live default `per_profile=1`, raising `max_concurrent_per_repo` above 1
+is a **no-op for single-lane profiles** — it only yields actual parallelism when
+same-repo tasks fan out across disjoint lanes (e.g. `coder` + `coder-claude`),
+or when `max_in_progress_per_profile` is also raised to ≥ the repo cap.
+Otherwise the per-profile cap binds first and the repo cap never engages.
+See `hermes_cli/kanban_db.py` (`dispatch_once`, `_repo_count`, `_max_per_repo`)
+and `tests/hermes_cli/test_kanban_worktrees.py` (4 contract tests, all green).
+PlanSpec: S1 (commit `b293993bc`) + S2 (this doc).
+
+**Original symptom.** `per_profile=1` + `repo_serialized` ⇒ all hermes-repo code
+tasks run one-at-a-time (coder and coder-claude did NOT run concurrently);
+Wave-2's 5 children took ~30 min serial. `repo_serialized` events;
+`max_in_progress_per_profile=1` in gateway.log. Intentional (avoids
+git/worktree contention) — now an operator-tunable cap rather than a hard
+binary lock.
 
 ### F7 — Code tasks need explicit workspace pinning (LOW, documentation)
 **Symptom.** A direct CLI `create` of a code task with bare `--workspace worktree` was **refused**
