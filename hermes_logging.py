@@ -495,6 +495,11 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         super().emit(record)
 
     def _open(self):
+        # Test sandboxes and short-lived profile homes can remove the log
+        # directory while a handler is still alive (for example during atexit
+        # cleanup).  Recreate the parent before opening so logging never turns
+        # a harmless late record into a FileNotFoundError traceback.
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
         stream = super()._open()
         self._chmod_if_managed()
         return stream

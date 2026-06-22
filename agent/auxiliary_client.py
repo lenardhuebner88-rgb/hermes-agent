@@ -4032,12 +4032,17 @@ def resolve_provider_client(
             return None, None
 
         raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        effective_raw_base_url = raw_base_url
         base_url = _to_openai_base_url(raw_base_url)
         # Honour an explicit base_url override from the caller — used when a
         # fallback_model entry (or custom_providers lookup) routes through a
-        # built-in provider name but targets a user-specified endpoint.
+        # built-in provider name but targets a user-specified endpoint.  Keep a
+        # matching raw URL for transport auto-detection below; otherwise a
+        # built-in Anthropic-wire default such as kimi-coding would incorrectly
+        # wrap an explicitly OpenAI-wire override endpoint.
         if explicit_base_url:
-            base_url = _to_openai_base_url(explicit_base_url.strip().rstrip("/"))
+            effective_raw_base_url = explicit_base_url.strip().rstrip("/")
+            base_url = _to_openai_base_url(effective_raw_base_url)
 
         default_model = _get_aux_model_for_provider(provider)
         final_model = _normalize_resolved_model(model or default_model, provider)
@@ -4102,7 +4107,7 @@ def resolve_provider_client(
         # Anthropic-wire endpoints (Kimi Coding Plan api.kimi.com/coding,
         # /anthropic-suffixed gateways) so named providers like kimi-coding
         # land on the right transport without needing per-provider branches.
-        client = _wrap_if_needed(client, final_model, raw_base_url, api_key)
+        client = _wrap_if_needed(client, final_model, effective_raw_base_url, api_key)
 
         logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode

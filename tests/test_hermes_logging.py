@@ -1086,3 +1086,29 @@ class TestSafeStderr:
             logger.info("Session hygiene: 400 messages — auto-compressing")
         finally:
             logger.removeHandler(handler)
+
+
+def test_secure_rotating_file_handler_recreates_missing_parent(tmp_path):
+    from hermes_logging import _ManagedRotatingFileHandler
+
+    log_path = tmp_path / "profile" / ".hermes" / "logs" / "agent.log"
+    handler = _ManagedRotatingFileHandler(log_path, maxBytes=128, backupCount=1)
+    logger = logging.getLogger("_test_recreate_missing_log_parent")
+    logger.handlers = []
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        logger.info("before cleanup")
+        handler.close()
+        import shutil
+
+        shutil.rmtree(log_path.parent)
+        handler = _ManagedRotatingFileHandler(log_path, maxBytes=128, backupCount=1)
+        logger.handlers = [handler]
+        logger.info("after cleanup")
+        assert log_path.exists()
+        assert "after cleanup" in log_path.read_text()
+    finally:
+        logger.handlers = []
+        handler.close()
