@@ -3921,6 +3921,63 @@ def test_gateway_dispatcher_invalid_repo_cap_uses_default(
     )
 
 
+def test_gateway_dispatcher_invalid_max_spawn_uses_default(kanban_home, monkeypatch):
+    """Bad kanban.max_spawn config must not flow into dispatch comparisons."""
+    import asyncio
+
+    from gateway.run import GatewayRunner
+    import hermes_cli.config as _cfg_mod
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    captured = {}
+
+    monkeypatch.setattr(
+        _cfg_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+                "max_spawn": "many",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "list_boards",
+        lambda include_archived=False: [{"slug": kb.DEFAULT_BOARD}],
+    )
+
+    def _dispatch_once(conn, **kwargs):
+        captured.update(kwargs)
+        runner._running = False
+        return SimpleNamespace(
+            spawned=[],
+            reclaimed=0,
+            crashed=[],
+            timed_out=[],
+            promoted=0,
+            auto_blocked=[],
+        )
+
+    async def _sleep(_delay):
+        return None
+
+    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
+    monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
+
+    asyncio.run(
+        asyncio.wait_for(
+            runner._kanban_dispatcher_watcher(),
+            timeout=3.0,
+        )
+    )
+
+    assert captured["max_spawn"] is None
+
+
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
 def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     monkeypatch, tmp_path, caplog, corrupt_exc
