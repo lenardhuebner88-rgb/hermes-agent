@@ -13848,6 +13848,11 @@ def no_silent_stall_sweep(
         ) or ""
         if not reason.startswith("integration parked:"):
             continue
+        if _operator_escalation_is_active(conn, task_id):
+            # Explicit operator hold: no integration self-heal sweep may retry
+            # or unblock a task while the latest escalation is unresolved.
+            summary["skipped_held"].append(task_id)
+            continue
 
         park_class = _kwt._integration_park_class(reason)
         try:

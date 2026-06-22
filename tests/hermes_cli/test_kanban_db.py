@@ -8082,6 +8082,40 @@ def _patch_integrate(monkeypatch, outcomes):
     return calls
 
 
+def test_integration_retry_skips_active_operator_escalation(
+    kanban_home, monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect() as conn:
+        tid = _make_integration_parked(
+            conn, "chain worktree has uncommitted changes: foo.py",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "task": {"id": tid, "title": "parked finalizer"},
+                    "why_now": "operator must decide whether to retry integration",
+                    "attempts_already_made": 1,
+                    "evidence": {"reason": "integration parked"},
+                    "recommended_human_action": "inspect held integration park",
+                },
+            )
+        calls = _patch_integrate(monkeypatch, [{
+            "action": "merged", "branch": "kanban/chain-x",
+            "merge_commit": "abc123def456", "target": "main",
+        }])
+        summary = kb.no_silent_stall_sweep(conn, now=now)
+        task = kb.get_task(conn, tid)
+
+    assert calls == []
+    assert task.status == "blocked"
+    assert tid in summary.get("skipped_held", [])
+    assert summary["self_healed"] == []
+
+
 def test_integration_retry_transient_park_reintegrates_and_completes(
     kanban_home, monkeypatch,
 ):
