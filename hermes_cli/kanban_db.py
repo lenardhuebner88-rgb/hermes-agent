@@ -8219,6 +8219,7 @@ def _maybe_advance_review_chain(
         return None  # final stage → terminal done (normal path)
     next_stage = stage + 1
     next_profile = stages[next_stage]
+    advanced_run_id: Optional[int] = None
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'review', claim_lock = NULL, "
@@ -8236,12 +8237,14 @@ def _maybe_advance_review_chain(
         )
         if rid is not None:
             _set_run_verdict(conn, rid, "APPROVED")
+        advanced_run_id = rid
         _append_event(conn, task_id, "submitted_for_review", {
             "review_tier": tier,
             "review_stage": next_stage,
             "target_profile": next_profile,
             "advanced_from_stage": stage,
         }, run_id=rid)
+    _record_disposition_items(conn, task_id, metadata, run_id=advanced_run_id)
     return True
 
 

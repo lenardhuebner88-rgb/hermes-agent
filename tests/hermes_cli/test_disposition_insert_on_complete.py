@@ -282,6 +282,48 @@ def test_review_gate_verified_done_records_coder_disposition(
     assert {r["typ"] for r in rows} == {"risk", "follow_up"}
 
 
+def test_intermediate_review_stage_records_disposition(
+    kanban_home, review_gate_on
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical review-gated task",
+            assignee="coder",
+            review_tier="critical",
+        )
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="implementation done",
+            summary="impl ready for staged review",
+            metadata=_NO_DISPOSITION_METADATA,
+            review_gate=True,
+        ) is True
+        assert kb.get_task(conn, tid).status == "review"
+
+        claimed = kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert claimed is not None and claimed.status == "running"
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="APPROVED",
+            summary="verifier approved with follow-up",
+            metadata=_TWO_ITEMS_METADATA,
+            review_gate=True,
+        ) is True
+
+        task = kb.get_task(conn, tid)
+        review_target = kb._review_chain_target(conn, tid, kb._review_gate_config())
+        rows = kb.list_disposition_items(conn, source_task_id=tid)
+
+    assert task.status == "review"
+    assert review_target == "reviewer"
+    assert len(rows) == 2
+    assert {r["typ"] for r in rows} == {"risk", "follow_up"}
+
+
 def test_workflow_step_completion_records_disposition(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="workflow task", assignee="planner")
