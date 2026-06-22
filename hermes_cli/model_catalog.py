@@ -277,8 +277,15 @@ def get_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
             _catalog_cache = new_disk_data
             _catalog_cache_source_mtime = new_mtime
             return new_disk_data
-        _catalog_cache = fetched
-        _catalog_cache_source_mtime = now
+        # The write succeeded but the immediate read-back failed (e.g. a
+        # transient race where the file is briefly invisible, or the written
+        # JSON round-trips differently through validation).  Return the
+        # fetched data to the caller, but do NOT populate the in-process
+        # cache.  Setting ``_catalog_cache_source_mtime = now`` would never
+        # match the real disk mtime on the next call, forcing a spurious
+        # re-fetch even though the data was just fetched moments ago.
+        # Leaving the cache unset means the next call re-reads from disk
+        # (which should succeed by then) and caches normally.
         return fetched
 
     if disk_data is not None:
