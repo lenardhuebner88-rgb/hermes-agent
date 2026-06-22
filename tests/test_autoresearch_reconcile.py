@@ -145,13 +145,16 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
 
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
-        rows = conn.execute("SELECT id, title, assignee, idempotency_key FROM tasks").fetchall()
+        rows = conn.execute(
+            "SELECT id, title, assignee, idempotency_key, review_tier FROM tasks"
+        ).fetchall()
 
     assert summary["routed_to_kanban"] == 2
     assert summary["new_tasks"] == 1
     assert len(rows) == 1
     assert rows[0]["assignee"] == "coder"
     assert rows[0]["idempotency_key"] == "autoresearch:F-123"
+    assert rows[0]["review_tier"] == "review"
     assert _load("code-a")["kanban_task_id"] == rows[0]["id"]
     assert _load("code-b")["kanban_task_id"] == rows[0]["id"]
 
@@ -178,7 +181,7 @@ def test_critical_severity_proposal_routes_with_max_iterations_220(reconcile_env
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
         rows = conn.execute(
-            "SELECT id, max_iterations FROM tasks WHERE idempotency_key = ?",
+            "SELECT id, max_iterations, review_tier FROM tasks WHERE idempotency_key = ?",
             ("autoresearch:F-CRIT",),
         ).fetchall()
 
@@ -188,6 +191,46 @@ def test_critical_severity_proposal_routes_with_max_iterations_220(reconcile_env
     assert rows[0]["max_iterations"] == 220, (
         f"Expected max_iterations=220 for critical severity, got {rows[0]['max_iterations']}"
     )
+    assert rows[0]["review_tier"] == "critical"
+
+
+def test_existing_autoresearch_task_gets_missing_review_tier_backfilled(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    with kb.connect() as conn:
+        existing_id = kb.create_task(
+            conn,
+            title="Existing Autoresearch finding",
+            assignee="coder",
+            created_by="autoresearch",
+            idempotency_key="autoresearch:F-EXISTING",
+            kind="code",
+        )
+
+    _proposal(
+        "code-existing",
+        mode="code",
+        finding_id="F-EXISTING",
+        target="hermes_cli/auth.py",
+        target_path="hermes_cli/auth.py",
+        title="Existing Auth finding",
+        category="bug_risk",
+        theme="silent-except",
+        subsystem="auth",
+        severity="high",
+    )
+
+    with kb.connect() as conn:
+        summary = reconcile.reconcile_proposals(conn=conn)
+        row = conn.execute(
+            "SELECT id, review_tier FROM tasks WHERE idempotency_key = ?",
+            ("autoresearch:F-EXISTING",),
+        ).fetchone()
+
+    assert summary["routed_to_kanban"] == 1
+    assert summary["new_tasks"] == 0
+    assert row["id"] == existing_id
+    assert row["review_tier"] == "review"
 
 
 def test_low_severity_proposal_routes_with_max_iterations_none(reconcile_env):
@@ -210,7 +253,7 @@ def test_low_severity_proposal_routes_with_max_iterations_none(reconcile_env):
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn, min_task_severity="low")
         rows = conn.execute(
-            "SELECT id, max_iterations FROM tasks WHERE idempotency_key = ?",
+            "SELECT id, max_iterations, review_tier FROM tasks WHERE idempotency_key = ?",
             ("autoresearch:F-LOW",),
         ).fetchall()
 
@@ -220,6 +263,7 @@ def test_low_severity_proposal_routes_with_max_iterations_none(reconcile_env):
     assert rows[0]["max_iterations"] is None, (
         f"Expected max_iterations=None for low severity, got {rows[0]['max_iterations']}"
     )
+    assert rows[0]["review_tier"] is None
 
 
 
@@ -297,10 +341,15 @@ def test_diff_less_finding_escalates_and_digest_groups_theme(reconcile_env):
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
         queue = kb.decision_queue(conn)
+        esc_task = conn.execute(
+            "SELECT review_tier FROM tasks WHERE id = ?",
+            (queue["decisions"][0]["task_id"],),
+        ).fetchone()
 
     assert summary["escalated"] == 1
     assert _load("diff-less")["status"] == "escalated"
     assert queue["count"] == 1
+    assert esc_task["review_tier"] == "review"
 
     digest = json.loads(reconcile_env["digest"].read_text(encoding="utf-8"))
     assert digest["themes"] == [

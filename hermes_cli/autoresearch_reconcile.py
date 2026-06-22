@@ -38,6 +38,12 @@ _SEVERITY_TO_MAX_ITERATIONS: dict[str, int] = {
     "medium": 150,
 }
 
+_SEVERITY_TO_REVIEW_TIER: dict[str, str] = {
+    "critical": "critical",
+    "high": "review",
+    "medium": "review",
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -50,6 +56,10 @@ def _severity(proposal: dict[str, Any]) -> str:
 
 def _priority(proposal: dict[str, Any]) -> int:
     return SEVERITY_ORDINAL.get(_severity(proposal), 2)
+
+
+def _review_tier(proposal: dict[str, Any]) -> str | None:
+    return _SEVERITY_TO_REVIEW_TIER.get(_severity(proposal))
 
 
 def _meets_min_severity(proposal: dict[str, Any], minimum: str) -> bool:
@@ -127,6 +137,7 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
     idem = "autoresearch:" + _finding_id(proposal)
     existing = _task_for_idempotency(conn, idem)
     max_iter = _SEVERITY_TO_MAX_ITERATIONS.get(_severity(proposal))
+    review_tier = _review_tier(proposal)
     task_id = kb.create_task(
         conn,
         title=str(proposal.get("title") or f"Autoresearch finding {_finding_id(proposal)}"),
@@ -138,7 +149,14 @@ def _route_to_kanban(conn, proposal: dict[str, Any]) -> tuple[str, bool]:
         initial_status="running",
         kind="code",
         max_iterations=max_iter,
+        review_tier=review_tier,
     )
+    if existing is not None and review_tier:
+        row = conn.execute(
+            "SELECT review_tier FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row and not row["review_tier"]:
+            kb.set_task_review_tier(conn, task_id, review_tier)
     return task_id, existing is None
 
 
@@ -173,6 +191,7 @@ def _escalate(conn, proposal: dict[str, Any], reason: str) -> str:
     signal = _signal_key(proposal)
     idem = "autoresearch-escalation:" + signal
     existing = _task_for_idempotency(conn, idem)
+    review_tier = _review_tier(proposal)
     task_id = kb.create_task(
         conn,
         title=str(proposal.get("title") or f"Autoresearch escalation: {signal}"),
@@ -183,7 +202,14 @@ def _escalate(conn, proposal: dict[str, Any], reason: str) -> str:
         priority=_priority(proposal),
         initial_status="blocked",
         kind="ops",
+        review_tier=review_tier,
     )
+    if existing is not None and review_tier:
+        row = conn.execute(
+            "SELECT review_tier FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row and not row["review_tier"]:
+            kb.set_task_review_tier(conn, task_id, review_tier)
     # Only the first finding of a signal emits the escalation event; later ones
     # reuse the same blocked task (idempotency) without re-raising a duplicate.
     if existing is None:
