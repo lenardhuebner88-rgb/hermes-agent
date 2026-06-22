@@ -5733,7 +5733,7 @@ def _budget_extension_config() -> dict:
                 be = candidate
     except Exception:
         be = {}
-    enabled = bool(be.get("enabled", False))
+    enabled = _coerce_config_bool(be.get("enabled", False), default=False)
     try:
         min_delta = int(be.get("min_progress_delta", 1))
     except (TypeError, ValueError):

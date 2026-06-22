@@ -97,6 +97,26 @@ def test_extension_disabled_by_default_blocks_at_limit(kanban_home, monkeypatch)
         assert kinds[-1] == "auto_continuation_exhausted"
 
 
+def test_extension_string_false_blocks_at_limit(kanban_home, monkeypatch):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n"
+        "  budget_progress_extension:\n"
+        "    enabled: \"false\"\n",
+        encoding="utf-8",
+    )
+    _scripted_progress(monkeypatch, [10, 99])
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=1)
+        assert _exhaust(conn, tid)
+        assert _exhaust(conn, tid)
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert int(task.budget_extension_count or 0) == 0
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "budget_extension_granted" not in kinds
+
+
 # --------------------------------------------------------------------------- #
 # Enabled + progress: exactly one bounded extension, then block.
 # --------------------------------------------------------------------------- #
