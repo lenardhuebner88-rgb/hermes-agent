@@ -165,6 +165,60 @@ def test_resolved_operator_escalation_does_not_trap_later_block(kanban_home: Pat
 
 
 # ---------------------------------------------------------------------------
+# Operator-escalation holds must also survive auto_retry_blocked_tasks
+# (the third blocked→ready path, after recompute_ready / default_assignee)
+# ---------------------------------------------------------------------------
+
+
+def test_operator_escalation_block_is_not_auto_retried(kanban_home: Path) -> None:
+    """``auto_retry_blocked_tasks`` is the third ``blocked``→``ready`` pathway,
+    alongside ``recompute_ready`` and ``default_assignee``. A task parked on an
+    *unresolved* operator escalation that ALSO carries a failed run — one that
+    would otherwise classify as retryable and flip back to ``ready`` (see
+    ``test_kanban_review_gate.py::test_auto_retry_feedback_plaintext_fallback``,
+    same setup) — must stay ``blocked``. Otherwise the auto-retry tick silently
+    bypasses the operator decision the escalation explicitly requested.
+
+    Companion to ``test_operator_escalation_block_is_not_auto_promoted``
+    (``recompute_ready``): same 2026-06-22 gate-leak root cause, third path."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="needs operator review", assignee="coder")
+        kb.claim_task(conn, tid)
+        # A plain retryable block + failed run — this exact setup auto-retries.
+        kb.block_task(conn, tid, reason="just stuck")
+        # …but an unresolved operator escalation parks it for a human decision.
+        kb.add_event(
+            conn, tid, kb.OPERATOR_ESCALATION_EVENT, {"source": "autoresearch"}
+        )
+
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert retried == [], "operator-escalation hold must not auto-retry"
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_resolved_operator_escalation_allows_auto_retry(kanban_home: Path) -> None:
+    """Latest-state-aware guard (pins the use of ``_operator_escalation_is_active``
+    over the permanent ``_has_operator_escalation``): once the operator resolves
+    the escalation — a newer ``"unblocked"`` event than the escalation — a still
+    retryable blocked task must auto-retry exactly as a never-escalated one does.
+    With the permanent predicate this task would be trapped forever."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="was escalated, now resolved", assignee="coder"
+        )
+        kb.claim_task(conn, tid)
+        kb.block_task(conn, tid, reason="just stuck")
+        kb.add_event(conn, tid, kb.OPERATOR_ESCALATION_EVENT, {"source": "breaker"})
+        kb.add_event(conn, tid, "unblocked", {})
+
+        retried = kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert [t for t, _ in retried] == [tid], (
+            "resolved escalation must not block auto-retry"
+        )
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+# ---------------------------------------------------------------------------
 # Circuit-breaker blocks still auto-recover (preserve #40c1decb3 intent)
 # ---------------------------------------------------------------------------
 

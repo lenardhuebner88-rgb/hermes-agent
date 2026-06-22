@@ -15539,6 +15539,17 @@ def auto_retry_blocked_tasks(
         task_id = row["id"]
         if _is_funnel_root_task(conn, row):
             continue
+        if _operator_escalation_is_active(conn, task_id):
+            # Operator-review hold (autoresearch ``_escalate`` born blocked, or a
+            # budget-runaway / circuit-breaker escalation): the operator must
+            # decide what happens next. Never auto-retry behind the hold — the
+            # third ``blocked``→``ready`` pathway must respect it just like
+            # ``recompute_ready`` (kanban_db.py:6028) and ``default_assignee`` do.
+            # Latest-state-aware via ``_operator_escalation_is_active`` (NOT the
+            # permanent ``_has_operator_escalation``): an escalation the operator
+            # already resolved (a newer ``"unblocked"`` event) falls through and
+            # retries normally.
+            continue
         blocked_run = _latest_blocked_run_for_auto_retry(conn, task_id)
         if blocked_run is None:
             continue
