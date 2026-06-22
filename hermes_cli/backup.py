@@ -1102,9 +1102,13 @@ def _prune_pre_migration_backups(backup_dir: Path, keep: int) -> int:
     return deleted
 
 
+_PRE_DEPLOY_PREFIX = "pre-deploy-"
+_PRE_DEPLOY_DEFAULT_KEEP = 5
+
+
 def create_pre_deploy_backup(
     hermes_home: Optional[Path] = None,
-    keep: int = 5,
+    keep: int = _PRE_DEPLOY_DEFAULT_KEEP,
 ) -> Optional[Path]:
     """Create a full zip backup of HERMES_HOME under ``backups/`` before an
     autonomous deploy / release-gate run.
@@ -1123,6 +1127,8 @@ def create_pre_deploy_backup(
     if not hermes_root.is_dir():
         return None
 
+    # Reuses the shared backups/ directory so `hermes import` and the
+    # update-backup listing pick up pre-deploy archives too.
     backup_dir = _pre_update_backup_dir(hermes_root)
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1131,7 +1137,7 @@ def create_pre_deploy_backup(
         return None
 
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    out_path = backup_dir / f"pre-deploy-{stamp}.zip"
+    out_path = backup_dir / f"{_PRE_DEPLOY_PREFIX}{stamp}.zip"
 
     try:
         result = _write_full_zip_backup(out_path, hermes_root)
@@ -1157,7 +1163,7 @@ def _prune_pre_deploy_backups(backup_dir: Path, keep: int) -> int:
 
     backups = sorted(
         (p for p in backup_dir.iterdir()
-         if p.is_file() and p.name.startswith("pre-deploy-") and p.suffix.lower() == ".zip"),
+         if p.is_file() and p.name.startswith(_PRE_DEPLOY_PREFIX) and p.suffix.lower() == ".zip"),
         key=lambda p: p.name,
         reverse=True,
     )
