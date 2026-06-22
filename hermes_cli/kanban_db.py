@@ -17673,37 +17673,34 @@ def _spawn_claude_worker(
             )
     except Exception:
         git_contract = ""
-    # Comment thread + parent-results/role-history (AC-PROMPT-PARITY): a
-    # claude-CLI worker has NO kanban tools — unlike the Hermes worker
-    # path, which gets the full build_worker_context. Bake the most-recent
-    # _CTX_MAX_COMMENTS AND the parent-task handoff results + cross-task
-    # role history into the prompt using the SAME renderers so the worker
-    # sees operator follow-ups, prior-attempt notes, parent outputs, and
-    # its own recent role continuity. Fail-soft: a DB hiccup must never
-    # block the spawn — fall back to no block. Zero results/comments
-    # → no block, so the prompt stays byte-identical to the pre-change
-    # status quo. Board-scoped (not os.environ) so the fetch matches the
-    # board the dispatcher claimed the task from. Uses worker_slim caps
-    # so the claude-CLI prompt stays bounded like the Hermes worker lane.
+    # Comment thread + parent results + role history: a claude-CLI worker
+    # has NO kanban tools and never sees task context via kanban_show —
+    # unlike the Hermes worker path, which gets the full build_worker_context.
+    # Bake the most-recent comments AND the parent-results / role-history
+    # blocks into the prompt using the SAME renderers so the claude-CLI
+    # worker gets context parity with the Hermes worker path, including
+    # the scout-parent advisory labeling and tenant-scoped role history.
+    # Fail-soft: a DB hiccup must never block the spawn — fall back to no
+    # block. Board-scoped (not os.environ) so the fetch matches the board
+    # the dispatcher claimed the task from.
     comment_block = ""
-    handoff_block = ""
+    parent_history_block = ""
     try:
         with connect_closing(board=board) as _cconn:
             _comment_lines = _render_comment_thread(list_comments(_cconn, task.id))
-            _handoff_lines = _render_parent_results_and_role_history(
+            _parent_history_lines = _render_parent_results_and_role_history(
                 _cconn,
-                task.id,
-                field_bytes=_CTX_CAP_PROFILES["worker_slim"]["field_bytes"],
-                role_history_limit=_CTX_CAP_PROFILES["worker_slim"]["role_history"],
-                assignee=task.assignee,
+                task,
+                field_bytes=_CTX_MAX_FIELD_BYTES,
+                role_history_limit=5,
             )
         if _comment_lines:
             comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
-        if _handoff_lines:
-            handoff_block = "\n".join(_handoff_lines).rstrip() + "\n\n"
+        if _parent_history_lines:
+            parent_history_block = "\n".join(_parent_history_lines).rstrip() + "\n\n"
     except Exception:
         comment_block = ""
-        handoff_block = ""
+        parent_history_block = ""
     profile_instructions = _claude_profile_instructions(env.get("HERMES_HOME"))
     profile_block = (
         "Profile instructions (SOUL.md):\n"
@@ -17717,8 +17714,8 @@ def _spawn_claude_worker(
         f"{profile_block}"
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
+        f"{parent_history_block}"
         f"{comment_block}"
-        f"{handoff_block}"
         "Work in the current directory.\n\n"
         f"{git_contract}"
         "MANDATORY: your turn is not over until you report back, via the "
@@ -18472,45 +18469,66 @@ def _render_comment_thread(
 
 def _render_parent_results_and_role_history(
     conn: sqlite3.Connection,
-    task_id: str,
+    task: "Task",
     *,
-    field_bytes: int,
-    role_history_limit: int,
-    assignee: Optional[str] = None,
+    field_bytes: int = _CTX_MAX_FIELD_BYTES,
+    role_history_limit: int = 5,
 ) -> list[str]:
-    """Render the ``## Parent task results`` and ``## Recent work by @<assignee>``
-    context sections as a flat list of lines.
+    """Render parent task results + cross-task role history as worker-context lines.
 
-    Shared by :func:`build_worker_context` (Hermes worker) and
-    :func:`_spawn_claude_worker` (claude-CLI worker) so both lanes get
-    identical parent-handoff + role-history framing — a worker that has
-    no kanban tools (the claude lane) otherwise never sees what its
-    parents produced or what else it has done recently.
+    Single source of truth for the parent-results and role-history blocks shared
+    by the Hermes worker path (:func:`build_worker_context`) and the claude-CLI
+    worker path (:func:`_spawn_claude_worker`) — both inherit identical framing
+    and advisory labeling from here.
 
-    Parent results: prefer the most-recent ``completed`` run's summary +
-    metadata, fall back to ``task.result`` when no run rows exist (legacy
-    DBs, or tasks completed before the runs table landed).
+    Parent results: prefers ``run.summary`` / ``run.metadata`` from the most-recent
+    completed run; falls back to ``task.result`` for legacy DBs. Scout parents are
+    routed into a separate ``## Advisory scout notes`` section so their recon
+    hints cannot be misread as committed parent outcomes the worker must follow.
 
-    Role history: most recent ``role_history_limit`` completed runs on
-    other tasks by ``assignee``, excluding ``task_id`` so the prior-
-    attempts section above isn't duplicated. Skipped silently when
-    ``assignee`` is falsy.
+    Role history: most-recent ``role_history_limit`` completed runs on OTHER
+    tasks by the same assignee, tenant-scoped so a worker in tenant A cannot see
+    another tenant's summaries. Suppressed for scout assignees (a read-only recon
+    must take scope from the target task body, never prior scout runs). Labelled
+    advisory: even same-tenant history is continuity, NOT this task's scope.
 
-    Returns ``[]`` when there is nothing to render (no done parents and
-    no role history) so callers can fold the result into a prompt without
-    emitting stray blank sections — the claude-CLI spawn path relies on
-    this to stay byte-identical to the pre-parity prompt for tasks with
-    no parents/history.
+    Returns ``[]`` when there are no done parents and no role history so callers
+    emit no block.
     """
     lines: list[str] = []
 
+    # Parents: prefer the most-recent 'completed' run's summary + metadata,
+    # fall back to ``task.result`` when no run rows exist (legacy DBs,
+    # or tasks completed before the runs table landed).
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-        (task_id,),
+        (task.id,),
     ).fetchall()
     parent_ids = [r["parent_id"] for r in parent_rows]
 
     if parent_ids:
+        def _parent_result_lines(pt: "Task", run) -> list[str]:
+            body_lines: list[str] = []
+            if run is not None and run.summary and run.summary.strip():
+                body_lines.append(_cap(run.summary, field_bytes))
+            elif pt.result:
+                body_lines.append(_cap(pt.result, field_bytes))
+            else:
+                body_lines.append("(no result recorded)")
+            if run is not None and run.metadata:
+                try:
+                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
+                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
+                except Exception:
+                    pass
+            return body_lines
+
+        # A read-only scout parent produces recon hints, NOT an authoritative
+        # result. Routing it into a separate "Advisory scout notes" section (vs
+        # the equal-weight "Parent task results") stops a scout's off-scope
+        # recommendation from reading as a committed parent outcome the coder
+        # must follow. Non-scout parents render byte-identically to before.
+        scout_parents: list[tuple[str, "Task", object]] = []
         wrote_header = False
         for pid in parent_ids:
             pt = get_task(conn, pid)
@@ -18520,39 +18538,71 @@ def _render_parent_results_and_role_history(
             runs.sort(key=lambda r: r.started_at, reverse=True)
             run = runs[0] if runs else None
 
+            if pt.assignee == "scout":
+                scout_parents.append((pid, pt, run))
+                continue
+
             if not wrote_header:
                 lines.append("## Parent task results")
                 wrote_header = True
             lines.append(f"### {pid}")
-
-            body_lines: list[str] = []
-            if run is not None and run.summary and run.summary.strip():
-                body_lines.append(_cap(run.summary, field_bytes))
-            elif pt.result:
-                body_lines.append(_cap(pt.result, field_bytes))
-            else:
-                body_lines.append("(no result recorded)")
-
-            if run is not None and run.metadata:
-                try:
-                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
-                except Exception:
-                    pass
-            lines.extend(body_lines)
+            lines.extend(_parent_result_lines(pt, run))
             lines.append("")
 
-    if assignee:
+        if scout_parents:
+            lines.append("## Advisory scout notes")
+            lines.append(
+                "_Advisory scout notes — the target task body and operator "
+                "directives remain the source of truth. Treat these as recon "
+                "hints; do NOT broaden scope based on them._"
+            )
+            for pid, pt, run in scout_parents:
+                lines.append(f"### {pid} (scout)")
+                lines.extend(_parent_result_lines(pt, run))
+                lines.append("")
+
+    # Cross-task role history: what else has THIS assignee completed
+    # recently? Gives the worker implicit continuity — "I'm the reviewer
+    # and my last three reviews focused on security" — without forcing
+    # the user to wire anything into SOUL.md / MEMORY.md. Bounded to the
+    # most recent ``role_history_limit`` completed runs, excluding this
+    # task so a prior-attempts section elsewhere isn't duplicated. Safe on
+    # assignee=None (skipped).
+    #
+    # Two hardenings over the naive profile-only query:
+    #   * TENANT-SCOPED. The old query selected by ``r.profile`` alone, so a
+    #     worker in tenant A could see another tenant's summaries — cross-tenant
+    #     bias that can pull a worker off its own scope. We restrict to the
+    #     task's tenant (NULL-aware: an untenanted task sees only untenanted
+    #     history, keeping single-tenant boards byte-identical).
+    #   * SUPPRESSED FOR scout. A read-only recon must take its scope from the
+    #     target task body, never from prior (possibly off-scope) scout runs —
+    #     so a scout gets no recent-work block at all.
+    #   * Labelled advisory: even same-tenant history is continuity, NOT this
+    #     task's scope; the task body + operator directives stay authoritative.
+    if task.assignee and task.assignee != "scout":
+        if task.tenant:
+            tenant_clause = "AND t.tenant = ? "
+            role_params = (task.assignee, task.tenant, task.id, role_history_limit)
+        else:
+            tenant_clause = "AND t.tenant IS NULL "
+            role_params = (task.assignee, task.id, role_history_limit)
         role_rows = conn.execute(
             "SELECT t.id, t.title, r.summary, r.ended_at "
             "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.profile = ? AND r.task_id != ? "
+            "WHERE r.profile = ? " + tenant_clause + "AND r.task_id != ? "
             "  AND r.outcome = 'completed' "
             "ORDER BY r.ended_at DESC LIMIT ?",
-            (assignee, task_id, role_history_limit),
+            role_params,
         ).fetchall()
         if role_rows:
-            lines.append(f"## Recent work by @{assignee}")
+            scope_label = f" (tenant {task.tenant})" if task.tenant else ""
+            lines.append(f"## Recent work by @{task.assignee}{scope_label}")
+            lines.append(
+                "_Advisory continuity only — same-tenant history, NOT this "
+                "task's scope. The task body and operator directives remain the "
+                "source of truth; do not broaden scope from prior work._"
+            )
             for row in role_rows:
                 ts = time.strftime(
                     "%Y-%m-%d %H:%M", time.localtime(int(row["ended_at"]))
@@ -18580,10 +18630,10 @@ def build_worker_context(
          shown; older attempts collapsed into a one-line summary).
          Each attempt's ``summary`` / ``error`` / ``metadata`` capped at
          ``_CTX_MAX_FIELD_BYTES`` each.
-      4. Structured handoff results of every done parent task (rendered by
-         :func:`_render_parent_results_and_role_history`). Prefers
+      4. Structured handoff results of every done parent task. Prefers
          ``run.summary`` / ``run.metadata`` when the parent was executed
-         via a run; falls back to ``task.result`` for older data.
+         via a run; falls back to ``task.result`` for older data. Same
+         per-field cap.
       5. Cross-task role history for the assignee (most recent 5
          completed runs on other tasks).
       6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
@@ -18705,15 +18755,15 @@ def build_worker_context(
             lines.append("")
 
     # Parent task results + cross-task role history.
-    # Rendering is shared with the claude-CLI worker path via
-    # _render_parent_results_and_role_history so both lanes show an
-    # identical handoff/continuity view — see the helper docstring.
+    # Rendering is shared with the claude-CLI worker path
+    # (see _render_parent_results_and_role_history) so both runtimes show
+    # the identical view — including the scout-parent advisory labeling
+    # and the tenant-scoped, scout-suppressed role history.
     lines.extend(_render_parent_results_and_role_history(
         conn,
-        task_id,
+        task,
         field_bytes=field_bytes,
         role_history_limit=role_history_limit,
-        assignee=task.assignee,
     ))
 
     # Comments: cap at the most-recent _CTX_MAX_COMMENTS so comment-storm
@@ -21102,6 +21152,91 @@ def _scout_max_runtime_seconds(cfg: Optional[dict] = None) -> int:
     return val if val > 0 else _SCOUT_MAX_RUNTIME_SECONDS
 
 
+# --- Auto-scout body: inherit the target task's scope (source of truth) -----
+#
+# A scout recon card carrying only a generic "look at the affected code"
+# instruction loses the precise scope of the task it precedes. The scout then
+# infers scope from its own title / recent work and can recommend off-scope
+# files, which flow into the coder as a Parent result (incident: scout
+# ``t_6661c5cc`` recommended ``acp_adapter/permissions.py`` for a gateway-scoped
+# slice ``t_d3eb22f2``). Inheriting the target's body excerpt + allowed paths +
+# an explicit source-of-truth warning keeps the scout inside the same scope the
+# coder will build against. Shared by :func:`ensure_scout_predecessor` and the
+# dashboard flow-release scout injection so both stay in lockstep.
+
+_SCOUT_RECON_INTRO = (
+    "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und liefere "
+    "knappe Fund-Notizen (Dateien, Symbole, Risiken) für den nachfolgenden "
+    "Coder. Nichts editieren, committen oder deployen."
+)
+
+_SCOUT_SOURCE_OF_TRUTH_WARNING = (
+    "WICHTIG — Scope-Quelle: Body und Operator-Directives des/der unten "
+    "genannten Ziel-Task(s) sind die ALLEINIGE Source of Truth für den Scope. "
+    "Leite den Scope NICHT aus dem Titel, aus \"Recent work\" oder aus früheren "
+    "Scout-Läufen breiter ab. Bleibe innerhalb der Allowed scope / allowed_paths; "
+    "respektiere Anti-scope und Acceptance criteria. Im Zweifel enger statt breiter."
+)
+
+_SCOUT_TARGET_BODY_CAP = 4 * 1024        # per-target body excerpt cap (one target)
+_SCOUT_TARGET_BODY_CAP_MULTI = 2 * 1024  # smaller cap when one scout fans out
+
+
+def _scout_target_scope_block(task: "Task", *, body_cap: int) -> list[str]:
+    """Render one target task's inherited scope for a scout recon body."""
+    lines = [f"## Ziel-Task {task.id}: {task.title or '(kein Titel)'}"]
+    try:
+        from hermes_cli.kanban_decompose import _collect_absolute_paths
+        paths = _collect_absolute_paths(task.body or "")
+    except Exception:
+        paths = []
+    if paths:
+        joined = ", ".join(f"`{p}`" for p in paths[:20])
+        lines.append(f"Allowed paths (aus Ziel-Body): {joined}")
+    body = (task.body or "").strip()
+    if body:
+        lines.append(
+            "Ziel-Body (maßgeblich — enthält Allowed scope / Acceptance criteria "
+            "/ Anti-scope / scope_contract; Auszug):"
+        )
+        lines.append(_cap(body, body_cap))
+    else:
+        lines.append(
+            "(Ziel-Task hat keinen Body — Scope strikt aus Titel + "
+            "Operator-Directives ableiten, nicht breiter.)"
+        )
+    return lines
+
+
+def _scout_recon_body(targets: "list[Optional[Task]]") -> str:
+    """Build a scope-inheriting scout recon body.
+
+    ``targets`` is the task(s) the scout precedes. With one target the scout
+    inherits that task's scope; when one scout fans out to several entry
+    children, each child's id/title/scope summary is listed so the scout never
+    has to guess which slice it is reconning. ``None`` entries (a lookup that
+    raced) are skipped; an empty list falls back to intro + warning only.
+    """
+    real = [t for t in targets if t is not None]
+    lines = [_SCOUT_RECON_INTRO, "", _SCOUT_SOURCE_OF_TRUTH_WARNING, ""]
+    if not real:
+        return "\n".join(lines).rstrip() + "\n"
+    body_cap = (
+        _SCOUT_TARGET_BODY_CAP if len(real) == 1 else _SCOUT_TARGET_BODY_CAP_MULTI
+    )
+    if len(real) > 1:
+        lines.append(
+            f"Dieser Scout läuft VOR {len(real)} Ziel-Tasks; halte je Ziel den "
+            "jeweils genannten Scope getrennt — keine Querkontamination zwischen "
+            "den Slices:"
+        )
+        lines.append("")
+    for t in real:
+        lines.extend(_scout_target_scope_block(t, body_cap=body_cap))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def scout_predecessor_id(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """Return the id of an existing read-only ``scout`` predecessor of
     ``task_id`` (a parent task with ``assignee == 'scout'``), or ``None``.
@@ -21150,11 +21285,7 @@ def ensure_scout_predecessor(
     scout_id = create_task(
         conn,
         title=f"Scout: {task.title}",
-        body=(
-            "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und "
-            "liefere knappe Fund-Notizen (Dateien, Symbole, Risiken) für den "
-            "nachfolgenden Coder. Nichts editieren, committen oder deployen."
-        ),
+        body=_scout_recon_body([task]),
         assignee="scout",
         created_by="auto-scout-critical",
         priority=task.priority,

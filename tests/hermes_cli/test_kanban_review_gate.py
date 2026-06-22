@@ -899,3 +899,78 @@ def test_batch_active_review_stages_latest_event_wins(kanban_home):
         m = kb.batch_active_review_stages(conn, [t1, t2])
         assert m == {t1: "reviewer"}   # latest event wins; t2 (no event) omitted
         assert kb.batch_active_review_stages(conn, []) == {}
+
+
+# ---------------------------------------------------------------------------
+# S2: auto-scout inherits the target task's scope (source of truth) and warns
+# against broadening. PlanSpec autoscout-context-integrity-2026-06-22.
+# ---------------------------------------------------------------------------
+
+_TARGET_SCOPED_BODY = (
+    "Harden the approval-prompt redaction.\n\n"
+    "Allowed scope: gateway/run.py, gateway/platforms/api_server.py.\n"
+    "Acceptance criteria: redact credentials before the prompt renders.\n"
+    "Anti-scope: do NOT touch acp_adapter/permissions.py.\n\n"
+    "scope_contract:\n"
+    "  version: 2\n"
+    "  allowed_paths:\n"
+    "    - /home/piet/.hermes/hermes-agent/gateway/run.py\n"
+    "  allowed_tools:\n"
+    "    - terminal\n"
+)
+
+
+def test_auto_scout_body_inherits_target_scope(kanban_home):
+    """The scout body created for a scoped target carries that target's scope
+    boundaries (id/title, Allowed scope, Acceptance criteria, Anti-scope,
+    scope_contract/allowed paths) — not a generic recon instruction."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="redaction slice", assignee="coder",
+            body=_TARGET_SCOPED_BODY,
+        )
+        scout_id = kb.ensure_scout_predecessor(conn, tid)
+        assert scout_id is not None
+        body = kb.get_task(conn, scout_id).body or ""
+    # target identity
+    assert tid in body
+    assert "redaction slice" in body
+    # inherited scope markers from the target body excerpt
+    assert "Allowed scope" in body
+    assert "Acceptance criteria" in body
+    assert "Anti-scope" in body
+    assert "scope_contract:" in body
+    # explicit allowed-path list pulled out of the body
+    assert "/home/piet/.hermes/hermes-agent/gateway/run.py" in body
+
+
+def test_auto_scout_body_warns_against_broadening(kanban_home):
+    """The scout body must explicitly say the target body/operator directives are
+    the source of truth and forbid broadening from title/recent work."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder", body="do the thing")
+        scout_id = kb.ensure_scout_predecessor(conn, tid)
+        body = kb.get_task(conn, scout_id).body or ""
+    assert "Source of Truth" in body
+    assert "Recent work" in body          # names the thing NOT to broaden from
+    assert "enger statt breiter" in body  # err narrow, not broad
+
+
+def test_scout_recon_body_handles_empty_target_body():
+    """Helper-level: a target with a TRULY empty body still yields the warning
+    plus an explicit 'no body — derive strictly' note (never silently
+    scopeless). (A real coder task gets the Coder-Contract boilerplate body, so
+    this path is exercised at the helper.)"""
+    from types import SimpleNamespace
+    fake = SimpleNamespace(id="t_empty", title="no-body target", body="")
+    body = kb._scout_recon_body([fake])
+    assert "t_empty" in body
+    assert "Source of Truth" in body
+    assert "keinen Body" in body
+
+
+def test_scout_recon_body_empty_targets_is_warning_only():
+    """No resolvable targets → intro + warning only, no target block."""
+    body = kb._scout_recon_body([None])
+    assert "Source of Truth" in body
+    assert "## Ziel-Task" not in body  # no per-target block rendered

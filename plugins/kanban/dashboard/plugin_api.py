@@ -6826,13 +6826,15 @@ def _release_flow_gate(
             and kanban_db.scout_predecessor_id(conn, cid) is None
         ]
         if entry_children:
+            # Inherit the entry children's scope into the scout body so a
+            # fanned-out scout reconns each released slice against its real
+            # task body (allowed paths / scope_contract / anti-scope), not a
+            # generic instruction it would broaden from its own title.
             scout_id = kanban_db.create_task(
                 conn,
                 title=f"Scout: {root.title}",
-                body=(
-                    "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code "
-                    "und liefere knappe Fund-Notizen (Dateien, Symbole, Risiken) "
-                    "für die nachfolgenden Coder. Nichts editieren."
+                body=kanban_db._scout_recon_body(
+                    [kanban_db.get_task(conn, cid) for cid in entry_children]
                 ),
                 assignee="scout",
                 created_by="flow-gate",
