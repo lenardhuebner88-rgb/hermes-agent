@@ -107,6 +107,22 @@ KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
 
+def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
     """Fire a kanban lifecycle plugin hook, fully best-effort.
 
@@ -7054,13 +7070,15 @@ def _review_gate_config() -> dict:
         str(cp).strip().lower() if cp and str(cp).strip() else _DEFAULT_CRITIC_PROFILE
     )
     # B Grill-Entscheid 2: auto-risk classification is opt-in, default OFF.
-    auto_tier = bool(rg.get("auto_tier", False))
+    auto_tier = _coerce_config_bool(rg.get("auto_tier", False), default=False)
     # Phase-C-followup (a): couple scout to review_tier:critical, opt-in default
     # OFF. With this false, a critical task gets no automatic scout predecessor —
     # byte-identical to today (the operator can still inject one via flow-release).
-    auto_scout_on_critical = bool(rg.get("auto_scout_on_critical", False))
+    auto_scout_on_critical = _coerce_config_bool(
+        rg.get("auto_scout_on_critical", False), default=False
+    )
     return {
-        "enabled": bool(rg.get("enabled", False)),
+        "enabled": _coerce_config_bool(rg.get("enabled", False), default=False),
         "code_roles": code_roles,
         "acceptance_roles": acceptance_roles,
         "verifier_profile": verifier_profile,

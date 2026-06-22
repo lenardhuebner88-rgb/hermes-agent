@@ -10786,6 +10786,24 @@ def test_a2_acceptance_roles_default_empty_is_noop(kanban_home):
     assert "coder-claude" in cfg["code_roles"]
 
 
+def test_review_gate_config_string_false_flags_are_disabled(kanban_home):
+    import yaml
+    (kanban_home / "config.yaml").write_text(
+        yaml.safe_dump({
+            "kanban": {"review_gate": {
+                "enabled": "false",
+                "auto_tier": "false",
+                "auto_scout_on_critical": "false",
+            }}
+        }),
+        encoding="utf-8",
+    )
+    cfg = kb._review_gate_config()
+    assert cfg["enabled"] is False
+    assert cfg["auto_tier"] is False
+    assert cfg["auto_scout_on_critical"] is False
+
+
 def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
     import yaml
     (kanban_home / "config.yaml").write_text(
