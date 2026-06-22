@@ -17673,23 +17673,37 @@ def _spawn_claude_worker(
             )
     except Exception:
         git_contract = ""
-    # Comment thread (chirurgischer Fix, AC-A): a claude-CLI worker has NO
-    # kanban tools and never sees task comments — unlike the Hermes worker
-    # path, which gets them via build_worker_context. Bake the most-recent
-    # _CTX_MAX_COMMENTS into the prompt using the SAME renderer so operator
-    # follow-ups / prior-attempt notes reach the worker. Fail-soft: a DB
-    # hiccup must never block the spawn — fall back to no block. Zero comments
-    # → no block, so the prompt stays byte-identical to the pre-change status
-    # quo. Board-scoped (not os.environ) so the fetch matches the board the
-    # dispatcher claimed the task from.
+    # Comment thread + parent-results/role-history (AC-PROMPT-PARITY): a
+    # claude-CLI worker has NO kanban tools — unlike the Hermes worker
+    # path, which gets the full build_worker_context. Bake the most-recent
+    # _CTX_MAX_COMMENTS AND the parent-task handoff results + cross-task
+    # role history into the prompt using the SAME renderers so the worker
+    # sees operator follow-ups, prior-attempt notes, parent outputs, and
+    # its own recent role continuity. Fail-soft: a DB hiccup must never
+    # block the spawn — fall back to no block. Zero results/comments
+    # → no block, so the prompt stays byte-identical to the pre-change
+    # status quo. Board-scoped (not os.environ) so the fetch matches the
+    # board the dispatcher claimed the task from. Uses worker_slim caps
+    # so the claude-CLI prompt stays bounded like the Hermes worker lane.
     comment_block = ""
+    handoff_block = ""
     try:
         with connect_closing(board=board) as _cconn:
             _comment_lines = _render_comment_thread(list_comments(_cconn, task.id))
+            _handoff_lines = _render_parent_results_and_role_history(
+                _cconn,
+                task.id,
+                field_bytes=_CTX_CAP_PROFILES["worker_slim"]["field_bytes"],
+                role_history_limit=_CTX_CAP_PROFILES["worker_slim"]["role_history"],
+                assignee=task.assignee,
+            )
         if _comment_lines:
             comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
+        if _handoff_lines:
+            handoff_block = "\n".join(_handoff_lines).rstrip() + "\n\n"
     except Exception:
         comment_block = ""
+        handoff_block = ""
     profile_instructions = _claude_profile_instructions(env.get("HERMES_HOME"))
     profile_block = (
         "Profile instructions (SOUL.md):\n"
@@ -17704,6 +17718,7 @@ def _spawn_claude_worker(
         f"Task title: {title}\n"
         f"Task body:\n{body}\n\n"
         f"{comment_block}"
+        f"{handoff_block}"
         "Work in the current directory.\n\n"
         f"{git_contract}"
         "MANDATORY: your turn is not over until you report back, via the "
@@ -18455,6 +18470,101 @@ def _render_comment_thread(
     return lines
 
 
+def _render_parent_results_and_role_history(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    field_bytes: int,
+    role_history_limit: int,
+    assignee: Optional[str] = None,
+) -> list[str]:
+    """Render the ``## Parent task results`` and ``## Recent work by @<assignee>``
+    context sections as a flat list of lines.
+
+    Shared by :func:`build_worker_context` (Hermes worker) and
+    :func:`_spawn_claude_worker` (claude-CLI worker) so both lanes get
+    identical parent-handoff + role-history framing — a worker that has
+    no kanban tools (the claude lane) otherwise never sees what its
+    parents produced or what else it has done recently.
+
+    Parent results: prefer the most-recent ``completed`` run's summary +
+    metadata, fall back to ``task.result`` when no run rows exist (legacy
+    DBs, or tasks completed before the runs table landed).
+
+    Role history: most recent ``role_history_limit`` completed runs on
+    other tasks by ``assignee``, excluding ``task_id`` so the prior-
+    attempts section above isn't duplicated. Skipped silently when
+    ``assignee`` is falsy.
+
+    Returns ``[]`` when there is nothing to render (no done parents and
+    no role history) so callers can fold the result into a prompt without
+    emitting stray blank sections — the claude-CLI spawn path relies on
+    this to stay byte-identical to the pre-parity prompt for tasks with
+    no parents/history.
+    """
+    lines: list[str] = []
+
+    parent_rows = conn.execute(
+        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+        (task_id,),
+    ).fetchall()
+    parent_ids = [r["parent_id"] for r in parent_rows]
+
+    if parent_ids:
+        wrote_header = False
+        for pid in parent_ids:
+            pt = get_task(conn, pid)
+            if not pt or pt.status != "done":
+                continue
+            runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
+            runs.sort(key=lambda r: r.started_at, reverse=True)
+            run = runs[0] if runs else None
+
+            if not wrote_header:
+                lines.append("## Parent task results")
+                wrote_header = True
+            lines.append(f"### {pid}")
+
+            body_lines: list[str] = []
+            if run is not None and run.summary and run.summary.strip():
+                body_lines.append(_cap(run.summary, field_bytes))
+            elif pt.result:
+                body_lines.append(_cap(pt.result, field_bytes))
+            else:
+                body_lines.append("(no result recorded)")
+
+            if run is not None and run.metadata:
+                try:
+                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
+                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
+                except Exception:
+                    pass
+            lines.extend(body_lines)
+            lines.append("")
+
+    if assignee:
+        role_rows = conn.execute(
+            "SELECT t.id, t.title, r.summary, r.ended_at "
+            "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
+            "WHERE r.profile = ? AND r.task_id != ? "
+            "  AND r.outcome = 'completed' "
+            "ORDER BY r.ended_at DESC LIMIT ?",
+            (assignee, task_id, role_history_limit),
+        ).fetchall()
+        if role_rows:
+            lines.append(f"## Recent work by @{assignee}")
+            for row in role_rows:
+                ts = time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(int(row["ended_at"]))
+                )
+                s = (row["summary"] or "").strip().splitlines()
+                first = s[0][:200] if s else "(no summary)"
+                lines.append(f"- {row['id']} — {row['title']} ({ts}): {first}")
+            lines.append("")
+
+    return lines
+
+
 def build_worker_context(
     conn: sqlite3.Connection,
     task_id: str,
@@ -18470,10 +18580,10 @@ def build_worker_context(
          shown; older attempts collapsed into a one-line summary).
          Each attempt's ``summary`` / ``error`` / ``metadata`` capped at
          ``_CTX_MAX_FIELD_BYTES`` each.
-      4. Structured handoff results of every done parent task. Prefers
+      4. Structured handoff results of every done parent task (rendered by
+         :func:`_render_parent_results_and_role_history`). Prefers
          ``run.summary`` / ``run.metadata`` when the parent was executed
-         via a run; falls back to ``task.result`` for older data. Same
-         per-field cap.
+         via a run; falls back to ``task.result`` for older data.
       5. Cross-task role history for the assignee (most recent 5
          completed runs on other tasks).
       6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
@@ -18594,72 +18704,17 @@ def build_worker_context(
                     pass
             lines.append("")
 
-    # Parents: prefer the most-recent 'completed' run's summary + metadata,
-    # fall back to ``task.result`` when no run rows exist (legacy DBs,
-    # or tasks completed before the runs table landed).
-    parent_rows = conn.execute(
-        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-        (task_id,),
-    ).fetchall()
-    parent_ids = [r["parent_id"] for r in parent_rows]
-
-    if parent_ids:
-        wrote_header = False
-        for pid in parent_ids:
-            pt = get_task(conn, pid)
-            if not pt or pt.status != "done":
-                continue
-            runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
-            runs.sort(key=lambda r: r.started_at, reverse=True)
-            run = runs[0] if runs else None
-
-            if not wrote_header:
-                lines.append("## Parent task results")
-                wrote_header = True
-            lines.append(f"### {pid}")
-
-            body_lines: list[str] = []
-            if run is not None and run.summary and run.summary.strip():
-                body_lines.append(_cap(run.summary, field_bytes))
-            elif pt.result:
-                body_lines.append(_cap(pt.result, field_bytes))
-            else:
-                body_lines.append("(no result recorded)")
-
-            if run is not None and run.metadata:
-                try:
-                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
-                except Exception:
-                    pass
-            lines.extend(body_lines)
-            lines.append("")
-
-    # Cross-task role history: what else has THIS assignee completed
-    # recently? Gives the worker implicit continuity — "I'm the reviewer
-    # and my last three reviews focused on security" — without forcing
-    # the user to wire anything into SOUL.md / MEMORY.md. Bounded to the
-    # most recent 5 completed runs, excluding this task so the retry
-    # section above isn't duplicated. Safe on assignee=None (skipped).
-    if task.assignee:
-        role_rows = conn.execute(
-            "SELECT t.id, t.title, r.summary, r.ended_at "
-            "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.profile = ? AND r.task_id != ? "
-            "  AND r.outcome = 'completed' "
-            "ORDER BY r.ended_at DESC LIMIT ?",
-            (task.assignee, task_id, role_history_limit),
-        ).fetchall()
-        if role_rows:
-            lines.append(f"## Recent work by @{task.assignee}")
-            for row in role_rows:
-                ts = time.strftime(
-                    "%Y-%m-%d %H:%M", time.localtime(int(row["ended_at"]))
-                )
-                s = (row["summary"] or "").strip().splitlines()
-                first = s[0][:200] if s else "(no summary)"
-                lines.append(f"- {row['id']} — {row['title']} ({ts}): {first}")
-            lines.append("")
+    # Parent task results + cross-task role history.
+    # Rendering is shared with the claude-CLI worker path via
+    # _render_parent_results_and_role_history so both lanes show an
+    # identical handoff/continuity view — see the helper docstring.
+    lines.extend(_render_parent_results_and_role_history(
+        conn,
+        task_id,
+        field_bytes=field_bytes,
+        role_history_limit=role_history_limit,
+        assignee=task.assignee,
+    ))
 
     # Comments: cap at the most-recent _CTX_MAX_COMMENTS so comment-storm
     # tasks don't blow out the worker's prompt. Older comments collapse into a
