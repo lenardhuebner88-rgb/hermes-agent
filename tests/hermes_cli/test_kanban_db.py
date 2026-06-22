@@ -12738,6 +12738,52 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     assert totals["cost_effective_usd"] == pytest.approx(0.42)
 
 
+def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
+    """chain_cost_breakdown exposes actual API + NeuralWatt billing fields."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="actual-cost-chain", assignee="orchestrator")
+        with kb.write_txn(conn):
+            _insert_run_cost_with_meta(
+                conn,
+                root,
+                profile="coder",
+                input_tokens=1000,
+                output_tokens=200,
+                cost_usd=0.40,
+                metadata={},
+            )
+            _insert_run_cost_with_meta(
+                conn,
+                root,
+                profile="neuralwatt",
+                input_tokens=2000,
+                output_tokens=500,
+                cost_usd=0.0,
+                metadata={
+                    "cost_usd_equivalent": 0.90,
+                    "energy": {"energy_kwh": 0.03, "usd_per_kwh": 5.0},
+                },
+            )
+
+    with kb.connect() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    lanes = {lane["profile"]: lane for lane in result["by_lane"]}
+    assert lanes["coder"]["actual_cost_usd"] == pytest.approx(0.40)
+    assert lanes["coder"]["billing_neuralwatt_kwh"] == pytest.approx(0.0)
+
+    neuralwatt = lanes["neuralwatt"]
+    assert neuralwatt["billing_neuralwatt_kwh"] == pytest.approx(0.03)
+    assert neuralwatt["billing_neuralwatt_cost_usd"] == pytest.approx(0.15)
+    assert neuralwatt["actual_cost_usd"] == pytest.approx(0.15)
+    assert neuralwatt["api_equivalent_usd"] == pytest.approx(0.90)
+
+    totals = result["totals"]
+    assert totals["actual_cost_usd"] == pytest.approx(0.55)
+    assert totals["billing_neuralwatt_cost_usd"] == pytest.approx(0.15)
+    assert totals["api_equivalent_usd"] == pytest.approx(0.90)
+
+
 def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
     """A run with real cost_usd>0 and no equivalent → cost_effective_usd==cost_usd."""
     with kb.connect() as conn:

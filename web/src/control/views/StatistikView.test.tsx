@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   BudgetLedgerSection,
+  ChainCostsLaneTable,
   EffizienzSection,
   ErrorTaxonomySection,
   LatencySection,
@@ -13,6 +14,7 @@ import { broadsheet } from "../lib/broadsheetTokens";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
+  ChainCostsResponse,
   CostProfileRow,
   IssueGroup,
   ReliabilityProfile,
@@ -104,6 +106,46 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
     ...over,
   };
 }
+
+describe("ChainCostsLaneTable", () => {
+  it("zeigt Ist-$ und NeuralWatt-kWh-Basis aus realen Backend-Feldern", () => {
+    const costs: ChainCostsResponse = {
+      schema: "kanban-chain-costs-v1",
+      root_id: "t_root",
+      totals: {
+        input_tokens: 2000,
+        output_tokens: 500,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.03,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      },
+      by_lane: [{
+        profile: "neuralwatt",
+        input_tokens: 2000,
+        output_tokens: 500,
+        cost_usd: 0,
+        actual_cost_usd: 0.15,
+        cost_usd_equivalent: 0.9,
+        api_equivalent_usd: 0.9,
+        cost_effective_usd: 0.9,
+        billing_neuralwatt_kwh: 0.03,
+        billing_neuralwatt_cost_usd: 0.15,
+        run_count: 1,
+      }],
+    };
+
+    const html = renderToStaticMarkup(<ChainCostsLaneTable costs={costs} />);
+
+    expect(html).toContain("$0.15");
+    expect(html).toContain("API-Äquivalent");
+    expect(html).toContain("0.0300 kWh × $5.00/kWh");
+  });
+});
 
 describe("StatsMasthead (ST4)", () => {
   it("leads with the fleet Akzeptanzrate and the three Stütz-KPIs", () => {

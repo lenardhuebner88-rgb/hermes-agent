@@ -307,8 +307,6 @@ export interface ChainCostsLane {
   /** Effektive Kosten; 0 wenn nicht gestempelt. */
   cost_effective_usd: number;
   billing_neuralwatt_kwh: number;
-  billing_neuralwatt_charged_kwh: number;
-  billing_neuralwatt_usd_per_kwh: number | null;
   billing_neuralwatt_cost_usd: number;
 }
 
@@ -327,8 +325,6 @@ export interface ChainCostsResponse {
     /** Effektive Kosten; 0 wenn nicht gestempelt. */
     cost_effective_usd: number;
     billing_neuralwatt_kwh: number;
-    billing_neuralwatt_charged_kwh: number;
-    billing_neuralwatt_usd_per_kwh: number | null;
     billing_neuralwatt_cost_usd: number;
   };
   by_lane: ChainCostsLane[];
