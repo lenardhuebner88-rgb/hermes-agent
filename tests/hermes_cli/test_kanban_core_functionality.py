@@ -3715,6 +3715,53 @@ def test_cli_create_no_warn_unassigned(kanban_home, monkeypatch, capsys):
     assert "hermes gateway start" not in err
 
 
+def test_cli_dispatch_string_false_auto_retry_disabled(monkeypatch):
+    """Quoted false must not opt the CLI dispatch path into blocked retries."""
+    from hermes_cli import kanban as kb_cli
+
+    class _ConnCtx:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    captured = {}
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"auto_retry_blocked": "false"}},
+    )
+    monkeypatch.setattr(kb_cli.kb, "connect_closing", lambda: _ConnCtx())
+
+    def _dispatch_once(conn, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            reclaimed=0,
+            crashed=[],
+            timed_out=[],
+            stale=[],
+            auto_blocked=[],
+            auto_retried_blocked=[],
+            promoted=0,
+            spawned=[],
+            skipped_unassigned=[],
+            skipped_nonspawnable=[],
+            skipped_per_profile_capped=[],
+            auto_assigned_default=[],
+        )
+
+    monkeypatch.setattr(kb_cli.kb, "dispatch_once", _dispatch_once)
+    args = argparse.Namespace(
+        dry_run=False,
+        max=None,
+        failure_limit=kb.DEFAULT_SPAWN_FAILURE_LIMIT,
+        json=False,
+    )
+
+    assert kb_cli._cmd_dispatch(args) == 0
+    assert captured["auto_retry_blocked"] is False
+
+
 def _make_decompose_ns(task_id, **overrides):
     """Build a Namespace suitable for kb_cli._cmd_decompose()."""
     ns = argparse.Namespace(

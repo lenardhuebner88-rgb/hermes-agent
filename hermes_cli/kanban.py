@@ -3004,7 +3004,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
             _kanban_cfg.get("max_spawn")
         )
-        auto_retry_blocked = bool(_kanban_cfg.get("auto_retry_blocked", False))
+        auto_retry_blocked = _coerce_config_bool(
+            _kanban_cfg.get("auto_retry_blocked", False), default=False
+        )
         try:
             auto_retry_blocked_backoff_seconds = int(
                 _kanban_cfg.get(
