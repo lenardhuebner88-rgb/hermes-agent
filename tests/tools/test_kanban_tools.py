@@ -1459,8 +1459,16 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
 
 
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
-    """Sanity: the guidance block is under 4 KB so it doesn't blow
-    up the cached prompt."""
+    """Sanity: the guidance block stays lean so it doesn't blow up the
+    cached prompt.
+
+    The ceiling guards against unbounded growth, not against any growth.
+    The block absorbed the load-bearing worker/orchestrator reference
+    details (workspace kinds, deliverable artifacts, created-card claims,
+    profile discovery) when the standalone kanban-worker / kanban-orchestrator
+    skills were removed and folded into this always-injected guidance, so the
+    ceiling is sized to fit that content with a little headroom.
+    """
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fake")
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -1479,7 +1487,11 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     # then a structured --metadata handoff with residual_risk) — the ceiling was
     # left stale by those commits, so the shared gate had been red. Still guards
     # against bloat.
-    assert 1_500 < len(KANBAN_GUIDANCE) < 6_144, (
+    # Bumped 6_144 -> 8_192 at the 2026-06-22 upstream sync: the merge combined
+    # our fork's worker-contract clauses with upstream's own KANBAN_GUIDANCE
+    # additions (base 4_056 + fork 2_087 + upstream 938 = 7_081 chars, verified
+    # no duplication). Still guards against runaway bloat.
+    assert 1_500 < len(KANBAN_GUIDANCE) < 8_192, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars — too short (missing?) or too long"
     )
 
