@@ -84,6 +84,18 @@ def test_guard_fires_on_hermes_gateway_restart():
     assert _contains_gateway_lifecycle_command(_strip_quotes(cmd)) is True
 
 
+def test_guard_fires_on_profiled_hermes_gateway_restart():
+    """Profile flags must not bypass the in-gateway lifecycle hard block."""
+    cmd = "hermes --profile coder gateway restart"
+    assert _contains_gateway_lifecycle_command(_strip_quotes(cmd)) is True
+
+
+def test_guard_fires_on_module_gateway_restart():
+    """The Python module entrypoint is equivalent to `hermes gateway restart`."""
+    cmd = "python -m hermes_cli.main --profile coder gateway restart"
+    assert _contains_gateway_lifecycle_command(_strip_quotes(cmd)) is True
+
+
 def test_guard_does_not_fire_on_quoted_python_dash_c():
     """Python -c with the pattern inside a quoted string must NOT be blocked."""
     cmd = 'python3 -c "print(\'systemctl restart hermes-gateway\')"'
