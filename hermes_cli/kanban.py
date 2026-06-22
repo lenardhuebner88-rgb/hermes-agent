@@ -47,6 +47,22 @@ _STATUS_ICONS = {
 }
 
 
+def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 def _fmt_ts(ts: Optional[int]) -> str:
     if not ts:
         return ""
@@ -169,7 +185,9 @@ def _check_dispatcher_presence() -> tuple[bool, str]:
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
+        dispatch_on = _coerce_config_bool(
+            cfg.get("kanban", {}).get("dispatch_in_gateway", True), default=True
+        )
     except Exception:
         dispatch_on = True  # can't tell — assume default
 

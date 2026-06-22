@@ -3620,6 +3620,19 @@ def test_check_dispatcher_presence_warns_when_flag_off(monkeypatch):
     assert "dispatch_in_gateway" in msg
 
 
+def test_check_dispatcher_presence_warns_when_flag_string_false(monkeypatch):
+    """Quoted false still means dispatch is off for create warnings."""
+    from hermes_cli import kanban as kb_cli
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 999)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"dispatch_in_gateway": "false"}},
+    )
+    running, msg = kb_cli._check_dispatcher_presence()
+    assert running is False
+    assert "dispatch_in_gateway" in msg
+
+
 def test_check_dispatcher_presence_silent_on_probe_error(monkeypatch):
     """If the probe itself errors, we stay silent."""
     from hermes_cli import kanban as kb_cli
