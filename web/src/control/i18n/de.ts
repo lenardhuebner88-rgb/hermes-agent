@@ -874,21 +874,21 @@ export const de = {
     costNone: "keine Kostendaten",
     // Statistik-Tab: Kosten pro Kette
     chainCostsTitle: "Kostenaufschlüsselung pro Kette",
-    chainCostsMeta: "abgeschlossene Roots · Ist-$ + API-Äquivalent je Lane",
+    chainCostsMeta: "abgeschlossene Roots · Gesamt$ + Token-Aufschlüsselung je Lane",
     chainCostsEmpty: "Noch keine abgeschlossenen Ketten mit Kostenstempel.",
     chainCostsColChain: "Kette",
     chainCostsColCost: "Ist-$",
     chainCostsColTokens: "Tokens",
     chainCostsColRuns: "Runs",
-    chainCostsLaneTitle: "Kostenaufschlüsselung je Lane",
+    chainCostsLaneTitle: "Kosten je Lane",
     chainCostsLoadError: "Kosten konnten nicht geladen werden.",
     chainCostsTotal: "Ist-Kosten",
-    // "gesch." marker tooltip — erscheint auf Abo-Schätzwert-Zellen
-    costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
     chainCostsApiEquivalent: "API-Äquivalent",
     chainCostsNeuralwattBasis: "Neuralwatt-Basis",
+    // "gesch." marker tooltip — erscheint auf Abo-Schätzwert-Zellen
+    costEstimatedTooltip: "geschätzter API-Gegenwert (läuft über Abo)",
     // Legende unterhalb der Lane-Tabelle
-    chainCostsCostLegend: "Neuralwatt-kWh ist Abrechnungsbasis, kein eigener Kostenposten. Ist-$ enthält abgerechnete API-Kosten plus kWh-basierte Neuralwatt-Kosten. API-Äquivalent bleibt ein separater Abo-/Schätzwert.",
+    chainCostsCostLegend: "Ist-$ = abgerechnete API-Kosten plus kWh-basierte NeuralWatt-Kosten. API-Äquivalent bleibt separat als Abo-/Schätzwert sichtbar.",
     // Kette-Summary (zwischen Selector und Pipeline)
     summaryEyebrow: "Kette · Fortschritt",
     summaryProgress: (done: number, total: number, running: number, waiting: number) =>

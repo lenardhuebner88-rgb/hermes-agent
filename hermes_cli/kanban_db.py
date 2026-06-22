@@ -22638,11 +22638,21 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
             "root_id": str,
             "totals":  {"input_tokens": int, "output_tokens": int,
                         "cost_usd": float, "cost_usd_equivalent": float,
-                        "cost_effective_usd": float, "run_count": int},
+                        "cost_effective_usd": float,
+                        "actual_cost_usd": float,
+                        "api_equivalent_usd": float,
+                        "billing_neuralwatt_kwh": float,
+                        "billing_neuralwatt_cost_usd": float,
+                        "run_count": int},
             "by_lane": [
                 {"profile": str, "input_tokens": int, "output_tokens": int,
                  "cost_usd": float, "cost_usd_equivalent": float,
-                 "cost_effective_usd": float, "run_count": int},
+                 "cost_effective_usd": float,
+                 "actual_cost_usd": float,
+                 "api_equivalent_usd": float,
+                 "billing_neuralwatt_kwh": float,
+                 "billing_neuralwatt_cost_usd": float,
+                 "run_count": int},
                 ...   # descending by cost_effective_usd
             ],
         }
@@ -22653,6 +22663,9 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
     cost_usd_equivalent`` — the real-or-estimated burn.  NULL ``cost_usd``
     rows are treated as 0 in sums (COALESCE in SQL).
     NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
+    ``actual_cost_usd`` is metered API cost plus NeuralWatt kWh billing
+    derived from numeric ``metadata.energy.energy_kwh`` and
+    ``metadata.energy.usd_per_kwh``.
     """
     member_ids = _root_tree_member_ids(conn, root_id)
     if not member_ids:
@@ -22670,6 +22683,19 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
                 COALESCE(SUM(COALESCE(
                     json_extract(metadata, '$.cost_usd_equivalent'), 0.0
                 )), 0.0)                                          AS cost_usd_equivalent,
+                COALESCE(SUM(
+                    CASE WHEN json_type(metadata, '$.energy.energy_kwh') IN ('integer', 'real')
+                              AND json_type(metadata, '$.energy.usd_per_kwh') IN ('integer', 'real')
+                         THEN CAST(json_extract(metadata, '$.energy.energy_kwh') AS REAL)
+                         ELSE 0.0 END
+                ), 0.0)                                            AS billing_neuralwatt_kwh,
+                COALESCE(SUM(
+                    CASE WHEN json_type(metadata, '$.energy.energy_kwh') IN ('integer', 'real')
+                              AND json_type(metadata, '$.energy.usd_per_kwh') IN ('integer', 'real')
+                         THEN CAST(json_extract(metadata, '$.energy.energy_kwh') AS REAL)
+                            * CAST(json_extract(metadata, '$.energy.usd_per_kwh') AS REAL)
+                         ELSE 0.0 END
+                ), 0.0)                                            AS billing_neuralwatt_cost_usd,
                 COUNT(*)                                          AS run_count
             FROM task_runs
             WHERE task_id IN ({placeholders})
@@ -22681,18 +22707,25 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         # Pre-K5a DB without cost_usd / token columns — return empty breakdown.
         rows = []
 
-    by_lane = [
-        {
+    by_lane = []
+    for row in rows:
+        cost = float(row["cost_usd"])
+        equiv = float(row["cost_usd_equivalent"])
+        nw_kwh = float(row["billing_neuralwatt_kwh"])
+        nw_cost = float(row["billing_neuralwatt_cost_usd"])
+        by_lane.append({
             "profile": row["profile"],
             "input_tokens": int(row["input_tokens"]),
             "output_tokens": int(row["output_tokens"]),
-            "cost_usd": float(row["cost_usd"]),
-            "cost_usd_equivalent": float(row["cost_usd_equivalent"]),
-            "cost_effective_usd": float(row["cost_usd"]) + float(row["cost_usd_equivalent"]),
+            "cost_usd": cost,
+            "cost_usd_equivalent": equiv,
+            "cost_effective_usd": cost + equiv,
+            "actual_cost_usd": round(cost + nw_cost, 6),
+            "api_equivalent_usd": equiv,
+            "billing_neuralwatt_kwh": round(nw_kwh, 6),
+            "billing_neuralwatt_cost_usd": round(nw_cost, 6),
             "run_count": int(row["run_count"]),
-        }
-        for row in rows
-    ]
+        })
 
     # Sort descending by cost_effective_usd so subscription lanes (cost_usd=0
     # but positive equivalent) rank ahead of zero-cost API runs.
@@ -22704,6 +22737,10 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         "cost_usd": sum(l["cost_usd"] for l in by_lane),
         "cost_usd_equivalent": sum(l["cost_usd_equivalent"] for l in by_lane),
         "cost_effective_usd": sum(l["cost_effective_usd"] for l in by_lane),
+        "actual_cost_usd": round(sum(l["actual_cost_usd"] for l in by_lane), 6),
+        "api_equivalent_usd": round(sum(l["api_equivalent_usd"] for l in by_lane), 6),
+        "billing_neuralwatt_kwh": round(sum(l["billing_neuralwatt_kwh"] for l in by_lane), 6),
+        "billing_neuralwatt_cost_usd": round(sum(l["billing_neuralwatt_cost_usd"] for l in by_lane), 6),
         "run_count": sum(l["run_count"] for l in by_lane),
     }
 
