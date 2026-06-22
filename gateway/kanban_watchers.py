@@ -573,8 +573,14 @@ def _gave_up_message(task_id: str, tag: str, payload: Optional[dict]) -> str:
 _AUTO_RECEIPT_DEFAULT_DIR = "/home/piet/vault/03-Agents/Hermes/receipts/auto"
 
 
-def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary: Optional[str] = None) -> None:
-    """K12: write a Markdown receipt for a task that reached ``done``.
+def _write_auto_receipt(
+    task: Any,
+    *,
+    board_slug: Optional[str] = None,
+    summary: Optional[str] = None,
+    status_override: Optional[str] = None,
+) -> None:
+    """K12: write a Markdown receipt for a task terminal/attention outcome.
 
     FAIL-SOFT by contract: a missing/unwritable vault dir or any other error
     is swallowed (logged at debug) so the notifier tick continues uninterrupted
@@ -590,7 +596,7 @@ def _write_auto_receipt(task: Any, *, board_slug: Optional[str] = None, summary:
         task_id = getattr(task, "id", None) or "<unknown>"
         title = getattr(task, "title", None) or task_id
         assignee = getattr(task, "assignee", None) or "unbekannt"
-        status = getattr(task, "status", None) or "done"
+        status = status_override or getattr(task, "status", None) or "done"
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")
         summary_body = (summary or "").strip()
         result_body = str(getattr(task, "result", "") or "").strip()
@@ -1108,6 +1114,20 @@ class GatewayKanbanWatchersMixin:
                                     logger.debug(
                                         "kanban notifier: artifact delivery for %s failed: %s",
                                         sub["task_id"], art_exc,
+                                    )
+                            elif kind == "gave_up":
+                                try:
+                                    await asyncio.to_thread(
+                                        _write_auto_receipt,
+                                        task,
+                                        board_slug=board_slug,
+                                        summary=msg,
+                                        status_override="gave_up",
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "kanban notifier: failure auto-receipt for %s failed",
+                                        sub["task_id"], exc_info=True,
                                     )
                             # Reset the failure counter on success.  Advance
                             # delivered_cursor so a subsequent send failure in

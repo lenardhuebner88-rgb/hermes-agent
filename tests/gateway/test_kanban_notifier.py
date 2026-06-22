@@ -902,6 +902,46 @@ def test_auto_receipt_written_on_done(tmp_path, monkeypatch):
     assert "Kurz erledigt." in content
 
 
+def test_auto_receipt_written_on_gave_up(tmp_path, monkeypatch):
+    """A final retry/timeout failure still needs a crash-safe task receipt."""
+    db_path = tmp_path / "auto-receipt-gave-up.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    receipt_dir = tmp_path / "receipts"
+    monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(receipt_dir))
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="timeout failure", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb._append_event(
+            conn,
+            tid,
+            kind="gave_up",
+            payload={
+                "trigger_outcome": "timed_out",
+                "error": "worker exceeded max runtime after two attempts",
+            },
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+
+    receipt = receipt_dir / f"{tid}.md"
+    assert receipt.exists(), f"expected failure auto-receipt at {receipt}"
+    content = receipt.read_text(encoding="utf-8")
+    assert "status: gave_up" in content
+    assert "Step-Ledger" in content
+    assert "timed out" in content.lower()
+    assert "worker exceeded max runtime" in content
+
+
 def test_auto_receipt_fail_soft_unwritable_dir(tmp_path, monkeypatch):
     """K12: an impossible receipt dir (a path *under a regular file*, so
     mkdir raises NotADirectoryError) must not break the tick or change
