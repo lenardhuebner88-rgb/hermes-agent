@@ -663,6 +663,23 @@ def _body_has_scope_contract(body: str) -> bool:
     return "scope_contract:" in body and "allowed_tools:" in body
 
 
+def _count_scope_contract_blocks(body: str) -> int:
+    """Count ``scope_contract:`` block headers in ``body``.
+
+    A worker child must carry EXACTLY ONE structured scope_contract block. A
+    second (decoy) block is a spoofing vector: :func:`validate_worker_scope_contracts`
+    extracts ``version`` / ``allowed_tools`` via FIRST-match, so it would attest
+    against block #1 while a downstream reader could act on a broader block #2.
+    Counting block headers lets the validator fail closed on any duplicate.
+    A header is a line whose stripped form starts with ``scope_contract:`` — prose
+    mentions like ``scope_contract/allowed paths`` do not match.
+    """
+    return sum(
+        1 for line in body.splitlines()
+        if line.strip().startswith("scope_contract:")
+    )
+
+
 def _default_worker_scope_contract(
     child: dict,
     *,
@@ -862,6 +879,12 @@ def validate_worker_scope_contracts(children: list[dict]) -> WorkerScopeContract
             continue
         raw_body = child.get("body")
         body = raw_body if isinstance(raw_body, str) else ""
+        if _count_scope_contract_blocks(body) > 1:
+            issues.append(WorkerScopeContractIssue(
+                idx, assignee_text,
+                "multiple scope_contract blocks rejected (exactly one allowed)",
+            ))
+            continue
         version = _extract_scope_version(body)
         if version != 2:
             issues.append(WorkerScopeContractIssue(

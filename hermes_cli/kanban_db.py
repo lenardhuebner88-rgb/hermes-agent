@@ -18604,6 +18604,28 @@ def build_worker_context(
     parent_ids = [r["parent_id"] for r in parent_rows]
 
     if parent_ids:
+        def _parent_result_lines(pt: "Task", run) -> list[str]:
+            body_lines: list[str] = []
+            if run is not None and run.summary and run.summary.strip():
+                body_lines.append(_cap(run.summary, field_bytes))
+            elif pt.result:
+                body_lines.append(_cap(pt.result, field_bytes))
+            else:
+                body_lines.append("(no result recorded)")
+            if run is not None and run.metadata:
+                try:
+                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
+                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
+                except Exception:
+                    pass
+            return body_lines
+
+        # A read-only scout parent produces recon hints, NOT an authoritative
+        # result. Routing it into a separate "Advisory scout notes" section (vs
+        # the equal-weight "Parent task results") stops a scout's off-scope
+        # recommendation from reading as a committed parent outcome the coder
+        # must follow. Non-scout parents render byte-identically to before.
+        scout_parents: list[tuple[str, "Task", object]] = []
         wrote_header = False
         for pid in parent_ids:
             pt = get_task(conn, pid)
@@ -18613,27 +18635,28 @@ def build_worker_context(
             runs.sort(key=lambda r: r.started_at, reverse=True)
             run = runs[0] if runs else None
 
+            if pt.assignee == "scout":
+                scout_parents.append((pid, pt, run))
+                continue
+
             if not wrote_header:
                 lines.append("## Parent task results")
                 wrote_header = True
             lines.append(f"### {pid}")
-
-            body_lines: list[str] = []
-            if run is not None and run.summary and run.summary.strip():
-                body_lines.append(_cap(run.summary, field_bytes))
-            elif pt.result:
-                body_lines.append(_cap(pt.result, field_bytes))
-            else:
-                body_lines.append("(no result recorded)")
-
-            if run is not None and run.metadata:
-                try:
-                    meta_str = json.dumps(run.metadata, ensure_ascii=False, sort_keys=True)
-                    body_lines.append(f"_metadata_: `{_cap(meta_str, field_bytes)}`")
-                except Exception:
-                    pass
-            lines.extend(body_lines)
+            lines.extend(_parent_result_lines(pt, run))
             lines.append("")
+
+        if scout_parents:
+            lines.append("## Advisory scout notes")
+            lines.append(
+                "_Advisory scout notes — the target task body and operator "
+                "directives remain the source of truth. Treat these as recon "
+                "hints; do NOT broaden scope based on them._"
+            )
+            for pid, pt, run in scout_parents:
+                lines.append(f"### {pid} (scout)")
+                lines.extend(_parent_result_lines(pt, run))
+                lines.append("")
 
     # Cross-task role history: what else has THIS assignee completed
     # recently? Gives the worker implicit continuity — "I'm the reviewer
@@ -18641,17 +18664,41 @@ def build_worker_context(
     # the user to wire anything into SOUL.md / MEMORY.md. Bounded to the
     # most recent 5 completed runs, excluding this task so the retry
     # section above isn't duplicated. Safe on assignee=None (skipped).
-    if task.assignee:
+    #
+    # Two hardenings over the naive profile-only query:
+    #   * TENANT-SCOPED. The old query selected by ``r.profile`` alone, so a
+    #     worker in tenant A could see another tenant's summaries — cross-tenant
+    #     bias that can pull a worker off its own scope. We restrict to the
+    #     task's tenant (NULL-aware: an untenanted task sees only untenanted
+    #     history, keeping single-tenant boards byte-identical).
+    #   * SUPPRESSED FOR scout. A read-only recon must take its scope from the
+    #     target task body, never from prior (possibly off-scope) scout runs —
+    #     so a scout gets no recent-work block at all.
+    #   * Labelled advisory: even same-tenant history is continuity, NOT this
+    #     task's scope; the task body + operator directives stay authoritative.
+    if task.assignee and task.assignee != "scout":
+        if task.tenant:
+            tenant_clause = "AND t.tenant = ? "
+            role_params = (task.assignee, task.tenant, task_id, role_history_limit)
+        else:
+            tenant_clause = "AND t.tenant IS NULL "
+            role_params = (task.assignee, task_id, role_history_limit)
         role_rows = conn.execute(
             "SELECT t.id, t.title, r.summary, r.ended_at "
             "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.profile = ? AND r.task_id != ? "
+            "WHERE r.profile = ? " + tenant_clause + "AND r.task_id != ? "
             "  AND r.outcome = 'completed' "
             "ORDER BY r.ended_at DESC LIMIT ?",
-            (task.assignee, task_id, role_history_limit),
+            role_params,
         ).fetchall()
         if role_rows:
-            lines.append(f"## Recent work by @{task.assignee}")
+            scope_label = f" (tenant {task.tenant})" if task.tenant else ""
+            lines.append(f"## Recent work by @{task.assignee}{scope_label}")
+            lines.append(
+                "_Advisory continuity only — same-tenant history, NOT this "
+                "task's scope. The task body and operator directives remain the "
+                "source of truth; do not broaden scope from prior work._"
+            )
             for row in role_rows:
                 ts = time.strftime(
                     "%Y-%m-%d %H:%M", time.localtime(int(row["ended_at"]))
@@ -21047,6 +21094,91 @@ def _scout_max_runtime_seconds(cfg: Optional[dict] = None) -> int:
     return val if val > 0 else _SCOUT_MAX_RUNTIME_SECONDS
 
 
+# --- Auto-scout body: inherit the target task's scope (source of truth) -----
+#
+# A scout recon card carrying only a generic "look at the affected code"
+# instruction loses the precise scope of the task it precedes. The scout then
+# infers scope from its own title / recent work and can recommend off-scope
+# files, which flow into the coder as a Parent result (incident: scout
+# ``t_6661c5cc`` recommended ``acp_adapter/permissions.py`` for a gateway-scoped
+# slice ``t_d3eb22f2``). Inheriting the target's body excerpt + allowed paths +
+# an explicit source-of-truth warning keeps the scout inside the same scope the
+# coder will build against. Shared by :func:`ensure_scout_predecessor` and the
+# dashboard flow-release scout injection so both stay in lockstep.
+
+_SCOUT_RECON_INTRO = (
+    "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und liefere "
+    "knappe Fund-Notizen (Dateien, Symbole, Risiken) für den nachfolgenden "
+    "Coder. Nichts editieren, committen oder deployen."
+)
+
+_SCOUT_SOURCE_OF_TRUTH_WARNING = (
+    "WICHTIG — Scope-Quelle: Body und Operator-Directives des/der unten "
+    "genannten Ziel-Task(s) sind die ALLEINIGE Source of Truth für den Scope. "
+    "Leite den Scope NICHT aus dem Titel, aus \"Recent work\" oder aus früheren "
+    "Scout-Läufen breiter ab. Bleibe innerhalb der Allowed scope / allowed_paths; "
+    "respektiere Anti-scope und Acceptance criteria. Im Zweifel enger statt breiter."
+)
+
+_SCOUT_TARGET_BODY_CAP = 4 * 1024        # per-target body excerpt cap (one target)
+_SCOUT_TARGET_BODY_CAP_MULTI = 2 * 1024  # smaller cap when one scout fans out
+
+
+def _scout_target_scope_block(task: "Task", *, body_cap: int) -> list[str]:
+    """Render one target task's inherited scope for a scout recon body."""
+    lines = [f"## Ziel-Task {task.id}: {task.title or '(kein Titel)'}"]
+    try:
+        from hermes_cli.kanban_decompose import _collect_absolute_paths
+        paths = _collect_absolute_paths(task.body or "")
+    except Exception:
+        paths = []
+    if paths:
+        joined = ", ".join(f"`{p}`" for p in paths[:20])
+        lines.append(f"Allowed paths (aus Ziel-Body): {joined}")
+    body = (task.body or "").strip()
+    if body:
+        lines.append(
+            "Ziel-Body (maßgeblich — enthält Allowed scope / Acceptance criteria "
+            "/ Anti-scope / scope_contract; Auszug):"
+        )
+        lines.append(_cap(body, body_cap))
+    else:
+        lines.append(
+            "(Ziel-Task hat keinen Body — Scope strikt aus Titel + "
+            "Operator-Directives ableiten, nicht breiter.)"
+        )
+    return lines
+
+
+def _scout_recon_body(targets: "list[Optional[Task]]") -> str:
+    """Build a scope-inheriting scout recon body.
+
+    ``targets`` is the task(s) the scout precedes. With one target the scout
+    inherits that task's scope; when one scout fans out to several entry
+    children, each child's id/title/scope summary is listed so the scout never
+    has to guess which slice it is reconning. ``None`` entries (a lookup that
+    raced) are skipped; an empty list falls back to intro + warning only.
+    """
+    real = [t for t in targets if t is not None]
+    lines = [_SCOUT_RECON_INTRO, "", _SCOUT_SOURCE_OF_TRUTH_WARNING, ""]
+    if not real:
+        return "\n".join(lines).rstrip() + "\n"
+    body_cap = (
+        _SCOUT_TARGET_BODY_CAP if len(real) == 1 else _SCOUT_TARGET_BODY_CAP_MULTI
+    )
+    if len(real) > 1:
+        lines.append(
+            f"Dieser Scout läuft VOR {len(real)} Ziel-Tasks; halte je Ziel den "
+            "jeweils genannten Scope getrennt — keine Querkontamination zwischen "
+            "den Slices:"
+        )
+        lines.append("")
+    for t in real:
+        lines.extend(_scout_target_scope_block(t, body_cap=body_cap))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def scout_predecessor_id(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """Return the id of an existing read-only ``scout`` predecessor of
     ``task_id`` (a parent task with ``assignee == 'scout'``), or ``None``.
@@ -21095,11 +21227,7 @@ def ensure_scout_predecessor(
     scout_id = create_task(
         conn,
         title=f"Scout: {task.title}",
-        body=(
-            "Code-Recon-Vorlauf (read-only): sichte den betroffenen Code und "
-            "liefere knappe Fund-Notizen (Dateien, Symbole, Risiken) für den "
-            "nachfolgenden Coder. Nichts editieren, committen oder deployen."
-        ),
+        body=_scout_recon_body([task]),
         assignee="scout",
         created_by="auto-scout-critical",
         priority=task.priority,

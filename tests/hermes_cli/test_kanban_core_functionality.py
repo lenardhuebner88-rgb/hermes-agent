@@ -1812,6 +1812,99 @@ def test_build_worker_context_uses_parent_run_summary(kanban_home):
         conn.close()
 
 
+def test_build_worker_context_labels_scout_parent_advisory(kanban_home):
+    """A scout parent's result renders under '## Advisory scout notes' with a
+    source-of-truth warning, NOT under the equal-weight '## Parent task
+    results' — so the coder treats scout recon as hints, not a committed
+    parent outcome it must follow (incident: scout t_6661c5cc off-scope rec)."""
+    conn = kb.connect()
+    try:
+        scout = kb.create_task(conn, title="Scout: redaction", assignee="scout")
+        child = kb.create_task(
+            conn, title="redaction", assignee="coder", parents=[scout],
+        )
+        kb.claim_task(conn, scout)
+        kb.complete_task(
+            conn, scout, summary="look at acp_adapter/permissions.py",
+        )
+        ctx = kb.build_worker_context(conn, child)
+        assert "## Advisory scout notes" in ctx
+        assert "source of truth" in ctx.lower()
+        # the scout's recon text lives ONLY in the advisory section, not under
+        # an equal-weight parent-results header.
+        assert "## Parent task results" not in ctx
+        assert f"### {scout} (scout)" in ctx
+    finally:
+        conn.close()
+
+
+def test_build_worker_context_splits_scout_from_real_parents(kanban_home):
+    """With both a scout parent and a real (non-scout) parent, the real parent
+    stays under '## Parent task results' and the scout moves to advisory."""
+    conn = kb.connect()
+    try:
+        builder = kb.create_task(conn, title="prep", assignee="researcher")
+        scout = kb.create_task(conn, title="Scout: prep", assignee="scout")
+        child = kb.create_task(
+            conn, title="impl", assignee="coder", parents=[builder, scout],
+        )
+        for pid, summary in ((builder, "authoritative parent result"),
+                             (scout, "advisory recon hint")):
+            kb.claim_task(conn, pid)
+            kb.complete_task(conn, pid, summary=summary)
+        ctx = kb.build_worker_context(conn, child)
+        assert "## Parent task results" in ctx
+        assert "authoritative parent result" in ctx
+        assert "## Advisory scout notes" in ctx
+        assert "advisory recon hint" in ctx
+        # real parent appears before the advisory scout section
+        assert ctx.index("## Parent task results") < ctx.index("## Advisory scout notes")
+    finally:
+        conn.close()
+
+
+def test_build_worker_context_recent_work_is_tenant_scoped(kanban_home):
+    """Recent-work role history must not leak across tenants: a worker in
+    tenant A sees its own tenant's history, never tenant B's."""
+    conn = kb.connect()
+    try:
+        a = kb.create_task(conn, title="A job", assignee="coder", tenant="tenant-a")
+        kb.claim_task(conn, a)
+        kb.complete_task(conn, a, summary="did the tenant-A thing")
+        b = kb.create_task(conn, title="B job", assignee="coder", tenant="tenant-b")
+        kb.claim_task(conn, b)
+        kb.complete_task(conn, b, summary="did the tenant-B thing")
+
+        new_a = kb.create_task(
+            conn, title="A followup", assignee="coder", tenant="tenant-a",
+        )
+        ctx = kb.build_worker_context(conn, new_a)
+        assert "## Recent work by @coder" in ctx
+        assert "did the tenant-A thing" in ctx
+        # cross-tenant contamination is the bug we are fixing:
+        assert "did the tenant-B thing" not in ctx
+        # retained rows are explicitly labelled non-authoritative
+        assert "NOT this" in ctx.split("## Recent work by")[1]
+    finally:
+        conn.close()
+
+
+def test_build_worker_context_suppresses_recent_work_for_scout(kanban_home):
+    """A scout takes its scope from the target task body, never from prior
+    (possibly off-scope) scout runs — so it gets no recent-work block."""
+    conn = kb.connect()
+    try:
+        for i in range(3):
+            tid = kb.create_task(conn, title=f"Scout: prior #{i}", assignee="scout")
+            kb.claim_task(conn, tid)
+            kb.complete_task(conn, tid, summary=f"prior scout finding #{i}")
+        new_scout = kb.create_task(conn, title="Scout: new", assignee="scout")
+        ctx = kb.build_worker_context(conn, new_scout)
+        assert "## Recent work by" not in ctx
+    finally:
+        conn.close()
+
+
 def test_migration_backfills_inflight_run_for_legacy_db(kanban_home):
     """An existing 'running' task from before task_runs existed should
     get a synthesized run row so subsequent operations (complete,

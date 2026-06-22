@@ -4701,6 +4701,28 @@ def test_flow_release_critical_plus_inject_scout_no_double_scout(client, monkeyp
             assert len(scouts) == 1, (cid, scouts)   # exactly one scout, never two
 
 
+def test_flow_release_scout_body_inherits_entry_child_scope(client):
+    """The injected scout's body inherits each entry child's id/title/scope plus
+    the source-of-truth warning, so a fanned-out scout reconns the real slices
+    instead of broadening from its own generic title."""
+    root, child_ids = _setup_gated_root()
+    # child_ids[0], [1] are entry children (no in-chain parent); [2] depends on them.
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    scout_id = r.json()["scout_id"]
+    with kb.connect() as conn:
+        body = kb.get_task(conn, scout_id).body or ""
+    # both entry children named in the scout body, the non-entry one is not a target
+    assert child_ids[0] in body
+    assert child_ids[1] in body
+    # fan-out framing + the scope-source warning
+    assert "VOR 2 Ziel-Tasks" in body
+    assert "Source of Truth" in body
+
+
 # ---------------------------------------------------------------------------
 # Phase C — capture-step levers: tier+scout chosen at "Aufgabe erfassen" carry
 # through to execution for the gated/parked paths (mirror of the release panel).
