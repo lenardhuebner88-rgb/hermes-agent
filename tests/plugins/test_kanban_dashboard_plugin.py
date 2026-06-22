@@ -4987,6 +4987,54 @@ def test_flow_gate_timeout_sweep_scopes_to_flow_planspec_roots(client):
         assert kb.get_task(conn, ingested_children[0]).status == "ready"
 
 
+def test_flow_gate_timeout_sweep_skips_freigabe_operator_roots(client):
+    """A strategist PlanSpec lands with ``freigabe='operator'`` so the root is
+    parked in ``scheduled`` for explicit operator approve/veto. The autonomous
+    timeout-sweep must NOT release such a hold behind the operator's back — only
+    the explicit /approve (``release_freigabe_hold``) path may.
+
+    Regression for the 2026-06-22 leak where the timeout-sweep released a
+    ``freigabe='operator'`` PlanSpec ~42 min after creation, dispatching the
+    held chain without operator sign-off."""
+    now = int(time.time())
+    old = now - 4000
+    plan_root, plan_children = _setup_gated_root(tenant="planspec")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_at=?, freigabe='operator' WHERE id=?",
+                (old, plan_root),
+            )
+        pre_root_status = kb.get_task(conn, plan_root).status
+
+    r = client.post(
+        "/api/plugins/kanban/tasks/flow-gate/timeout-sweep",
+        json={"timeout_seconds": 1800},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    released_roots = {row["task_id"] for row in body["released_roots"]}
+    assert plan_root not in released_roots
+    assert body["released"] == 0
+
+    with kb.connect() as conn:
+        # Children stay held, root untouched, no freigabe_released event.
+        assert all(
+            kb.get_task(conn, c).status == "scheduled" for c in plan_children
+        )
+        assert kb.get_task(conn, plan_root).status == pre_root_status
+        freigabe = conn.execute(
+            "SELECT freigabe FROM tasks WHERE id=?", (plan_root,)
+        ).fetchone()["freigabe"]
+        assert freigabe == "operator"
+        released_ev = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id=? AND kind='freigabe_released' LIMIT 1",
+            (plan_root,),
+        ).fetchone()
+        assert released_ev is None, "operator hold must not be auto-released by the sweep"
+
+
 def test_chain_graph_returns_dependency_dag_with_runtime_heartbeat(client):
     root, child_ids = _setup_gated_root()
     now = int(time.time())

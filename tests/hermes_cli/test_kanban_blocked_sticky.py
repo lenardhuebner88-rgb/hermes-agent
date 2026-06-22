@@ -100,6 +100,71 @@ def test_worker_block_on_child_with_done_parents_is_still_sticky(kanban_home: Pa
 
 
 # ---------------------------------------------------------------------------
+# Operator-escalation blocks (autoresearch _escalate) must be sticky
+# ---------------------------------------------------------------------------
+
+
+def test_operator_escalation_block_is_not_auto_promoted(kanban_home: Path) -> None:
+    """An autoresearch ``_escalate`` task is *born* blocked (``initial_status=
+    'blocked'``) carrying an ``operator_escalation`` event but NO ``blocked``
+    event — so ``_has_sticky_block`` (which keys on a blocked/unblocked pair)
+    misses it. ``recompute_ready`` must still leave it blocked: it is an
+    operator-review hold, not a stalled task to auto-recover.
+
+    Regression for the 2026-06-22 leak where such holds were promoted to a
+    coder ~39s after creation (``promoted`` → ``default_assignee`` → spawn),
+    bypassing the operator decision the escalation explicitly requested."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="autoresearch finding needs operator review",
+            initial_status="blocked",
+        )
+        kb.add_event(
+            conn, tid, kb.OPERATOR_ESCALATION_EVENT, {"source": "autoresearch"}
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        # Hammer the promotion path — a parent-free task would otherwise be
+        # promoted immediately (its empty parent set is vacuously "all done").
+        for _ in range(5):
+            promoted = kb.recompute_ready(conn)
+            assert promoted == 0, "operator-escalation hold must not auto-promote"
+            assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_resolved_operator_escalation_does_not_trap_later_block(kanban_home: Path) -> None:
+    """Latest-state-aware guard (regression for the cross-family review catch):
+    the circuit breaker writes an ``operator_escalation`` event when it trips,
+    so a permanent "ever escalated" predicate would trap a task forever. Once
+    the operator resolves the escalation via unblock (an ``"unblocked"`` event
+    newer than the escalation), a later unrelated *transient* block (below the
+    breaker limit) must auto-recover when its parents are done — exactly as a
+    never-escalated transient block does."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+        kb.complete_task(conn, parent, result="ok")
+
+        # Breaker trip wrote an escalation; operator then resolved it (unblock
+        # emits a newer ``"unblocked"`` event than the escalation).
+        kb.add_event(conn, child, kb.OPERATOR_ESCALATION_EVENT, {"source": "breaker"})
+        kb.add_event(conn, child, "unblocked", {})
+
+        # A later, unrelated transient block below the breaker limit (no new
+        # escalation event) — must NOT be trapped by the stale escalation.
+        conn.execute(
+            "UPDATE tasks SET status='blocked', consecutive_failures=1 WHERE id=?",
+            (child,),
+        )
+        conn.commit()
+
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 1, "resolved escalation must not trap a later transient block"
+        assert kb.get_task(conn, child).status == "ready"
+
+
+# ---------------------------------------------------------------------------
 # Circuit-breaker blocks still auto-recover (preserve #40c1decb3 intent)
 # ---------------------------------------------------------------------------
 

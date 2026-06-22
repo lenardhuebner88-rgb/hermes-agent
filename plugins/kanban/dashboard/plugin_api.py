@@ -7061,6 +7061,11 @@ def flow_gate_timeout_sweep(
              WHERE child.status = 'scheduled'
                AND root.created_at <= ?
                AND root.status != 'archived'
+               -- Never auto-release a freigabe='operator' hold (a strategist
+               -- PlanSpec awaiting explicit operator approve/veto). Only the
+               -- /approve path (release_freigabe_hold, author='operator') may
+               -- clear it; the autonomous timeout-sweep must leave it parked.
+               AND (root.freigabe IS NULL OR root.freigabe != 'operator')
                AND (
                     root.tenant IN ('planspec', 'flow-capture')
                     OR EXISTS (

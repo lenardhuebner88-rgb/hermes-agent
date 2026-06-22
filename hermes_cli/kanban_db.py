@@ -5902,6 +5902,31 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True when ``task_id`` is parked on an *unresolved* operator
+    escalation.
+
+    Mirrors :func:`_has_sticky_block`'s latest-event logic. An
+    ``operator_escalation`` event (autoresearch ``_escalate`` born-blocked
+    task, budget-runaway park, stall/circuit-breaker escalation) parks the task
+    for an operator decision. An ``"unblocked"`` event is the operator resolving
+    it (``unblock_task`` returns the task to the queue). The escalation is still
+    active only when the most recent of the two is the escalation — so a task
+    that was escalated, unblocked, and later re-blocked for an unrelated reason
+    is NOT trapped here (it falls through to the normal recovery / breaker-limit
+    guards), while a freshly escalated task with no resolution stays held.
+    Distinct from :func:`_has_operator_escalation` (the permanent "ever
+    escalated" predicate used elsewhere), which must not change semantics.
+    """
+    row = conn.execute(
+        "SELECT kind FROM task_events "
+        "WHERE task_id = ? AND kind IN (?, 'unblocked') "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchone()
+    return bool(row) and row["kind"] == OPERATOR_ESCALATION_EVENT
+
+
 def _latest_unresolved_gave_up_limit(
     conn: sqlite3.Connection, task_id: str,
 ) -> Optional[int]:
@@ -5999,6 +6024,17 @@ def recompute_ready(
                 # silently auto-recover.  ``unblock_task`` is the only
                 # legitimate exit (it emits ``"unblocked"`` which flips
                 # this predicate back).
+                continue
+            if cur_status == "blocked" and _operator_escalation_is_active(conn, task_id):
+                # Operator-review hold (e.g. autoresearch ``_escalate`` born
+                # blocked, or a budget-runaway park): carries an
+                # ``operator_escalation`` event but NO ``"blocked"`` event, so
+                # ``_has_sticky_block`` above misses it.  Latest-state-aware
+                # (mirrors ``_has_sticky_block``): a later ``"unblocked"``
+                # resolves it, so a circuit-breaker task that was escalated,
+                # unblocked, then re-blocked is NOT trapped here — only an
+                # unresolved escalation stays held.  Must wait for an explicit
+                # operator decision; never auto-promote behind the operator.
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
