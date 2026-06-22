@@ -10804,6 +10804,18 @@ def test_review_gate_config_string_false_flags_are_disabled(kanban_home):
     assert cfg["auto_scout_on_critical"] is False
 
 
+def test_worker_gate_config_string_false_flag_is_disabled(kanban_home):
+    import yaml
+    (kanban_home / "config.yaml").write_text(
+        yaml.safe_dump({
+            "kanban": {"worker_gate": {"enabled": "false"}}
+        }),
+        encoding="utf-8",
+    )
+    cfg = kb._worker_gate_config()
+    assert cfg["enabled"] is False
+
+
 def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
     import yaml
     (kanban_home / "config.yaml").write_text(

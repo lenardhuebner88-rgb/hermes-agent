@@ -7316,7 +7316,7 @@ def _worker_gate_config() -> dict:
     except (TypeError, ValueError):
         timeout = 900
     return {
-        "enabled": bool(wg.get("enabled", False)),
+        "enabled": _coerce_config_bool(wg.get("enabled", False), default=False),
         "repos": repos,
         "default": default_list,
         "timeout": timeout,
