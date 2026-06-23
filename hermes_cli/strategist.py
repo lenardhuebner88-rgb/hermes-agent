@@ -1425,6 +1425,25 @@ def load_followup_candidates_from_ledger(
     return out
 
 
+def reap_worker_drop_disposition_items(conn) -> int:
+    """Dismiss open disposition-ledger items explicitly marked as worker ``drop``."""
+    reaped = 0
+    for item in kanban_db.list_disposition_items(conn, status="open"):
+        if item.get("disposition") != "drop":
+            continue
+        updated = kanban_db.set_disposition_status(
+            conn,
+            item["id"],
+            status="dismissed",
+            decided_by="harvest-reaper",
+        )
+        if updated is not None:
+            reaped += 1
+    if reaped:
+        logger.info("harvest reaper dismissed %d worker-drop disposition items", reaped)
+    return reaped
+
+
 # --------------------------------------------------------------------------- #
 # Default runtime paths (CLI fills these; tests inject explicit paths)
 # --------------------------------------------------------------------------- #
@@ -1596,6 +1615,7 @@ def run_harvest(args) -> dict[str, Any]:
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
         # Beide Quellen laden, bevor conn geschlossen wird
+        reap_worker_drop_disposition_items(conn)
         ledger_cands = load_followup_candidates_from_ledger(conn, since_ts=since_ts)
         receipts = gather_recent_receipts(conn, since_ts=since_ts)
     finally:

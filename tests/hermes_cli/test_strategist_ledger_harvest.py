@@ -195,6 +195,44 @@ def test_run_harvest_keyword_only_task_appears_as_fallback(kanban_home):
     assert "ledger" not in sources
 
 
+def test_run_harvest_reaps_worker_drop_items_only(kanban_home):
+    """Harvest dismisses explicit worker-drop ledger items, leaving other dispositions open."""
+    with kb.connect() as conn:
+        tid = _done_task(conn, title="Reaper-Task", body="x" * 50, completed_at=int(time.time()))
+        drop_iid = _insert_follow_up(conn, source_task_id=tid, disposition="drop")
+        defer_iid = _insert_follow_up(conn, source_task_id=tid, disposition="defer")
+        delegate_iid = _insert_follow_up(conn, source_task_id=tid, disposition="delegate")
+        risk_iid = kb.insert_disposition_item(
+            conn,
+            source_task_id=tid,
+            typ="risk",
+            disposition="defer",
+            severity="real-risk",
+        )
+
+    strategist.run_harvest(types.SimpleNamespace(board=None))
+
+    with kb.connect() as conn:
+        drop_item = kb.get_disposition_item(conn, drop_iid)
+        defer_item = kb.get_disposition_item(conn, defer_iid)
+        delegate_item = kb.get_disposition_item(conn, delegate_iid)
+        risk_item = kb.get_disposition_item(conn, risk_iid)
+
+    assert drop_item is not None
+    assert defer_item is not None
+    assert delegate_item is not None
+    assert risk_item is not None
+
+    assert drop_item["status"] == "dismissed"
+    assert drop_item["decided_by"] == "harvest-reaper"
+    assert drop_item["decided_at"] is not None
+
+    for item in (defer_item, delegate_item, risk_item):
+        assert item["status"] == "open"
+        assert item["decided_by"] is None
+        assert item["decided_at"] is None
+
+
 # --------------------------------------------------------------------------- #
 # 5. Backward-Compat: keine Ledger-Items → keyword-fallback wie bisher, kein Crash
 # --------------------------------------------------------------------------- #
