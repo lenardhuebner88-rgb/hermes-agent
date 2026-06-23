@@ -126,6 +126,22 @@ describe("DispositionItemList", () => {
     expect(html).toContain("Scope-Hinweis");
   });
 
+  it("scope-note Items zeigen keinen Fix-Task als actionable Work", () => {
+    const html = renderToStaticMarkup(
+      <DispositionItemList
+        items={[item({ typ: "follow_up", severity: "scope-note" })]}
+        pending={null}
+        busy={false}
+        onAct={noop}
+        onPending={noop}
+        onDismissReasonChange={noop}
+      />,
+    );
+    expect(html).toContain("Scope-Hinweis (nicht queue-relevant)");
+    expect(html).toContain("kein Fix-Task nötig");
+    expect(html).not.toContain("Fix-Task anlegen");
+  });
+
   it("Deep-Link zum Quell-Task enthält source_task_id URL-enkodiert", () => {
     const html = renderToStaticMarkup(
       <DispositionItemList
