@@ -102,6 +102,26 @@ class TestParseEnvVar:
         assert config["cwd"] == baseline["cwd"]
 
 
+    def test_get_env_config_empty_image_env_values_use_defaults(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TERMINAL_ENV": "docker",
+                "TERMINAL_DOCKER_IMAGE": "",
+                "TERMINAL_MODAL_IMAGE": "",
+                "TERMINAL_DAYTONA_IMAGE": "",
+                "TERMINAL_SINGULARITY_IMAGE": "",
+            },
+            clear=False,
+        ):
+            config = _tt_mod._get_env_config()
+
+        assert config["docker_image"]
+        assert config["modal_image"] == config["docker_image"]
+        assert config["daytona_image"] == config["docker_image"]
+        assert config["singularity_image"] == f"docker://{config['docker_image']}"
+
+
     def test_get_env_config_rejects_docker_forward_env_non_list_json(self):
         with patch.dict(
             "os.environ",

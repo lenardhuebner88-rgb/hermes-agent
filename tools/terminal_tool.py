@@ -1238,6 +1238,10 @@ def _parse_bool_env_var(name: str, default: str) -> bool:
     return (raw or default.strip().lower()) in {"true", "1", "yes"}
 
 
+def _string_env_var(name: str, default: str) -> str:
+    return os.getenv(name) or default
+
+
 def _safe_getcwd() -> str:
     """Return the current working directory, tolerating a deleted CWD.
 
@@ -1327,11 +1331,11 @@ def _get_env_config() -> Dict[str, Any]:
     return {
         "env_type": env_type,
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
-        "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
+        "docker_image": _string_env_var("TERMINAL_DOCKER_IMAGE", default_image),
         "docker_forward_env": docker_forward_env,
-        "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
-        "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
-        "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
+        "singularity_image": _string_env_var("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
+        "modal_image": _string_env_var("TERMINAL_MODAL_IMAGE", default_image),
+        "daytona_image": _string_env_var("TERMINAL_DAYTONA_IMAGE", default_image),
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
