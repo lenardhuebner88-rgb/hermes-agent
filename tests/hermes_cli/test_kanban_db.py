@@ -3733,6 +3733,28 @@ def test_no_directive_block_without_directives(kanban_home):
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+
+
+def test_dispatch_treats_openclaw_assignee_as_nonspawnable(kanban_home, monkeypatch):
+    """Native dispatcher must fail closed for legacy OpenClaw lanes.
+
+    Even if stale DB rows mention ``openclaw:<agent>``, an autonomous Gateway
+    tick must not sign or submit Mission-Control envelopes.
+    """
+    monkeypatch.setattr(kb, "_dispatch_to_openclaw", lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy dispatch touched")))
+    conn = kb.connect()
+    with conn:
+        tid = kb.create_task(conn, title="legacy lane", assignee="openclaw:lens")
+        res = kb.dispatch_once(conn, dry_run=False)
+
+    assert tid in res.skipped_nonspawnable
+    assert not res.openclaw_dispatched
+    assert not res.spawned
+    task = kb.get_task(conn, tid)
+    assert task.status == "ready"
+    events = [e.kind for e in kb.list_events(conn, tid)]
+    assert "nonspawnable" in events
+
 def test_dispatch_dry_run_does_not_claim(kanban_home, all_assignees_spawnable):
     with kb.connect() as conn:
         t1 = kb.create_task(conn, title="a", assignee="alice")

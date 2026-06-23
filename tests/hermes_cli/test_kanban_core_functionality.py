@@ -51,6 +51,12 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+def _write_test_profile(home: Path, name: str) -> None:
+    d = home / "profiles" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.yaml").write_text("model: {}\n")
+
+
 # ---------------------------------------------------------------------------
 # Idempotency key
 # ---------------------------------------------------------------------------
@@ -1442,6 +1448,211 @@ def test_known_assignees_merges_disk_and_board(tmp_path, monkeypatch):
     assert by_name["on_board_only"]["counts"] == {"ready": 1}
 
 
+
+
+
+def test_decompose_does_not_mutate_children_on_late_validation_error(kanban_home):
+    _write_test_profile(kanban_home, "premium")
+    conn = kb.connect()
+    root = kb.create_task(conn, title="triage", assignee="default", triage=True)
+    children = [
+        {"title": "alias child", "assignee": "coder-claude"},
+        {"title": "bad parent", "assignee": "premium", "parents": [99]},
+    ]
+
+    with pytest.raises(ValueError, match="not a valid index"):
+        kb.decompose_triage_task(conn, root, root_assignee=None, children=children)
+
+    assert children[0]["assignee"] == "coder-claude"
+
+def test_decompose_rejects_invalid_root_assignee_atomically(kanban_home):
+    _write_test_profile(kanban_home, "coder")
+    conn = kb.connect()
+    root = kb.create_task(conn, title="triage", assignee="default", triage=True)
+
+    with pytest.raises(ValueError, match="not spawnable"):
+        kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="researcher",
+            children=[{"title": "child", "assignee": "coder"}],
+            validate_assignees=True,
+        )
+
+    tasks = kb.list_tasks(conn)
+    assert [t.id for t in tasks] == [root]
+    assert tasks[0].status == "triage"
+    assert tasks[0].assignee == "default"
+
+
+def test_decompose_canonicalizes_root_assignee_alias(kanban_home):
+    _write_test_profile(kanban_home, "premium")
+    _write_test_profile(kanban_home, "coder")
+    conn = kb.connect()
+    root = kb.create_task(conn, title="triage", assignee="default", triage=True)
+
+    child_ids = kb.decompose_triage_task(
+        conn,
+        root,
+        root_assignee="coder-claude",
+        children=[{"title": "child", "assignee": "coder"}],
+    )
+
+    assert child_ids
+    root_task = kb.get_task(conn, root)
+    assert root_task.assignee == "premium"
+
+
+
+def test_decompose_normalizes_blank_child_assignee_to_none(kanban_home):
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", triage=True)
+        children = kb.decompose_triage_task(
+            conn,
+            root,
+            children=[
+                {"title": "empty assignee child", "assignee": ""},
+                {"title": "blank assignee child", "assignee": "   "},
+            ],
+            root_assignee=None,
+            validate_assignees=True,
+        )
+        assert children is not None
+        for child_id in children:
+            child = kb.get_task(conn, child_id)
+            assert child is not None
+            assert child.assignee is None
+    finally:
+        conn.close()
+
+def test_decompose_rejects_non_spawnable_child_assignee(kanban_home):
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", triage=True)
+        with pytest.raises(ValueError, match="not spawnable"):
+            kb.decompose_triage_task(
+                conn,
+                root,
+                root_assignee=None,
+                children=[
+                    {"title": "bad child", "assignee": "researcher"},
+                ],
+                validate_assignees=True,
+            )
+        assert conn.execute("SELECT COUNT(*) FROM task_links WHERE child_id = ? OR parent_id = ?", (root, root)).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_decompose_normalizes_legacy_child_assignee_alias(kanban_home):
+    _write_test_profile(kanban_home, "premium")
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", triage=True)
+        children = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "hard child", "assignee": "coder-claude"},
+            ],
+        )
+        assert children
+        child = kb.get_task(conn, children[0])
+        assert child.assignee == "premium"
+    finally:
+        conn.close()
+
+
+
+
+def test_kanban_create_rejected_assignee_exits_nonzero(tmp_path, monkeypatch):
+    """CLI exit status must reflect rejected Kanban preflight checks.
+
+    Automation, Gateway smoke jobs, and operator scripts should not need to parse
+    stderr to know that a task was rejected before creation.
+    """
+    import os
+    import subprocess
+    import sys
+
+    hermes_home = tmp_path / ".hermes"
+    profile = hermes_home / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: {}\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
+            "kanban",
+            "create",
+            "bad lane",
+            "--assignee",
+            "researcher",
+            "--json",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 2
+    assert "not spawnable" in result.stderr
+    assert kb.list_tasks(kb.connect()) == []
+
+def test_known_assignees_omits_off_disk_done_only_ghosts(tmp_path, monkeypatch):
+    """Stale historical lanes should not stay selectable forever.
+
+    Off-disk assignees with active work remain visible so operators can repair
+    or reassign them; off-disk assignees with only completed work are audit
+    history, not spawnable lane choices.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    profiles = tmp_path / ".hermes" / "profiles"
+    (profiles / "coder").mkdir(parents=True)
+    (profiles / "coder" / "config.yaml").write_text("model: {}\n")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        ghost_done = kb.create_task(conn, title="old alias", assignee="ghost_done")
+        kb.complete_task(conn, ghost_done)
+
+        mixed_done = kb.create_task(conn, title="old mixed", assignee="ghost_mixed")
+        kb.complete_task(conn, mixed_done)
+        kb.create_task(conn, title="needs reassignment", assignee="ghost_mixed")
+
+        coder_done = kb.create_task(conn, title="spawnable history", assignee="coder")
+        kb.complete_task(conn, coder_done)
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, assignee, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("t_blank_ghost", "historical blank", "ready", "", 1),
+        )
+        conn.commit()
+
+        data = kb.known_assignees(conn)
+    finally:
+        conn.close()
+
+    by_name = {d["name"]: d for d in data}
+    assert "ghost_done" not in by_name
+    assert by_name["ghost_mixed"]["on_disk"] is False
+    assert by_name["ghost_mixed"]["counts"] == {"done": 1, "ready": 1}
+    assert by_name["coder"]["on_disk"] is True
+    assert by_name["coder"]["counts"] == {"done": 1}
+    assert "" not in by_name
+
 def test_cli_assignees_json(kanban_home):
     conn = kb.connect()
     try:
@@ -2401,6 +2612,9 @@ def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
     'no such table: tasks' — init_db auto-runs now."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    profile = home / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: {}\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Sanity: kanban.db does NOT exist yet.
@@ -3274,10 +3488,64 @@ def test_default_spawn_passes_task_skills_verbatim(kanban_home, monkeypatch):
     )
 
 
+
+
+
+
+def test_cli_assign_rejects_non_spawnable_assignee(kanban_home):
+    tid = run_slash("create 'assign-target' --json")
+    task_id = json.loads(tid)["id"]
+
+    out = run_slash(f"assign {task_id} no-such-profile")
+
+    assert "no-such-profile" in out
+    assert "not spawnable" in out
+
+
+def test_cli_reassign_normalizes_legacy_assignee_alias(kanban_home):
+    _write_test_profile(kanban_home, "premium")
+    tid = run_slash("create 'reassign-target' --json")
+    task_id = json.loads(tid)["id"]
+
+    out = run_slash(f"reassign {task_id} coder-claude")
+
+    assert "premium" in out
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, task_id)
+        assert task.assignee == "premium"
+    finally:
+        conn.close()
+
+
+def test_cli_create_rejects_non_spawnable_assignee(kanban_home):
+    """CLI create rejects assignee typos before they become unspawnable ready cards."""
+    out = run_slash("create 'bad-lane' --assignee no-such-profile --json")
+
+    assert "no-such-profile" in out
+    assert "not spawnable" in out
+
+
+def test_cli_create_normalizes_legacy_assignee_alias(kanban_home):
+    """CLI create normalizes deprecated lane aliases to canonical profiles."""
+    profiles = kanban_home / "profiles"
+    (profiles / "premium").mkdir(parents=True, exist_ok=True)
+    (profiles / "premium" / "config.yaml").write_text("model: {}\n")
+
+    out = run_slash("create 'hard-lane' --assignee coder-claude --json")
+    tid = json.loads(out)["id"]
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.assignee == "premium"
+    finally:
+        conn.close()
+
+
 def test_cli_create_skill_flag_repeatable(kanban_home):
     """`hermes kanban create --skill a --skill b` persists the list."""
     out = run_slash(
-        "create 'multi-skill' --assignee linguist "
+        "create 'multi-skill' --assignee default "
         "--skill translation --skill github-code-review --json"
     )
     tid = json.loads(out)["id"]
@@ -3289,7 +3557,7 @@ def test_cli_create_skill_flag_repeatable(kanban_home):
 def test_cli_create_without_skill_flag_leaves_none(kanban_home):
     """No --skill on the CLI means Task.skills stays None (not []) —
     we don't want to silently write [] when the user didn't opt in."""
-    out = run_slash("create 'no-skill' --assignee x --json")
+    out = run_slash("create 'no-skill' --assignee default --json")
     tid = json.loads(out)["id"]
     with kb.connect() as conn:
         task = kb.get_task(conn, tid)
@@ -3299,7 +3567,7 @@ def test_cli_create_without_skill_flag_leaves_none(kanban_home):
 def test_cli_show_renders_skills(kanban_home):
     """`hermes kanban show <id>` prints a skills row when present."""
     out = run_slash(
-        "create 'show-test' --assignee x "
+        "create 'show-test' --assignee default "
         "--skill translation --json"
     )
     tid = json.loads(out)["id"]
@@ -3661,6 +3929,7 @@ def _make_create_ns(**overrides):
 def test_cli_create_warns_when_no_gateway(kanban_home, monkeypatch, capsys):
     """ready+assigned task + no gateway -> warning on stderr."""
     from hermes_cli import kanban as kb_cli
+    _write_test_profile(kanban_home, "worker")
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
@@ -3676,6 +3945,7 @@ def test_cli_create_warns_when_no_gateway(kanban_home, monkeypatch, capsys):
 def test_cli_create_silent_when_gateway_up(kanban_home, monkeypatch, capsys):
     """gateway running + dispatch enabled -> no warning."""
     from hermes_cli import kanban as kb_cli
+    _write_test_profile(kanban_home, "worker")
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: 4242)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
@@ -3690,6 +3960,7 @@ def test_cli_create_silent_when_gateway_up(kanban_home, monkeypatch, capsys):
 def test_cli_create_no_warn_on_triage(kanban_home, monkeypatch, capsys):
     """Triage tasks can't be dispatched -> no warning."""
     from hermes_cli import kanban as kb_cli
+    _write_test_profile(kanban_home, "worker")
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
@@ -3704,6 +3975,7 @@ def test_cli_create_no_warn_on_triage(kanban_home, monkeypatch, capsys):
 def test_cli_create_no_warn_unassigned(kanban_home, monkeypatch, capsys):
     """Unassigned tasks can't be dispatched -> no warning."""
     from hermes_cli import kanban as kb_cli
+    _write_test_profile(kanban_home, "worker")
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",

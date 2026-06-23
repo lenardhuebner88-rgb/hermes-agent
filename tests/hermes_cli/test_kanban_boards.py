@@ -510,6 +510,11 @@ class TestCLI:
 
     def test_per_board_task_isolation_via_cli(self, tmp_path):
         env = {"HERMES_HOME": str(tmp_path)}
+        # Seed the "dev" profile so the assignee-spawnability guard accepts it.
+        # HERMES_HOME is outside ~/.hermes, so get_default_hermes_root() returns
+        # tmp_path directly; profiles live at tmp_path/profiles/<name>/.
+        (tmp_path / "profiles" / "dev").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "profiles" / "dev" / "config.yaml").write_text("model: {}\n")
         assert _cli(["boards", "create", "projA"], env_extra=env).returncode == 0
         assert _cli(["boards", "create", "projB"], env_extra=env).returncode == 0
 

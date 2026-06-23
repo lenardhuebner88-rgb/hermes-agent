@@ -12985,9 +12985,13 @@ def main():
         cmd_chat(args)
         return
 
-    # Execute the command
+    # Execute the command.  Most subcommands either call sys.exit themselves or
+    # return a shell-style code; preserve that return value so automation can
+    # distinguish rejected Kanban operations from successful no-ops.
     if hasattr(args, "func"):
-        args.func(args)
+        code = args.func(args)
+        if type(code) is int:
+            sys.exit(code)
     else:
         parser.print_help()
 

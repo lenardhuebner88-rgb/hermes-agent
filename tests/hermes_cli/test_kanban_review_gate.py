@@ -21,6 +21,12 @@ from pathlib import Path
 
 import pytest
 
+
+def _write_profile(home: Path, name: str) -> None:
+    d = home / "profiles" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.yaml").write_text("model: {}\n")
+
 import hermes_cli.profiles as profiles_mod
 from hermes_cli import kanban_db as kb
 
@@ -32,6 +38,8 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for name in ["coder", "premium", "scout"]:
+        _write_profile(home, name)
     kb.init_db()
     return home
 

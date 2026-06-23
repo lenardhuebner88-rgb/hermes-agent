@@ -1086,6 +1086,28 @@ def test_create_rejects_no_assignee(worker_env):
     assert json.loads(kt._handle_create({"title": "t"})).get("error")
 
 
+
+
+def test_create_normalizes_legacy_assignee_alias(worker_env, monkeypatch):
+    """Tool-side create preflight accepts canonicalized legacy lane aliases."""
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "premium")
+    d = json.loads(kt._handle_create({
+        "title": "hard follow-up",
+        "assignee": "coder-claude",
+    }))
+
+    assert d["ok"] is True
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, d["task_id"])
+        assert task.assignee == "premium"
+    finally:
+        conn.close()
+
 def test_create_rejects_unknown_profile_assignee(worker_env, monkeypatch):
     """Reject a create whose assignee is not a runnable Hermes profile.
 
@@ -1124,10 +1146,8 @@ def test_create_rejects_code_kind_for_verdict_only_role(worker_env, monkeypatch)
     assert "verdict" in err
 
 
-def test_create_allows_openclaw_assignee(worker_env, monkeypatch):
-    """An ``openclaw:<agent>`` assignee is a legitimate cross-system lane the
-    dispatcher intercepts BEFORE the profile gate, so the create handler must
-    NOT reject it even though it is not a local Hermes profile."""
+def test_create_rejects_legacy_openclaw_assignee(worker_env, monkeypatch):
+    """Native tool creation should not create legacy OpenClaw runtime cards."""
     from hermes_cli import profiles
     from tools import kanban_tools as kt
 
@@ -1136,7 +1156,29 @@ def test_create_allows_openclaw_assignee(worker_env, monkeypatch):
         "title": "lens audit",
         "assignee": "openclaw:lens",
     }))
-    assert d.get("ok") is True
+
+    assert d.get("ok") is not True
+    assert "openclaw:lens" in d.get("error", "")
+    assert "no on-disk Hermes profile" in d.get("error", "")
+
+
+def test_create_rejects_when_profile_lookup_fails(worker_env, monkeypatch):
+    """Fail closed when spawnability cannot be checked."""
+    from hermes_cli import profiles
+    from tools import kanban_tools as kt
+
+    def boom(name):
+        raise RuntimeError("profile store unavailable")
+
+    monkeypatch.setattr(profiles, "profile_exists", boom)
+    d = json.loads(kt._handle_create({
+        "title": "ambiguous",
+        "assignee": "coder",
+    }))
+
+    assert d.get("ok") is not True
+    assert "could not be verified as spawnable" in d.get("error", "")
+    assert "profile store unavailable" in d.get("error", "")
 
 
 def test_create_persists_iteration_budget_overrides(worker_env):

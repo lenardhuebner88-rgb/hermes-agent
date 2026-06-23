@@ -1542,6 +1542,7 @@ def ingest_planspec(
                 auto_promote=False,
                 initial_child_status="scheduled",
                 expected_root_status="scheduled",
+                validate_assignees=True,
             )
         except ValueError as exc:
             raise PlanSpecBlocked([f"DB rejected binding taskgraph: {exc}"]) from exc

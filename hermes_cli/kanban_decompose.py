@@ -1271,6 +1271,7 @@ def decompose_task(
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
+                validate_assignees=True,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
@@ -1644,6 +1645,7 @@ def plan_and_document(
                     auto_promote=(not gate),
                     initial_child_status=child_status,
                     expected_root_status="scheduled",
+                    validate_assignees=True,
                 )
         except ValueError as exc:
             return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")

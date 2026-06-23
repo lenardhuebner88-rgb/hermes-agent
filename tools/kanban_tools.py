@@ -895,31 +895,16 @@ def _handle_create(args: dict, **kw) -> str:
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
     # Reject an assignee that is not a runnable Hermes profile. The
-    # dispatcher's profile_exists gate would otherwise silently skip the
-    # task on every tick (it stays 'ready' with no diagnosis), so catch it
-    # here and give the agent immediate feedback instead of letting it fan
-    # out a card that can never spawn. A common failure is naming a Claude
-    # subagent type (e.g. 'ui-verifier') instead of a profile. Fail open if
-    # profile_exists can't be imported — same degradation as the gate.
-    # Exempt the ``openclaw:<agent>`` cross-system lane: it is intentionally
-    # NOT a local profile and the dispatcher intercepts it BEFORE the
-    # profile_exists gate (see kanban_db.OPENCLAW_ASSIGNEE_PREFIX), so the
-    # check here must let it through.
+    # dispatcher's profile_exists gate would otherwise skip the task on every
+    # tick, so catch it here and give the worker immediate feedback instead of
+    # letting it fan out a card that can never spawn. Alias normalization is
+    # centralized in kanban_db so back-compat names such as ``coder-claude``
+    # resolve consistently.
     try:
-        from hermes_cli.profiles import profile_exists
-        from hermes_cli.kanban_db import OPENCLAW_ASSIGNEE_PREFIX
-    except Exception:
-        profile_exists = None  # type: ignore[assignment]
-        OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
-    _is_openclaw = str(assignee).lower().startswith(OPENCLAW_ASSIGNEE_PREFIX)
-    if profile_exists is not None and not _is_openclaw and not profile_exists(assignee):
-        return tool_error(
-            f"assignee {assignee!r} is not a runnable Hermes profile — the "
-            "dispatcher only spawns tasks whose assignee matches a profile "
-            "under ~/.hermes/profiles/ (e.g. coder, reviewer, research, "
-            "critic, premium). Subagent/role names are not profiles and would hang "
-            "in 'ready' forever."
-        )
+        from hermes_cli import kanban_db
+        assignee = kanban_db.validate_spawnable_assignee(str(assignee))
+    except ValueError as exc:
+        return tool_error(str(exc))
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")

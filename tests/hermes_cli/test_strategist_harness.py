@@ -20,7 +20,7 @@ from hermes_cli import strategist_surface
 
 
 @pytest.fixture
-def board_home(tmp_path, monkeypatch):
+def board_home(tmp_path, monkeypatch, all_assignees_spawnable):
     """Isolated temp board + hermes-home, mirroring the G1 surface tests."""
     home = tmp_path / ".hermes"
     home.mkdir()

@@ -101,6 +101,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
+TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -2954,13 +2955,66 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
 
     Normalizes case (dashboard/CLI parity) then folds legacy lane names onto their
     canonical target via :data:`_LANE_ALIASES` (Phase A: ``coder-claude`` -> ``premium``).
+    Blank strings normalize to ``None`` so API/UI round-trips do not persist
+    unspawnable empty-string lanes.
     """
     if assignee is None:
+        return None
+    if not str(assignee).strip():
         return None
     from hermes_cli.profiles import normalize_profile_name
 
     canon = normalize_profile_name(assignee)
     return _LANE_ALIASES.get(canon, canon)
+
+
+def canonical_assignee(assignee: Optional[str]) -> Optional[str]:
+    """Public wrapper for Kanban assignee alias normalization."""
+    return _canonical_assignee(assignee)
+
+
+def assignee_spawnability_error(assignee: Optional[str]) -> Optional[str]:
+    """Return a user-facing error when *assignee* cannot be spawned.
+
+    This is intentionally a boundary/preflight helper, not a DB invariant:
+    historical rows, tests, repair flows, and read-only audits may still need to
+    preserve arbitrary assignee strings. New autonomous task creation paths can
+    use this helper to reject typos before they become stuck ready cards.
+    """
+    canonical = _canonical_assignee(assignee)
+    if not canonical:
+        return None
+    try:
+        from hermes_cli.profiles import profile_exists
+        exists = profile_exists(canonical)
+    except Exception as exc:
+        return (
+            f"Assignee {assignee!r} could not be verified as spawnable because "
+            f"profile lookup failed for {canonical!r}: {exc}"
+        )
+    if exists:
+        return None
+    try:
+        known = list_profiles_on_disk()
+    except Exception:
+        known = []
+    known_msg = f" Known on-disk profiles: {', '.join(known)}." if known else ""
+    alias_msg = ""
+    raw = str(assignee).strip()
+    if canonical != raw:
+        alias_msg = f" Alias {assignee!r} resolves to {canonical!r}, but that profile is not on disk."
+    return (
+        f"Assignee {assignee!r} is not spawnable: no on-disk Hermes profile "
+        f"for {canonical!r}.{alias_msg}{known_msg}"
+    )
+
+
+def validate_spawnable_assignee(assignee: Optional[str]) -> Optional[str]:
+    """Return canonical assignee or raise ValueError if it cannot be spawned."""
+    err = assignee_spawnability_error(assignee)
+    if err:
+        raise ValueError(err)
+    return _canonical_assignee(assignee)
 
 
 _CODE_TASK_CONTRACT_MARKER = "## Hermes Coder Contract v1"
@@ -10135,6 +10189,7 @@ def decompose_triage_task(
     auto_promote: bool = True,
     initial_child_status: str = "todo",
     expected_root_status: str = "triage",
+    validate_assignees: bool = False,
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
 
@@ -10169,9 +10224,12 @@ def decompose_triage_task(
     fan-out. The root is still flipped to ``'todo'`` on success either
     way.
 
-    Validation of titles/assignees happens inside the same write_txn as
-    the inserts so a malformed entry aborts the whole decomposition
-    cleanly (no orphan children).
+    Title/graph validation happens before the write_txn so malformed input
+    aborts without orphan children. Set ``validate_assignees=True`` at
+    autonomous task-creation boundaries (auto-decompose / PlanSpec ingest)
+    to reject unspawnable lanes before the graph is written. The default is
+    intentionally false so DB-level repair/audit/test helpers can preserve
+    historical lane strings.
 
     ``initial_child_status`` is the status children are created in
     (default ``'todo'`` — the long-standing behaviour). Pass
@@ -10190,14 +10248,24 @@ def decompose_triage_task(
             "initial_child_status must be 'todo' or 'scheduled', "
             f"got {initial_child_status!r}"
         )
-    if root_assignee is not None:
+    if validate_assignees and root_assignee is not None:
+        # The root wakes the orchestrator back up after children complete; if
+        # this assignee is off-disk, the autonomous loop strands at the very
+        # end of an otherwise valid decomposition. Validate it at the same
+        # task-creation boundary as child assignees.
+        root_assignee = validate_spawnable_assignee(root_assignee)
+    else:
         root_assignee = _canonical_assignee(root_assignee)
 
     # Pre-validate the children list shape outside the txn. Cheap checks
     # that don't need DB access. Bad input aborts before we touch the DB.
+    # Build normalized copies so callers reusing the input list do not see
+    # partially-canonicalized assignees after a later validation error.
+    normalized_children: list[dict[str, object]] = []
     for idx, child in enumerate(children):
         if not isinstance(child, dict):
             raise ValueError(f"child[{idx}] is not a dict")
+        child = dict(child)
         title = child.get("title")
         if not isinstance(title, str) or not title.strip():
             raise ValueError(f"child[{idx}].title is required")
@@ -10219,6 +10287,17 @@ def decompose_triage_task(
                     f"unknown review_tier {review_tier_value!r}; "
                     f"expected one of {sorted(_TIER_ORDER)}"
                 )
+        child_assignee = child.get("assignee")
+        if child_assignee is not None:
+            if validate_assignees:
+                # Auto-decompose is an autonomous task-creation boundary. Reject
+                # unspawnable worker lanes before the whole child graph is written
+                # atomically; otherwise one typo can strand a ready child forever.
+                child["assignee"] = validate_spawnable_assignee(str(child_assignee))
+            else:
+                child["assignee"] = _canonical_assignee(str(child_assignee))
+        normalized_children.append(child)
+    children = normalized_children
 
     # Detect cycles in the sibling parent graph (Kahn's topological sort).
     # link_tasks() calls _would_cycle() for every new edge; here we check
@@ -10285,7 +10364,7 @@ def decompose_triage_task(
             new_id = _new_task_id()
             title = child["title"].strip()
             body = child.get("body")
-            assignee = _canonical_assignee(child.get("assignee"))
+            assignee = child.get("assignee")
             kind = child.get("kind")
             # Per-child override wins; otherwise inherit the root's
             # workspace. A child that sets workspace_kind without a path
@@ -16699,45 +16778,10 @@ def _dispatch_once_locked(
             else:
                 result.skipped_unassigned.append(row["id"])
                 continue
-        # ---- OpenClaw cross-system dispatch ----
-        # An ``openclaw:<agent>`` assignee is NOT a Hermes profile and would be
-        # rejected by the profile_exists gate just below. Intercept it FIRST:
-        # claim the task, sign + POST an MC envelope, and leave it ``running``
-        # for poll-back. This branch must sit BEFORE the profile_exists gate so
-        # normal assignees are 100% unaffected (they never enter this block).
-        _openclaw_op = _parse_openclaw_assignee(row_assignee)
-        if _openclaw_op is not None:
-            if dry_run:
-                # Report what WOULD be dispatched without mutating the DB.
-                result.spawned.append((row["id"], row_assignee, ""))
-                result.openclaw_dispatched.append((row["id"], _openclaw_op))
-                continue
-            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
-            if claimed is None:
-                continue
-            try:
-                _dispatch_to_openclaw(conn, claimed, _openclaw_op)
-                # Success: task stays ``running`` (poll-back closes it later).
-                result.openclaw_dispatched.append((claimed.id, _openclaw_op))
-                spawned += 1
-                if _per_profile_cap is not None and claimed.assignee:
-                    _per_profile_running[claimed.assignee] = (
-                        _per_profile_running.get(claimed.assignee, 0) + 1
-                    )
-                if serialize_by_repo and _cand_repo:
-                    _repo_count[_cand_repo] = _repo_count.get(_cand_repo, 0) + 1
-            except Exception as exc:
-                # Mirror the local-spawn failure path: release the claim,
-                # count the failure, auto-block after the limit. A missing
-                # signer module, an MC rejection, or an unimplemented agent
-                # all degrade here rather than crashing the dispatcher.
-                auto = _record_spawn_failure(
-                    conn, claimed.id, f"openclaw: {exc}",
-                    failure_limit=failure_limit,
-                )
-                if auto:
-                    result.auto_blocked.append(claimed.id)
-            continue
+        # Legacy OpenClaw/Mission-Control assignees intentionally fall through
+        # to the normal profile_exists gate below. The native Kanban loop must
+        # fail closed on non-Hermes lanes instead of touching the decommissioned
+        # cross-system runtime from an autonomous dispatch tick.
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
         # with "Profile 'X' does not exist" when the assignee names a
@@ -19029,7 +19073,7 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     by_assignee: dict[str, dict[str, int]] = {}
     for row in conn.execute(
         "SELECT assignee, status, COUNT(*) AS n FROM tasks "
-        "WHERE status != 'archived' AND assignee IS NOT NULL "
+        "WHERE status != 'archived' AND assignee IS NOT NULL AND TRIM(assignee) != '' "
         "GROUP BY assignee, status"
     ):
         by_assignee.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
@@ -22329,15 +22373,21 @@ def list_profiles_on_disk() -> list[str]:
 
 
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
-    """Return every assignee name known to the board or on disk.
+    """Return spawnable profiles plus off-disk assignees that still need attention.
 
     Each entry is ``{"name": str, "on_disk": bool, "counts": {status: n}}``.
-    A name is included when it's a configured profile on disk OR when
-    any non-archived task has it as the assignee. Used by:
+    A name is included when it's a configured profile on disk OR when an
+    off-disk/non-spawnable assignee still has a non-terminal task on the board.
+    Done-only historical assignees are intentionally omitted: they are useful
+    audit history in the task table, but keeping them in this picker nudges
+    operators and planners toward invalid lanes (for example old aliases such
+    as ``researcher`` or ``coder-claude``), which then creates tasks the Gateway
+    cannot spawn. Used by:
 
     - ``hermes kanban assignees`` for the terminal.
     - The dashboard assignee dropdown (so a fresh profile appears in
-      the picker even before it's been given any task).
+      the picker even before it's been given any task, while stale done-only
+      ghosts stay out of the default lane list).
     - Router-profile heuristics ("who's overloaded?") without scanning
       the whole board.
     """
@@ -22347,12 +22397,22 @@ def known_assignees(conn: sqlite3.Connection) -> list[dict]:
     counts: dict[str, dict[str, int]] = {}
     for row in conn.execute(
         "SELECT assignee, status, COUNT(*) AS n FROM tasks "
-        "WHERE status != 'archived' AND assignee IS NOT NULL "
+        "WHERE status != 'archived' AND assignee IS NOT NULL AND TRIM(assignee) != '' "
         "GROUP BY assignee, status"
     ):
         counts.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
 
-    names = sorted(on_disk | set(counts.keys()))
+    def _has_non_terminal_work(status_counts: dict[str, int]) -> bool:
+        return any(status not in TERMINAL_TASK_STATUSES for status in status_counts)
+
+    names = sorted(
+        on_disk
+        | {
+            name
+            for name, status_counts in counts.items()
+            if _has_non_terminal_work(status_counts)
+        }
+    )
     return [
         {
             "name": name,

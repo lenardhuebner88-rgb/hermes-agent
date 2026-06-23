@@ -80,6 +80,14 @@ def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    profiles = home / "profiles"
+    for name in [
+        "default", "coder", "premium", "research", "reviewer", "scout", "claude-cli", "ops", "x", "a", "b", "old",
+        "new", "worker", "linguist", "alice", "bob",
+    ]:
+        d = profiles / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.yaml").write_text("model: {}\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
@@ -423,12 +431,115 @@ def test_board_empty(client):
 # ---------------------------------------------------------------------------
 
 
+
+
+
+
+def test_dashboard_create_normalizes_legacy_assignee_alias(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "legacy alias", "assignee": "coder-claude"},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["task"]["assignee"] == "premium"
+
+
+def test_dashboard_patch_normalizes_legacy_assignee_alias_and_allows_unassign(client):
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "alias patch", "assignee": "coder"},
+    ).json()["task"]
+
+    patched = client.patch(
+        f"/api/plugins/kanban/tasks/{created['id']}",
+        json={"assignee": "coder-claude"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["task"]["assignee"] == "premium"
+
+    cleared = client.patch(
+        f"/api/plugins/kanban/tasks/{created['id']}",
+        json={"assignee": ""},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["task"]["assignee"] is None
+
+
+def test_create_task_rejects_non_spawnable_assignee(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "bad lane", "assignee": "no-such-profile"},
+    )
+
+    assert r.status_code == 400
+    assert "not spawnable" in r.json()["detail"]
+
+
+
+
+def test_patch_task_preserves_unchanged_off_disk_assignee_for_repair(client):
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="legacy active", assignee="ghost_lane")
+    finally:
+        conn.close()
+
+    edited = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"title": "legacy active edited", "assignee": "ghost_lane"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["task"]["title"] == "legacy active edited"
+    assert edited.json()["task"]["assignee"] == "ghost_lane"
+
+    repaired = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"assignee": "coder"},
+    )
+    assert repaired.status_code == 200
+    assert repaired.json()["task"]["assignee"] == "coder"
+
+    rejected = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"assignee": "other_ghost"},
+    )
+    assert rejected.status_code == 400
+
+
+def test_researcher_is_not_spawnable_when_not_on_disk(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "bad researcher", "assignee": "researcher"},
+    )
+
+    assert r.status_code == 400
+    assert "researcher" in r.json()["detail"]
+
+
+def test_patch_task_rejects_non_spawnable_assignee(client):
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "good lane", "assignee": "coder"},
+    ).json()["task"]
+
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{created['id']}",
+        json={"assignee": "no-such-profile"},
+    )
+
+    assert r.status_code == 400
+    assert "not spawnable" in r.json()["detail"]
+
+
 def test_create_task_appears_on_board(client):
     r = client.post(
         "/api/plugins/kanban/tasks",
         json={
             "title": "Research LLM caching",
-            "assignee": "researcher",
+            "assignee": "research",
             "priority": 3,
             "tenant": "acme",
         },
@@ -436,7 +547,7 @@ def test_create_task_appears_on_board(client):
     assert r.status_code == 200, r.text
     task = r.json()["task"]
     assert task["title"] == "Research LLM caching"
-    assert task["assignee"] == "researcher"
+    assert task["assignee"] == "research"
     assert task["status"] == "ready"  # no parents -> immediately ready
     assert task["priority"] == 3
     assert task["tenant"] == "acme"
@@ -450,7 +561,7 @@ def test_create_task_appears_on_board(client):
     assert len(ready["tasks"]) == 1
     assert ready["tasks"][0]["id"] == task_id
     assert "acme" in data["tenants"]
-    assert "researcher" in data["assignees"]
+    assert "research" in data["assignees"]
 
 
 def test_board_surfaces_active_review_stage_only_while_in_review(client):
@@ -1157,7 +1268,7 @@ def test_runs_summary_groups_completed_tree_by_root(client, kanban_home):
         child_ids = kb.decompose_triage_task(
             conn,
             root,
-            root_assignee="orchestrator",
+            root_assignee="default",
             children=[
                 {"title": "build A", "assignee": "coder", "parents": []},
                 {"title": "build B", "assignee": "coder", "parents": []},
@@ -1191,7 +1302,7 @@ def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_ho
     with kb.connect() as conn:
         root = kb.create_task(conn, title="subscription ship", triage=True)
         (child,) = kb.decompose_triage_task(
-            conn, root, root_assignee="orchestrator",
+            conn, root, root_assignee="default",
             children=[{"title": "sub-build", "assignee": "claude-cli", "parents": []}],
             author="decomposer",
         )
@@ -1287,7 +1398,7 @@ def test_runs_daily_series(client):
     try:
         root = kb.create_task(conn, title="ship it", triage=True)
         child_ids = kb.decompose_triage_task(
-            conn, root, root_assignee="orchestrator",
+            conn, root, root_assignee="default",
             children=[{"title": "build", "assignee": "coder", "parents": []}],
             author="decomposer",
         )
@@ -5177,12 +5288,12 @@ def test_chain_costs_endpoint_returns_breakdown(client, kanban_home):
     """GET /tasks/{id}/chain-costs returns schema kanban-chain-costs-v1 with
     correct totals and by_lane breakdown aggregated from task_runs."""
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="costed-chain", assignee="orchestrator",
+        root = kb.create_task(conn, title="costed-chain", assignee="default",
                               triage=True)
         child_ids = kb.decompose_triage_task(
             conn,
             root,
-            root_assignee="orchestrator",
+            root_assignee="default",
             children=[
                 {"title": "worker A", "assignee": "coder", "parents": []},
                 {"title": "worker B", "assignee": "coder", "parents": []},
@@ -5225,12 +5336,12 @@ def test_chain_costs_endpoint_404_for_unknown_task(client):
 def test_chain_costs_endpoint_resolves_non_root_to_root(client, kanban_home):
     """Endpoint resolves a non-root member task to its chain root."""
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="chain-root-resolve", assignee="orchestrator",
+        root = kb.create_task(conn, title="chain-root-resolve", assignee="default",
                               triage=True)
         child_ids = kb.decompose_triage_task(
             conn,
             root,
-            root_assignee="orchestrator",
+            root_assignee="default",
             children=[{"title": "leaf", "assignee": "coder", "parents": []}],
             author="decomposer",
         )
@@ -5332,12 +5443,12 @@ def test_chain_costs_endpoint_includes_equivalent_fields(client, kanban_home):
     cost_effective_usd in totals and by_lane for subscription runs."""
     import json as _json
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="equiv-chain", assignee="orchestrator",
+        root = kb.create_task(conn, title="equiv-chain", assignee="default",
                               triage=True)
         child_ids = kb.decompose_triage_task(
             conn,
             root,
-            root_assignee="orchestrator",
+            root_assignee="default",
             children=[
                 {"title": "sub-worker", "assignee": "claude-cli", "parents": []},
             ],
@@ -5872,13 +5983,13 @@ def _plugin_module():
 
 def _write_lane_profiles(home: Path) -> None:
     coder = home / "profiles" / "coder"
-    coder.mkdir(parents=True)
+    coder.mkdir(parents=True, exist_ok=True)
     (coder / "config.yaml").write_text(
         "worker_runtime: claude-cli\nclaude_model: claude-fable-5\n"
     )
     (coder / "profile.yaml").write_text("description: builds things\n")
     research = home / "profiles" / "research"
-    research.mkdir()
+    research.mkdir(exist_ok=True)
     (research / "config.yaml").write_text(
         "model:\n"
         "  provider: openrouter\n"

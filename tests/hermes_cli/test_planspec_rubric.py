@@ -21,7 +21,7 @@ from hermes_cli.subcommands import plan as plan_cmd
 
 
 @pytest.fixture
-def kanban_home(tmp_path, monkeypatch):
+def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))

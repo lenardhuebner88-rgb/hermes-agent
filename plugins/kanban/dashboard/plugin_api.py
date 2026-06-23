@@ -1759,11 +1759,15 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        try:
+            assignee = kanban_db.validate_spawnable_assignee(payload.assignee) if payload.assignee else None
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
             body=payload.body,
-            assignee=payload.assignee,
+            assignee=assignee,
             created_by="dashboard",
             workspace_kind=payload.workspace_kind,
             workspace_path=payload.workspace_path,
@@ -2015,11 +2019,29 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
             try:
-                ok = kanban_db.assign_task(
-                    conn, task_id, payload.assignee or None,
+                if payload.assignee:
+                    try:
+                        assignee = kanban_db.validate_spawnable_assignee(payload.assignee)
+                    except ValueError:
+                        # Repair/edit safety: active off-disk assignees remain
+                        # visible so operators can edit metadata or explicitly
+                        # clear/reassign them. Preserve an unchanged invalid
+                        # value, but reject switching to a different invalid lane.
+                        proposed = kanban_db.canonical_assignee(payload.assignee)
+                        current = kanban_db.canonical_assignee(task.assignee)
+                        if proposed == current:
+                            assignee = task.assignee
+                        else:
+                            raise
+                else:
+                    assignee = None
+                ok = True if assignee == task.assignee else kanban_db.assign_task(
+                    conn, task_id, assignee,
                 )
             except RuntimeError as e:
                 raise HTTPException(status_code=409, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
 
