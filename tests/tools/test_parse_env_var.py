@@ -85,6 +85,23 @@ class TestParseEnvVar:
         assert config["ssh_persistent"] is True
 
 
+    def test_get_env_config_empty_terminal_cwd_uses_backend_default(self):
+        with patch.dict("os.environ", {"TERMINAL_ENV": "ssh"}, clear=False):
+            baseline = _tt_mod._get_env_config()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TERMINAL_ENV": "ssh",
+                "TERMINAL_CWD": "",
+            },
+            clear=False,
+        ):
+            config = _tt_mod._get_env_config()
+
+        assert config["cwd"] == baseline["cwd"]
+
+
     def test_get_env_config_rejects_docker_forward_env_non_list_json(self):
         with patch.dict(
             "os.environ",
