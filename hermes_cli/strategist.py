@@ -1481,8 +1481,8 @@ def append_run_history(state_dir: Path, entry: dict[str, Any]) -> None:
 
 
 def read_last_runs(state_dir: Path) -> dict[str, Any]:
-    """Most-recent run-history entry per mode (harvest/propose), or None each."""
-    out: dict[str, Any] = {"harvest": None, "propose": None}
+    """Most-recent run-history entry per mode (harvest/propose/digest), or None."""
+    out: dict[str, Any] = {"harvest": None, "propose": None, "digest": None}
     path = Path(state_dir) / "run-history.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1500,6 +1500,163 @@ def read_last_runs(state_dir: Path) -> dict[str, Any]:
         if mode in out:
             out[mode] = entry  # later lines win → most recent
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Disposition digest (A3): the Sonnet harvest step persists its clustering
+# decision here so the dashboard can show the full triage — not just the levers
+# that survived the propose gate.
+# --------------------------------------------------------------------------- #
+_DIGEST_RECOMMENDATIONS = ("drop", "collect", "planspec")
+
+
+def disposition_digest_path(state_dir: Optional[Path] = None) -> Path:
+    """Resolve the disposition-digest artifact path.
+
+    ``HERMES_STRATEGIST_DIGEST_PATH`` is the explicit override (test isolation);
+    otherwise ``<state_dir>/disposition_digest.json`` where ``state_dir``
+    defaults to the runtime strategist state dir. The dashboard reader
+    (:func:`strategist_surface.disposition_digest_path`) delegates here so both
+    sides resolve the SAME path."""
+    override = os.environ.get("HERMES_STRATEGIST_DIGEST_PATH", "").strip()
+    if override:
+        return Path(override)
+    base = Path(state_dir) if state_dir is not None else default_state_dir()
+    return base / "disposition_digest.json"
+
+
+def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
+    """Validate + normalize the Sonnet-supplied clustering decision into the
+    persisted digest schema. Raises ``ValueError`` on a malformed contract so a
+    bad LLM payload fails loud (CLI exits 2) instead of writing garbage.
+
+    ``generated_at`` is ALWAYS stamped from ``now`` (Python wall-clock), never
+    trusted from the payload — an LLM cannot backdate the digest. ``total_open``
+    and ``reaped`` are honoured if the step supplied valid ints, else derived:
+    ``total_open`` = distinct items across clusters + left, ``reaped`` = number
+    of clusters recommended for ``planspec``."""
+    if not isinstance(payload, dict):
+        raise ValueError("digest payload must be a JSON object")
+
+    raw_clusters = payload.get("clusters", [])
+    if not isinstance(raw_clusters, list):
+        raise ValueError("digest 'clusters' must be a list")
+    clusters: list[dict[str, Any]] = []
+    seen_items: set[str] = set()
+    reaped_derived = 0
+    for idx, cluster in enumerate(raw_clusters):
+        if not isinstance(cluster, dict):
+            raise ValueError(f"cluster[{idx}] must be an object")
+        theme = str(cluster.get("theme") or "").strip()
+        if not theme:
+            raise ValueError(f"cluster[{idx}] has an empty 'theme'")
+        recommendation = str(cluster.get("recommendation") or "").strip().lower()
+        if recommendation not in _DIGEST_RECOMMENDATIONS:
+            raise ValueError(
+                f"cluster[{idx}] recommendation {recommendation!r} not in "
+                f"{_DIGEST_RECOMMENDATIONS}"
+            )
+        raw_ids = cluster.get("item_ids", [])
+        if not isinstance(raw_ids, list):
+            raise ValueError(f"cluster[{idx}] 'item_ids' must be a list")
+        item_ids = [str(i) for i in raw_ids]
+        seen_items.update(item_ids)
+        if recommendation == "planspec":
+            reaped_derived += 1
+        norm = {
+            "theme": theme,
+            "item_ids": item_ids,
+            "severity": str(cluster.get("severity") or "none").strip() or "none",
+            "recommendation": recommendation,
+        }
+        planspec_key = cluster.get("planspec_key")
+        if planspec_key:
+            norm["planspec_key"] = str(planspec_key).strip()
+        clusters.append(norm)
+
+    raw_left = payload.get("left", [])
+    if not isinstance(raw_left, list):
+        raise ValueError("digest 'left' must be a list")
+    left: list[dict[str, Any]] = []
+    for idx, entry in enumerate(raw_left):
+        if not isinstance(entry, dict):
+            raise ValueError(f"left[{idx}] must be an object")
+        item_id = str(entry.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError(f"left[{idx}] has an empty 'item_id'")
+        seen_items.add(item_id)
+        norm_left: dict[str, Any] = {
+            "item_id": item_id,
+            "reason": str(entry.get("reason") or "").strip(),
+        }
+        disposition = entry.get("disposition")
+        if disposition:
+            norm_left["disposition"] = str(disposition).strip()
+        left.append(norm_left)
+
+    total_open = payload.get("total_open")
+    if not isinstance(total_open, int) or isinstance(total_open, bool) or total_open < 0:
+        total_open = len(seen_items)
+    reaped = payload.get("reaped")
+    if not isinstance(reaped, int) or isinstance(reaped, bool) or reaped < 0:
+        reaped = reaped_derived
+
+    return {
+        "generated_at": int(now),
+        "total_open": total_open,
+        "reaped": reaped,
+        "clusters": clusters,
+        "left": left,
+    }
+
+
+def write_disposition_digest(
+    state_dir: Path, payload: dict[str, Any], *, now: int
+) -> Path:
+    """Validate + persist the harvest clustering decision atomically. Returns
+    the digest path. See :func:`_normalize_digest` for the contract."""
+    digest = _normalize_digest(payload, now=now)
+    path = disposition_digest_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(digest, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def run_digest(args) -> dict[str, Any]:
+    """CLI adapter: read the harvest step's ``--digest-file`` clustering JSON,
+    validate + persist it as ``disposition_digest.json``, append a run-history
+    line. Deterministic — no LLM call, no ingest (the propose path handles the
+    levers; this only records the transparent triage)."""
+    state_dir = default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    digest_file = getattr(args, "digest_file", None)
+    if not digest_file:
+        raise FileNotFoundError("--mode digest requires --digest-file <path>")
+    payload = json.loads(Path(digest_file).read_text(encoding="utf-8"))
+    now = int(time.time())
+    path = write_disposition_digest(state_dir, payload, now=now)
+    digest = json.loads(path.read_text(encoding="utf-8"))
+    append_run_history(
+        state_dir,
+        {
+            "ts": now,
+            "mode": "digest",
+            "clusters": len(digest["clusters"]),
+            "total_open": digest["total_open"],
+            "reaped": digest["reaped"],
+            "left": len(digest["left"]),
+        },
+    )
+    return {
+        "mode": "digest",
+        "digest_path": str(path),
+        "clusters": len(digest["clusters"]),
+        "total_open": digest["total_open"],
+        "reaped": digest["reaped"],
+        "left": len(digest["left"]),
+    }
 
 
 def run_propose(args) -> dict[str, Any]:

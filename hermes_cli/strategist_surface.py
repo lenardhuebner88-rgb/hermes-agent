@@ -230,6 +230,41 @@ def read_vision_metrics() -> Optional[dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def disposition_digest_path() -> Path:
+    """Resolve the disposition-digest path (A3), honouring the explicit
+    ``HERMES_STRATEGIST_DIGEST_PATH`` override; otherwise delegate to the writer
+    (:func:`strategist.disposition_digest_path`) so reader and writer agree."""
+    import os
+
+    override = os.environ.get("HERMES_STRATEGIST_DIGEST_PATH", "").strip()
+    if override:
+        return Path(override)
+    try:
+        from hermes_cli import strategist as _strat
+
+        return _strat.disposition_digest_path()
+    except Exception:
+        return get_hermes_home() / "state" / "strategist" / "disposition_digest.json"
+
+
+def read_disposition_digest() -> Optional[dict[str, Any]]:
+    """Read the persisted disposition digest (A3), or ``None`` if absent/unreadable.
+
+    Defensive on purpose (mirrors :func:`read_vision_metrics`): a missing file
+    (no harvest has clustered yet), a partial write or malformed JSON degrades to
+    "no digest", never raises into the poll path."""
+    path = disposition_digest_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def held_operator_proposals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return the held ``freigabe: operator`` proposal roots for the surface.
 
