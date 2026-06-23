@@ -40,6 +40,21 @@ class TestParseEnvVar:
             assert config["docker_forward_env"] == ["GITHUB_TOKEN", "NPM_TOKEN"]
 
 
+    def test_get_env_config_normalizes_terminal_env_selector(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TERMINAL_ENV": " Docker ",
+                "TERMINAL_DOCKER_FORWARD_ENV": '["GITHUB_TOKEN"]',
+            },
+            clear=False,
+        ):
+            config = _tt_mod._get_env_config()
+
+        assert config["env_type"] == "docker"
+        assert config["docker_forward_env"] == ["GITHUB_TOKEN"]
+
+
     def test_get_env_config_rejects_docker_forward_env_non_list_json(self):
         with patch.dict(
             "os.environ",
