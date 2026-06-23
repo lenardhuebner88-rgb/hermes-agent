@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest.mock
@@ -1403,6 +1404,77 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(clie
     assert any(r["cost_usd_equivalent"] == pytest.approx(0.42) for r in worker_b_runs)
     assert any(r["cost_effective_usd"] == pytest.approx(0.42) for r in worker_b_runs)
 
+
+
+def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanban_home):
+    """Contract: a real backend response must parse with the frontend Zod schema."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="contract mother", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "contract worker", "assignee": "coder", "parents": []}],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        (worker,) = child_ids
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                worker,
+                profile="coder",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.20,
+                metadata={"provider": "openrouter", "model": "qwen/qwen3-coder"},
+            )
+        kb.complete_task(conn, worker, summary="worker done")
+        kb.complete_task(conn, root, summary="root done")
+
+    response = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24&limit=5")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["schema"] == "kanban-windowed-rollup-v1"
+    assert any(row["id"] == root for row in payload["roots"])
+
+    repo_root = Path(__file__).resolve().parents[2]
+    web_dir = repo_root / "web"
+    if not ((web_dir / "node_modules" / "@nous-research" / "ui").exists() and (repo_root / "node_modules" / "vitest").exists()):
+        pytest.skip("frontend dependencies are not installed; run npm ci in web/ for contract gate")
+
+    lib_dir = web_dir / "src" / "control" / "lib"
+    fixture_file = lib_dir / "__windowed_rollup_contract_fixture.json"
+    test_file = lib_dir / "__windowed_rollup_contract.generated.test.ts"
+    fixture_file.write_text(json.dumps(payload), encoding="utf-8")
+    test_file.write_text(
+        'import { describe, expect, it } from "vitest";\n'
+        'import fixture from "./__windowed_rollup_contract_fixture.json";\n'
+        'import { WindowedRollupResponseSchema, parseOrThrow } from "./schemas";\n\n'
+        'describe("windowed rollup backend/frontend contract", () => {\n'
+        '  it("parses the real backend response with the frontend schema", () => {\n'
+        '    const parsed = parseOrThrow(WindowedRollupResponseSchema, fixture, "windowed-rollup-contract");\n'
+        '    expect(parsed.schema).toBe("kanban-windowed-rollup-v1");\n'
+        '    expect(parsed.roots.length).toBeGreaterThan(0);\n'
+        '    expect(parsed.roots[0].runners).toBeInstanceOf(Array);\n'
+        '  });\n'
+        '});\n',
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            ["npm", "exec", "vitest", "--", "run", str(test_file.relative_to(web_dir))],
+            cwd=web_dir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        fixture_file.unlink(missing_ok=True)
+        test_file.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stdout
 
 def test_runs_windowed_rollup_keeps_unknown_costs_null(client, kanban_home):
     """S1: missing price evidence remains unknown/null instead of fake $0."""
