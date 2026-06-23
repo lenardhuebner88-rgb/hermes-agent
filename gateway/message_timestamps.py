@@ -104,8 +104,9 @@ def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Option
         if not match:
             break
         parsed = _parse_timestamp_match(match, tz=tz)
-        if parsed is not None:
-            embedded_epoch = parsed
+        if parsed is None:
+            break
+        embedded_epoch = parsed
         text = text[match.end():]
 
     return text, embedded_epoch
@@ -163,4 +164,6 @@ def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
         dt = dt.replace(tzinfo=tz)
     else:
         dt = dt.astimezone()
+    if match.group("dow") != dt.strftime("%a"):
+        return None
     return float(dt.timestamp())

@@ -61,6 +61,15 @@ def test_strip_leading_message_timestamps_removes_multiple_prefixes_and_prefers_
     assert embedded_ts == _epoch(2026, 4, 27, 15, 54, 44)
 
 
+def test_strip_leading_message_timestamps_keeps_mismatched_weekday_prefix():
+    content = "[Tue 2026-04-27 15:54:44 CEST] [Example User] Real text"
+
+    stripped, embedded_ts = strip_leading_message_timestamps(content, tz=BERLIN)
+
+    assert stripped == content
+    assert embedded_ts is None
+
+
 def test_coerce_message_timestamp_accepts_datetime_and_epoch():
     dt = datetime(2026, 4, 28, 13, 40, 53, tzinfo=BERLIN)
 
