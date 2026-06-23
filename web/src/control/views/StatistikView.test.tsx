@@ -10,6 +10,7 @@ import {
   MotherLedgerSection,
   ReliabilitySection,
   StatsMasthead,
+  StatistikView,
   SubscriptionBurnSection,
 } from "./StatistikView";
 import { broadsheet } from "../lib/broadsheetTokens";
@@ -37,17 +38,54 @@ type TestRollupState = {
   updateData: () => void;
 };
 
+type ControlHookState = ReturnType<typeof controlState>;
+
 const windowedRollupMock = vi.hoisted(() => ({
   state: null as TestRollupState | null,
+}));
+
+const controlDataMock = vi.hoisted(() => ({
+  reliability: null as ControlHookState | null,
+  summary: null as ControlHookState | null,
+  daily: null as ControlHookState | null,
+  issues: null as ControlHookState | null,
+  accountUsage: null as ControlHookState | null,
+  costs: null as ControlHookState | null,
+  subscriptionBurn: null as ControlHookState | null,
+  chain: null as ControlHookState | null,
+  board: null as ControlHookState | null,
 }));
 
 vi.mock("../hooks/useControlData", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useControlData")>();
   return {
     ...actual,
+    useAccountUsage: () => controlDataMock.accountUsage,
+    useBoardStats: () => controlDataMock.board,
+    useChainCompletion: () => controlDataMock.chain,
+    useHermesReliability: () => controlDataMock.reliability,
+    useHermesRunSummary: () => controlDataMock.summary,
+    useHermesRunsCosts: () => controlDataMock.costs,
+    useHermesRunsDaily: () => controlDataMock.daily,
+    useHermesRunsIssues: () => controlDataMock.issues,
+    useHermesSubscriptionBurn: () => controlDataMock.subscriptionBurn,
     useHermesWindowedRollup: () => windowedRollupMock.state!,
   };
 });
+
+function controlState(data: unknown = null, over: Record<string, unknown> = {}) {
+  return {
+    data,
+    error: null,
+    errorObj: null,
+    loading: false,
+    lastUpdated: null,
+    isStale: false,
+    reload: async () => undefined,
+    updateData: () => undefined,
+    ...over,
+  };
+}
 
 function rollupState(over: Partial<TestRollupState> = {}): TestRollupState {
   return {
@@ -65,7 +103,44 @@ function rollupState(over: Partial<TestRollupState> = {}): TestRollupState {
 
 beforeEach(() => {
   windowedRollupMock.state = rollupState();
+  controlDataMock.reliability = controlState({ now: 1_780_000_000, profiles: [], baseline: [] });
+  controlDataMock.summary = controlState({ cycle_time_p50_seconds: null, cycle_time_p90_seconds: null });
+  controlDataMock.daily = controlState({ series: [] });
+  controlDataMock.issues = controlState({ issues: [] });
+  controlDataMock.accountUsage = controlState({ providers: [] });
+  controlDataMock.costs = controlState({ profiles: [] });
+  controlDataMock.subscriptionBurn = controlState(null);
+  controlDataMock.chain = controlState({ chain_completion_rate: null });
+  controlDataMock.board = controlState({ queue_wait_p50_seconds: null });
 });
+
+function withViewport<T>(width: number, run: () => T): T {
+  const previousInnerWidth = Object.getOwnPropertyDescriptor(globalThis, "innerWidth");
+  const previousMatchMedia = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
+  Object.defineProperty(globalThis, "innerWidth", { configurable: true, value: width });
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    value: (query: string) => ({
+      matches: /max-width:\s*760px/.test(query) ? width <= 760 : false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }),
+  });
+  try {
+    return run();
+  } finally {
+    if (previousInnerWidth) Object.defineProperty(globalThis, "innerWidth", previousInnerWidth);
+    else delete (globalThis as { innerWidth?: number }).innerWidth;
+    if (previousMatchMedia) Object.defineProperty(globalThis, "matchMedia", previousMatchMedia);
+    else delete (globalThis as { matchMedia?: unknown }).matchMedia;
+  }
+}
+
+function renderStatistikAtViewport(width: number) {
+  windowedRollupMock.state = rollupState({ data: rollupResponse() });
+  return withViewport(width, () => renderToStaticMarkup(<StatistikView />));
+}
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
   return {
@@ -301,6 +376,26 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("USD effektiv: $0.42");
     expect(html).toContain("USD echt/metered: —");
     expect(html).not.toContain('<b class="sb-mono">—</b>');
+  });
+
+  it("marks the mobile MotherLedger cards active at the 390px Statistik viewport", () => {
+    const html = renderStatistikAtViewport(390);
+
+    expect(html).toContain('data-ledger-viewport="mobile"');
+    expect(html).toContain('aria-label="MotherLedger Desktop" aria-hidden="true"');
+    expect(html).toContain('aria-label="MotherLedger Mobile" aria-hidden="false"');
+    expect(html).toContain("Mother A");
+    expect(html).toContain("coder");
+  });
+
+  it("marks the desktop MotherLedger table active at the 1440px Statistik viewport", () => {
+    const html = renderStatistikAtViewport(1440);
+
+    expect(html).toContain('data-ledger-viewport="desktop"');
+    expect(html).toContain('aria-label="MotherLedger Desktop" aria-hidden="false"');
+    expect(html).toContain('aria-label="MotherLedger Mobile" aria-hidden="true"');
+    expect(html).toContain("Mother A");
+    expect(html).toContain("coder");
   });
 });
 

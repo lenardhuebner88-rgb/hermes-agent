@@ -15,7 +15,7 @@
  *
  * Mobil-first: the column is capped at 27rem and reads top-to-bottom at 390px.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import {
@@ -565,6 +565,25 @@ function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSor
   });
 }
 
+function useMediaQuery(query: string): boolean {
+  const readMatch = () => {
+    if (typeof globalThis.matchMedia !== "function") return false;
+    return globalThis.matchMedia(query).matches;
+  };
+  const [matches, setMatches] = useState(readMatch);
+
+  useEffect(() => {
+    if (typeof globalThis.matchMedia !== "function") return undefined;
+    const media = globalThis.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, [query]);
+
+  return matches;
+}
+
 export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
   const runners = root.runners.filter((runner) => runner.profile === worker.profile);
   if (runners.length === 0) {
@@ -589,6 +608,7 @@ export function MotherLedgerSection() {
   const [windowHours, setWindowHours] = useState<24 | 168>(168);
   const [sortKey, setSortKey] = useState<MotherLedgerSortKey>("usd");
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const isMobileLedger = useMediaQuery("(max-width: 760px)");
   const rollup = useHermesWindowedRollup({ hours: windowHours, limit: 20 });
   const roots = useMemo(
     () => sortedLedgerRoots(rollup.data?.roots ?? [], sortKey),
@@ -623,13 +643,13 @@ export function MotherLedgerSection() {
       ) : roots.length === 0 ? (
         <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
       ) : (
-        <div className="sb-ledger">
+        <div className="sb-ledger" data-ledger-viewport={isMobileLedger ? "mobile" : "desktop"}>
           {showStaleNotice ? (
             <div className="sb-kick" role="status" title={rollup.error ?? undefined}>
               Letzte Daten angezeigt
             </div>
           ) : null}
-          <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop">
+          <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop" aria-hidden={isMobileLedger}>
             <div className="sb-ledger-head" role="row">
               <span>Mother</span><span>Worker</span><span>Runs</span><span>Tokens</span><span>USD <small>inkl. Cache</small></span>
             </div>
@@ -650,7 +670,7 @@ export function MotherLedgerSection() {
               );
             }))}
           </div>
-          <div className="sb-ledger-cards" aria-label="MotherLedger Mobile">
+          <div className="sb-ledger-cards" aria-label="MotherLedger Mobile" aria-hidden={!isMobileLedger}>
             {roots.map((root) => (
               <article key={root.id} className="sb-ledger-card">
                 <div className="sb-kick">Mother</div>
