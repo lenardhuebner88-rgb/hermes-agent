@@ -1531,7 +1531,11 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
 
 def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[str]:
     """Map a diff to existing pytest modules: changed test files run
-    themselves; ``<pkg>/<name>.py`` runs ``tests/<pkg>/test_<name>.py``."""
+    themselves; ``<pkg>/<name>.py`` runs ``tests/<pkg>/test_<name>.py``.
+
+    Fallback: when the 1:1 test file is absent (monolith source files whose
+    tests are feature-named, e.g. ``gateway/run.py``), select the entire
+    ``tests/<pkg>/`` directory so regressions are caught at the merge gate."""
     modules: set[str] = set()
     for f in changed_files:
         if not f.endswith(".py"):
@@ -1550,6 +1554,11 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
+        else:
+            # Fallback: no 1:1 test file. Select the package test directory.
+            pkg_test_dir = Path("tests") / rel_dir
+            if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
+                modules.add(str(pkg_test_dir) + "/")
     return sorted(modules)
 
 

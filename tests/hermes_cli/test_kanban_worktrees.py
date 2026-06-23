@@ -1505,7 +1505,28 @@ def test_affected_pytest_module_mapping(repo):
          "web/src/x.ts", "tests/hermes_cli/test_kanban_db.py",
          "tests/stress/test_atypical_scenarios.py"],
     )
-    assert mods == ["tests/hermes_cli/test_kanban_db.py"]
+    # hermes_cli/kanban_db.py -> 1:1 match
+    # hermes_cli/no_tests.py -> no 1:1 test -> fallback to tests/hermes_cli/
+    # tests/hermes_cli/test_kanban_db.py -> runs itself
+    # tests/stress/ skipped
+    assert mods == ["tests/hermes_cli/", "tests/hermes_cli/test_kanban_db.py"]
+
+
+def test_affected_pytest_module_fallback_for_monolith(repo):
+    """A monolith source file with no 1:1 test selects the package test dir."""
+    (repo / "gateway").mkdir(parents=True)
+    (repo / "tests" / "gateway").mkdir(parents=True)
+    (repo / "tests" / "gateway" / "test_shutdown_cache_cleanup.py").write_text("")
+    mods = kwt._affected_pytest_modules(repo, ["gateway/run.py"])
+    assert mods == ["tests/gateway/"]
+
+
+def test_affected_pytest_module_no_fallback_for_root_source(repo):
+    """Root-level source without a package dir must not select tests/ root."""
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_something.py").write_text("")
+    mods = kwt._affected_pytest_modules(repo, ["run_agent.py"])
+    assert mods == []
 
 
 # ---------------------------------------------------------------------------

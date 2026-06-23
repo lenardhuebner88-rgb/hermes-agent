@@ -12,6 +12,11 @@ affected, instead of letting an empty ``$(...)`` collapse into a bare
 
 Mapping rule (changed source -> its test file): ``<pkg>/<name>.py`` maps to
 ``tests/<pkg>/test_<name>.py``; changed ``test_*.py`` files run themselves.
+When the 1:1 test file does not exist (common for monolith source files whose
+tests are named by feature, e.g. ``gateway/run.py`` -> no ``test_run.py`` but
+``tests/gateway/test_shutdown_cache_cleanup.py`` etc.), fall back to the entire
+``tests/<pkg>/`` directory so regressions are caught at the merge gate instead
+of only in the nightly full suite.
 
 This MIRRORS ``hermes_cli.kanban_worktrees._affected_pytest_modules`` on
 purpose, reimplemented with pure stdlib so it also runs in a bare worktree that
@@ -85,6 +90,15 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
+        else:
+            # Fallback: no 1:1 test file. Monolith source files like
+            # gateway/run.py or hermes_cli/kanban_db.py have feature-named
+            # tests (test_shutdown_cache_cleanup.py, test_kanban_core*.py),
+            # not test_<module>.py.  Select the entire package test directory
+            # so regressions are caught at the merge gate, not only nightly.
+            pkg_test_dir = Path("tests") / rel_dir
+            if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
+                modules.add(str(pkg_test_dir) + "/")
     return sorted(modules)
 
 

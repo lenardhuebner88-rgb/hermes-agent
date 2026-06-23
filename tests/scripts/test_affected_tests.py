@@ -52,6 +52,26 @@ def test_stress_scripts_are_skipped():
     assert out == []
 
 
+def test_monolith_source_falls_back_to_package_dir():
+    """When a source file has no 1:1 test_<name>.py (e.g. gateway/run.py),
+    the entire tests/<pkg>/ directory is selected so feature-named tests
+    still run at the merge gate."""
+    mod = _load_module()
+    # gateway/run.py has no tests/gateway/test_run.py but tests/gateway/ exists.
+    out = mod.affected_pytest_modules(REPO_ROOT, ["gateway/run.py"])
+    assert "tests/gateway/" in out
+
+
+def test_fallback_does_not_fire_for_root_source():
+    """A root-level source file (no package dir) must not select tests/
+    itself — that would be the full suite."""
+    mod = _load_module()
+    out = mod.affected_pytest_modules(REPO_ROOT, ["run_agent.py"])
+    # run_agent.py -> tests/test_run_agent.py; if absent, rel_dir is "." so
+    # pkg_test_dir == tests/ which is explicitly excluded.
+    assert "tests/" not in out
+
+
 def test_matches_kanban_worktrees_mapping():
     """The standalone copy must agree with the gate's implementation."""
     mod = _load_module()
@@ -60,6 +80,7 @@ def test_matches_kanban_worktrees_mapping():
     sample = [
         "hermes_cli/kanban_db.py",
         "hermes_cli/config.py",
+        "gateway/run.py",
         "tests/hermes_cli/test_kanban_cli.py",
         "README.md",
         "tests/stress/test_x.py",
