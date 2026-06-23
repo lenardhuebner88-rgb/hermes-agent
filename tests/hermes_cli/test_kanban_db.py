@@ -13033,6 +13033,50 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     assert totals["cost_effective_usd"] == pytest.approx(0.42)
 
 
+def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkeypatch):
+    """Windowed rollup resolves active lane provider/model once per profile."""
+    calls = []
+
+    def fake_lane_provider_model(profile, *, board=None):
+        calls.append((profile, board))
+        return f"{profile}-provider", f"{profile}-model"
+
+    monkeypatch.setattr(kb, "_lane_provider_model_for_profile", fake_lane_provider_model)
+
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="many runner root", assignee="orchestrator")
+        with kb.write_txn(conn):
+            for index in range(30):
+                profile = "coder" if index % 2 == 0 else "verifier"
+                conn.execute(
+                    "INSERT INTO task_runs "
+                    "(task_id, profile, status, outcome, started_at, ended_at, "
+                    "input_tokens, output_tokens, cost_usd) "
+                    "VALUES (?, ?, 'done', 'completed', ?, ?, 10, 2, 0.01)",
+                    (root, profile, 1000 + index, 1010 + index),
+                )
+        kb.complete_task(conn, root, summary="done")
+
+    with kb.connect() as conn:
+        result = kb.runs_windowed_rollup(
+            conn, since_hours=24, max_roots=5, board="default"
+        )
+
+    assert len(calls) == len(set(calls))
+    assert len(calls) <= 3
+    assert ("coder", "default") in calls
+    assert ("verifier", "default") in calls
+    root_row = next(row for row in result["roots"] if row["id"] == root)
+    workers = {worker["profile"]: worker for worker in root_row["workers"]}
+    assert workers["coder"]["provider"] == "coder-provider"
+    assert workers["verifier"]["provider"] == "verifier-provider"
+    runners_by_profile = {
+        runner["profile"]: runner for runner in root_row["runners"]
+    }
+    assert runners_by_profile["coder"]["provider"] == "coder-provider"
+    assert runners_by_profile["verifier"]["provider"] == "verifier-provider"
+
+
 def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
     """chain_cost_breakdown exposes actual API + NeuralWatt billing fields."""
     with kb.connect() as conn:

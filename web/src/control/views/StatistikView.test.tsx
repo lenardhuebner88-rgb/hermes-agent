@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   BudgetLedgerSection,
   ChainCostsLaneTable,
   EffizienzSection,
   ErrorTaxonomySection,
+  LedgerWorkerRunners,
   LatencySection,
+  MotherLedgerSection,
   ReliabilitySection,
   StatsMasthead,
   SubscriptionBurnSection,
@@ -19,7 +21,51 @@ import type {
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
+  WindowedRollupResponse,
+  WindowedRollupRoot,
+  WindowedRollupWorker,
 } from "../lib/schemas";
+
+type TestRollupState = {
+  data: WindowedRollupResponse | null;
+  error: string | null;
+  errorObj: null;
+  loading: boolean;
+  lastUpdated: number | null;
+  isStale: boolean;
+  reload: () => Promise<void>;
+  updateData: () => void;
+};
+
+const windowedRollupMock = vi.hoisted(() => ({
+  state: null as TestRollupState | null,
+}));
+
+vi.mock("../hooks/useControlData", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/useControlData")>();
+  return {
+    ...actual,
+    useHermesWindowedRollup: () => windowedRollupMock.state!,
+  };
+});
+
+function rollupState(over: Partial<TestRollupState> = {}): TestRollupState {
+  return {
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: false,
+    lastUpdated: null,
+    isStale: false,
+    reload: async () => undefined,
+    updateData: () => undefined,
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  windowedRollupMock.state = rollupState();
+});
 
 function profile(over: Partial<ReliabilityProfile> = {}): ReliabilityProfile {
   return {
@@ -107,6 +153,75 @@ function costRow(over: Partial<CostProfileRow> = {}): CostProfileRow {
   };
 }
 
+function rollupWorker(over: Partial<WindowedRollupWorker> = {}): WindowedRollupWorker {
+  return {
+    profile: "coder",
+    input_tokens: 1000,
+    output_tokens: 200,
+    cost_usd: 0,
+    actual_cost_usd: 0,
+    cost_usd_equivalent: 0.42,
+    api_equivalent_usd: 0.42,
+    cost_effective_usd: 0.42,
+    billing_neuralwatt_kwh: 0,
+    billing_neuralwatt_cost_usd: 0,
+    run_count: 1,
+    provider: "anthropic",
+    model: "claude-opus-4-8",
+    ...over,
+  };
+}
+
+function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot {
+  const worker = rollupWorker();
+  return {
+    id: "t_mother",
+    title: "Mother A",
+    status: "done",
+    assignee: "orchestrator",
+    created_at: 100,
+    started_at: 110,
+    completed_at: 200,
+    ended_at: 200,
+    providers: ["anthropic"],
+    cost_usd: 0,
+    cost_usd_equivalent: 0.42,
+    cost_effective_usd: 0.42,
+    billing_mode: "subscription_included",
+    neuralwatt: null,
+    runtime_seconds: 90,
+    workers: [worker],
+    runners: [{
+      id: 501,
+      task_id: "t_worker",
+      profile: "coder",
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      input_tokens: 1000,
+      output_tokens: 200,
+      cost_usd: 0,
+      cost_usd_equivalent: 0.42,
+      cost_effective_usd: 0.42,
+      billing_mode: "subscription_included",
+      neuralwatt: null,
+      started_at: 120,
+      ended_at: 180,
+      runtime_seconds: 60,
+    }],
+    ...over,
+  };
+}
+
+function rollupResponse(root: WindowedRollupRoot = rollupRoot()): WindowedRollupResponse {
+  return {
+    schema: "kanban-windowed-rollup-v1",
+    since_hours: 168,
+    now: 200,
+    completed_roots: 1,
+    roots: [root],
+  };
+}
+
 describe("ChainCostsLaneTable", () => {
   it("zeigt Ist-$ und NeuralWatt-kWh-Basis aus realen Backend-Feldern", () => {
     const costs: ChainCostsResponse = {
@@ -144,6 +259,48 @@ describe("ChainCostsLaneTable", () => {
     expect(html).toContain("$0.15");
     expect(html).toContain("API-Äquivalent");
     expect(html).toContain("0.0300 kWh × $5.00/kWh");
+  });
+});
+
+describe("MotherLedgerSection", () => {
+  it("zeigt den harten Fehlerzustand nur wenn noch keine Rollup-Daten vorliegen", () => {
+    windowedRollupMock.state = rollupState({ data: null, error: "timeout", loading: false });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).toContain("Kosten konnten nicht geladen werden");
+    expect(html).not.toContain("Mother A");
+    expect(html).not.toContain("Letzte Daten angezeigt");
+  });
+
+  it("rendert letzte gute Daten weiter und markiert sie bei transientem Fehler", () => {
+    windowedRollupMock.state = rollupState({
+      data: rollupResponse(),
+      error: "timeout",
+      isStale: true,
+      lastUpdated: 1782070000,
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).toContain("Mother A");
+    expect(html).toContain("coder");
+    expect(html).toContain("$0.42");
+    expect(html).toContain("Letzte Daten angezeigt");
+    expect(html).not.toContain("Kosten konnten nicht geladen werden");
+  });
+
+  it("zeigt in Läufer-Zeilen den effektiven USD-Wert statt nur metered cost_usd", () => {
+    const worker = rollupWorker();
+    const root = rollupRoot({ workers: [worker] });
+
+    const html = renderToStaticMarkup(<LedgerWorkerRunners root={root} worker={worker} />);
+
+    expect(html).toContain("#501");
+    expect(html).toContain("$0.42");
+    expect(html).toContain("USD effektiv: $0.42");
+    expect(html).toContain("USD echt/metered: —");
+    expect(html).not.toContain('<b class="sb-mono">—</b>');
   });
 });
 
