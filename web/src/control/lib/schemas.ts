@@ -345,6 +345,55 @@ export const ChainCostsResponseSchema = z.object({
 export type ChainCostsLane = z.infer<typeof ChainCostsLaneSchema>;
 export type ChainCostsResponse = z.infer<typeof ChainCostsResponseSchema>;
 
+// GET /runs/windowed-rollup — completed Mother roots with Worker + Läufer cost detail.
+const WindowedRollupWorkerSchema = ChainCostsLaneSchema.extend({
+  provider: z.string().nullable().catch(null),
+  model: z.string().nullable().catch(null),
+});
+
+const WindowedRollupRunnerSchema = z.object({
+  id: z.coerce.number().catch(0),
+  task_id: z.coerce.string().catch(""),
+  profile: z.string().catch("unbekannt"),
+  provider: z.string().nullable().catch(null),
+  model: z.string().nullable().catch(null),
+  input_tokens: z.coerce.number().nullable().catch(null),
+  output_tokens: z.coerce.number().nullable().catch(null),
+  cost_usd: nullableNumber,
+  cost_usd_equivalent: nullableNumber,
+  cost_effective_usd: nullableNumber,
+  started_at: z.coerce.number().nullable().catch(null),
+  ended_at: z.coerce.number().nullable().catch(null),
+});
+
+const WindowedRollupRootSchema = z.object({
+  id: z.coerce.string().catch(""),
+  title: z.string().nullable().catch(null),
+  status: z.string().nullable().catch(null),
+  assignee: z.string().nullable().catch(null),
+  created_at: z.coerce.number().nullable().catch(null),
+  completed_at: z.coerce.number().nullable().catch(null),
+  ended_at: z.coerce.number().nullable().catch(null),
+  providers: z.array(z.string()).catch([]),
+  cost_usd: nullableNumber,
+  cost_usd_equivalent: nullableNumber,
+  cost_effective_usd: nullableNumber,
+  workers: z.array(WindowedRollupWorkerSchema).catch([]),
+  runners: z.array(WindowedRollupRunnerSchema).catch([]),
+});
+
+export const WindowedRollupResponseSchema = z.object({
+  schema: z.string().catch("kanban-windowed-rollup-v1"),
+  since_hours: z.coerce.number().catch(168),
+  now: z.coerce.number().catch(() => Math.floor(Date.now() / 1000)),
+  completed_roots: z.coerce.number().catch(0),
+  roots: z.array(WindowedRollupRootSchema).catch([]),
+});
+export type WindowedRollupWorker = z.infer<typeof WindowedRollupWorkerSchema>;
+export type WindowedRollupRunner = z.infer<typeof WindowedRollupRunnerSchema>;
+export type WindowedRollupRoot = z.infer<typeof WindowedRollupRootSchema>;
+export type WindowedRollupResponse = z.infer<typeof WindowedRollupResponseSchema>;
+
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),
   source: z.string().catch("unknown"),

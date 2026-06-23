@@ -189,6 +189,46 @@
 [data-stats-broadsheet] .sb-subburn-anti { background: rgba(166, 98, 10, .08); }
 [data-stats-broadsheet] .sb-subburn-anti b { color: var(--sb-amber); }
 
+/* ── MotherLedger (responsive, no mobile horizontal scroll table) ─────────── */
+[data-stats-broadsheet] .sb-ledger-controls { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
+[data-stats-broadsheet] .sb-chipset { display: flex; flex-wrap: wrap; gap: 6px; }
+[data-stats-broadsheet] .sb-chipset button {
+  font-family: var(--sb-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  border: 1px solid var(--sb-rule2); background: transparent; color: var(--sb-ink2); padding: 5px 8px;
+}
+[data-stats-broadsheet] .sb-chipset button.is-active { background: var(--sb-ink); color: var(--sb-paper); border-color: var(--sb-ink); }
+[data-stats-broadsheet] .sb-ledger { min-width: 0; }
+[data-stats-broadsheet] .sb-ledger-table { display: none; }
+[data-stats-broadsheet] .sb-ledger-cards { display: grid; gap: 12px; }
+[data-stats-broadsheet] .sb-ledger-card { border-top: 2px solid var(--sb-ink); padding-top: 9px; min-width: 0; }
+[data-stats-broadsheet] .sb-ledger-card h3 { font-family: var(--sb-disp); font-size: 18px; line-height: 1.1; margin: 4px 0 10px; color: var(--sb-ink); }
+[data-stats-broadsheet] .sb-ledger-worker-card { border-top: 1px solid var(--sb-rule); }
+[data-stats-broadsheet] .sb-ledger-worker-card > button {
+  display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 4px 10px; width: 100%;
+  padding: 9px 0; text-align: left; color: var(--sb-ink); background: transparent; border: 0;
+}
+[data-stats-broadsheet] .sb-ledger-worker-card small { grid-column: 1 / -1; color: var(--sb-ink3); }
+[data-stats-broadsheet] .sb-ledger-usd { color: var(--sb-navy); }
+[data-stats-broadsheet] .sb-ledger-usd small { display: block; font-size: 9px; color: var(--sb-ink3); font-weight: 400; }
+[data-stats-broadsheet] .sb-ledger-runners { margin: 0 0 10px; padding: 7px 9px; background: rgba(21, 53, 95, .045); color: var(--sb-ink2); }
+[data-stats-broadsheet] .sb-ledger-runner { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content max-content; gap: 8px; align-items: baseline; padding: 4px 0; font-size: 12px; }
+[data-stats-broadsheet] .sb-ledger-runner span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-width: 760px) {
+  [data-stats-broadsheet] .sb-ledger-cards { display: none; }
+  [data-stats-broadsheet] .sb-ledger-table { display: block; border-top: 2px solid var(--sb-ink); }
+  [data-stats-broadsheet] .sb-ledger-head,
+  [data-stats-broadsheet] .sb-ledger-row {
+    display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, .9fr) 70px 110px 120px;
+    gap: 10px; align-items: center;
+  }
+  [data-stats-broadsheet] .sb-ledger-head { padding: 8px 0; font-family: var(--sb-mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--sb-ink3); border-bottom: 1px solid var(--sb-rule2); }
+  [data-stats-broadsheet] .sb-ledger-row { width: 100%; padding: 9px 0; border: 0; border-bottom: 1px solid var(--sb-rule); background: transparent; text-align: left; color: var(--sb-ink); }
+  [data-stats-broadsheet] .sb-ledger-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  [data-stats-broadsheet] .sb-ledger-row span:nth-child(n+3) { text-align: right; }
+  [data-stats-broadsheet] .sb-ledger-mother { font-weight: 600; }
+  [data-stats-broadsheet] .sb-ledger-runners { margin-left: calc(180px + 10px); }
+}
+
 /* ── Zeit-Trend rows (compact day-by-day burn, reuses sb-subburn-row layout) ── */
 [data-stats-broadsheet] .sb-subburn-trend-row {
   display: grid;

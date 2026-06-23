@@ -22,12 +22,12 @@ import {
   useAccountUsage,
   useBoardStats,
   useChainCompletion,
-  useHermesChainCosts,
   useHermesReliability,
   useHermesRunsCosts,
   useHermesRunsDaily,
   useHermesRunsIssues,
   useHermesRunSummary,
+  useHermesWindowedRollup,
   useHermesSubscriptionBurn,
 } from "../hooks/useControlData";
 import type {
@@ -37,8 +37,10 @@ import type {
   IssueGroup,
   ReliabilityProfile,
   RunsDailyPoint,
-  RunSummaryRoot,
   SubscriptionTokenBurnResponse,
+  WindowedRollupRoot,
+  WindowedRollupRunner,
+  WindowedRollupWorker,
 } from "../lib/schemas";
 import {
   BroadsheetShell,
@@ -405,8 +407,8 @@ export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnR
 }
 
 // ── Kosten pro Kette ─────────────────────────────────────────────────────────
-// Tabelle der abgeschlossenen Ketten (aus RunSummary.roots). Bei Auswahl einer
-// Zeile wird die by_lane-Aufschlüsselung via useHermesChainCosts geladen.
+// Detailtabelle für API-Antworten aus chain-costs; bleibt als kleine
+// Anzeige-Hilfe für Tests/Diagnose, der Statistik-Tab nutzt das MotherLedger.
 
 function fmtUsd(value: number | null | undefined): string {
   return value != null && value > 0 ? `$${value.toFixed(2)}` : "—";
@@ -497,116 +499,139 @@ export function ChainCostsLaneTable({ costs }: { costs: ChainCostsResponse }) {
   );
 }
 
-function ChainCostsRow({
-  root,
-  selected,
-  onSelect,
-}: {
-  root: RunSummaryRoot;
-  selected: boolean;
-  onSelect: (id: string) => void;
-}) {
-  const chainCosts = useHermesChainCosts(selected ? root.id : null);
-  const totalTokens = chainCosts.data
-    ? chainCosts.data.totals.input_tokens + chainCosts.data.totals.output_tokens
-    : null;
+type MotherLedgerSortKey = "usd" | "tokens" | "runs";
 
-  // Zeige cost_effective_usd wenn vorhanden, sonst cost_usd; null = kein Wert.
-  const effectiveForRoot = formatEffectiveCost({
-    cost_usd: root.cost_usd ?? 0,
-    cost_effective_usd: root.cost_effective_usd ?? 0,
-    tokens: totalTokens ?? 0,
+function workerTokens(worker: WindowedRollupWorker): number {
+  return worker.input_tokens + worker.output_tokens;
+}
+
+function rootRuns(root: WindowedRollupRoot): number {
+  return root.workers.reduce((sum, worker) => sum + worker.run_count, 0);
+}
+
+function rootTokens(root: WindowedRollupRoot): number {
+  return root.workers.reduce((sum, worker) => sum + workerTokens(worker), 0);
+}
+
+function rootUsd(root: WindowedRollupRoot): number {
+  return root.cost_effective_usd ?? root.cost_usd ?? 0;
+}
+
+function runnerUsd(runner: WindowedRollupRunner): number {
+  return runner.cost_effective_usd ?? runner.cost_usd ?? 0;
+}
+
+function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSortKey): WindowedRollupRoot[] {
+  return [...roots].sort((a, b) => {
+    const byMetric = sortKey === "tokens"
+      ? rootTokens(b) - rootTokens(a)
+      : sortKey === "runs"
+        ? rootRuns(b) - rootRuns(a)
+        : rootUsd(b) - rootUsd(a);
+    return byMetric || (b.completed_at ?? 0) - (a.completed_at ?? 0) || a.id.localeCompare(b.id);
   });
-  const costDisplay = root.cost_effective_usd != null || root.cost_usd != null
-    ? effectiveForRoot
-    : null;
+}
 
+function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
+  const runners = root.runners.filter((runner) => runner.profile === worker.profile);
+  if (runners.length === 0) {
+    return <div className="sb-ledger-runners sb-mono">keine Läuferdaten</div>;
+  }
   return (
-    <div className="border-b border-[var(--hc-border)] last:border-0">
-      <button
-        type="button"
-        className="flex w-full min-w-0 items-start justify-between gap-2 py-2 text-left text-xs hover:bg-[var(--hc-hover)] active:bg-[var(--hc-hover)]"
-        onClick={() => onSelect(root.id)}
-        aria-expanded={selected}
-      >
-        <span className="min-w-0 flex-1 truncate text-[var(--hc-text)]">
-          {root.title ?? root.id}
-        </span>
-        <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text-soft)]">
-          {totalTokens != null ? fmtTokens(totalTokens) : "—"}
-        </span>
-        <span className="hc-mono shrink-0 tabular-nums text-[var(--hc-text)]">
-          {costDisplay == null ? "—" : costDisplay.estimated ? (
-            <span title={de.ketten.costEstimatedTooltip}>{costDisplay.text}</span>
-          ) : costDisplay.text}
-        </span>
-        <span
-          aria-hidden="true"
-          className="shrink-0 text-[var(--hc-text-dim)] transition-transform"
-          style={{ transform: selected ? "rotate(90deg)" : "rotate(0deg)" }}
-        >
-          ›
-        </span>
-      </button>
-      {selected ? (
-        <div className="pb-2">
-          {chainCosts.loading && !chainCosts.data ? (
-            <p className="text-[11px] text-[var(--hc-text-dim)]">lädt …</p>
-          ) : chainCosts.error ? (
-            <p className="text-[11px] text-red-600">{de.ketten.chainCostsLoadError}</p>
-          ) : chainCosts.data ? (
-            <ChainCostsLaneTable costs={chainCosts.data} />
-          ) : null}
+    <div className="sb-ledger-runners">
+      {runners.map((runner) => (
+        <div key={runner.id} className="sb-ledger-runner">
+          <span className="sb-mono">#{runner.id}</span>
+          <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
+          <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
+          <b className="sb-mono">{fmtUsd(runnerUsd(runner))}</b>
         </div>
-      ) : null}
+      ))}
     </div>
   );
 }
 
-export function ChainCostsSection({
-  roots,
-  totalCostEffectiveUsd,
-}: {
-  roots: RunSummaryRoot[];
-  totalCostEffectiveUsd: number | null;
-}) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  function handleSelect(id: string) {
-    setSelectedId((prev) => (prev === id ? null : id));
-  }
-
-  // Gesamt-Kennzahl für den Section-Meta (zeigt geschätzten Gesamtwert wenn vorhanden).
-  const totalEff =
-    totalCostEffectiveUsd != null
-      ? formatEffectiveCost({ cost_usd: 0, cost_effective_usd: totalCostEffectiveUsd, tokens: 1 })
-      : null;
-  const metaText = totalEff && totalEff.text !== "—"
-    ? `${de.ketten.chainCostsMeta} · ${de.ketten.chainCostsTotal} ${totalEff.text}`
-    : de.ketten.chainCostsMeta;
+export function MotherLedgerSection() {
+  const [windowHours, setWindowHours] = useState<24 | 168>(168);
+  const [sortKey, setSortKey] = useState<MotherLedgerSortKey>("usd");
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const rollup = useHermesWindowedRollup({ hours: windowHours, limit: 20 });
+  const roots = useMemo(
+    () => sortedLedgerRoots(rollup.data?.roots ?? [], sortKey),
+    [rollup.data, sortKey],
+  );
+  const totalUsd = roots.reduce((sum, root) => sum + rootUsd(root), 0);
+  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD API-equiv · ${fmtUsd(totalUsd)}`;
+  const toggleWorker = (rootId: string, profile: string) => {
+    const key = `${rootId}:${profile}`;
+    setOpenKey((prev) => (prev === key ? null : key));
+  };
 
   return (
     <>
-      <SectionRule title={de.ketten.chainCostsTitle} meta={metaText} />
-      {roots.length === 0 ? (
+      <SectionRule title="MotherLedger" meta={metaText} />
+      <div className="sb-ledger-controls" aria-label="MotherLedger Controls">
+        <div className="sb-chipset" aria-label="Fenster">
+          <button type="button" className={windowHours === 168 ? "is-active" : ""} onClick={() => setWindowHours(168)}>7T</button>
+          <button type="button" className={windowHours === 24 ? "is-active" : ""} onClick={() => setWindowHours(24)}>24Std</button>
+        </div>
+        <div className="sb-chipset" aria-label="Sortierung">
+          <button type="button" className={sortKey === "usd" ? "is-active" : ""} onClick={() => setSortKey("usd")}>USD</button>
+          <button type="button" className={sortKey === "tokens" ? "is-active" : ""} onClick={() => setSortKey("tokens")}>Tokens</button>
+          <button type="button" className={sortKey === "runs" ? "is-active" : ""} onClick={() => setSortKey("runs")}>Runs</button>
+        </div>
+      </div>
+      {rollup.loading && !rollup.data ? (
+        <Verdict tone="calm">lädt …</Verdict>
+      ) : rollup.error ? (
+        <Verdict tone="warn">{de.ketten.chainCostsLoadError}</Verdict>
+      ) : roots.length === 0 ? (
         <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
       ) : (
-        <div className="hc-surface-card overflow-hidden rounded-lg border border-[var(--hc-border)] px-3">
-          {/* Kopfzeile */}
-          <div className="flex min-w-0 items-center gap-2 border-b border-[var(--hc-border)] py-1.5 text-[10px] uppercase tracking-wider text-[var(--hc-text-dim)]">
-            <span className="flex-1">{de.ketten.chainCostsColChain}</span>
-            <span className="hc-mono w-16 text-right">{de.ketten.chainCostsColTokens}</span>
-            <span className="hc-mono w-16 text-right">{de.ketten.chainCostsColCost}</span>
-            <span className="w-4" />
+        <div className="sb-ledger">
+          <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop">
+            <div className="sb-ledger-head" role="row">
+              <span>Mother</span><span>Worker</span><span>Runs</span><span>Tokens</span><span>USD <small>API-equiv</small></span>
+            </div>
+            {roots.map((root) => root.workers.map((worker, index) => {
+              const key = `${root.id}:${worker.profile}`;
+              const open = openKey === key;
+              return (
+                <div key={key} className="sb-ledger-pair">
+                  <button type="button" className="sb-ledger-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open}>
+                    <span className="sb-ledger-mother">{index === 0 ? (root.title ?? root.id) : ""}</span>
+                    <span>{worker.profile}</span>
+                    <span className="sb-mono">{worker.run_count}</span>
+                    <span className="sb-mono">{fmtTokens(workerTokens(worker))}</span>
+                    <span className="sb-mono sb-ledger-usd"><b>{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b><small>API-equiv</small></span>
+                  </button>
+                  {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
+                </div>
+              );
+            }))}
           </div>
-          {roots.map((r) => (
-            <ChainCostsRow
-              key={r.id}
-              root={r}
-              selected={selectedId === r.id}
-              onSelect={handleSelect}
-            />
-          ))}
+          <div className="sb-ledger-cards" aria-label="MotherLedger Mobile">
+            {roots.map((root) => (
+              <article key={root.id} className="sb-ledger-card">
+                <div className="sb-kick">Mother</div>
+                <h3>{root.title ?? root.id}</h3>
+                {root.workers.map((worker) => {
+                  const key = `${root.id}:${worker.profile}`;
+                  const open = openKey === key;
+                  return (
+                    <div key={key} className="sb-ledger-worker-card">
+                      <button type="button" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open}>
+                        <span>{worker.profile}</span>
+                        <b className="sb-mono">{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b>
+                        <small>Runs {worker.run_count} · {fmtTokens(workerTokens(worker))} Tokens · USD API-equiv</small>
+                      </button>
+                      {open ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
+                    </div>
+                  );
+                })}
+              </article>
+            ))}
+          </div>
         </div>
       )}
     </>
@@ -631,8 +656,6 @@ export function StatistikView() {
   const issueGroups = useMemo(() => issues.data?.issues ?? [], [issues.data]);
   const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
-  const summaryRoots = useMemo(() => summary.data?.roots ?? [], [summary.data]);
-  const totalCostEffectiveUsd = summary.data?.total_cost_effective_usd ?? null;
 
   const stale = reliability.isStale || daily.isStale;
   const hasLoadError = Boolean(reliability.error || daily.error);
@@ -669,7 +692,7 @@ export function StatistikView() {
       />
 
       {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
-      <ChainCostsSection roots={summaryRoots} totalCostEffectiveUsd={totalCostEffectiveUsd} />
+      <MotherLedgerSection />
 
       <BroadsheetFooter left={de.stats.footLeft(fmtClock(now))} right="/control/statistik" />
     </BroadsheetShell>

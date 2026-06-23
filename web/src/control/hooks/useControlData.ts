@@ -48,11 +48,12 @@ import {
   StrategistCountSchema,
   StrategistLastRunsSchema,
   DispositionListResponseSchema,
+  WindowedRollupResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
-import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse } from "../lib/schemas";
+import type { BacklogDetail, BacklogResponse, OrchestrationDetail, OrchestrationBacklogResponse, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, RunsCostsResponse, SubscriptionTokenBurnResponse, ChainCompletionResponse, ChainCostsResponse, BoardStatsResponse, RunsIssuesResponse, TaskDetailResponse, DecisionQueueResponse, EpicsResponse, PlanSpecsResponse, FlowGateResponse, PlanSpecDetailResponse, WindowedRollupResponse } from "../lib/schemas";
 import { isActionable } from "../lib/autoresearch";
 import { proposalNeedsManualReview } from "../lib/autoresearchDecisionGuide";
 import { buildAgentOpsSnapshot, type AgentOpsSnapshot } from "../lib/agentOps";
@@ -1437,6 +1438,20 @@ export function useHermesRunSummary() {
       RunSummaryResponseSchema,
       await fetchJSON<unknown>("/api/plugins/kanban/runs/summary?since_hours=24"),
       "runs/summary",
+    ),
+    20000,
+  );
+}
+
+export function useHermesWindowedRollup({ hours, limit }: { hours: number; limit: number }) {
+  const safeHours = Math.max(1, Math.min(24 * 90, Math.round(hours)));
+  const safeLimit = Math.max(1, Math.min(100, Math.round(limit)));
+  return usePolling<WindowedRollupResponse>(
+    `runs/windowed-rollup:${safeHours}:${safeLimit}`,
+    async () => parseOrThrow(
+      WindowedRollupResponseSchema,
+      await fetchJSON<unknown>(`/api/plugins/kanban/runs/windowed-rollup?hours=${safeHours}&limit=${safeLimit}`),
+      "runs/windowed-rollup",
     ),
     20000,
   );

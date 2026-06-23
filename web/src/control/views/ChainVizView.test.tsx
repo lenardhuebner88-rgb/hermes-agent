@@ -239,8 +239,8 @@ describe("ChainNodeCard cost badge", () => {
   });
 });
 
-// ── Statistik-Tab: ChainCostsSection source-contract ────────────────────────
-describe("ChainCostsSection source contract", () => {
+// ── Statistik-Tab: MotherLedger source-contract ─────────────────────────────
+describe("MotherLedger source contract", () => {
   const statsSrc = readFileSync(
     fileURLToPath(new URL("./StatistikView.tsx", import.meta.url)),
     "utf8",
@@ -250,21 +250,25 @@ describe("ChainCostsSection source contract", () => {
     "utf8",
   );
 
-  it("StatistikView uses useHermesChainCosts hook", () => {
-    expect(statsSrc).toMatch(/useHermesChainCosts/);
+  it("StatistikView uses the windowed rollup hook", () => {
+    expect(statsSrc).toMatch(/useHermesWindowedRollup/);
   });
 
-  it("StatistikView renders ChainCostsSection", () => {
-    expect(statsSrc).toMatch(/ChainCostsSection/);
+  it("StatistikView renders MotherLedger instead of the old costs section", () => {
+    expect(statsSrc).toMatch(/MotherLedgerSection/);
+    expect(statsSrc).not.toMatch(/<ChainCostsSection/);
   });
 
-  it("hook fetches chain-costs endpoint", () => {
-    expect(hooksSrc).toMatch(/chain-costs/);
+  it("hook fetches the windowed-rollup endpoint", () => {
+    expect(hooksSrc).toMatch(/runs\/windowed-rollup/);
   });
 
-  it("StatistikView uses summaryRoots from useHermesRunSummary", () => {
-    expect(statsSrc).toMatch(/summaryRoots/);
-    expect(statsSrc).toMatch(/summary\.data/);
+  it("renders required controls and USD API-equiv labels", () => {
+    expect(statsSrc).toMatch(/7T/);
+    expect(statsSrc).toMatch(/24Std/);
+    expect(statsSrc).toMatch(/USD API-equiv/);
+    expect(statsSrc).toMatch(/sortKey === "tokens"/);
+    expect(statsSrc).toMatch(/sortKey === "runs"/);
   });
 });
 
