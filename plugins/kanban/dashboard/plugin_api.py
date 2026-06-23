@@ -361,6 +361,11 @@ _RESULT_SUMMARY_LIMIT = 8 * 1024
 _RESULT_METADATA_LIMIT = 16 * 1024
 _RESULT_PREVIEW_LIMIT = 160
 _DELIVERABLES_MAX_FILES = 50
+# Bound dashboard work for pathological worker outputs: a task can preserve
+# thousands of artifacts, and /runs/recent-results calls this helper for many
+# rows.  Keep RESULT.md deterministic, then stop walking after a generous cap
+# instead of letting one task monopolize the control API.
+_DELIVERABLES_MAX_SCANNED = 5_000
 _DELIVERABLE_EXCERPT_LIMIT = 600
 
 
@@ -582,15 +587,36 @@ def _list_task_deliverables(task_id: str) -> list[dict[str, Any]]:
     root, root_resolved = _safe_deliverables_root(task_id)
     if not root.is_dir():
         return []
+
     items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: Path) -> bool:
+        item = _deliverable_dict(candidate, root, root_resolved, task_id)
+        if item is None:
+            return False
+        rel = str(item["relative_path"])
+        if rel in seen:
+            return False
+        seen.add(rel)
+        items.append(item)
+        return True
+
+    # Preserve the conventional primary handoff even when a worker dumps a very
+    # large artifact tree before/around it.
+    add_candidate(root / "RESULT.md")
+
+    scanned = 0
     try:
         candidates = root.rglob("*")
     except OSError:
-        return []
+        candidates = iter(())
     for candidate in candidates:
-        item = _deliverable_dict(candidate, root, root_resolved, task_id)
-        if item is not None:
-            items.append(item)
+        scanned += 1
+        add_candidate(candidate)
+        if scanned >= _DELIVERABLES_MAX_SCANNED or len(items) >= _DELIVERABLES_MAX_FILES:
+            break
+
     items.sort(key=lambda item: (0 if item["relative_path"] == "RESULT.md" else 1, item["relative_path"].lower()))
     return items[:_DELIVERABLES_MAX_FILES]
 

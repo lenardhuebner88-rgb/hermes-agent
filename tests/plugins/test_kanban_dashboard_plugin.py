@@ -2840,6 +2840,35 @@ def test_task_deliverables_rejects_traversal_and_skips_symlinks_outside(client, 
     assert "do not serve" not in escaped.text
 
 
+def test_task_deliverables_caps_large_artifact_trees_and_keeps_result_md(
+    client,
+    kanban_home,
+    monkeypatch,
+):
+    plugin_api = sys.modules["hermes_dashboard_plugin_kanban_test"]
+
+    task = client.post("/api/plugins/kanban/tasks", json={"title": "many deliverables"}).json()["task"]
+    root = kanban_home / "reports" / "by-task" / task["id"]
+    root.mkdir(parents=True)
+    (root / "RESULT.md").write_text("primary result", encoding="utf-8")
+    for idx in range(20):
+        (root / f"artifact-{idx:02d}.txt").write_text(str(idx), encoding="utf-8")
+
+    monkeypatch.setattr(plugin_api, "_DELIVERABLES_MAX_SCANNED", 4)
+    monkeypatch.setattr(plugin_api, "_DELIVERABLES_MAX_FILES", 4)
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task['id']}/deliverables")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    assert data["count"] == 4
+    assert data["deliverables"][0]["relative_path"] == "RESULT.md"
+    assert all(
+        item["relative_path"].startswith(("RESULT.md", "artifact-"))
+        for item in data["deliverables"]
+    )
+
+
 def test_recent_results_includes_preserved_deliverables(client, kanban_home):
     now = int(time.time())
     conn = kb.connect()
