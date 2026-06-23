@@ -1323,6 +1323,111 @@ def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_ho
     assert only["cost_effective_usd"] == pytest.approx(0.42)
 
 
+def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(client, kanban_home):
+    """S1: windowed rollup ranks roots by real+equivalent cost and keeps
+    worker/runner provider+model evidence attached."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="mother rollup", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "metered worker", "assignee": "coder", "parents": []},
+                {"title": "subscription worker", "assignee": "claude-cli", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        worker_a, worker_b = child_ids
+        low = kb.create_task(conn, title="lower cost root", assignee="coder")
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                worker_a,
+                profile="coder",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.20,
+                metadata={"provider": "openrouter", "model": "qwen/qwen3-coder"},
+            )
+            _insert_cost_run_with_meta(
+                conn,
+                worker_b,
+                profile="claude-cli",
+                input_tokens=900,
+                output_tokens=180,
+                cost_usd=0.0,
+                metadata={
+                    "provider": "anthropic",
+                    "model": "claude-opus-4-8",
+                    "cost_usd_equivalent": 0.42,
+                },
+            )
+            _insert_cost_run_with_meta(
+                conn,
+                low,
+                profile="coder",
+                input_tokens=50,
+                output_tokens=10,
+                cost_usd=0.05,
+                metadata={"provider": "openrouter", "model": "qwen/qwen3-coder"},
+            )
+        kb.complete_task(conn, worker_a, summary="metered done")
+        kb.complete_task(conn, worker_b, summary="subscription done")
+        kb.complete_task(conn, root, summary="merged")
+        kb.complete_task(conn, low, summary="smaller done")
+
+    response = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24&limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["schema"] == "kanban-windowed-rollup-v1"
+    assert data["since_hours"] == 24
+    assert data["roots"][0]["id"] == root
+
+    top = data["roots"][0]
+    assert top["cost_usd"] == pytest.approx(0.20)
+    assert top["cost_usd_equivalent"] == pytest.approx(0.42)
+    assert top["cost_effective_usd"] == pytest.approx(0.62)
+    assert top["providers"] == ["anthropic", "openrouter"]
+
+    workers = {w["profile"]: w for w in top["workers"]}
+    assert workers["coder"]["provider"] == "openrouter"
+    assert workers["coder"]["model"] == "qwen/qwen3-coder"
+    assert workers["claude-cli"]["provider"] == "anthropic"
+    assert workers["claude-cli"]["model"] == "claude-opus-4-8"
+
+    worker_a_runs = [r for r in top["runners"] if r["task_id"] == worker_a]
+    worker_b_runs = [r for r in top["runners"] if r["task_id"] == worker_b]
+    assert any(r["cost_effective_usd"] == pytest.approx(0.20) for r in worker_a_runs)
+    assert any(r["cost_usd_equivalent"] == pytest.approx(0.42) for r in worker_b_runs)
+    assert any(r["cost_effective_usd"] == pytest.approx(0.42) for r in worker_b_runs)
+
+
+def test_runs_windowed_rollup_keeps_unknown_costs_null(client, kanban_home):
+    """S1: missing price evidence remains unknown/null instead of fake $0."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="unknown cost", assignee="coder")
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                root,
+                profile="coder",
+                input_tokens=12,
+                output_tokens=3,
+                cost_usd=None,
+                metadata={"provider": "unknown", "model": "mystery"},
+            )
+        kb.complete_task(conn, root, summary="done")
+
+    data = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24").json()
+    only = next(r for r in data["roots"] if r["id"] == root)
+    assert only["cost_usd"] is None
+    assert only["cost_usd_equivalent"] is None
+    assert only["cost_effective_usd"] is None
+    assert only["runners"][0]["cost_effective_usd"] is None
+
+
 def test_runs_summary_empty_window(client):
     """K7: with nothing completed, the summary is well-formed and empty."""
     data = client.get("/api/plugins/kanban/runs/summary?since_hours=1").json()

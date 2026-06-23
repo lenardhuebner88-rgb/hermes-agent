@@ -12981,6 +12981,20 @@ def _insert_run_cost_with_meta(conn, task_id, *, profile, input_tokens, output_t
     )
 
 
+def test_claude_opus_equivalent_uses_anthropic_model_label_prices():
+    """G5: Claude equivalent cost is priced from the model label including cache read."""
+    equivalent = kb._equiv_from_tokens(
+        None,
+        "claude-opus-4-8",
+        131_747,
+        4_793,
+        cache_read=350_208,
+    )
+    assert equivalent is not None
+    assert equivalent == pytest.approx(0.953664)
+    assert equivalent > 0
+
+
 def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
     by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""

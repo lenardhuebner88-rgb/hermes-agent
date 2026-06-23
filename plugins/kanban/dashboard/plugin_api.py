@@ -4746,6 +4746,27 @@ def get_runs_subscription_burn(
         conn.close()
 
 
+@router.get("/runs/windowed-rollup")
+def get_runs_windowed_rollup(
+    hours: int = Query(24 * 7, ge=1, le=24 * 90),
+    limit: int = Query(20, ge=1, le=100),
+    board: Optional[str] = Query(None),
+):
+    """S1: root→worker→runner rollup over completed sink tasks.
+
+    Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
+    captured as a run id.
+    """
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return kanban_db.runs_windowed_rollup(
+            conn, since_hours=hours, max_roots=limit, board=board
+        )
+    finally:
+        conn.close()
+
+
 @router.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),

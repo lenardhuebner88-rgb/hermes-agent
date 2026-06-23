@@ -5276,9 +5276,13 @@ def _lookup_model_price_per_mtok(
         override = _PRICE_OVERRIDES_PER_MTOK.get(str(model).lower())
     if override is not None:
         return override
+    lookup_provider = provider
+    model_label = str(model)
+    if not lookup_provider and model_label.lower().startswith("claude-"):
+        lookup_provider = "anthropic"
     try:
         from agent.models_dev import get_model_info
-        info = get_model_info(provider or "", str(model))
+        info = get_model_info(lookup_provider or "", model_label)
     except Exception:
         return None
     if info is None or not info.has_cost_data():
@@ -22857,4 +22861,214 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         "root_id": root_id,
         "totals": totals,
         "by_lane": by_lane,
+    }
+
+
+def _run_meta_dict(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _profile_provider_model_from_runs(
+    conn: sqlite3.Connection,
+    member_ids: list[str],
+    profile: Optional[str],
+    *,
+    board: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    provider, model = _lane_provider_model_for_profile(profile, board=board)
+    if not member_ids:
+        return provider, model
+    placeholders = ",".join("?" for _ in member_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT metadata
+            FROM task_runs
+            WHERE task_id IN ({placeholders}) AND profile IS ?
+            ORDER BY COALESCE(ended_at, started_at, 0) DESC, id DESC
+            """,
+            [*member_ids, profile],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return provider, model
+    for row in rows:
+        meta = _run_meta_dict(row["metadata"])
+        provider = (
+            meta.get("provider")
+            or meta.get("billing_provider")
+            or meta.get("api_provider")
+            or provider
+        )
+        model = (
+            meta.get("model")
+            or meta.get("billing_model")
+            or meta.get("api_model")
+            or model
+        )
+        if provider and model:
+            break
+    return provider, model
+
+
+def _run_cost_equivalent_from_meta(meta: dict[str, Any]) -> Optional[float]:
+    value = meta.get("cost_usd_equivalent")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def runs_windowed_rollup(
+    conn: sqlite3.Connection,
+    *,
+    since_hours: int = 168,
+    max_roots: int = 20,
+    board: Optional[str] = None,
+) -> dict[str, Any]:
+    """Root→worker→runner cost rollup for completed sink tasks in a window.
+
+    Roots are tree sinks (no task depends on them), measured by the task's
+    completion timestamp (exported as ``completed_at`` and ``ended_at``). Cost
+    ranking uses the effective API burn
+    (``cost_usd + metadata.cost_usd_equivalent``); missing price evidence stays
+    ``None`` instead of being reported as a fake zero.
+    """
+    now = int(time.time())
+    since_hours = max(1, int(since_hours))
+    max_roots = max(0, int(max_roots))
+    window_start = now - since_hours * 3600
+
+    interior = {
+        r["parent_id"]
+        for r in conn.execute("SELECT DISTINCT parent_id FROM task_links")
+    }
+    completed = conn.execute(
+        "SELECT id, title, status, assignee, created_at, completed_at "
+        "FROM tasks WHERE completed_at IS NOT NULL AND completed_at >= ?",
+        (window_start,),
+    ).fetchall()
+
+    roots: list[dict[str, Any]] = []
+    for row in completed:
+        if row["id"] in interior:
+            continue
+        member_ids = _root_tree_member_ids(conn, row["id"])
+        placeholders = ",".join("?" for _ in member_ids)
+        runners: list[dict[str, Any]] = []
+        cost: Optional[float] = None
+        equiv: Optional[float] = None
+        providers: set[str] = set()
+        if member_ids:
+            try:
+                run_rows = conn.execute(
+                    f"""
+                    SELECT id, task_id, profile, input_tokens, output_tokens,
+                           cost_usd, metadata, started_at, ended_at
+                    FROM task_runs
+                    WHERE task_id IN ({placeholders})
+                    ORDER BY COALESCE(ended_at, started_at, 0) ASC, id ASC
+                    """,
+                    member_ids,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                run_rows = []
+            for run in run_rows:
+                meta = _run_meta_dict(run["metadata"])
+                fallback_provider, fallback_model = _lane_provider_model_for_profile(
+                    run["profile"], board=board
+                )
+                provider = (
+                    meta.get("provider")
+                    or meta.get("billing_provider")
+                    or meta.get("api_provider")
+                    or fallback_provider
+                )
+                model = (
+                    meta.get("model")
+                    or meta.get("billing_model")
+                    or meta.get("api_model")
+                    or fallback_model
+                )
+                if provider:
+                    providers.add(str(provider))
+                if run["cost_usd"] is not None:
+                    cost = (cost or 0.0) + float(run["cost_usd"])
+                run_equiv = _run_cost_equivalent_from_meta(meta)
+                if run_equiv is not None:
+                    equiv = (equiv or 0.0) + run_equiv
+                runners.append({
+                    "id": int(run["id"]),
+                    "task_id": run["task_id"],
+                    "profile": run["profile"],
+                    "provider": provider,
+                    "model": model,
+                    "input_tokens": run["input_tokens"],
+                    "output_tokens": run["output_tokens"],
+                    "cost_usd": run["cost_usd"],
+                    "cost_usd_equivalent": run_equiv,
+                    "cost_effective_usd": (
+                        (float(run["cost_usd"]) if run["cost_usd"] is not None else 0.0)
+                        + (run_equiv or 0.0)
+                        if run["cost_usd"] is not None or run_equiv is not None
+                        else None
+                    ),
+                    "metadata": meta,
+                    "started_at": run["started_at"],
+                    "ended_at": run["ended_at"],
+                })
+
+        breakdown = chain_cost_breakdown(conn, row["id"])
+        workers: list[dict[str, Any]] = []
+        for lane in breakdown.get("by_lane", []):
+            worker = dict(lane)
+            provider, model = _profile_provider_model_from_runs(
+                conn, member_ids, worker.get("profile"), board=board
+            )
+            worker["provider"] = provider
+            worker["model"] = model
+            if provider:
+                providers.add(str(provider))
+            workers.append(worker)
+
+        cost_effective: Optional[float] = None
+        if cost is not None or equiv is not None:
+            cost_effective = (cost or 0.0) + (equiv or 0.0)
+        roots.append({
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+            "ended_at": row["completed_at"],
+            "providers": sorted(providers),
+            "cost_usd": cost,
+            "cost_usd_equivalent": equiv,
+            "cost_effective_usd": cost_effective,
+            "workers": workers,
+            "runners": runners,
+        })
+
+    roots.sort(
+        key=lambda root: (
+            root["cost_effective_usd"] is not None,
+            root["cost_effective_usd"] or 0.0,
+            root["completed_at"] or 0,
+        ),
+        reverse=True,
+    )
+    return {
+        "schema": "kanban-windowed-rollup-v1",
+        "since_hours": since_hours,
+        "now": now,
+        "completed_roots": len(roots),
+        "roots": roots[:max_roots],
     }
