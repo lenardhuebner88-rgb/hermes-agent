@@ -63,6 +63,13 @@ class _FakeGateway:
     async def _drain_active_agents(self, timeout):
         return {}, False
 
+    def _adapter_disconnect_timeout_secs(self):
+        # The real shutdown path caps adapter disconnect via this helper
+        # (added by the "cap adapter disconnect budget" change). 0.0 keeps
+        # the deadline disabled — this fake has no adapters, so the cap is
+        # never exercised; it just has to exist for stop() to run.
+        return 0.0
+
     def _finalize_shutdown_agents(self, agents):
         for agent in agents.values():
             self._cleanup_agent_resources(agent)
