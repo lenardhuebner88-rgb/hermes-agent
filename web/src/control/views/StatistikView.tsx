@@ -534,6 +534,7 @@ function estimateSuffix(provider: string | null | undefined, billingMode: string
 
 function ledgerDetailTitle(item: {
   cost_usd?: number | null;
+  cost_effective_usd?: number | null;
   provider?: string | null;
   providers?: string[];
   model?: string | null;
@@ -544,6 +545,7 @@ function ledgerDetailTitle(item: {
   const model = item.model ?? null;
   const billingMode = item.billing_mode ?? null;
   return [
+    `USD effektiv: ${fmtUsd(item.cost_effective_usd ?? item.cost_usd)}`,
     `USD echt/metered: ${fmtUsd(item.cost_usd)}${estimateSuffix(provider, billingMode)}`,
     `Provider/Model: ${provider ?? "—"}${model ? ` · ${model}` : ""}`,
     `billing_mode: ${billingMode ?? "—"}`,
@@ -563,7 +565,7 @@ function sortedLedgerRoots(roots: WindowedRollupRoot[], sortKey: MotherLedgerSor
   });
 }
 
-function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
+export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worker: WindowedRollupWorker }) {
   const runners = root.runners.filter((runner) => runner.profile === worker.profile);
   if (runners.length === 0) {
     return <div className="sb-ledger-runners sb-mono">keine Läuferdaten</div>;
@@ -575,7 +577,7 @@ function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot; worke
           <span className="sb-mono">#{runner.id}</span>
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
           <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
-          <b className="sb-mono">{fmtUsd(runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode)}</b>
+          <b className="sb-mono">{fmtUsd(runner.cost_effective_usd ?? runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode)}</b>
           <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · Neuralwatt —</small>
         </div>
       ))}
@@ -593,7 +595,8 @@ export function MotherLedgerSection() {
     [rollup.data, sortKey],
   );
   const totalUsd = roots.reduce((sum, root) => sum + rootUsd(root), 0);
-  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD inkl. Cache · ${fmtUsd(totalUsd)}`;
+  const showStaleNotice = Boolean((rollup.error || rollup.isStale) && rollup.data);
+  const metaText = `${windowHours === 168 ? "7T" : "24Std"} · USD inkl. Cache · ${fmtUsd(totalUsd)}${showStaleNotice ? " · Letzte Daten angezeigt" : ""}`;
   const toggleWorker = (rootId: string, profile: string) => {
     const key = `${rootId}:${profile}`;
     setOpenKey((prev) => (prev === key ? null : key));
@@ -615,12 +618,17 @@ export function MotherLedgerSection() {
       </div>
       {rollup.loading && !rollup.data ? (
         <Verdict tone="calm">lädt …</Verdict>
-      ) : rollup.error ? (
+      ) : rollup.error && !rollup.data ? (
         <Verdict tone="warn">{de.ketten.chainCostsLoadError}</Verdict>
       ) : roots.length === 0 ? (
         <Verdict tone="calm">{de.ketten.chainCostsEmpty}</Verdict>
       ) : (
         <div className="sb-ledger">
+          {showStaleNotice ? (
+            <div className="sb-kick" role="status" title={rollup.error ?? undefined}>
+              Letzte Daten angezeigt
+            </div>
+          ) : null}
           <div className="sb-ledger-table" role="table" aria-label="MotherLedger Desktop">
             <div className="sb-ledger-head" role="row">
               <span>Mother</span><span>Worker</span><span>Runs</span><span>Tokens</span><span>USD <small>inkl. Cache</small></span>

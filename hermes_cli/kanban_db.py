@@ -88,7 +88,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod
@@ -22880,8 +22880,14 @@ def _profile_provider_model_from_runs(
     profile: Optional[str],
     *,
     board: Optional[str] = None,
+    lane_lookup: Optional[
+        Callable[[Optional[str]], tuple[Optional[str], Optional[str]]]
+    ] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    provider, model = _lane_provider_model_for_profile(profile, board=board)
+    if lane_lookup is not None:
+        provider, model = lane_lookup(profile)
+    else:
+        provider, model = _lane_provider_model_for_profile(profile, board=board)
     if not member_ids:
         return provider, model
     placeholders = ",".join("?" for _ in member_ids)
@@ -22945,6 +22951,20 @@ def runs_windowed_rollup(
     since_hours = max(1, int(since_hours))
     max_roots = max(0, int(max_roots))
     window_start = now - since_hours * 3600
+    lane_provider_model_cache: dict[
+        tuple[Optional[str], Optional[str]],
+        tuple[Optional[str], Optional[str]],
+    ] = {}
+
+    def cached_lane_provider_model(
+        profile: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        key = (profile, board)
+        if key not in lane_provider_model_cache:
+            lane_provider_model_cache[key] = _lane_provider_model_for_profile(
+                profile, board=board
+            )
+        return lane_provider_model_cache[key]
 
     interior = {
         r["parent_id"]
@@ -22985,9 +23005,7 @@ def runs_windowed_rollup(
                 run_rows = []
             for run in run_rows:
                 meta = _run_meta_dict(run["metadata"])
-                fallback_provider, fallback_model = _lane_provider_model_for_profile(
-                    run["profile"], board=board
-                )
+                fallback_provider, fallback_model = cached_lane_provider_model(run["profile"])
                 provider = (
                     meta.get("provider")
                     or meta.get("billing_provider")
@@ -23051,7 +23069,11 @@ def runs_windowed_rollup(
         for lane in breakdown.get("by_lane", []):
             worker = dict(lane)
             provider, model = _profile_provider_model_from_runs(
-                conn, member_ids, worker.get("profile"), board=board
+                conn,
+                member_ids,
+                worker.get("profile"),
+                board=board,
+                lane_lookup=cached_lane_provider_model,
             )
             worker["provider"] = provider
             worker["model"] = model
