@@ -5283,6 +5283,8 @@ def _lookup_model_price_per_mtok(
     try:
         from agent.models_dev import get_model_info
         info = get_model_info(lookup_provider or "", model_label)
+        if info is None and model_label.lower().startswith("claude-"):
+            info = get_model_info("anthropic", model_label)
     except Exception:
         return None
     if info is None or not info.has_cost_data():

@@ -1376,6 +1376,49 @@ def test_s1_subscription_actual_does_not_leak_into_metered(kanban_home, tmp_path
         assert meta["billing_mode"] == "subscription_included"
 
 
+def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Real Claude subscription sessions can carry billing_provider=openai-codex.
+
+    Pricing must key on the claude-* model label instead of trusting the mismatched
+    billing provider, otherwise cost_usd_equivalent stays empty for real Opus runs.
+    """
+    profile_dir = tmp_path / "profiles" / "premium"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "premium" else None)
+    monkeypatch.setattr(
+        kb, "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
+        if model == "claude-opus-4-8" else None,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="claude-mismatch", assignee="premium")
+        run_id = _insert_run_window(
+            conn, tid, profile="premium", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-claude-mismatch", "source": "claude-cli", "started_at": 1500,
+             "input_tokens": 1_000_000, "output_tokens": 100_000,
+             "cache_read_tokens": 2_000_000, "cache_write_tokens": 100_000,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "claude-opus-4-8", "billing_provider": "openai-codex",
+             "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, metadata FROM task_runs WHERE id=?",
+            (run_id,)).fetchone()
+        assert row["cost_usd"] == pytest.approx(0.0)
+        meta = json.loads(row["metadata"])
+        # 1M in × $5 + 0.1M out × $25 + 2M cr × $0.5 + 0.1M cw × $6.25
+        assert meta["cost_usd_equivalent"] == pytest.approx(9.125)
+        assert meta["model"] == "claude-opus-4-8"
+        assert meta["billing_mode"] == "subscription_included"
+
+
 def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path, monkeypatch):
     """COST-VISIBILITY-WORKERS-S2: a codex subscription session stamps
     estimated_cost_usd=0 ('included'), so the runtime leaves it unpriced. The
