@@ -1659,6 +1659,112 @@ def run_digest(args) -> dict[str, Any]:
     }
 
 
+SPECIAL_HARVEST_COOLDOWN_SECONDS = 6 * 60 * 60
+
+
+def _read_special_harvest_state(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
+        return {"armed": True, "last_special_run_ts": None}
+    return {
+        "armed": bool(raw.get("armed", True)),
+        "last_special_run_ts": raw.get("last_special_run_ts"),
+    }
+
+
+def _write_special_harvest_state(path: Path, state: dict[str, Any]) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def _open_disposition_item_count(conn) -> int:
+    row = conn.execute("SELECT COUNT(*) AS n FROM disposition_items WHERE status = 'open'").fetchone()
+    return int(row["n"] if row is not None else 0)
+
+
+def run_harvest_watch(args) -> dict[str, Any]:
+    """Cheap count-watchdog that triggers an extra harvest run when backlog spikes.
+
+    The watcher does no LLM work and uses the normal :func:`run_harvest` path for
+    the actual special run, so ``harvest_last_run.json`` remains the single
+    source of truth for harvest windows. A separate watchdog state only guards
+    cooldown + hysteresis to avoid firing repeatedly while the backlog stays high.
+    """
+    state_dir = default_state_dir()
+    state_path = state_dir / "harvest_special_run.json"
+    now = int(time.time())
+
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    threshold = int(kanban_cfg.get("disposition_special_run_threshold", 25))
+    rearm = int(kanban_cfg.get("disposition_special_run_rearm", 20))
+
+    conn = kanban_db.connect(board=getattr(args, "board", None))
+    try:
+        open_count = _open_disposition_item_count(conn)
+    finally:
+        conn.close()
+
+    state = _read_special_harvest_state(state_path)
+    last_special_run_ts = state.get("last_special_run_ts")
+    if open_count < rearm and not state.get("armed", True):
+        state["armed"] = True
+        _write_special_harvest_state(state_path, state)
+
+    if open_count <= threshold:
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "below-threshold",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "state_path": str(state_path),
+        }
+    if not state.get("armed", True):
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "not-rearmed",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "state_path": str(state_path),
+        }
+    if (
+        isinstance(last_special_run_ts, int)
+        and now - last_special_run_ts < SPECIAL_HARVEST_COOLDOWN_SECONDS
+    ):
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "cooldown",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "cooldown_remaining_seconds": SPECIAL_HARVEST_COOLDOWN_SECONDS
+            - (now - last_special_run_ts),
+            "state_path": str(state_path),
+        }
+
+    harvest = run_harvest(args)
+    state.update({"armed": False, "last_special_run_ts": now})
+    _write_special_harvest_state(state_path, state)
+    return {
+        "mode": "harvest-watch",
+        "triggered": True,
+        "reason": "threshold-exceeded",
+        "open_disposition_items": open_count,
+        "threshold": threshold,
+        "rearm": rearm,
+        "harvest": harvest,
+        "state_path": str(state_path),
+    }
+
+
 def run_propose(args) -> dict[str, Any]:
     """CLI adapter: resolve defaults from the runtime layout, then propose."""
     state_dir = default_state_dir()

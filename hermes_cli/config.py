@@ -2479,6 +2479,11 @@ DEFAULT_CONFIG = {
         # items older than this many days stay visible as overdue candidates
         # even if they predate the normal harvest marker.
         "disposition_realrisk_escalate_days": 2,
+        # Cheap strategist harvest watchdog: open disposition-items above this
+        # count trigger an extra harvest run, then re-arm only after the open
+        # count drops below the rearm value.
+        "disposition_special_run_threshold": 25,
+        "disposition_special_run_rearm": 20,
         # Stale detection: running tasks that have exceeded this many
         # seconds without a heartbeat (since ``last_heartbeat_at``) are
         # auto-reclaimed to ``ready`` on the next dispatcher tick. The

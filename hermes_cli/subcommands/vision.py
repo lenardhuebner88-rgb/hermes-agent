@@ -52,9 +52,9 @@ def build_vision_parser(subparsers) -> None:
     )
     strat.add_argument(
         "--mode",
-        choices=["propose", "reflect", "harvest", "digest"],
+        choices=["propose", "reflect", "harvest", "digest", "harvest-watch"],
         required=True,
-        help="propose, reflect, harvest oder digest",
+        help="propose, reflect, harvest, digest oder harvest-watch",
     )
     strat.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
     strat.add_argument("--json", action="store_true", help="Emit JSON output")
@@ -314,6 +314,8 @@ def vision_command(args: argparse.Namespace) -> int:
                 result = strategist.run_harvest(args)
             elif args.mode == "digest":
                 result = strategist.run_digest(args)
+            elif args.mode == "harvest-watch":
+                result = strategist.run_harvest_watch(args)
             else:
                 result = strategist.run_reflect(args)
         except (FileNotFoundError, ValueError) as exc:
@@ -351,6 +353,21 @@ def vision_command(args: argparse.Namespace) -> int:
                 f"{result['reaped']} reaped, {result['left']} left "
                 f"(of {result['total_open']} open) → {result['digest_path']}"
             )
+        elif result["mode"] == "harvest-watch":
+            if result.get("triggered"):
+                harvest = result.get("harvest") or {}
+                print(
+                    f"strategist harvest-watch: triggered at "
+                    f"{result['open_disposition_items']} open disposition item(s); "
+                    f"{harvest.get('candidates', 0)} candidate(s) → "
+                    f"{harvest.get('candidates_path')}"
+                )
+            else:
+                print(
+                    f"strategist harvest-watch: idle — {result['reason']} "
+                    f"({result['open_disposition_items']} open, threshold {result['threshold']}, "
+                    f"rearm {result['rearm']})"
+                )
         else:
             print(
                 f"strategist reflect: {result['note']['approved']} approved, "
