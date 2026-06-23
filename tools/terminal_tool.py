@@ -1234,7 +1234,8 @@ def _parse_json_env_var(name: str, default: str, expected_type: type, type_label
 
 
 def _parse_bool_env_var(name: str, default: str) -> bool:
-    return (os.getenv(name, default).strip().lower() or default) in {"true", "1", "yes"}
+    raw = os.getenv(name, default).strip().lower()
+    return (raw or default.strip().lower()) in {"true", "1", "yes"}
 
 
 def _safe_getcwd() -> str:

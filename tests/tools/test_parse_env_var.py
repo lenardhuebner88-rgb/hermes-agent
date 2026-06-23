@@ -71,6 +71,20 @@ class TestParseEnvVar:
         assert config["docker_run_as_host_user"] is True
 
 
+    def test_get_env_config_normalizes_empty_boolean_fallback_default(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TERMINAL_SSH_PERSISTENT": "",
+                "TERMINAL_PERSISTENT_SHELL": " True ",
+            },
+            clear=False,
+        ):
+            config = _tt_mod._get_env_config()
+
+        assert config["ssh_persistent"] is True
+
+
     def test_get_env_config_rejects_docker_forward_env_non_list_json(self):
         with patch.dict(
             "os.environ",
