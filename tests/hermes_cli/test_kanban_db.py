@@ -13120,6 +13120,62 @@ def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkey
     assert runners_by_profile["verifier"]["provider"] == "verifier-provider"
 
 
+def test_runs_windowed_rollup_emits_neuralwatt_request_cost_detail(kanban_home, monkeypatch):
+    """NeuralWatt detail is sourced from metadata.cost.request_cost_usd, not kWh × rate."""
+    monkeypatch.setattr(
+        kb,
+        "_lane_provider_model_for_profile",
+        lambda profile, *, board=None: (f"{profile}-provider", f"{profile}-model"),
+    )
+
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="neuralwatt detail root", assignee="orchestrator")
+        with kb.write_txn(conn):
+            _insert_run_cost_with_meta(
+                conn,
+                root,
+                profile="coder",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.40,
+                metadata={},
+            )
+            _insert_run_cost_with_meta(
+                conn,
+                root,
+                profile="neuralwatt",
+                input_tokens=200,
+                output_tokens=50,
+                cost_usd=0.0,
+                metadata={
+                    "energy": {"energy_kwh": 0.03, "usd_per_kwh": 999.0},
+                    "cost": {"request_cost_usd": 0.12},
+                },
+            )
+        kb.complete_task(conn, root, summary="done")
+
+    with kb.connect() as conn:
+        result = kb.runs_windowed_rollup(conn, since_hours=24, max_roots=5, board="default")
+
+    root_row = next(row for row in result["roots"] if row["id"] == root)
+    assert root_row["neuralwatt"] == {
+        "energy_kwh": pytest.approx(0.03),
+        "request_cost_usd": pytest.approx(0.12),
+    }
+    workers = {worker["profile"]: worker for worker in root_row["workers"]}
+    assert workers["coder"]["neuralwatt"] is None
+    assert workers["neuralwatt"]["neuralwatt"] == {
+        "energy_kwh": pytest.approx(0.03),
+        "request_cost_usd": pytest.approx(0.12),
+    }
+    runners = {runner["profile"]: runner for runner in root_row["runners"]}
+    assert runners["coder"]["neuralwatt"] is None
+    assert runners["neuralwatt"]["neuralwatt"] == {
+        "energy_kwh": pytest.approx(0.03),
+        "request_cost_usd": pytest.approx(0.12),
+    }
+
+
 def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
     """chain_cost_breakdown exposes actual API + NeuralWatt billing fields."""
     with kb.connect() as conn:
@@ -13143,7 +13199,8 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
                 cost_usd=0.0,
                 metadata={
                     "cost_usd_equivalent": 0.90,
-                    "energy": {"energy_kwh": 0.03, "usd_per_kwh": 5.0},
+                    "energy": {"energy_kwh": 0.03, "usd_per_kwh": 999.0},
+                    "cost": {"request_cost_usd": 0.12},
                 },
             )
 
@@ -13156,13 +13213,13 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
 
     neuralwatt = lanes["neuralwatt"]
     assert neuralwatt["billing_neuralwatt_kwh"] == pytest.approx(0.03)
-    assert neuralwatt["billing_neuralwatt_cost_usd"] == pytest.approx(0.15)
-    assert neuralwatt["actual_cost_usd"] == pytest.approx(0.15)
+    assert neuralwatt["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
+    assert neuralwatt["actual_cost_usd"] == pytest.approx(0.12)
     assert neuralwatt["api_equivalent_usd"] == pytest.approx(0.90)
 
     totals = result["totals"]
-    assert totals["actual_cost_usd"] == pytest.approx(0.55)
-    assert totals["billing_neuralwatt_cost_usd"] == pytest.approx(0.15)
+    assert totals["actual_cost_usd"] == pytest.approx(0.52)
+    assert totals["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
     assert totals["api_equivalent_usd"] == pytest.approx(0.90)
 
 

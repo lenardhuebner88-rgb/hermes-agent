@@ -19618,6 +19618,35 @@ def _cost_bucket_add(
         bucket["output_tokens"] = (bucket["output_tokens"] or 0) + int(tokens_out)
 
 
+def _numeric_metadata_value(container: dict, *path: str) -> float | None:
+    current = container
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if isinstance(current, (int, float)) and not isinstance(current, bool):
+        return float(current)
+    return None
+
+
+def _neuralwatt_detail(*, kwh: float | None, cost: float | None) -> dict[str, float] | None:
+    if (kwh is None or kwh == 0.0) and (cost is None or cost == 0.0):
+        return None
+    detail: dict[str, float] = {}
+    if kwh is not None:
+        detail["energy_kwh"] = kwh
+    if cost is not None:
+        detail["request_cost_usd"] = cost
+    return detail
+
+
+def _neuralwatt_detail_from_meta(meta: dict) -> dict[str, float] | None:
+    return _neuralwatt_detail(
+        kwh=_numeric_metadata_value(meta, "energy", "energy_kwh"),
+        cost=_numeric_metadata_value(meta, "cost", "request_cost_usd"),
+    )
+
+
 # Paid-subscription lanes for the Statistik "Abo-Tokenverbrauch" panel. The
 # bucket is derived from the profile's ACTUAL runtime/provider config, never
 # its name — a name heuristic mis-attributes renamed/repurposed lanes (e.g.
@@ -19912,18 +19941,8 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
                     raw = meta.get("cost_usd_equivalent")
                     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                         equiv = float(raw)
-                    energy = meta.get("energy")
-                    if isinstance(energy, dict):
-                        raw_kwh = energy.get("energy_kwh")
-                        raw_rate = energy.get("usd_per_kwh")
-                        if (
-                            isinstance(raw_kwh, (int, float))
-                            and not isinstance(raw_kwh, bool)
-                            and isinstance(raw_rate, (int, float))
-                            and not isinstance(raw_rate, bool)
-                        ):
-                            neuralwatt_kwh = float(raw_kwh)
-                            neuralwatt_cost = float(raw_kwh) * float(raw_rate)
+                    neuralwatt_kwh = _numeric_metadata_value(meta, "energy", "energy_kwh")
+                    neuralwatt_cost = _numeric_metadata_value(meta, "cost", "request_cost_usd")
             except (ValueError, TypeError):
                 pass
         kwargs = {
@@ -22777,9 +22796,9 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
     cost_usd_equivalent`` — the real-or-estimated burn.  NULL ``cost_usd``
     rows are treated as 0 in sums (COALESCE in SQL).
     NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
-    ``actual_cost_usd`` is metered API cost plus NeuralWatt kWh billing
-    derived from numeric ``metadata.energy.energy_kwh`` and
-    ``metadata.energy.usd_per_kwh``.
+    ``actual_cost_usd`` is metered API cost plus NeuralWatt request billing
+    from numeric ``metadata.cost.request_cost_usd``. kWh is an energy detail;
+    this aggregate never reconstructs NeuralWatt USD from energy.
     """
     member_ids = _root_tree_member_ids(conn, root_id)
     if not member_ids:
@@ -22799,15 +22818,12 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
                 )), 0.0)                                          AS cost_usd_equivalent,
                 COALESCE(SUM(
                     CASE WHEN json_type(metadata, '$.energy.energy_kwh') IN ('integer', 'real')
-                              AND json_type(metadata, '$.energy.usd_per_kwh') IN ('integer', 'real')
                          THEN CAST(json_extract(metadata, '$.energy.energy_kwh') AS REAL)
                          ELSE 0.0 END
                 ), 0.0)                                            AS billing_neuralwatt_kwh,
                 COALESCE(SUM(
-                    CASE WHEN json_type(metadata, '$.energy.energy_kwh') IN ('integer', 'real')
-                              AND json_type(metadata, '$.energy.usd_per_kwh') IN ('integer', 'real')
-                         THEN CAST(json_extract(metadata, '$.energy.energy_kwh') AS REAL)
-                            * CAST(json_extract(metadata, '$.energy.usd_per_kwh') AS REAL)
+                    CASE WHEN json_type(metadata, '$.cost.request_cost_usd') IN ('integer', 'real')
+                         THEN CAST(json_extract(metadata, '$.cost.request_cost_usd') AS REAL)
                          ELSE 0.0 END
                 ), 0.0)                                            AS billing_neuralwatt_cost_usd,
                 COUNT(*)                                          AS run_count
@@ -23059,7 +23075,7 @@ def runs_windowed_rollup(
                         else None
                     ),
                     "billing_mode": str(billing_mode) if billing_mode else None,
-                    "neuralwatt": None,
+                    "neuralwatt": _neuralwatt_detail_from_meta(meta),
                     "metadata": meta,
                     "started_at": run["started_at"],
                     "ended_at": run["ended_at"],
@@ -23079,6 +23095,10 @@ def runs_windowed_rollup(
             )
             worker["provider"] = provider
             worker["model"] = model
+            worker["neuralwatt"] = _neuralwatt_detail(
+                kwh=worker.get("billing_neuralwatt_kwh"),
+                cost=worker.get("billing_neuralwatt_cost_usd"),
+            )
             if provider:
                 providers.add(str(provider))
             workers.append(worker)
@@ -23086,6 +23106,11 @@ def runs_windowed_rollup(
         cost_effective: Optional[float] = None
         if cost is not None or equiv is not None:
             cost_effective = (cost or 0.0) + (equiv or 0.0)
+        totals = breakdown.get("totals") or {}
+        root_neuralwatt = _neuralwatt_detail(
+            kwh=totals.get("billing_neuralwatt_kwh"),
+            cost=totals.get("billing_neuralwatt_cost_usd"),
+        )
         roots.append({
             "id": row["id"],
             "title": row["title"],
@@ -23104,7 +23129,7 @@ def runs_windowed_rollup(
                 if len(billing_modes) == 1
                 else ("mixed" if billing_modes else None)
             ),
-            "neuralwatt": None,
+            "neuralwatt": root_neuralwatt,
             "runtime_seconds": (
                 max(0, (ended_at if ended_at is not None else int(row["completed_at"] or 0)) - started_at)
                 if started_at is not None
