@@ -87,6 +87,10 @@ class TestParseEnvVar:
             with patch.dict("os.environ", env, clear=True):
                 assert _parse_env_var("TERMINAL_TIMEOUT", "180") == 180
 
+    def test_empty_value_falls_back_to_default(self):
+        with patch.dict("os.environ", {"TERMINAL_TIMEOUT": ""}):
+            assert _parse_env_var("TERMINAL_TIMEOUT", "180") == 180
+
     # -- invalid int raises ValueError with env var name --
 
     def test_invalid_int_raises_with_var_name(self):
