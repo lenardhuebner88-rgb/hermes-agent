@@ -7,10 +7,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Matches ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} tokens in SKILL.md.
-# Tokens that don't resolve (e.g. ${HERMES_SESSION_ID} with no session) are
-# left as-is so the user can debug them.
-_SKILL_TEMPLATE_RE = re.compile(r"\$\{(HERMES_SKILL_DIR|HERMES_SESSION_ID)\}")
+_SKILL_DIR_TOKEN = "${HERMES_SKILL_DIR}"
+_SESSION_ID_TOKEN = "${HERMES_SESSION_ID}"
+_HERMES_TEMPLATE_PREFIX = "${HERMES_"
 
 # Matches inline shell snippets like:  !`date +%Y-%m-%d`
 # Non-greedy, single-line only -- no newlines inside the backticks.
@@ -47,17 +46,15 @@ def substitute_template_vars(
     if not content:
         return content
 
+    if _HERMES_TEMPLATE_PREFIX not in content:
+        return content
+
     skill_dir_str = str(skill_dir) if skill_dir else None
-
-    def _replace(match: re.Match) -> str:
-        token = match.group(1)
-        if token == "HERMES_SKILL_DIR" and skill_dir_str:
-            return skill_dir_str
-        if token == "HERMES_SESSION_ID" and session_id:
-            return str(session_id)
-        return match.group(0)
-
-    return _SKILL_TEMPLATE_RE.sub(_replace, content)
+    if skill_dir_str and _SKILL_DIR_TOKEN in content:
+        content = content.replace(_SKILL_DIR_TOKEN, skill_dir_str)
+    if session_id and _SESSION_ID_TOKEN in content:
+        content = content.replace(_SESSION_ID_TOKEN, str(session_id))
+    return content
 
 
 def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
@@ -67,18 +64,26 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     raising, so one bad snippet can't wreck the whole skill message.
     """
     try:
+        timeout_seconds = max(1, int(timeout))
+    except (TypeError, ValueError):
+        return f"[inline-shell error: invalid timeout: {timeout}]"
+
+    try:
         completed = subprocess.run(
             ["bash", "-c", command],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
-            timeout=max(1, int(timeout)),
+            timeout=timeout_seconds,
             check=False,
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return f"[inline-shell timeout after {timeout}s: {command}]"
-    except FileNotFoundError:
+        return f"[inline-shell timeout after {timeout_seconds}s: {command}]"
+    except FileNotFoundError as exc:
+        if cwd and not Path(cwd).exists():
+            return f"[inline-shell error: cwd not found: {cwd}]"
+        logger.debug("Inline shell executable lookup failed", exc_info=True)
         return "[inline-shell error: bash not found]"
     except RuntimeError as exc:
         # tests/conftest.py installs a live-system guard that blocks real
@@ -135,6 +140,14 @@ def preprocess_skill_content(
     if cfg.get("template_vars", True):
         content = substitute_template_vars(content, skill_dir, session_id)
     if cfg.get("inline_shell", False):
-        timeout = int(cfg.get("inline_shell_timeout", 10) or 10)
+        timeout_value = cfg.get("inline_shell_timeout", 10) or 10
+        try:
+            timeout = max(1, int(timeout_value))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid skills.inline_shell_timeout=%r; using default timeout",
+                timeout_value,
+            )
+            timeout = 10
         content = expand_inline_shell(content, skill_dir, timeout)
     return content
