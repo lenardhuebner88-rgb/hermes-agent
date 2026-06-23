@@ -1384,19 +1384,31 @@ def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str,
 
 
 def load_followup_candidates_from_ledger(
-    conn, *, since_ts: int
+    conn, *, since_ts: int, realrisk_escalate_days: int = 2
 ) -> list[dict[str, Any]]:
-    """Primäre Quelle: lädt ``follow_up``-Items (status=open, created_at >= since_ts)
-    aus dem Disposition-Ledger als Harvest-Kandidaten.
+    """Primäre Quelle: lädt offene Disposition-Ledger-Items als Harvest-Kandidaten.
+
+    Reguläre Kandidaten sind ``follow_up``, ``risk`` und ``still_open`` mit
+    ``created_at >= since_ts``. Ältere ``real-risk``-Items bleiben zusätzlich im
+    Kandidatensatz, wenn sie den Eskalations-Cutoff überschreiten.
 
     Kandidaten-Format ist kompatibel mit dem keyword-Pfad (``filter_followup_candidates``),
     damit beide Quellen im Merge in ``run_harvest`` identisch behandelt werden.
     """
-    items = kanban_db.list_disposition_items(conn, status="open", typ="follow_up")
+    candidate_types = {"follow_up", "risk", "still_open"}
+    escalate_days = max(0, int(realrisk_escalate_days or 0))
+    overdue_cutoff_ts = int(time.time()) - (escalate_days * 86400)
+    items = kanban_db.list_disposition_items(conn, status="open")
     out: list[dict[str, Any]] = []
     for item in items:
+        if item.get("typ") not in candidate_types:
+            continue
         item_created_at = item.get("created_at") or 0
-        if item_created_at < since_ts:
+        disposition = item.get("disposition") or ""
+        source_severity = item.get("severity") or "none"
+        is_real_risk = source_severity == "real-risk"
+        is_overdue = is_real_risk and item_created_at < overdue_cutoff_ts
+        if item_created_at < since_ts and not is_overdue:
             continue
         source_task_id = item["source_task_id"]
         # Titel-Fallback: kein tasks-Eintrag → source_task_id als Titel
@@ -1410,7 +1422,7 @@ def load_followup_candidates_from_ledger(
         if next_action or evidence:
             excerpt = next_action + (" — " + evidence if evidence else "")
         else:
-            excerpt = item.get("disposition") or ""
+            excerpt = disposition
         out.append(
             {
                 "task_id": source_task_id,
@@ -1420,6 +1432,11 @@ def load_followup_candidates_from_ledger(
                 "excerpt": excerpt,
                 "suggested_key": f"disposition-{item['id']}",
                 "source": "ledger",
+                "typ": item.get("typ"),
+                "disposition": disposition,
+                "source_severity": source_severity,
+                "severity": "urgent" if is_real_risk else "bundle",
+                "overdue": bool(is_overdue),
             }
         )
     return out
@@ -1611,12 +1628,24 @@ def run_harvest(args) -> dict[str, Any]:
     marker = state_dir / "harvest_last_run.json"
     now = int(time.time())
     since_ts = _read_harvest_since(marker, now=now)
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    realrisk_escalate_days = (
+        cfg.get("kanban", {}).get("disposition_realrisk_escalate_days", 2)
+        if isinstance(cfg, dict)
+        else 2
+    )
 
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
         # Beide Quellen laden, bevor conn geschlossen wird
         reap_worker_drop_disposition_items(conn)
-        ledger_cands = load_followup_candidates_from_ledger(conn, since_ts=since_ts)
+        ledger_cands = load_followup_candidates_from_ledger(
+            conn,
+            since_ts=since_ts,
+            realrisk_escalate_days=realrisk_escalate_days,
+        )
         receipts = gather_recent_receipts(conn, since_ts=since_ts)
     finally:
         conn.close()
