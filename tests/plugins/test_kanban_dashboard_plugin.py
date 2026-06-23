@@ -90,6 +90,8 @@ def kanban_home(tmp_path, monkeypatch):
         d.mkdir(parents=True, exist_ok=True)
         (d / "config.yaml").write_text("model: {}\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
@@ -1642,7 +1644,9 @@ def test_runs_daily_series(client):
     data = client.get("/api/plugins/kanban/runs/daily?days=7").json()
     assert data["days"] == 7
     assert len(data["series"]) == 7  # auch leere Tage (durchgehende Achse)
-    today = data["series"][-1]
+    active_days = [day for day in data["series"] if day["done_tasks"]]
+    assert len(active_days) == 1
+    today = active_days[0]
     assert today["done_roots"] == 1     # nur der Root zählt als Lieferung
     assert today["done_tasks"] == 2     # Root + Subtask
     # complete_task legt selbst synthetische completed-Runs an → >= statt ==.
@@ -2284,6 +2288,8 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
@@ -2333,6 +2339,8 @@ def test_ws_events_accepts_gated_ticket(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
@@ -2380,6 +2388,8 @@ def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
@@ -2437,6 +2447,8 @@ def test_ws_events_swallows_cancellation_on_shutdown(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
