@@ -1221,6 +1221,16 @@ def _parse_env_var(name: str, default: str, converter: Any = int, type_label: st
         )
 
 
+def _parse_json_env_var(name: str, default: str, expected_type: type, type_label: str):
+    value = _parse_env_var(name, default, json.loads, "valid JSON")
+    if not isinstance(value, expected_type):
+        raise ValueError(
+            f"Invalid value for {name}: {os.getenv(name, default)!r} "
+            f"(expected {type_label}). Check ~/.hermes/.env or environment variables."
+        )
+    return value
+
+
 def _safe_getcwd() -> str:
     """Return the current working directory, tolerating a deleted CWD.
 
@@ -1259,10 +1269,10 @@ def _get_env_config() -> Dict[str, Any]:
         container_disk = 51200
 
     if docker_backend:
-        docker_forward_env = _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON")
-        docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
-        docker_env = _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON")
-        docker_extra_args = _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON")
+        docker_forward_env = _parse_json_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", list, "JSON list")
+        docker_volumes = _parse_json_env_var("TERMINAL_DOCKER_VOLUMES", "[]", list, "JSON list")
+        docker_env = _parse_json_env_var("TERMINAL_DOCKER_ENV", "{}", dict, "JSON object")
+        docker_extra_args = _parse_json_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", list, "JSON list")
     else:
         docker_forward_env = []
         docker_volumes = []
