@@ -1703,13 +1703,14 @@ def test_runs_costs_today_window_and_profiles(client):
                         cost=0.0, tokens_in=5000, tokens_out=900,
                         metadata={"billing_mode": "subscription_included",
                                   "cost_usd_equivalent": 1.5})
-            # Neuralwatt-Lane: kWh wird in echte USD-Kosten umgerechnet, aber
-            # bleibt als Abrechnungsbasis getrennt sichtbar.
+            # NeuralWatt-Lane: echte USD kommen aus metadata.cost.request_cost_usd;
+            # kWh bleibt nur als getrennte Abrechnungsbasis sichtbar.
             _insert_run(conn, t, profile="neuralwatt", outcome="completed",
                         started_at=now - 450, ended_at=now,
                         cost=0.0, tokens_in=600, tokens_out=120,
                         metadata={"provider": "neuralwatt",
-                                  "energy": {"energy_kwh": 0.02, "usd_per_kwh": 5.0}})
+                                  "cost": {"request_cost_usd": 0.10},
+                                  "energy": {"energy_kwh": 0.02}})
             # Verifier ohne Stamps: zählt als Run, kostet nichts.
             _insert_run(conn, t, profile="verifier", outcome="completed",
                         started_at=now - 400, ended_at=now)
