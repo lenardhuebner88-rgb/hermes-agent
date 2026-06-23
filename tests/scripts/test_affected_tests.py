@@ -62,6 +62,25 @@ def test_monolith_source_falls_back_to_package_dir():
     assert "tests/gateway/" in out
 
 
+def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
+    """When the package test directory exceeds _FALLBACK_MAX_TEST_FILES,
+    the fallback downgrades to no selection — the nightly full suite
+    remains the backstop (AC-2 counter-metric)."""
+    mod = _load_module()
+    # Build a fake repo: gateway/run.py with no 1:1 test, but a bloated
+    # tests/gateway/ directory that exceeds the cap.
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "run.py").write_text("x = 1\n")
+    pkg = tmp_path / "tests" / "gateway"
+    pkg.mkdir(parents=True)
+    cap = mod._FALLBACK_MAX_TEST_FILES
+    for i in range(cap + 1):
+        (pkg / f"test_{i:04d}.py").write_text("def t(): pass\n")
+    out = mod.affected_pytest_modules(tmp_path, ["gateway/run.py"])
+    assert "tests/gateway/" not in out
+    assert out == []
+
+
 def test_fallback_does_not_fire_for_root_source():
     """A root-level source file (no package dir) must not select tests/
     itself — that would be the full suite."""

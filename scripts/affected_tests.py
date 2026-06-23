@@ -38,6 +38,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Cap for the package-directory fallback: if the package test directory
+# contains more than this many test_*.py files, the fallback downgrades to
+# no selection (nightly full suite remains the backstop). This prevents a
+# monolith edit from turning the targeted gate into a de-facto full-suite
+# run, satisfying the AC-2 counter-metric: no gate-tempo-for-coverage trade.
+#
+# Calibrated against real package directories (2026-06-23):
+#   tests/hermes_cli/  437 files / 9076 tests / ~26s wall
+#   tests/gateway/     356 files / 7516 tests / ~41s wall
+#   tests/tools/       270 files
+# 500 covers all current directories with headroom; anything larger would
+# push walltime past the targeted-gate budget.
+_FALLBACK_MAX_TEST_FILES = 500
+
 
 def _git(repo_root: Path, *args: str) -> str:
     proc = subprocess.run(
@@ -96,9 +110,16 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
             # tests (test_shutdown_cache_cleanup.py, test_kanban_core*.py),
             # not test_<module>.py.  Select the entire package test directory
             # so regressions are caught at the merge gate, not only nightly.
+            # Cap: if the directory has too many test files, downgrade to no
+            # selection — the nightly full suite remains the backstop. This
+            # prevents a gate-tempo explosion (AC-2 counter-metric).
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
-                modules.add(str(pkg_test_dir) + "/")
+                test_file_count = sum(
+                    1 for _p in (repo_root / pkg_test_dir).glob("test_*.py")
+                )
+                if test_file_count <= _FALLBACK_MAX_TEST_FILES:
+                    modules.add(str(pkg_test_dir) + "/")
     return sorted(modules)
 
 

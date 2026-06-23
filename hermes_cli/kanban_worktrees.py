@@ -41,6 +41,16 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+# Cap for the package-directory fallback in _affected_pytest_modules: if the
+# package test directory contains more than this many test_*.py files, the
+# fallback downgrades to no selection (nightly full suite remains the
+# backstop). Must stay in sync with scripts/affected_tests.py.
+#
+# Calibrated (2026-06-23): tests/hermes_cli/=437, tests/gateway/=356 files.
+# 500 covers all current directories; anything larger would exceed the
+# targeted-gate walltime budget.
+_FALLBACK_MAX_TEST_FILES = 500
+
 _log = logging.getLogger(__name__)
 
 # Namespace for dispatcher-managed worktrees, relative to the repo root.
@@ -1558,7 +1568,14 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
             # Fallback: no 1:1 test file. Select the package test directory.
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
-                modules.add(str(pkg_test_dir) + "/")
+                # Cap: if the directory has too many test files, downgrade to
+                # no selection — the nightly full suite remains the backstop
+                # (AC-2 counter-metric: no gate-tempo-for-coverage trade).
+                test_file_count = sum(
+                    1 for _p in (repo_root / pkg_test_dir).glob("test_*.py")
+                )
+                if test_file_count <= _FALLBACK_MAX_TEST_FILES:
+                    modules.add(str(pkg_test_dir) + "/")
     return sorted(modules)
 
 
