@@ -362,8 +362,11 @@ const WindowedRollupRunnerSchema = z.object({
   cost_usd: nullableNumber,
   cost_usd_equivalent: nullableNumber,
   cost_effective_usd: nullableNumber,
+  billing_mode: z.string().nullable().catch(null),
+  neuralwatt: z.unknown().nullable().catch(null),
   started_at: z.coerce.number().nullable().catch(null),
   ended_at: z.coerce.number().nullable().catch(null),
+  runtime_seconds: z.coerce.number().nullable().catch(null),
 });
 
 const WindowedRollupRootSchema = z.object({
@@ -372,12 +375,16 @@ const WindowedRollupRootSchema = z.object({
   status: z.string().nullable().catch(null),
   assignee: z.string().nullable().catch(null),
   created_at: z.coerce.number().nullable().catch(null),
+  started_at: z.coerce.number().nullable().catch(null),
   completed_at: z.coerce.number().nullable().catch(null),
   ended_at: z.coerce.number().nullable().catch(null),
   providers: z.array(z.string()).catch([]),
   cost_usd: nullableNumber,
   cost_usd_equivalent: nullableNumber,
   cost_effective_usd: nullableNumber,
+  billing_mode: z.string().nullable().catch(null),
+  neuralwatt: z.unknown().nullable().catch(null),
+  runtime_seconds: z.coerce.number().nullable().catch(null),
   workers: z.array(WindowedRollupWorkerSchema).catch([]),
   runners: z.array(WindowedRollupRunnerSchema).catch([]),
 });

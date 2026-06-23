@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
+import { BacklogDetailSchema, BacklogResponseSchema, BlockedCompletionsResponseSchema, ChainCostsResponseSchema, CronObservabilityResponseSchema, DecisionQueueResponseSchema, FlowReleaseResponseSchema, MetricsLiteResponseSchema, OperatorInventoryResponseSchema, OrchestrationBacklogResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema, RecentResultsResponseSchema, RunsCostsResponseSchema, SystemHealthResponseSchema, TaskDetailResponseSchema, TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema, parseOrThrow } from "./schemas";
 
 describe("FlowReleaseResponseSchema", () => {
   it("preserves the release contract ok flag and count", () => {
@@ -91,6 +91,55 @@ describe("Cost schemas", () => {
     expect(parsed.totals.api_equivalent_usd).toBeCloseTo(0.9);
     expect(parsed.by_lane[0].billing_neuralwatt_kwh).toBeCloseTo(0.04);
     expect(parsed.by_lane[0].billing_neuralwatt_cost_usd).toBeCloseTo(0.15);
+  });
+
+  it("preserves windowed rollup detail fields for S3 tooltips", () => {
+    const parsed = parseOrThrow(WindowedRollupResponseSchema, {
+      schema: "kanban-windowed-rollup-v1",
+      since_hours: 24,
+      now: 1000,
+      completed_roots: 1,
+      roots: [{
+        id: "t_root",
+        title: "Mother",
+        status: "done",
+        assignee: "coder",
+        created_at: 800,
+        started_at: 900,
+        completed_at: 960,
+        ended_at: 960,
+        providers: ["openrouter"],
+        cost_usd: 0.12,
+        cost_usd_equivalent: 0.75,
+        cost_effective_usd: 0.87,
+        billing_mode: "metered",
+        neuralwatt: null,
+        runtime_seconds: 60,
+        workers: [],
+        runners: [{
+          id: 1,
+          task_id: "t_root",
+          profile: "coder",
+          provider: "openrouter",
+          model: "nous/hermes",
+          input_tokens: 1,
+          output_tokens: 2,
+          cost_usd: 0.12,
+          cost_usd_equivalent: 0.75,
+          cost_effective_usd: 0.87,
+          billing_mode: "metered",
+          neuralwatt: null,
+          started_at: 900,
+          ended_at: 960,
+          runtime_seconds: 60,
+        }],
+      }],
+    }, "windowed-rollup");
+
+    expect(parsed.roots[0].billing_mode).toBe("metered");
+    expect(parsed.roots[0].runtime_seconds).toBe(60);
+    expect(parsed.roots[0].runners[0].billing_mode).toBe("metered");
+    expect(parsed.roots[0].runners[0].runtime_seconds).toBe(60);
   });
 });
 

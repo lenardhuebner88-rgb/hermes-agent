@@ -1428,6 +1428,57 @@ def test_runs_windowed_rollup_keeps_unknown_costs_null(client, kanban_home):
     assert only["runners"][0]["cost_effective_usd"] is None
 
 
+def test_runs_windowed_rollup_exposes_runner_detail_metadata(client, kanban_home):
+    """S3: detail rows carry real USD, billing_mode, provider/model and runtime."""
+    import json as _json
+    import time
+
+    now = int(time.time())
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="detail root", triage=True)
+        child = kb.create_task(conn, title="runner child", parents=[root])
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?)", (now, root, child))
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, outcome, started_at, ended_at, metadata) "
+                "VALUES (?, 'coder', 'done', 'completed', ?, ?, ?)",
+                (
+                    child,
+                    now - 45,
+                    now - 15,
+                    _json.dumps({
+                        "provider": "openrouter",
+                        "model": "nous/hermes",
+                        "cost_usd": 0.123456,
+                        "cost_usd_equivalent": 0.75,
+                        "billing_mode": "metered",
+                    }),
+                ),
+            )
+
+    response = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24")
+    assert response.status_code == 200, response.text
+    root_row = next(r for r in response.json()["roots"] if r["id"] == child)
+    runner = root_row["runners"][0]
+
+    assert runner["cost_usd"] == pytest.approx(0.123456)
+    assert runner["cost_usd_equivalent"] == pytest.approx(0.75)
+    assert runner["cost_effective_usd"] == pytest.approx(0.873456)
+    assert runner["provider"] == "openrouter"
+    assert runner["model"] == "nous/hermes"
+    assert runner["billing_mode"] == "metered"
+    assert runner["started_at"] == now - 45
+    assert runner["ended_at"] == now - 15
+    assert runner["runtime_seconds"] == 30
+    assert runner["neuralwatt"] is None
+    assert root_row["billing_mode"] == "metered"
+    assert root_row["started_at"] == now - 45
+    assert root_row["ended_at"] == now - 15
+    assert root_row["runtime_seconds"] == 30
+    assert root_row["neuralwatt"] is None
+
+
 def test_runs_summary_empty_window(client):
     """K7: with nothing completed, the summary is well-formed and empty."""
     data = client.get("/api/plugins/kanban/runs/summary?since_hours=1").json()

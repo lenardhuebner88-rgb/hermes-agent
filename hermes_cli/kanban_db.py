@@ -22966,6 +22966,9 @@ def runs_windowed_rollup(
         cost: Optional[float] = None
         equiv: Optional[float] = None
         providers: set[str] = set()
+        billing_modes: set[str] = set()
+        started_at: Optional[int] = None
+        ended_at: Optional[int] = None
         if member_ids:
             try:
                 run_rows = conn.execute(
@@ -22999,11 +23002,26 @@ def runs_windowed_rollup(
                 )
                 if provider:
                     providers.add(str(provider))
-                if run["cost_usd"] is not None:
-                    cost = (cost or 0.0) + float(run["cost_usd"])
+                billing_mode = meta.get("billing_mode")
+                if billing_mode:
+                    billing_modes.add(str(billing_mode))
+                if run["started_at"] is not None:
+                    run_started = int(run["started_at"])
+                    started_at = run_started if started_at is None else min(started_at, run_started)
+                if run["ended_at"] is not None:
+                    run_ended = int(run["ended_at"])
+                    ended_at = run_ended if ended_at is None else max(ended_at, run_ended)
+                run_cost = float(run["cost_usd"]) if run["cost_usd"] is not None else _coerce_float(meta.get("cost_usd"))
+                if run_cost is None:
+                    run_cost = _coerce_float(meta.get("actual_cost_usd"))
+                if run_cost is not None:
+                    cost = (cost or 0.0) + run_cost
                 run_equiv = _run_cost_equivalent_from_meta(meta)
                 if run_equiv is not None:
                     equiv = (equiv or 0.0) + run_equiv
+                runtime_seconds: Optional[int] = None
+                if run["started_at"] is not None and run["ended_at"] is not None:
+                    runtime_seconds = max(0, int(run["ended_at"]) - int(run["started_at"]))
                 runners.append({
                     "id": int(run["id"]),
                     "task_id": run["task_id"],
@@ -23012,17 +23030,20 @@ def runs_windowed_rollup(
                     "model": model,
                     "input_tokens": run["input_tokens"],
                     "output_tokens": run["output_tokens"],
-                    "cost_usd": run["cost_usd"],
+                    "cost_usd": run_cost,
                     "cost_usd_equivalent": run_equiv,
                     "cost_effective_usd": (
-                        (float(run["cost_usd"]) if run["cost_usd"] is not None else 0.0)
+                        (run_cost or 0.0)
                         + (run_equiv or 0.0)
-                        if run["cost_usd"] is not None or run_equiv is not None
+                        if run_cost is not None or run_equiv is not None
                         else None
                     ),
+                    "billing_mode": str(billing_mode) if billing_mode else None,
+                    "neuralwatt": None,
                     "metadata": meta,
                     "started_at": run["started_at"],
                     "ended_at": run["ended_at"],
+                    "runtime_seconds": runtime_seconds,
                 })
 
         breakdown = chain_cost_breakdown(conn, row["id"])
@@ -23047,12 +23068,24 @@ def runs_windowed_rollup(
             "status": row["status"],
             "assignee": row["assignee"],
             "created_at": row["created_at"],
+            "started_at": started_at,
             "completed_at": row["completed_at"],
-            "ended_at": row["completed_at"],
+            "ended_at": ended_at if ended_at is not None else row["completed_at"],
             "providers": sorted(providers),
             "cost_usd": cost,
             "cost_usd_equivalent": equiv,
             "cost_effective_usd": cost_effective,
+            "billing_mode": (
+                next(iter(billing_modes))
+                if len(billing_modes) == 1
+                else ("mixed" if billing_modes else None)
+            ),
+            "neuralwatt": None,
+            "runtime_seconds": (
+                max(0, (ended_at if ended_at is not None else int(row["completed_at"] or 0)) - started_at)
+                if started_at is not None
+                else None
+            ),
             "workers": workers,
             "runners": runners,
         })

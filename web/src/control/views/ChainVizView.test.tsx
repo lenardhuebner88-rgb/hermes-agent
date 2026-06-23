@@ -263,12 +263,20 @@ describe("MotherLedger source contract", () => {
     expect(hooksSrc).toMatch(/runs\/windowed-rollup/);
   });
 
-  it("renders required controls and USD API-equiv labels", () => {
+  it("renders required controls and USD inkl. Cache labels", () => {
     expect(statsSrc).toMatch(/7T/);
     expect(statsSrc).toMatch(/24Std/);
-    expect(statsSrc).toMatch(/USD API-equiv/);
+    expect(statsSrc).toMatch(/USD inkl\. Cache/);
     expect(statsSrc).toMatch(/sortKey === "tokens"/);
     expect(statsSrc).toMatch(/sortKey === "runs"/);
+  });
+
+  it("renders S3 detail labels for actual cost, billing mode, runtime and estimates", () => {
+    expect(statsSrc).toMatch(/USD echt\/metered/);
+    expect(statsSrc).toMatch(/billing_mode/);
+    expect(statsSrc).toMatch(/Laufzeit/);
+    expect(statsSrc).toMatch(/gesch\./);
+    expect(statsSrc).toMatch(/Neuralwatt: —/);
   });
 });
 
