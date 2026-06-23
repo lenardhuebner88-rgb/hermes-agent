@@ -18,6 +18,7 @@ const t = {
   cancel: "Abbrechen",
   acceptHint: "markiert das Item als akzeptiert — kein weiterer Worker-Einsatz",
   fixTaskHint: "legt einen echten Kanban-Task an, der das Problem behebt",
+  scopeNoteHint: "kein Fix-Task nötig — Scope-Hinweis bleibt außerhalb der Worker-Queue",
   dismissHint: "archiviert das Item mit deinem Grund",
   reasonLabel: "Grund (Pflicht)",
   reasonPlaceholder: "Warum wird dieses Item verworfen?",
@@ -29,7 +30,7 @@ const t = {
   } as Record<string, string>,
   severityLabels: {
     "real-risk": "Echtes Risiko",
-    "scope-note": "Scope-Hinweis",
+    "scope-note": "Scope-Hinweis (nicht queue-relevant)",
     none: "Kein Risiko",
   } as Record<string, string>,
 };
@@ -71,6 +72,7 @@ export function DispositionItemList({
       {items.map((item) => {
         const isPending = pending?.id === item.id ? pending : null;
         const dismissPending = isPending?.kind === "dismiss" ? isPending : null;
+        const isScopeNote = item.severity === "scope-note";
         return (
           <li key={item.id} className="rounded-md border border-[var(--hc-accent-border)] px-3 py-2.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -172,15 +174,19 @@ export function DispositionItemList({
                     <CheckCircle className="h-3.5 w-3.5" />
                     {t.accept}
                   </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => onPending({ id: item.id, kind: "fix" })}
-                    className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-sky-500/30 px-3 py-1 text-[0.78rem] text-sky-200 hover:bg-sky-500/10"
-                  >
-                    <Wrench className="h-3.5 w-3.5" />
-                    {t.fixTask}
-                  </button>
+                  {isScopeNote ? (
+                    <span className="text-[0.72rem] hc-dim">{t.scopeNoteHint}</span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onPending({ id: item.id, kind: "fix" })}
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-sky-500/30 px-3 py-1 text-[0.78rem] text-sky-200 hover:bg-sky-500/10"
+                    >
+                      <Wrench className="h-3.5 w-3.5" />
+                      {t.fixTask}
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={busy}
