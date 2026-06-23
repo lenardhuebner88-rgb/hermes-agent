@@ -64,6 +64,24 @@ For a `--repo` sandbox whose default branch is **not** `main` (e.g. `trunk` or
 `--receipt-dir ''` (empty) writes the receipt/template to the current working
 directory instead of crashing.
 
+## Two serialization layers (read before interpreting evidence)
+
+The cap dogfood touches **two independent serialization layers**. Conflating them
+is the most common operator misread, so name them explicitly before judging any
+receipt:
+
+| Layer | Config key | Phase | Event in receipt | Behaviour at `cap=2` |
+|-------|-----------|-------|------------------|----------------------|
+| **Worker-execution** | `max_concurrent_per_repo` | dispatch/admission (build+test runs) | `repo_serialized` / `skipped_repo_serialized` | **RELAXED** — up to 2 workers run the same repo concurrently; this is the *only* event the cap emits, and at `cap=2` it must be **absent** for in-scope tasks. |
+| **Integration/merge** | `serialize_by_repo` (default `True`) | completion/merge into `main` | `integration_merged` (never `repo_serialized`) | **ALWAYS serialized** — a per-repo integrator lock (`.git/hermes-kanban-integrator.lock`) admits one merge at a time, independent of the cap. |
+
+Key consequence: at `cap=2` the two workers **execute** in parallel, but their two
+merges still land **one after another**. Two sequential `integration_merged` events
+are therefore *expected* and are **not** a cap failure — that sequencing comes from
+`serialize_by_repo`, which is independent of `max_concurrent_per_repo`. The cap is
+proven by the *absence of `repo_serialized`* together with a `workers/active`
+snapshot of 2 — not by simultaneous merges, which never happen by design.
+
 ## Scenario 1: Echte Parallelität (Real Parallelism)
 
 **Goal:** Prove that `max_concurrent_per_repo=2` allows two workers to run
@@ -86,13 +104,24 @@ python3 scripts/dogfood_repo_cap_evidence.py \
     --poll-duration 60 --poll-interval 3
 ```
 
-**Expected evidence in receipt:**
+**Expected evidence in receipt** (grouped by the two layers above):
+
+_Worker-execution layer — must be RELAXED at `cap=2`:_
 
 - `workers/active` count == 2 in at least one snapshot.
-- Both task_ids present in workers/active simultaneously.
-- Both tasks have `integration_merged` event.
+- Both task_ids present in `workers/active` simultaneously.
+- **NO `repo_serialized` (or `skipped_repo_serialized`) event** for either task.
+  The dispatch guard is the only emitter of that event, so its absence is the
+  positive proof that the cap let both workers execute concurrently.
+
+_Integration/merge layer — stays serialized at `cap=2` (expected, NOT a failure):_
+
+- Both tasks have an `integration_merged` event.
 - `git log main` shows both commits.
-- NO `repo_serialized` event between the two `integration_merged` events.
+- The two `integration_merged` events appear **sequentially**, never overlapping —
+  the per-repo integrator lock serializes the merge phase even at `cap=2`. Do not
+  misread this ordering as worker-execution serialization: `serialize_by_repo`
+  (merges) and `max_concurrent_per_repo` (worker execution) are independent layers.
 
 ## Scenario 2: No-Op-Falle (No-Op Trap)
 
