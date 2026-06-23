@@ -55,6 +55,22 @@ class TestParseEnvVar:
         assert config["docker_forward_env"] == ["GITHUB_TOKEN"]
 
 
+    def test_get_env_config_trims_boolean_env_values(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TERMINAL_ENV": "docker",
+                "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": " true ",
+                "TERMINAL_DOCKER_RUN_AS_HOST_USER": " Yes ",
+            },
+            clear=False,
+        ):
+            config = _tt_mod._get_env_config()
+
+        assert config["docker_mount_cwd_to_workspace"] is True
+        assert config["docker_run_as_host_user"] is True
+
+
     def test_get_env_config_rejects_docker_forward_env_non_list_json(self):
         with patch.dict(
             "os.environ",
