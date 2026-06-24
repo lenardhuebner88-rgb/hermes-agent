@@ -13425,6 +13425,135 @@ def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, m
     assert costs[tid]["cost_status"] == "estimated"
 
 
+
+
+
+def _close_claimed_run_for_backfill(conn, task_id):
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    assert row is not None
+    run_id = row["current_run_id"]
+    assert run_id is not None
+    conn.execute(
+        """
+        UPDATE task_runs
+           SET status = 'done', ended_at = ?, outcome = 'completed'
+         WHERE id = ?
+        """,
+        (now, run_id),
+    )
+    conn.commit()
+    return run_id
+
+
+def test_k17_backfill_claude_cli_uses_spawn_identity_after_lane_switch(
+    kanban_home,
+):
+    """Backfill must use spawn-time claude-cli identity, not the active
+    lane at backfill time. Otherwise lane/model changes after spawn skip
+    the run or stamp the wrong model.
+    """
+    import json as _json
+    with kb.connect() as conn:
+        claude_lane = kb.create_lane(
+            conn,
+            name="spawn-claude",
+            profiles={"premium": {
+                "worker_runtime": "claude-cli",
+                "model": "claude-fable-5",
+            }},
+        )
+        kb.activate_lane(conn, claude_lane["id"])
+        tid = kb.create_task(conn, title="cli-spawn", assignee="premium")
+        assert kb.claim_task(conn, tid, claimer="test-claimer") is not None
+        run_id = _close_claimed_run_for_backfill(conn, tid)
+
+        spawn_meta = _json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()["metadata"])
+        assert spawn_meta["worker_runtime"] == "claude-cli"
+        assert spawn_meta["model"] == "claude-fable-5"
+        assert spawn_meta["provider"] is None
+
+        hermes_lane = kb.create_lane(
+            conn,
+            name="later-hermes",
+            profiles={"premium": {
+                "worker_runtime": "hermes",
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+            }},
+        )
+        kb.activate_lane(conn, hermes_lane["id"])
+        _write_claude_result_log(tid, total_cost_usd=0.42, output_tokens=33)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        row = conn.execute(
+            "SELECT output_tokens, cost_usd, metadata FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row["output_tokens"] == 33
+        assert row["cost_usd"] == pytest.approx(0.0)
+        meta = _json.loads(row["metadata"])
+        assert meta["worker_runtime"] == "claude-cli"
+        assert meta["model"] == "claude-fable-5"
+        assert meta["provider"] is None
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)
+
+
+def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lane_switch(
+    kanban_home,
+):
+    """Per-task model_override is spawn-time identity and must survive a
+    later active-lane model change before claude-cli log backfill.
+    """
+    import json as _json
+    with kb.connect() as conn:
+        claude_lane = kb.create_lane(
+            conn,
+            name="override-claude",
+            profiles={"premium": {
+                "worker_runtime": "claude-cli",
+                "model": "claude-fable-5",
+            }},
+        )
+        kb.activate_lane(conn, claude_lane["id"])
+        tid = kb.create_task(
+            conn,
+            title="cli-override",
+            assignee="premium",
+            model_override="claude-opus-4-1",
+        )
+        assert kb.claim_task(conn, tid, claimer="test-claimer") is not None
+        run_id = _close_claimed_run_for_backfill(conn, tid)
+
+        hermes_lane = kb.create_lane(
+            conn,
+            name="override-later-hermes",
+            profiles={"premium": {
+                "worker_runtime": "hermes",
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+            }},
+        )
+        kb.activate_lane(conn, hermes_lane["id"])
+        _write_claude_result_log(tid, total_cost_usd=0.55)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        meta = _json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()["metadata"])
+        assert meta["worker_runtime"] == "claude-cli"
+        assert meta["model"] == "claude-opus-4-1"
+        assert meta["provider"] is None
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.55)
+
+
 def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
     kanban_home,
 ):

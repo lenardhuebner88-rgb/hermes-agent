@@ -4841,6 +4841,102 @@ def _run_is_claude_cli(profile: Optional[str], *, board: Optional[str] = None) -
         return False
 
 
+
+def _active_lane_entry_for_profile_from_conn(
+    conn: sqlite3.Connection,
+    profile_arg: Optional[str],
+) -> Optional[dict]:
+    """Resolve the active lane entry using the caller's existing connection."""
+    if not profile_arg:
+        return None
+    try:
+        row = conn.execute("SELECT profiles FROM lanes WHERE active = 1 LIMIT 1").fetchone()
+        if row is None:
+            return None
+        profiles = json.loads(row["profiles"] or "{}")
+        if not isinstance(profiles, dict):
+            return None
+        entry = profiles.get(profile_arg)
+        if not isinstance(entry, dict):
+            return None
+        normalized = _normalize_lane_profiles({profile_arg: entry}).get(profile_arg)
+        if not isinstance(normalized, dict):
+            return None
+        if (
+            normalized.get("worker_runtime") is None
+            and normalized.get("provider") is None
+            and normalized.get("model") is None
+            and not normalized.get("fallback_providers")
+        ):
+            return None
+        return normalized
+    except Exception:
+        return None
+
+def _claude_cli_spawn_identity_metadata(
+    profile: Optional[str],
+    *,
+    model_override: Optional[str] = None,
+    board: Optional[str] = None,
+    lane_entry: Optional[dict] = None,
+) -> Optional[dict[str, Any]]:
+    """Return spawn-time identity metadata for a claude-CLI run.
+
+    Active lanes are mutable. Cost backfill may run long after dispatch, so the
+    backfill path must not re-read the then-active lane to decide whether a
+    historical run was launched through ``claude`` or which model it used. This
+    helper mirrors the spawn-time runtime resolution and returns a small,
+    auditable metadata snapshot to persist on ``task_runs`` when the run is
+    claimed. Fail-soft: unknown/broken config returns None rather than blocking
+    dispatch.
+    """
+    if not profile:
+        return None
+    try:
+        if lane_entry is None:
+            lane_entry = _active_lane_entry_for_profile(profile, board=board)
+        lane_runtime = (lane_entry or {}).get("worker_runtime")
+        if lane_runtime == "claude-cli":
+            is_claude_cli = True
+        elif lane_runtime is None:
+            is_claude_cli = _is_claude_cli_runtime(profile)
+        else:
+            is_claude_cli = False
+        if not is_claude_cli:
+            return None
+
+        model: Optional[str] = None
+        if isinstance(model_override, str) and model_override.strip():
+            model = model_override.strip()
+        if not model and isinstance(lane_entry, dict):
+            lane_model = lane_entry.get("model")
+            if isinstance(lane_model, str) and lane_model.strip():
+                model = lane_model.strip()
+        if not model:
+            try:
+                from hermes_cli.profiles import resolve_profile_env
+                model = _claude_profile_model(resolve_profile_env(profile))
+            except Exception:
+                model = None
+
+        metadata: dict[str, Any] = {
+            "worker_runtime": "claude-cli",
+            # The claude CLI uses the subscription account, not a Hermes API
+            # provider. Keep this explicitly null so later lane provider changes
+            # cannot be mistaken for this run's provider.
+            "provider": None,
+        }
+        if model:
+            metadata["model"] = model
+        return metadata
+    except Exception:
+        return None
+
+
+def _metadata_marks_claude_cli(metadata: Optional[dict]) -> bool:
+    return isinstance(metadata, dict) and metadata.get("worker_runtime") == "claude-cli"
+
+
 def _parse_claude_cli_result(log_path: Path) -> Optional[dict]:
     """K17: last ``{"type": "result", ...}`` object in a claude-CLI task log.
 
@@ -4960,13 +5056,23 @@ def backfill_run_costs(
 
             # K17: claude-CLI branch — no state.db session exists; read the
             # final result JSON from the per-task worker log instead.
-            if _run_is_claude_cli(profile, board=board):
+            if _metadata_marks_claude_cli(metadata) or _run_is_claude_cli(profile, board=board):
                 task_id = row["task_id"]
                 newer = conn.execute(
-                    "SELECT profile FROM task_runs WHERE task_id = ? AND id > ?",
+                    "SELECT profile, metadata FROM task_runs WHERE task_id = ? AND id > ?",
                     (task_id, run_id),
                 ).fetchall()
-                if any(_is_claude_cli_runtime(r["profile"]) for r in newer):
+                newer_cli = False
+                for newer_row in newer:
+                    newer_meta = None
+                    try:
+                        newer_meta = json.loads(newer_row["metadata"]) if newer_row["metadata"] else None
+                    except (TypeError, ValueError):
+                        newer_meta = None
+                    if _metadata_marks_claude_cli(newer_meta) or _run_is_claude_cli(newer_row["profile"], board=board):
+                        newer_cli = True
+                        break
+                if newer_cli:
                     # The per-task log only proves the LAST claude-cli run's
                     # result — never stamp an older run from a newer run's
                     # JSON. Non-cli runs (the review-gate verifier appends
@@ -4984,8 +5090,10 @@ def backfill_run_costs(
                 stamped = dict(metadata or {})
                 lane_provider, lane_model = _lane_provider_model_for_profile(profile, board=board)
                 stamped.setdefault("worker_runtime", "claude-cli")
-                stamped.setdefault("model", lane_model)
-                stamped.setdefault("provider", lane_provider)
+                if stamped.get("model") is None and lane_model is not None:
+                    stamped["model"] = lane_model
+                if "provider" not in stamped:
+                    stamped["provider"] = lane_provider
                 stamped.setdefault("billing_mode", "subscription_included")
                 if c_equiv is not None:
                     stamped.setdefault("cost_usd_equivalent", c_equiv)
@@ -6556,26 +6664,35 @@ def claim_task(
         # Look up the current task row so we can populate the run with
         # its assignee / step / runtime cap.
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, model_override "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
+        run_profile = trow["assignee"] if trow else None
+        lane_entry = _active_lane_entry_for_profile_from_conn(conn, run_profile)
+        spawn_metadata = _claude_cli_spawn_identity_metadata(
+            run_profile,
+            model_override=trow["model_override"] if trow else None,
+            board=get_current_board(),
+            lane_entry=lane_entry,
+        )
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
-                trow["assignee"] if trow else None,
+                run_profile,
                 trow["current_step_key"] if trow else None,
                 lock,
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                json.dumps(spawn_metadata, ensure_ascii=False) if spawn_metadata else None,
             ),
         )
         run_id = run_cur.lastrowid
