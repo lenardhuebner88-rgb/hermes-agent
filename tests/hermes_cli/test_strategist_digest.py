@@ -4,7 +4,9 @@ The Sonnet harvest step clusters the open follow-ups and persists its triage
 decision via ``--mode digest``. ``write_disposition_digest`` validates +
 normalizes that decision and stamps ``generated_at`` in Python (never trusting
 an LLM-supplied timestamp); ``total_open``/``reaped`` are derived when the step
-omits them. ``read_disposition_digest`` is the defensive dashboard reader.
+omits them. ``reaped`` counts items the digest filtered as ``drop``; it is not
+evidence of deleted ledger rows. ``read_disposition_digest`` is the defensive
+dashboard reader.
 """
 from __future__ import annotations
 
@@ -125,11 +127,11 @@ def test_write_overrides_llm_supplied_generated_at(digest_override):
 
 
 def test_write_derives_total_open_and_reaped(digest_override):
-    """total_open = distinct triaged items (clusters + left); reaped = planspec clusters."""
+    """total_open = distinct triaged items; reaped = items recommended drop."""
     path = strategist.write_disposition_digest(digest_override.parent, _payload(), now=1)
     data = json.loads(path.read_text())
     assert data["total_open"] == 5  # di_1..di_5 distinct
-    assert data["reaped"] == 1  # exactly one cluster recommended → planspec
+    assert data["reaped"] == 1  # di_4 is filtered from future digest work
 
 
 def test_write_honors_explicit_counts(digest_override):

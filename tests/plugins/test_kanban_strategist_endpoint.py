@@ -149,14 +149,13 @@ def _write_digest() -> dict:
     payload = {
         "clusters": [
             {
-                "theme": "test isolation",
+                "theme": "obsolete watchdog follow-up",
                 "item_ids": ["di_1", "di_2", "di_3"],
-                "kind": "risk",
+                "kind": "follow_up",
                 "source_severity": "real-risk",
                 "triage_severity": "overdue",
                 "age_days": 3,
-                "recommendation": "planspec",
-                "planspec_key": "receipt-t_abc",
+                "recommendation": "drop",
             }
         ],
         "left": [{"item_id": "di_9", "reason": "vague", "disposition": "verworfen"}],
@@ -185,10 +184,10 @@ def test_disposition_digest_returns_persisted(client):
     assert set(body) == {"digest", "checked_at"}
     assert digest["generated_at"] == 1750000000
     assert digest["total_open"] == 4  # di_1..di_3 + di_9
-    assert digest["reaped"] == 1
+    assert digest["reaped"] == 3
     assert digest["clusters"][0]["triage_severity"] == "overdue"
     assert digest["clusters"][0]["severity"] == "overdue"
-    assert digest["clusters"][0]["recommendation"] == "planspec"
+    assert digest["clusters"][0]["recommendation"] == "drop"
     assert digest["left"][0]["item_id"] == "di_9"
     # Endpoint payload matches what the writer persisted.
     assert digest == written

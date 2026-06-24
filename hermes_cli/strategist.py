@@ -1450,6 +1450,7 @@ def load_followup_candidates_from_ledger(
                 "assignee": None,
                 "completed_at": item_created_at,
                 "excerpt": excerpt,
+                "disposition_item_id": item["id"],
                 "suggested_key": f"disposition-{item['id']}",
                 "source": "ledger",
                 "kind": item.get("typ"),
@@ -1466,7 +1467,13 @@ def load_followup_candidates_from_ledger(
 
 
 def reap_worker_drop_disposition_items(conn) -> int:
-    """Dismiss open disposition-ledger items explicitly marked as worker ``drop``."""
+    """Status-reap open disposition-ledger items explicitly marked ``drop``.
+
+    This is intentionally non-destructive: rows stay in ``disposition_items``
+    and receive the normal terminal ``dismissed`` audit stamp.  "Reaped" in
+    harvest/digest artifacts therefore means "filtered from future candidate
+    sets", not "deleted from the ledger".
+    """
     reaped = 0
     for item in kanban_db.list_disposition_items(conn, status="open", disposition="drop"):
         updated = kanban_db.set_disposition_status(
@@ -1569,7 +1576,9 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
     trusted from the payload — an LLM cannot backdate the digest. ``total_open``
     and ``reaped`` are honoured if the step supplied valid ints, else derived:
     ``total_open`` = distinct items across clusters + left, ``reaped`` = number
-    of clusters recommended for ``planspec``."""
+    of items in clusters recommended for ``drop``.  ``reaped`` is an audit
+    counter for filtered/obsolete digest entries, not evidence of DB deletion.
+    """
     if not isinstance(payload, dict):
         raise ValueError("digest payload must be a JSON object")
 
@@ -1596,8 +1605,8 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
             raise ValueError(f"cluster[{idx}] 'item_ids' must be a list")
         item_ids = [str(i) for i in raw_ids]
         seen_items.update(item_ids)
-        if recommendation == "planspec":
-            reaped_derived += 1
+        if recommendation == "drop":
+            reaped_derived += len(item_ids)
         triage_severity = _normalize_digest_triage_severity(
             cluster.get("triage_severity", cluster.get("severity"))
         )
@@ -1979,8 +1988,9 @@ def run_harvest(args) -> dict[str, Any]:
 
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
-        # Beide Quellen laden, bevor conn geschlossen wird
-        reap_worker_drop_disposition_items(conn)
+        # Beide Quellen laden, bevor conn geschlossen wird.  Drop-Reaping ist
+        # ein expliziter Status-Übergang (dismissed + decided_by), kein DELETE.
+        reaped_dispositions = reap_worker_drop_disposition_items(conn)
         ledger_cands = load_followup_candidates_from_ledger(
             conn,
             since_ts=since_ts,
@@ -2007,6 +2017,7 @@ def run_harvest(args) -> dict[str, Any]:
                 "since_ts": since_ts,
                 "ledger_candidates": len(ledger_cands),
                 "keyword_candidates": len(keyword_cands),
+                "reaped_dispositions": reaped_dispositions,
                 "candidates": candidates,
             },
             ensure_ascii=False,
@@ -2023,6 +2034,7 @@ def run_harvest(args) -> dict[str, Any]:
             "receipts": len(receipts),
             "ledger_candidates": len(ledger_cands),
             "keyword_candidates": len(keyword_cands),
+            "reaped_dispositions": reaped_dispositions,
             "candidates": len(candidates),
         },
     )
@@ -2032,6 +2044,7 @@ def run_harvest(args) -> dict[str, Any]:
         "receipts": len(receipts),
         "ledger_candidates": len(ledger_cands),
         "keyword_candidates": len(keyword_cands),
+        "reaped_dispositions": reaped_dispositions,
         "candidates": len(candidates),
         "candidates_path": str(cand_path),
     }

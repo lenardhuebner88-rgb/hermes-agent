@@ -194,6 +194,67 @@ def test_run_harvest_writes_candidates_and_marker(kanban_home):
     assert (state_dir / "harvest_last_run.json").exists()
 
 
+def test_run_harvest_reaps_drop_and_excludes_terminal_dispositions(kanban_home):
+    now = int(time.time())
+    with kb.connect() as conn:
+        source_ids = {
+            name: kb.create_task(conn, title=name, assignee="coder", created_by="test")
+            for name in ("keep", "drop", "accepted", "task_created", "dismissed")
+        }
+        keep_id = kb.insert_disposition_item(
+            conn,
+            source_task_id=source_ids["keep"],
+            typ="follow_up",
+            disposition="defer",
+            next_action="keep visible",
+            severity="none",
+            evidence="open item",
+        )
+        drop_id = kb.insert_disposition_item(
+            conn,
+            source_task_id=source_ids["drop"],
+            typ="follow_up",
+            disposition="drop",
+            next_action="obsolete",
+            severity="none",
+            evidence="worker decided drop",
+        )
+        terminal_ids = []
+        for status in ("accepted", "task_created", "dismissed"):
+            item_id = kb.insert_disposition_item(
+                conn,
+                source_task_id=source_ids[status],
+                typ="follow_up",
+                disposition="defer",
+                next_action=f"already {status}",
+                severity="none",
+                evidence="terminal item",
+            )
+            terminal_ids.append(item_id)
+            kb.set_disposition_status(conn, item_id, status=status, decided_by="test")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE disposition_items SET created_at=?", (now,))
+
+    result = strategist.run_harvest(types.SimpleNamespace(board=None))
+
+    assert result["reaped_dispositions"] == 1
+    assert result["ledger_candidates"] == 1
+    state_dir = strategist.default_state_dir()
+    cand = json.loads((state_dir / "harvest_candidates.json").read_text())
+    assert cand["reaped_dispositions"] == 1
+    assert [c["disposition_item_id"] for c in cand["candidates"]] == [keep_id]
+
+    with kb.connect() as conn:
+        drop_item = kb.get_disposition_item(conn, drop_id)
+        keep_item = kb.get_disposition_item(conn, keep_id)
+        assert drop_item is not None
+        assert keep_item is not None
+        assert drop_item["status"] == "dismissed"
+        assert drop_item["decided_by"] == "harvest-reaper"
+        assert keep_item["status"] == "open"
+        assert all(kb.get_disposition_item(conn, item_id) is not None for item_id in terminal_ids)
+
+
 def test_run_harvest_since_uses_marker(kanban_home):
     import json
 
