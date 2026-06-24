@@ -13238,3 +13238,169 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
     # claude-cli (effective=1.00) must rank above openrouter (effective=0.005)
     assert by_lane[0]["profile"] == "claude-cli"
     assert by_lane[1]["profile"] == "openrouter"
+
+
+def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanban_home):
+    """A task blocked by a stricter dispatcher limit must not escape when a
+    later generic recompute call does not pass that dispatcher config.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="strict dispatcher", assignee="a")
+        kb.claim_task(conn, t)
+        tripped = kb._record_task_failure(
+            conn,
+            t,
+            error="spawn boom",
+            outcome="spawn_failed",
+            release_claim=True,
+            end_run=True,
+            failure_limit=1,
+        )
+        assert tripped is True
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+
+        assert kb.recompute_ready(conn) == 0
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+
+
+def test_s1_claude_included_session_priced_without_task_run_cache_columns(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Claude subscription sessions can be unpriced and omit billing_provider.
+
+    ``task_runs`` deliberately has no cache-token columns; the fallback must use
+    the matched state.db session's model/tokens plus models.dev pricing and infer
+    Anthropic for bare ``claude-*`` model names.
+    """
+    profile_dir = tmp_path / "profiles" / "coder-claude"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription",
+                        lambda p: "claude" if p == "coder-claude" else None)
+
+    calls: list[tuple[str, str]] = []
+
+    class _FakeModelInfo:
+        cost_input = 15.0
+        cost_output = 75.0
+        cost_cache_read = 1.50
+        cost_cache_write = 18.75
+
+        def has_cost_data(self):
+            return True
+
+    def fake_get_model_info(provider, model):
+        calls.append((provider, model))
+        if (provider, model) == ("anthropic", "claude-opus-4-8"):
+            return _FakeModelInfo()
+        return None
+
+    monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
+
+    with kb.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
+        assert "cache_read_tokens" not in cols
+        assert "cache_write_tokens" not in cols
+
+        tid = kb.create_task(conn, title="claude-unpriced", assignee="coder-claude")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder-claude", started_at=1000, ended_at=2000)
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "S-claude-unpriced", "source": "cli", "started_at": 1500,
+             "input_tokens": 1_000_000, "output_tokens": 100_000,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "claude-opus-4-8", "cwd": f"/x/kanban/workspaces/{tid}"},
+        ])
+
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "FROM task_runs WHERE id=?", (run_id,)).fetchone()
+
+    assert row["cost_usd"] == pytest.approx(0.0)
+    assert row["input_tokens"] == 1_000_000
+    assert row["output_tokens"] == 100_000
+    meta = json.loads(row["metadata"])
+    assert meta["cost_usd_equivalent"] == pytest.approx(22.5)
+    assert meta["model"] == "claude-opus-4-8"
+    assert meta["billing_mode"] == "subscription_included"
+    assert meta["subscription"] == "claude"
+    assert calls == [("anthropic", "claude-opus-4-8")]
+
+
+def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, monkeypatch):
+    """OpenRouter state.db estimated cost stays value-identical and is labeled."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="openrouter-estimated", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=800, ended_at=900,
+        )
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "837", "source": "cli", "started_at": 837,
+             "input_tokens": 1000, "output_tokens": 200,
+             "estimated_cost_usd": 0.03760227, "cost_status": "estimated",
+             "model": "deepseek/deepseek-chat", "billing_provider": "openrouter"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        costs = kb.batch_task_costs(conn, [tid])
+
+    meta = json.loads(row["metadata"] or "{}")
+    row_status = row.keys() and meta.get("cost_status")
+    assert row["cost_usd"] == pytest.approx(0.03760227)
+    assert meta.get("cost_status") == "estimated"
+    assert costs[tid]["cost_usd"] == pytest.approx(0.03760227)
+    assert costs[tid]["cost_status"] == "estimated"
+
+
+def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
+    kanban_home,
+):
+    """Active claude-cli lanes stamp identity metadata without clobbering
+    pre-existing run metadata, including future fallback evidence.
+    """
+    import json as _json
+    with kb.connect() as conn:
+        lane = kb.create_lane(
+            conn,
+            name="claude-max",
+            profiles={"coder-claude": {
+                "worker_runtime": "claude-cli",
+                "model": "claude-fable-5",
+            }},
+        )
+        kb.activate_lane(conn, lane["id"])
+        tid = kb.create_task(conn, title="cli-lane", assignee="coder-claude")
+        run_id = _insert_ended_run(
+            conn,
+            tid,
+            profile="coder-claude",
+            metadata={"note": "keep", "fallback_used": True},
+        )
+        _write_claude_result_log(tid, total_cost_usd=0.42)
+
+        assert kb.backfill_run_costs(conn, limit=50) == 1
+
+        meta = _json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()["metadata"])
+        assert meta["note"] == "keep"
+        assert meta["worker_runtime"] == "claude-cli"
+        assert meta["model"] == "claude-fable-5"
+        assert meta["provider"] is None
+        assert meta["fallback_used"] is True
+        assert meta["billing_mode"] == "subscription_included"
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)

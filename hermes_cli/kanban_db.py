@@ -4914,7 +4914,7 @@ def backfill_run_costs(
 
             # K17: claude-CLI branch — no state.db session exists; read the
             # final result JSON from the per-task worker log instead.
-            if _is_claude_cli_runtime(profile):
+            if _run_is_claude_cli(profile, board=board):
                 task_id = row["task_id"]
                 newer = conn.execute(
                     "SELECT profile FROM task_runs WHERE task_id = ? AND id > ?",
@@ -4936,6 +4936,10 @@ def backfill_run_costs(
                 if c_in is None and c_out is None and c_equiv is None:
                     continue
                 stamped = dict(metadata or {})
+                lane_provider, lane_model = _lane_provider_model_for_profile(profile, board=board)
+                stamped.setdefault("worker_runtime", "claude-cli")
+                stamped.setdefault("model", lane_model)
+                stamped.setdefault("provider", lane_provider)
                 stamped.setdefault("billing_mode", "subscription_included")
                 if c_equiv is not None:
                     stamped.setdefault("cost_usd_equivalent", c_equiv)
@@ -5191,6 +5195,7 @@ def _read_state_sessions(path: Path) -> list[dict]:
         has_provider = "billing_provider" in cols
         has_cread = "cache_read_tokens" in cols
         has_cwrite = "cache_write_tokens" in cols
+        has_cost_status = "cost_status" in cols
         select = (
             "id, "
             + ("source" if has_src else "NULL AS source") + ", "
@@ -5200,7 +5205,8 @@ def _read_state_sessions(path: Path) -> list[dict]:
             + ("model" if has_model else "NULL AS model") + ", "
             + ("billing_provider" if has_provider else "NULL AS billing_provider") + ", "
             + ("cache_read_tokens" if has_cread else "NULL AS cache_read_tokens") + ", "
-            + ("cache_write_tokens" if has_cwrite else "NULL AS cache_write_tokens")
+            + ("cache_write_tokens" if has_cwrite else "NULL AS cache_write_tokens") + ", "
+            + ("cost_status" if has_cost_status else "NULL AS cost_status")
         )
         rows = conn.execute(f"SELECT {select} FROM sessions").fetchall()
     except Exception:
@@ -5235,6 +5241,7 @@ def _read_state_sessions(path: Path) -> list[dict]:
             # CanonicalUsage) — priced at their own rates in the equivalent.
             "cache_read": _coerce_int(r["cache_read_tokens"]),
             "cache_write": _coerce_int(r["cache_write_tokens"]),
+            "cost_status": r["cost_status"],
             "cwd": r["cwd"],
         })
     return out
@@ -5481,13 +5488,14 @@ def backfill_run_costs_from_sessions(
             est_sum: Optional[float] = None
             model_seen: Optional[str] = None
             provider_seen: Optional[str] = None
+            cost_status_seen: Optional[str] = None
             matched: list[str] = []
             source: Optional[str] = None
 
             def _take(dbkey: str, sess: dict) -> None:
                 nonlocal in_sum, out_sum, cread_sum, cwrite_sum
                 nonlocal actual_sum, est_sum, model_seen
-                nonlocal provider_seen
+                nonlocal provider_seen, cost_status_seen
                 key = f"{dbkey}::{sess['id']}"
                 if key in consumed:
                     return
@@ -5517,6 +5525,8 @@ def backfill_run_costs_from_sessions(
                     model_seen = sess["model"]
                 if not provider_seen and sess.get("provider"):
                     provider_seen = sess["provider"]
+                if not cost_status_seen and sess.get("cost_status"):
+                    cost_status_seen = str(sess["cost_status"])
 
             # Tier 1: deterministic cwd match (profile db + hub), keyed by path.
             cwd_sources: list[tuple[str, Path]] = []
@@ -5636,6 +5646,10 @@ def backfill_run_costs_from_sessions(
                 new_meta.setdefault("billing_mode", billing_mode)
             if subscription is not None:
                 new_meta.setdefault("subscription", subscription)
+            if cost_status_seen:
+                new_meta.setdefault("cost_status", cost_status_seen)
+            elif billing_mode == "metered" and stamp_cost is not None:
+                new_meta.setdefault("cost_status", "actual" if actual_sum is not None else "estimated")
 
             with write_txn(conn):
                 conn.execute(
@@ -22683,7 +22697,8 @@ def batch_task_costs(
                 COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
                 COALESCE(SUM(COALESCE(
                     json_extract(metadata, '$.cost_usd_equivalent'), 0.0
-                )), 0.0)                                          AS cost_usd_equivalent
+                )), 0.0)                                          AS cost_usd_equivalent,
+                MAX(json_extract(metadata, '$.cost_status'))        AS cost_status
             FROM task_runs
             WHERE task_id IN ({placeholders})
             GROUP BY task_id
@@ -22702,6 +22717,7 @@ def batch_task_costs(
             "cost_usd": c_usd,
             "cost_usd_equivalent": c_equiv,
             "cost_effective_usd": c_usd + c_equiv,
+            "cost_status": row["cost_status"],
         }
     return out
 
