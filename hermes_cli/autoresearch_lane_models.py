@@ -119,6 +119,29 @@ def _energy_from_response(resp: Any) -> Any:
     return None
 
 
+def _cost_from_response(resp: Any) -> dict[str, Any] | None:
+    cost = getattr(resp, "cost", None)
+    if cost is None and isinstance(resp, dict):
+        cost = resp.get("cost")
+    if cost is None:
+        extra = getattr(resp, "model_extra", None)
+        if isinstance(extra, dict):
+            cost = extra.get("cost")
+    return cost if isinstance(cost, dict) else None
+
+
+def response_usage_metadata(resp: Any) -> dict[str, Any]:
+    """Extract persisted NeuralWatt usage metadata from an API response."""
+    metadata: dict[str, Any] = {}
+    energy = _energy_from_response(resp)
+    if energy is not None:
+        metadata["energy"] = energy
+    cost = _cost_from_response(resp)
+    if cost is not None:
+        metadata["cost"] = cost
+    return metadata
+
+
 def _first_tool_call_name(resp: Any) -> str | None:
     choices = getattr(resp, "choices", None)
     if not choices and isinstance(resp, dict):
@@ -170,7 +193,7 @@ def neuralwatt_tool_call_smoke(
             if not tool_name:
                 item["error"] = "response did not include a tool_call"
             else:
-                item.update({"ok": True, "tool_call": tool_name, "energy": _energy_from_response(resp)})
+                item.update({"ok": True, "tool_call": tool_name, **response_usage_metadata(resp)})
         except Exception as exc:  # pragma: no cover - live smoke failure surface
             item["error"] = f"{type(exc).__name__}: {exc}"
         results.append(item)

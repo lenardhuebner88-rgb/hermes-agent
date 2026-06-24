@@ -17,10 +17,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from hermes_cli.autoresearch_lane_models import response_usage_metadata
+
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_AUDIT = _REPO / ".hermes" / "skill-audit"
 _MAX_FILE_CHARS = 12_000
 _MAX_ITERATIONS = 8
+
+_SUMMABLE_USAGE_FIELDS = {
+    ("cost", "request_cost_usd"),
+    ("energy", "energy_kwh"),
+    ("energy", "carbon_g_co2eq"),
+}
+
+
+def _merge_response_usage_metadata(acc: dict[str, Any], meta: dict[str, Any]) -> None:
+    """Merge NeuralWatt response usage into run-level metadata."""
+    if not meta:
+        return
+    acc.setdefault("response_usage_metadata", []).append(meta)
+    for section in ("cost", "energy"):
+        values = meta.get(section)
+        if not isinstance(values, dict):
+            continue
+        target = acc.setdefault(section, {})
+        for key, value in values.items():
+            if (section, key) in _SUMMABLE_USAGE_FIELDS and isinstance(value, int | float):
+                target[key] = float(target.get(key) or 0.0) + float(value)
+            elif key not in target:
+                target[key] = value
 _MAX_GREP_RESULTS = 100
 
 SUBSYSTEM_GLOBS: dict[str, tuple[str, ...]] = {
@@ -681,6 +706,7 @@ def run_deep_audit(
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         tokens = 0
         model_label = None
+        usage_metadata: dict[str, Any] = {}
         iterations = 0
         raw_findings: list[dict[str, Any]] = []
         finished = False
@@ -707,6 +733,7 @@ def run_deep_audit(
                     ),
                 })
             resp = llm_call(task="code_audit", tools=tool_schemas(), messages=messages, temperature=0, max_tokens=4000)
+            _merge_response_usage_metadata(usage_metadata, response_usage_metadata(resp))
             tokens += _usage_tokens(resp)
             model_label = _model_label(resp) or model_label
             message = _message_from_response(resp)
@@ -753,7 +780,7 @@ def run_deep_audit(
         reason = ""
         if not finished:
             reason = "max iterations reached before finish_audit"
-        return {
+        result = {
             "ok": True,
             "findings": findings,
             "subsystem": subsystem,
@@ -765,6 +792,9 @@ def run_deep_audit(
             "files": rel_files,
             "duration_s": round(time.time() - started, 3),
         }
+        if usage_metadata:
+            result.update(usage_metadata)
+        return result
     except Exception as exc:
         return {
             "ok": False,
@@ -945,6 +975,13 @@ def run_request_file(path: Path) -> dict[str, Any]:
                 errors=0 if result.get("ok") else 1,
                 scanned=len(result.get("files") or []),
                 model=result.get("model") or None,
+                cost=result.get("cost") if isinstance(result.get("cost"), dict) else None,
+                energy=result.get("energy") if isinstance(result.get("energy"), dict) else None,
+                response_usage_metadata=(
+                    result.get("response_usage_metadata")
+                    if isinstance(result.get("response_usage_metadata"), list)
+                    else None
+                ),
             )
         except Exception:
             errors = 1
