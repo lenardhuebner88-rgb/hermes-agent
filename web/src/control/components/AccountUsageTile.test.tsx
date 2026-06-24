@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AccountUsageTile } from "./AccountUsageTile";
 import type { AccountUsageResponse } from "../lib/types";
+import { DEFAULT_STATS_CONFIG, type StatsFieldConfig } from "../lib/statsFields";
 
 const usage: AccountUsageResponse = {
   cache_ttl_seconds: 60,
@@ -113,6 +114,40 @@ describe("AccountUsageTile", () => {
     const empty: AccountUsageResponse = { cache_ttl_seconds: 60, providers: [] };
     const html = renderToStaticMarkup(<AccountUsageTile usage={empty} loading={false} error={null} />);
     expect(html).toContain("Limit unbekannt");
+  });
+
+  it("custom config relabels providers without a code change (AC-2)", () => {
+    const cfg: StatsFieldConfig = {
+      ...DEFAULT_STATS_CONFIG,
+      providers: DEFAULT_STATS_CONFIG.providers.map((p) =>
+        p.id === "anthropic" ? { ...p, label: "Claude (Custom-Label)" } : p,
+      ),
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={usage} loading={false} error={null} config={cfg} />);
+
+    expect(html).toContain("Claude (Custom-Label)");
+    expect(html).not.toContain(">Claude<");
+  });
+
+  it("config visibility prunes a provider card → fewer DOM nodes (AC-3 measurable declutter)", () => {
+    const tagCount = (html: string) => (html.match(/<[a-zA-Z]/g) ?? []).length;
+
+    const full = renderToStaticMarkup(
+      <AccountUsageTile usage={usage} loading={false} error={null} config={DEFAULT_STATS_CONFIG} />,
+    );
+    const hidden: StatsFieldConfig = {
+      ...DEFAULT_STATS_CONFIG,
+      providers: DEFAULT_STATS_CONFIG.providers.map((p) =>
+        p.id === "anthropic" ? { ...p, visible: false } : p,
+      ),
+    };
+    const lean = renderToStaticMarkup(
+      <AccountUsageTile usage={usage} loading={false} error={null} config={hidden} />,
+    );
+
+    expect(full).toContain("Claude");
+    expect(lean).not.toContain("Claude");
+    expect(tagCount(lean)).toBeLessThan(tagCount(full));
   });
 
   it("kennzeichnet ein Fenster ohne Prozentwert als unbekanntes Limit (Gauge bleibt zugänglich)", () => {
