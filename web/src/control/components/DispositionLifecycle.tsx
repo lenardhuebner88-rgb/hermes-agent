@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle, Link2, Trash2, Wrench } from "lucide-react";
+import { CheckCircle, ChevronDown, ChevronRight, Link2, Trash2, Wrench } from "lucide-react";
 import { ToneCallout } from "./atoms";
 import { FleetPanel } from "./fleet/atoms";
 import { useDispositionItems, useDispositionActions } from "../hooks/useControlData";
@@ -11,6 +11,10 @@ const t = {
   eyebrow: "Disposition-Items",
   meta: "offene Follow-ups & Risiken aus abgeschlossenen Tasks",
   empty: "Keine offenen Disposition-Items.",
+  collapsedTitle: "Disposition-Items zusammengeklappt",
+  collapsedHint: "ausblenden, bis du sie bewusst öffnest",
+  expand: "Anzeigen",
+  collapse: "Einklappen",
   accept: "Akzeptieren",
   fixTask: "Fix-Task anlegen",
   dismiss: "Verwerfen",
@@ -212,6 +216,10 @@ export function DispositionLifecycle() {
   const [pending, setPending] = useState<PendingAction | null>(null);
 
   const items = data?.items ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const realRiskCount = items.filter((item) => item.severity === "real-risk").length;
+  const scopeNoteCount = items.filter((item) => item.severity === "scope-note").length;
+  const fixableCount = items.filter((item) => item.severity !== "scope-note").length;
 
   function handlePending(p: PendingAction | null) {
     setPending(p);
@@ -252,14 +260,38 @@ export function DispositionLifecycle() {
       {error ? <div className="mb-3"><ToneCallout tone="red">{error}</ToneCallout></div> : null}
       {actionError ? <div className="mb-3"><ToneCallout tone="red">{actionError}</ToneCallout></div> : null}
       {items.length > 0 ? (
-        <DispositionItemList
-          items={items}
-          pending={pending}
-          busy={busy}
-          onAct={handleAct}
-          onPending={handlePending}
-          onDismissReasonChange={handleDismissReasonChange}
-        />
+        <>
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="flex w-full items-center justify-between gap-3 rounded-md border border-[var(--hc-accent-border)] bg-black/15 px-3 py-2 text-left hover:bg-white/5"
+          >
+            <span className="min-w-0">
+              <span className="block text-[0.82rem] font-medium text-white">{expanded ? t.collapse : t.collapsedTitle}</span>
+              <span className="block text-[0.72rem] hc-dim">
+                {items.length} offen · {realRiskCount} echte Risiken · {scopeNoteCount} Hinweise · {fixableCount} fixierbar
+              </span>
+            </span>
+            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-white/10 px-2 py-1 text-[0.72rem] hc-soft">
+              {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              {expanded ? t.collapse : t.expand}
+            </span>
+          </button>
+          {expanded ? (
+            <div className="mt-2">
+              <DispositionItemList
+                items={items}
+                pending={pending}
+                busy={busy}
+                onAct={handleAct}
+                onPending={handlePending}
+                onDismissReasonChange={handleDismissReasonChange}
+              />
+            </div>
+          ) : (
+            <p className="mt-2 text-[0.72rem] hc-dim">{t.collapsedHint}</p>
+          )}
+        </>
       ) : (
         <p className="text-[0.82rem] hc-dim">{t.empty}</p>
       )}
