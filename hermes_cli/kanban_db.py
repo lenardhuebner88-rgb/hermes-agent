@@ -20713,7 +20713,12 @@ def decision_queue(
     except Exception:
         pass
 
-    # 9) disposition_stale — alternde offene follow_up + still_open Items
+    # 9) disposition_stale — legacy passive stale view for alternde offene
+    #    follow_up + still_open Items.  Default OFF: the disposition digest is
+    #    now the canonical passive stale surface. Keep this block only as an
+    #    explicit operator opt-in escape hatch; do not affect the Block 8
+    #    real-risk immediate path above.
+    #
     #    (FRD Phase 3a, Reaper).  Risiken (typ=risk) laufen bereits über
     #    Block 8 (disposition_risk) und werden hier NICHT nochmal erfasst.
     #    Read-only, bounded (cap), Schwelle konfigurierbar.  Fail-soft.
@@ -20723,14 +20728,17 @@ def decision_queue(
     #    Low-Signal-Einstufung; eine spätere Senke könnte es aufgreifen, falls
     #    sich solche Notizen als Friedhof erweisen.
     try:
-        _stale_max_age: int = (config or {}).get(
-            "disposition_stale_max_age_seconds", 7 * 24 * 3600
+        _stale_cfg = config or {}
+        _stale_max_age: int = _stale_cfg.get(
+            "disposition_stale_max_age_seconds", 4 * 24 * 3600
         )
-        _stale_cap: int = (config or {}).get("disposition_stale_cap", 50)
+        _stale_cap: int = _stale_cfg.get("disposition_stale_cap", 50)
 
         # Zwei separate Aufrufe weil list_disposition_items keinen Multi-typ-Filter hat.
-        _stale_items = list_disposition_items(conn, status="open", typ="follow_up") + \
-                       list_disposition_items(conn, status="open", typ="still_open")
+        _stale_items = []
+        if _stale_cfg.get("disposition_stale_in_decision_queue", False):
+            _stale_items = list_disposition_items(conn, status="open", typ="follow_up") + \
+                           list_disposition_items(conn, status="open", typ="still_open")
 
         # Nur Items die (a) ein gesetztes created_at haben und (b) alt genug sind.
         _cutoff = now - _stale_max_age

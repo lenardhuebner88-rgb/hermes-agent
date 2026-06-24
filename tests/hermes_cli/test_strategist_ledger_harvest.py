@@ -1,11 +1,12 @@
 """Tests: Ledger-Harvest (Phase 2b) — disposition_items als primäre Follow-up-Quelle.
 
 Deckt ab:
-  1. load_followup_candidates_from_ledger: ein open follow_up-Item → ein Kandidat
-  2. typ=risk → nicht geladen; status!=open → nicht; created_at < since_ts → nicht
-  3. Titel-Fallback: source_task_id ohne tasks-Zeile → title == source_task_id
-  4. run_harvest Merge+Dedup: Ledger-Item gewinnt gegen Keyword-Receipt für selben task_id
-  5. run_harvest Backward-Compat: keine Ledger-Items → keyword-fallback wie bisher
+  1. load_followup_candidates_from_ledger: open follow_up/risk/still_open → Kandidaten
+  2. Severity-Split: real-risk → urgent; scope-note/none → bundle; overdue-Flag
+  3. status!=open → nicht; created_at < since_ts → nicht, außer overdue real-risk
+  4. Titel-Fallback: source_task_id ohne tasks-Zeile → title == source_task_id
+  5. run_harvest Merge+Dedup: Ledger-Item gewinnt gegen Keyword-Receipt für selben task_id
+  6. run_harvest Backward-Compat: keine Ledger-Items → keyword-fallback wie bisher
 """
 from __future__ import annotations
 
@@ -49,14 +50,24 @@ def _done_task(conn, *, title, body, created_by="coder", completed_at=None):
     return tid
 
 
-def _insert_follow_up(conn, *, source_task_id, next_action="Schritt A", evidence="Beweis B",
-                      disposition="defer", created_at=None):
-    """Hilfsfunktion: follow_up-Ledger-Item einsetzen (ggf. created_at überschreiben)."""
+def _insert_follow_up(
+    conn,
+    *,
+    source_task_id,
+    typ="follow_up",
+    next_action="Schritt A",
+    evidence="Beweis B",
+    disposition="defer",
+    severity="none",
+    created_at=None,
+):
+    """Hilfsfunktion: Ledger-Item einsetzen (ggf. created_at überschreiben)."""
     iid = kb.insert_disposition_item(
         conn,
         source_task_id=source_task_id,
-        typ="follow_up",
+        typ=typ,
         disposition=disposition,
+        severity=severity,
         next_action=next_action,
         evidence=evidence,
     )
@@ -94,19 +105,41 @@ def test_load_ledger_one_follow_up(kanban_home):
 
 
 # --------------------------------------------------------------------------- #
-# 2. Negative Filter: typ=risk, status!=open, created_at < since_ts
+# 2. Typen + Severity: follow_up/risk/still_open werden geladen und klassifiziert
 # --------------------------------------------------------------------------- #
-def test_load_ledger_excludes_risk_type(kanban_home):
+def test_load_ledger_includes_follow_up_risk_still_open_with_severity(kanban_home):
     with kb.connect() as conn:
-        tid = _done_task(conn, title="Risiko-Task", body="x" * 50)
-        kb.insert_disposition_item(
+        follow_tid = _done_task(conn, title="Follow", body="x" * 50)
+        risk_tid = _done_task(conn, title="Risk", body="x" * 50)
+        still_open_tid = _done_task(conn, title="Still open", body="x" * 50)
+        _insert_follow_up(
             conn,
-            source_task_id=tid,
+            source_task_id=follow_tid,
+            typ="follow_up",
+            severity="scope-note",
+        )
+        _insert_follow_up(
+            conn,
+            source_task_id=risk_tid,
             typ="risk",
-            disposition="defer",
+            severity="real-risk",
+        )
+        _insert_follow_up(
+            conn,
+            source_task_id=still_open_tid,
+            typ="still_open",
+            severity="none",
         )
         cands = strategist.load_followup_candidates_from_ledger(conn, since_ts=0)
-    assert cands == []
+    by_task = {cand["task_id"]: cand for cand in cands}
+    assert set(by_task) == {follow_tid, risk_tid, still_open_tid}
+    assert by_task[follow_tid]["typ"] == "follow_up"
+    assert by_task[follow_tid]["severity"] == "bundle"
+    assert by_task[risk_tid]["typ"] == "risk"
+    assert by_task[risk_tid]["severity"] == "urgent"
+    assert by_task[risk_tid]["overdue"] is False
+    assert by_task[still_open_tid]["typ"] == "still_open"
+    assert by_task[still_open_tid]["severity"] == "bundle"
 
 
 def test_load_ledger_excludes_non_open_status(kanban_home):
@@ -127,6 +160,48 @@ def test_load_ledger_excludes_old_created_at(kanban_home):
         _insert_follow_up(conn, source_task_id=tid, created_at=old_ts)
         cands = strategist.load_followup_candidates_from_ledger(conn, since_ts=since_ts)
     assert cands == []
+
+
+def test_load_ledger_includes_overdue_real_risk_before_since_ts(kanban_home):
+    now = int(time.time())
+    old_ts = now - 5 * 86400
+    since_ts = now - 3600
+    with kb.connect() as conn:
+        overdue_tid = _done_task(conn, title="Altes Real-Risk", body="x" * 50)
+        accepted_tid = _done_task(conn, title="Akzeptiert", body="x" * 50)
+        task_created_tid = _done_task(conn, title="Task erzeugt", body="x" * 50)
+        _insert_follow_up(
+            conn,
+            source_task_id=overdue_tid,
+            typ="risk",
+            severity="real-risk",
+            created_at=old_ts,
+        )
+        accepted_iid = _insert_follow_up(
+            conn,
+            source_task_id=accepted_tid,
+            typ="risk",
+            severity="real-risk",
+            created_at=old_ts,
+        )
+        task_created_iid = _insert_follow_up(
+            conn,
+            source_task_id=task_created_tid,
+            typ="risk",
+            severity="real-risk",
+            created_at=old_ts,
+        )
+        kb.set_disposition_status(conn, accepted_iid, status="accepted")
+        kb.set_disposition_status(conn, task_created_iid, status="task_created")
+        cands = strategist.load_followup_candidates_from_ledger(
+            conn,
+            since_ts=since_ts,
+            realrisk_escalate_days=2,
+        )
+
+    assert [cand["task_id"] for cand in cands] == [overdue_tid]
+    assert cands[0]["severity"] == "urgent"
+    assert cands[0]["overdue"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +268,44 @@ def test_run_harvest_keyword_only_task_appears_as_fallback(kanban_home):
     sources = {c["source"] for c in cand_data["candidates"]}
     assert "keyword-fallback" in sources
     assert "ledger" not in sources
+
+
+def test_run_harvest_reaps_worker_drop_items_only(kanban_home):
+    """Harvest dismisses explicit worker-drop ledger items, leaving other dispositions open."""
+    with kb.connect() as conn:
+        tid = _done_task(conn, title="Reaper-Task", body="x" * 50, completed_at=int(time.time()))
+        drop_iid = _insert_follow_up(conn, source_task_id=tid, disposition="drop")
+        defer_iid = _insert_follow_up(conn, source_task_id=tid, disposition="defer")
+        delegate_iid = _insert_follow_up(conn, source_task_id=tid, disposition="delegate")
+        risk_iid = kb.insert_disposition_item(
+            conn,
+            source_task_id=tid,
+            typ="risk",
+            disposition="defer",
+            severity="real-risk",
+        )
+
+    strategist.run_harvest(types.SimpleNamespace(board=None))
+
+    with kb.connect() as conn:
+        drop_item = kb.get_disposition_item(conn, drop_iid)
+        defer_item = kb.get_disposition_item(conn, defer_iid)
+        delegate_item = kb.get_disposition_item(conn, delegate_iid)
+        risk_item = kb.get_disposition_item(conn, risk_iid)
+
+    assert drop_item is not None
+    assert defer_item is not None
+    assert delegate_item is not None
+    assert risk_item is not None
+
+    assert drop_item["status"] == "dismissed"
+    assert drop_item["decided_by"] == "harvest-reaper"
+    assert drop_item["decided_at"] is not None
+
+    for item in (defer_item, delegate_item, risk_item):
+        assert item["status"] == "open"
+        assert item["decided_by"] is None
+        assert item["decided_at"] is None
 
 
 # --------------------------------------------------------------------------- #

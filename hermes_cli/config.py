@@ -2475,12 +2475,31 @@ DEFAULT_CONFIG = {
         # large bulk-load of triage tasks from spending a burst of aux
         # LLM calls in one tick. Excess tasks defer to the next tick.
         "auto_decompose_per_tick": 3,
+        # Strategist harvest escalation window: open real-risk disposition
+        # items older than this many days stay visible as overdue candidates
+        # even if they predate the normal harvest marker.
+        "disposition_realrisk_escalate_days": 2,
+        # Cheap strategist harvest watchdog: open disposition-items above this
+        # count trigger an extra harvest run, then re-arm only after the open
+        # count drops below the rearm value.
+        "disposition_special_run_threshold": 25,
+        "disposition_special_run_rearm": 20,
         # Stale detection: running tasks that have exceeded this many
         # seconds without a heartbeat (since ``last_heartbeat_at``) are
         # auto-reclaimed to ``ready`` on the next dispatcher tick. The
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Disposition/Strategist thresholds. Keep defaults visible through
+        # load_config() so operator-tunable production behaviour does not rely
+        # on hardcoded call-site fallbacks.
+        "disposition_realrisk_escalate_days": 2,
+        "disposition_special_run_threshold": 25,
+        "disposition_special_run_rearm": 20,
+        "disposition_stale_max_age_seconds": 4 * 24 * 3600,
+        # Legacy passive stale rows in the decision queue were replaced by the
+        # disposition digest. Leave an explicit opt-in escape hatch, default OFF.
+        "disposition_stale_in_decision_queue": False,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

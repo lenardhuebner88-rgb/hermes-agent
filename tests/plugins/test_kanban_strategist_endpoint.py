@@ -42,6 +42,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("HERMES_VISION_METRICS_PATH", raising=False)
+    monkeypatch.delenv("HERMES_STRATEGIST_DIGEST_PATH", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
@@ -132,6 +133,68 @@ def test_list_emits_weak_etag_and_304_roundtrip(client):
     assert etag and etag.startswith('W/"')
     assert r1.headers.get("cache-control") == "private, no-cache"
     r2 = client.get(f"{PREFIX}/strategist/proposals", headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+
+
+# ---------------------------------------------------------------------------
+# GET /strategist/disposition-digest (A3)
+# ---------------------------------------------------------------------------
+
+
+def _write_digest() -> dict:
+    """Persist a minimal valid digest where the reader resolves it. Returns the
+    written dict."""
+    from hermes_cli import strategist
+
+    payload = {
+        "clusters": [
+            {
+                "theme": "test isolation",
+                "item_ids": ["di_1", "di_2", "di_3"],
+                "severity": "scope-note",
+                "recommendation": "planspec",
+                "planspec_key": "receipt-t_abc",
+            }
+        ],
+        "left": [{"item_id": "di_9", "reason": "vague", "disposition": "verworfen"}],
+    }
+    path = strategist.write_disposition_digest(
+        ss.disposition_digest_path().parent, payload, now=1750000000
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_disposition_digest_null_when_absent(client):
+    r = client.get(f"{PREFIX}/strategist/disposition-digest")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["digest"] is None
+    assert isinstance(data["checked_at"], int)
+
+
+def test_disposition_digest_returns_persisted(client):
+    written = _write_digest()
+    r = client.get(f"{PREFIX}/strategist/disposition-digest")
+    assert r.status_code == 200, r.text
+    digest = r.json()["digest"]
+    assert digest["generated_at"] == 1750000000
+    assert digest["total_open"] == 4  # di_1..di_3 + di_9
+    assert digest["reaped"] == 1
+    assert digest["clusters"][0]["recommendation"] == "planspec"
+    assert digest["left"][0]["item_id"] == "di_9"
+    # Endpoint payload matches what the writer persisted.
+    assert digest == written
+
+
+def test_disposition_digest_etag_304_roundtrip(client):
+    _write_digest()
+    r1 = client.get(f"{PREFIX}/strategist/disposition-digest")
+    etag = r1.headers.get("etag")
+    assert etag and etag.startswith('W/"')
+    assert r1.headers.get("cache-control") == "private, no-cache"
+    r2 = client.get(
+        f"{PREFIX}/strategist/disposition-digest", headers={"If-None-Match": etag}
+    )
     assert r2.status_code == 304
 
 

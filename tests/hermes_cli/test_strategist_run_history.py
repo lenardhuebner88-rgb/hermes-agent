@@ -15,7 +15,11 @@ def test_append_and_read_last_runs(tmp_path: Path):
 
 
 def test_read_last_runs_missing_file(tmp_path: Path):
-    assert strategist.read_last_runs(tmp_path) == {"harvest": None, "propose": None}
+    assert strategist.read_last_runs(tmp_path) == {
+        "harvest": None,
+        "propose": None,
+        "digest": None,
+    }
 
 
 def test_read_last_runs_skips_corrupt_lines(tmp_path: Path):

@@ -1384,19 +1384,31 @@ def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str,
 
 
 def load_followup_candidates_from_ledger(
-    conn, *, since_ts: int
+    conn, *, since_ts: int, realrisk_escalate_days: int = 2
 ) -> list[dict[str, Any]]:
-    """Primäre Quelle: lädt ``follow_up``-Items (status=open, created_at >= since_ts)
-    aus dem Disposition-Ledger als Harvest-Kandidaten.
+    """Primäre Quelle: lädt offene Disposition-Ledger-Items als Harvest-Kandidaten.
+
+    Reguläre Kandidaten sind ``follow_up``, ``risk`` und ``still_open`` mit
+    ``created_at >= since_ts``. Ältere ``real-risk``-Items bleiben zusätzlich im
+    Kandidatensatz, wenn sie den Eskalations-Cutoff überschreiten.
 
     Kandidaten-Format ist kompatibel mit dem keyword-Pfad (``filter_followup_candidates``),
     damit beide Quellen im Merge in ``run_harvest`` identisch behandelt werden.
     """
-    items = kanban_db.list_disposition_items(conn, status="open", typ="follow_up")
+    candidate_types = {"follow_up", "risk", "still_open"}
+    escalate_days = max(0, int(realrisk_escalate_days or 0))
+    overdue_cutoff_ts = int(time.time()) - (escalate_days * 86400)
+    items = kanban_db.list_disposition_items(conn, status="open")
     out: list[dict[str, Any]] = []
     for item in items:
+        if item.get("typ") not in candidate_types:
+            continue
         item_created_at = item.get("created_at") or 0
-        if item_created_at < since_ts:
+        disposition = item.get("disposition") or ""
+        source_severity = item.get("severity") or "none"
+        is_real_risk = source_severity == "real-risk"
+        is_overdue = is_real_risk and item_created_at < overdue_cutoff_ts
+        if item_created_at < since_ts and not is_overdue:
             continue
         source_task_id = item["source_task_id"]
         # Titel-Fallback: kein tasks-Eintrag → source_task_id als Titel
@@ -1410,7 +1422,7 @@ def load_followup_candidates_from_ledger(
         if next_action or evidence:
             excerpt = next_action + (" — " + evidence if evidence else "")
         else:
-            excerpt = item.get("disposition") or ""
+            excerpt = disposition
         out.append(
             {
                 "task_id": source_task_id,
@@ -1420,9 +1432,33 @@ def load_followup_candidates_from_ledger(
                 "excerpt": excerpt,
                 "suggested_key": f"disposition-{item['id']}",
                 "source": "ledger",
+                "typ": item.get("typ"),
+                "disposition": disposition,
+                "source_severity": source_severity,
+                "severity": "urgent" if is_real_risk else "bundle",
+                "overdue": bool(is_overdue),
             }
         )
     return out
+
+
+def reap_worker_drop_disposition_items(conn) -> int:
+    """Dismiss open disposition-ledger items explicitly marked as worker ``drop``."""
+    reaped = 0
+    for item in kanban_db.list_disposition_items(conn, status="open"):
+        if item.get("disposition") != "drop":
+            continue
+        updated = kanban_db.set_disposition_status(
+            conn,
+            item["id"],
+            status="dismissed",
+            decided_by="harvest-reaper",
+        )
+        if updated is not None:
+            reaped += 1
+    if reaped:
+        logger.info("harvest reaper dismissed %d worker-drop disposition items", reaped)
+    return reaped
 
 
 # --------------------------------------------------------------------------- #
@@ -1445,8 +1481,8 @@ def append_run_history(state_dir: Path, entry: dict[str, Any]) -> None:
 
 
 def read_last_runs(state_dir: Path) -> dict[str, Any]:
-    """Most-recent run-history entry per mode (harvest/propose), or None each."""
-    out: dict[str, Any] = {"harvest": None, "propose": None}
+    """Most-recent run-history entry per mode (harvest/propose/digest), or None."""
+    out: dict[str, Any] = {"harvest": None, "propose": None, "digest": None}
     path = Path(state_dir) / "run-history.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1464,6 +1500,269 @@ def read_last_runs(state_dir: Path) -> dict[str, Any]:
         if mode in out:
             out[mode] = entry  # later lines win → most recent
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Disposition digest (A3): the Sonnet harvest step persists its clustering
+# decision here so the dashboard can show the full triage — not just the levers
+# that survived the propose gate.
+# --------------------------------------------------------------------------- #
+_DIGEST_RECOMMENDATIONS = ("drop", "collect", "planspec")
+
+
+def disposition_digest_path(state_dir: Optional[Path] = None) -> Path:
+    """Resolve the disposition-digest artifact path.
+
+    ``HERMES_STRATEGIST_DIGEST_PATH`` is the explicit override (test isolation);
+    otherwise ``<state_dir>/disposition_digest.json`` where ``state_dir``
+    defaults to the runtime strategist state dir. The dashboard reader
+    (:func:`strategist_surface.disposition_digest_path`) delegates here so both
+    sides resolve the SAME path."""
+    override = os.environ.get("HERMES_STRATEGIST_DIGEST_PATH", "").strip()
+    if override:
+        return Path(override)
+    base = Path(state_dir) if state_dir is not None else default_state_dir()
+    return base / "disposition_digest.json"
+
+
+def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
+    """Validate + normalize the Sonnet-supplied clustering decision into the
+    persisted digest schema. Raises ``ValueError`` on a malformed contract so a
+    bad LLM payload fails loud (CLI exits 2) instead of writing garbage.
+
+    ``generated_at`` is ALWAYS stamped from ``now`` (Python wall-clock), never
+    trusted from the payload — an LLM cannot backdate the digest. ``total_open``
+    and ``reaped`` are honoured if the step supplied valid ints, else derived:
+    ``total_open`` = distinct items across clusters + left, ``reaped`` = number
+    of clusters recommended for ``planspec``."""
+    if not isinstance(payload, dict):
+        raise ValueError("digest payload must be a JSON object")
+
+    raw_clusters = payload.get("clusters", [])
+    if not isinstance(raw_clusters, list):
+        raise ValueError("digest 'clusters' must be a list")
+    clusters: list[dict[str, Any]] = []
+    seen_items: set[str] = set()
+    reaped_derived = 0
+    for idx, cluster in enumerate(raw_clusters):
+        if not isinstance(cluster, dict):
+            raise ValueError(f"cluster[{idx}] must be an object")
+        theme = str(cluster.get("theme") or "").strip()
+        if not theme:
+            raise ValueError(f"cluster[{idx}] has an empty 'theme'")
+        recommendation = str(cluster.get("recommendation") or "").strip().lower()
+        if recommendation not in _DIGEST_RECOMMENDATIONS:
+            raise ValueError(
+                f"cluster[{idx}] recommendation {recommendation!r} not in "
+                f"{_DIGEST_RECOMMENDATIONS}"
+            )
+        raw_ids = cluster.get("item_ids", [])
+        if not isinstance(raw_ids, list):
+            raise ValueError(f"cluster[{idx}] 'item_ids' must be a list")
+        item_ids = [str(i) for i in raw_ids]
+        seen_items.update(item_ids)
+        if recommendation == "planspec":
+            reaped_derived += 1
+        norm = {
+            "theme": theme,
+            "item_ids": item_ids,
+            "severity": str(cluster.get("severity") or "none").strip() or "none",
+            "recommendation": recommendation,
+        }
+        planspec_key = cluster.get("planspec_key")
+        if planspec_key:
+            norm["planspec_key"] = str(planspec_key).strip()
+        clusters.append(norm)
+
+    raw_left = payload.get("left", [])
+    if not isinstance(raw_left, list):
+        raise ValueError("digest 'left' must be a list")
+    left: list[dict[str, Any]] = []
+    for idx, entry in enumerate(raw_left):
+        if not isinstance(entry, dict):
+            raise ValueError(f"left[{idx}] must be an object")
+        item_id = str(entry.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError(f"left[{idx}] has an empty 'item_id'")
+        seen_items.add(item_id)
+        norm_left: dict[str, Any] = {
+            "item_id": item_id,
+            "reason": str(entry.get("reason") or "").strip(),
+        }
+        disposition = entry.get("disposition")
+        if disposition:
+            norm_left["disposition"] = str(disposition).strip()
+        left.append(norm_left)
+
+    total_open = payload.get("total_open")
+    if not isinstance(total_open, int) or isinstance(total_open, bool) or total_open < 0:
+        total_open = len(seen_items)
+    reaped = payload.get("reaped")
+    if not isinstance(reaped, int) or isinstance(reaped, bool) or reaped < 0:
+        reaped = reaped_derived
+
+    return {
+        "generated_at": int(now),
+        "total_open": total_open,
+        "reaped": reaped,
+        "clusters": clusters,
+        "left": left,
+    }
+
+
+def write_disposition_digest(
+    state_dir: Path, payload: dict[str, Any], *, now: int
+) -> Path:
+    """Validate + persist the harvest clustering decision atomically. Returns
+    the digest path. See :func:`_normalize_digest` for the contract."""
+    digest = _normalize_digest(payload, now=now)
+    path = disposition_digest_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(digest, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def run_digest(args) -> dict[str, Any]:
+    """CLI adapter: read the harvest step's ``--digest-file`` clustering JSON,
+    validate + persist it as ``disposition_digest.json``, append a run-history
+    line. Deterministic — no LLM call, no ingest (the propose path handles the
+    levers; this only records the transparent triage)."""
+    state_dir = default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    digest_file = getattr(args, "digest_file", None)
+    if not digest_file:
+        raise FileNotFoundError("--mode digest requires --digest-file <path>")
+    payload = json.loads(Path(digest_file).read_text(encoding="utf-8"))
+    now = int(time.time())
+    path = write_disposition_digest(state_dir, payload, now=now)
+    digest = json.loads(path.read_text(encoding="utf-8"))
+    append_run_history(
+        state_dir,
+        {
+            "ts": now,
+            "mode": "digest",
+            "clusters": len(digest["clusters"]),
+            "total_open": digest["total_open"],
+            "reaped": digest["reaped"],
+            "left": len(digest["left"]),
+        },
+    )
+    return {
+        "mode": "digest",
+        "digest_path": str(path),
+        "clusters": len(digest["clusters"]),
+        "total_open": digest["total_open"],
+        "reaped": digest["reaped"],
+        "left": len(digest["left"]),
+    }
+
+
+SPECIAL_HARVEST_COOLDOWN_SECONDS = 6 * 60 * 60
+
+
+def _read_special_harvest_state(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
+        return {"armed": True, "last_special_run_ts": None}
+    return {
+        "armed": bool(raw.get("armed", True)),
+        "last_special_run_ts": raw.get("last_special_run_ts"),
+    }
+
+
+def _write_special_harvest_state(path: Path, state: dict[str, Any]) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def _open_disposition_item_count(conn) -> int:
+    row = conn.execute("SELECT COUNT(*) AS n FROM disposition_items WHERE status = 'open'").fetchone()
+    return int(row["n"] if row is not None else 0)
+
+
+def run_harvest_watch(args) -> dict[str, Any]:
+    """Cheap count-watchdog that triggers an extra harvest run when backlog spikes.
+
+    The watcher does no LLM work and uses the normal :func:`run_harvest` path for
+    the actual special run, so ``harvest_last_run.json`` remains the single
+    source of truth for harvest windows. A separate watchdog state only guards
+    cooldown + hysteresis to avoid firing repeatedly while the backlog stays high.
+    """
+    state_dir = default_state_dir()
+    state_path = state_dir / "harvest_special_run.json"
+    now = int(time.time())
+
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    threshold = int(kanban_cfg.get("disposition_special_run_threshold", 25))
+    rearm = int(kanban_cfg.get("disposition_special_run_rearm", 20))
+
+    conn = kanban_db.connect(board=getattr(args, "board", None))
+    try:
+        open_count = _open_disposition_item_count(conn)
+    finally:
+        conn.close()
+
+    state = _read_special_harvest_state(state_path)
+    last_special_run_ts = state.get("last_special_run_ts")
+    if open_count < rearm and not state.get("armed", True):
+        state["armed"] = True
+        _write_special_harvest_state(state_path, state)
+
+    if open_count <= threshold:
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "below-threshold",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "state_path": str(state_path),
+        }
+    if not state.get("armed", True):
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "not-rearmed",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "state_path": str(state_path),
+        }
+    if (
+        isinstance(last_special_run_ts, int)
+        and now - last_special_run_ts < SPECIAL_HARVEST_COOLDOWN_SECONDS
+    ):
+        return {
+            "mode": "harvest-watch",
+            "triggered": False,
+            "reason": "cooldown",
+            "open_disposition_items": open_count,
+            "threshold": threshold,
+            "rearm": rearm,
+            "cooldown_remaining_seconds": SPECIAL_HARVEST_COOLDOWN_SECONDS
+            - (now - last_special_run_ts),
+            "state_path": str(state_path),
+        }
+
+    harvest = run_harvest(args)
+    state.update({"armed": False, "last_special_run_ts": now})
+    _write_special_harvest_state(state_path, state)
+    return {
+        "mode": "harvest-watch",
+        "triggered": True,
+        "reason": "threshold-exceeded",
+        "open_disposition_items": open_count,
+        "threshold": threshold,
+        "rearm": rearm,
+        "harvest": harvest,
+        "state_path": str(state_path),
+    }
 
 
 def run_propose(args) -> dict[str, Any]:
@@ -1592,11 +1891,24 @@ def run_harvest(args) -> dict[str, Any]:
     marker = state_dir / "harvest_last_run.json"
     now = int(time.time())
     since_ts = _read_harvest_since(marker, now=now)
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    realrisk_escalate_days = (
+        cfg.get("kanban", {}).get("disposition_realrisk_escalate_days", 2)
+        if isinstance(cfg, dict)
+        else 2
+    )
 
     conn = kanban_db.connect(board=getattr(args, "board", None))
     try:
         # Beide Quellen laden, bevor conn geschlossen wird
-        ledger_cands = load_followup_candidates_from_ledger(conn, since_ts=since_ts)
+        reap_worker_drop_disposition_items(conn)
+        ledger_cands = load_followup_candidates_from_ledger(
+            conn,
+            since_ts=since_ts,
+            realrisk_escalate_days=realrisk_escalate_days,
+        )
         receipts = gather_recent_receipts(conn, since_ts=since_ts)
     finally:
         conn.close()

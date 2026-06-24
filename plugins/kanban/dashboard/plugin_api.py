@@ -2825,9 +2825,16 @@ def get_decision_queue(
     :func:`kanban_db.decision_queue` (read-only, fail-soft per category).
     """
     board = _resolve_board(board)
+    try:
+        from hermes_cli.config import load_config
+
+        kanban_config = ((load_config() or {}).get("kanban") or {})
+    except Exception:
+        kanban_config = {}
+
     conn = _conn(board=board)
     try:
-        return kanban_db.decision_queue(conn)
+        return kanban_db.decision_queue(conn, config=kanban_config)
     finally:
         conn.close()
 
@@ -4486,6 +4493,37 @@ def get_strategist_proposals(request: Request, board: Optional[str] = Query(None
         "count": len(proposals),
         "metrics": metrics,
     }
+    etag = 'W/"' + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()[:32] + '"'
+    payload["checked_at"] = int(time.time())
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=http_status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+        )
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+    )
+
+
+@router.get("/strategist/disposition-digest")
+def get_strategist_disposition_digest(request: Request):
+    """Read-only: the current disposition digest (A3) or ``null`` when none yet.
+
+    The digest is the Sonnet harvest step's clustering decision persisted to
+    ``disposition_digest.json``: how many open follow-ups were triaged
+    (``total_open``), how many reaped into PlanSpec proposals (``reaped``), the
+    thematic ``clusters`` (each with ``theme``/``item_ids``/``severity``/
+    ``recommendation`` drop|collect|planspec + optional ``planspec_key``) and the
+    ``left`` list of consciously left/discarded items. ``digest`` is ``None``
+    when no harvest has written one yet — consistent with the proposals
+    endpoint's ``metrics: null``, so the SPA never sees a 404 on a fresh install.
+    A weak ETag lets the poll revalidate to 304 while the file is unchanged."""
+    digest = strategist_surface.read_disposition_digest()
+    payload: dict[str, Any] = {"digest": digest}
     etag = 'W/"' + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()[:32] + '"'
