@@ -414,6 +414,24 @@ def test_trigger_specs_argv_and_env(trigger_ctx):
     assert any(p.endswith("/.local/bin") for p in env["PATH"].split(":"))
 
 
+def test_harvest_watch_systemd_units_are_installable_templates():
+    repo_root = Path(__file__).resolve().parents[2]
+    systemd_dir = repo_root / "plugins" / "kanban" / "systemd"
+    service = systemd_dir / "strategist-harvest-watch.service"
+    timer = systemd_dir / "strategist-harvest-watch.timer"
+
+    service_text = service.read_text(encoding="utf-8")
+    timer_text = timer.read_text(encoding="utf-8")
+
+    assert "Type=oneshot" in service_text
+    assert "ExecStart=/usr/bin/flock -n /tmp/hermes-strategist-harvest-watch.lock" in service_text
+    assert "/home/piet/.local/bin/hermes vision strategist --mode harvest-watch" in service_text
+    assert "Restart=" not in service_text
+    assert "OnBootSec=15min" in timer_text
+    assert "OnUnitActiveSec=30min" in timer_text
+    assert "Unit=strategist-harvest-watch.service" in timer_text
+
+
 def test_real_spawn_trigger_guard_blocks_when_running(kanban_home):
     """Der ECHTE _spawn_trigger (nicht gemockt) gibt None zurück, wenn schon ein
     Lauf aktiv ist — der Guard greift VOR jedem Popen, also ohne Seiteneffekt."""

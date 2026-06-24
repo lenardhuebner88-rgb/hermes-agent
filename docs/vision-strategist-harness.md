@@ -75,9 +75,20 @@ Repo-side manual/dashboard trigger path:
 hermes vision strategist --mode harvest-watch
 ```
 
-Installing or changing the external cron/systemd timer or any wrapper script
-(e.g. `~/.hermes/scripts/strategist-cron.sh`) remains explicit operator/runtime
-work outside this repo; this document records the repo-callable contract.
+The repo ships optional user-systemd templates for the preferred operational
+path:
+
+```sh
+plugins/kanban/systemd/strategist-harvest-watch.service
+plugins/kanban/systemd/strategist-harvest-watch.timer
+```
+
+The timer is conservative (`OnBootSec=15min`, `OnUnitActiveSec=30min`) and the
+service uses `/usr/bin/flock -n /tmp/hermes-strategist-harvest-watch.lock` so a
+still-running watch is skipped rather than overlapped. These units are not
+auto-armed by the repo; copying them to `~/.config/systemd/user/`, running
+`systemctl --user daemon-reload`, and enabling/starting the timer remains an
+explicit operator/runtime action.
 
 ## `--mode propose`
 
