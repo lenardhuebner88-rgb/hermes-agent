@@ -477,7 +477,7 @@ def _(home, kb):
     conn = kb.connect()
     try:
         tid = kb.create_task(
-            conn, title="bad-workspace", assignee="w",
+            conn, title="bad-workspace", assignee="default",
             workspace_kind="dir",
             workspace_path="/nonexistent/path/that/does/not/exist",
         )
@@ -491,10 +491,14 @@ def _(home, kb):
         # - Task auto-blocked (after N retries, but we only ran 1 tick)
         print(f"  after 1 tick with nonexistent workspace: status={task.status}")
         if task.status == "ready":
-            # Expected path: workspace failure led to release
-            spawn_failures = task.spawn_failures
-            print(f"  spawn_failures counter: {spawn_failures}")
-            assert spawn_failures >= 1, "spawn_failures counter didn't increment"
+            # Expected path: workspace failure led to a bounded transient retry,
+            # not an immediate circuit-breaker failure. The permanent
+            # consecutive-failure counter increments only after that retry
+            # budget is exhausted.
+            transient_retries = task.transient_retry_count
+            print(f"  transient_retry_count: {transient_retries}")
+            assert transient_retries >= 1, "transient retry counter didn't increment"
+            assert task.consecutive_failures == 0
         elif task.status == "running":
             # Workspace not checked before spawn — the worker would hit
             # the bad path itself. Defensible for `dir:` workspaces that
@@ -1032,7 +1036,6 @@ def _(home, kb):
     r = client.post("/api/plugins/kanban/tasks", json={
         "title": "📋 deploy 🚀 to 生产",
         "body": "日本語 body",
-        "assignee": "deploy-bot",
     })
     assert r.status_code == 200
     tid = r.json()["task"]["id"]
