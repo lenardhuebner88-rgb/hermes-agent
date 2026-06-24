@@ -226,6 +226,11 @@ def test_neuralwatt_glm_fast_pricing_uses_exact_endpoint_model_id(monkeypatch):
         seen["base_url"] = base_url
         seen["api_key"] = api_key
         return {
+            # Live /models verification on 2026-06-24 confirmed both exact IDs
+            # are returned by Neuralwatt; keep the regression fixture aligned.
+            "glm-5.2-fast": {
+                "pricing": {"prompt": "0.00000055", "completion": "0.00000066"}
+            },
             "glm-5.2-short-fast": {
                 "pricing": {"prompt": "0.00000011", "completion": "0.00000022"}
             },
@@ -239,9 +244,19 @@ def test_neuralwatt_glm_fast_pricing_uses_exact_endpoint_model_id(monkeypatch):
         _fake_fetch_endpoint_model_metadata,
     )
 
+    fast_route = resolve_billing_route("glm-5.2-fast", provider="neuralwatt")
+    fast_entry = get_pricing_entry("glm-5.2-fast", provider="neuralwatt", api_key="secret")
     route = resolve_billing_route("glm-5.2-short-fast", provider="neuralwatt")
     entry = get_pricing_entry("glm-5.2-short-fast", provider="neuralwatt", api_key="secret")
 
+    assert fast_route.provider == "neuralwatt"
+    assert fast_route.model == "glm-5.2-fast"
+    assert fast_route.billing_mode == "official_models_api"
+    assert fast_entry is not None
+    assert fast_entry.input_cost_per_million is not None
+    assert fast_entry.output_cost_per_million is not None
+    assert float(fast_entry.input_cost_per_million) == 0.55
+    assert float(fast_entry.output_cost_per_million) == 0.66
     assert route.provider == "neuralwatt"
     assert route.model == "glm-5.2-short-fast"
     assert route.billing_mode == "official_models_api"
