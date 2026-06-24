@@ -1,0 +1,18 @@
+# Hermes Strategist Harvest-Watch timer — TEMPLATE.
+#
+# Fires once after boot and then every 30 minutes. NOT auto-armed; the operator
+# installs/enables it explicitly. The service uses flock, so missed overlaps are
+# skipped rather than queued.
+
+[Unit]
+Description=Hermes strategist harvest-watch schedule
+Documentation=file:/home/piet/.hermes/hermes-agent/docs/vision-strategist-harness.md
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=strategist-harvest-watch.service
+
+[Install]
+WantedBy=timers.target

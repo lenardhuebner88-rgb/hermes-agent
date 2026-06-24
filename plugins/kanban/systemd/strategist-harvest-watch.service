@@ -1,0 +1,30 @@
+# Hermes Strategist Harvest-Watch — TEMPLATE.
+#
+# Conservative user-systemd oneshot for the cheap disposition backlog watchdog.
+# It is NOT auto-armed: copy/install/enable only as an explicit operator action.
+# The flock lock mirrors the dashboard trigger guard and prevents overlapping
+# harvest-watch runs when a previous run is still active.
+#
+# Adjust WorkingDirectory/ExecStart if your checkout or hermes executable lives
+# somewhere else than Piet's default paths.
+
+[Unit]
+Description=Hermes strategist harvest-watch (manual operator timer template)
+Documentation=file:/home/piet/.hermes/hermes-agent/docs/vision-strategist-harness.md
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/piet/.hermes/hermes-agent
+ExecStart=/usr/bin/flock -n /tmp/hermes-strategist-harvest-watch.lock /home/piet/.local/bin/hermes vision strategist --mode harvest-watch
+# Surface skip/run decisions in the user journal. The CLI self-gates by backlog
+# threshold/rearm/cooldown and performs no deploy, restart, push, or direct task
+# creation.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
