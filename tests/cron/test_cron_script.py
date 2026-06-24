@@ -565,3 +565,77 @@ class TestRunJobEnvVarCleanup:
         assert os.environ.get("HERMES_SESSION_PLATFORM") is None
         assert os.environ.get("HERMES_SESSION_CHAT_ID") is None
         assert os.environ.get("HERMES_SESSION_CHAT_NAME") is None
+
+
+class TestRootScriptsFallback:
+    """Root-store cron scripts must resolve under the default ROOT home even
+    when a non-default profile's ticker fires them.
+
+    Regression (#32091 fallout): upstream anchored the cron jobs store + tick
+    lock on the ROOT home so all profile tickers share one jobs.json, but left
+    script resolution profile-relative. A job in the shared root store
+    references ``<root>/scripts/<x>``; when a non-default profile's ticker fired
+    it, ``_run_job_script`` resolved ``<root>/profiles/<name>/scripts/<x>`` and
+    failed with "Script not found", silently killing every root-stored
+    ``no_agent`` utility cron (watchdogs, sweepers, monitors, digests).
+    """
+
+    def _profile_mode(self, tmp_path, monkeypatch, *, in_root):
+        root = tmp_path / ".hermes"
+        profile_home = root / "profiles" / "research"
+        (profile_home / "scripts").mkdir(parents=True)
+        (root / "scripts").mkdir(parents=True)
+        where = root if in_root else profile_home
+        (where / "scripts" / "watchdog.py").write_text(
+            'print("ran from %s")\n' % ("root" if in_root else "profile")
+        )
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        import cron.scheduler as sched
+        monkeypatch.setattr(sched, "_hermes_home", None)
+        return root, profile_home
+
+    def test_relative_root_script_resolves_under_profile_ticker(self, tmp_path, monkeypatch):
+        """The failing production case: script only in ROOT/scripts."""
+        self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == "ran from root"
+
+    def test_profile_script_still_resolves(self, tmp_path, monkeypatch):
+        """Genuine per-profile script jobs must keep working (no regression)."""
+        self._profile_mode(tmp_path, monkeypatch, in_root=False)
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == "ran from profile"
+
+    def test_profile_script_shadows_root_on_name_collision(self, tmp_path, monkeypatch):
+        """When the same name exists in both, the active profile wins."""
+        root, profile_home = self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        (profile_home / "scripts" / "watchdog.py").write_text('print("ran from profile")\n')
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == "ran from profile"
+
+    def test_missing_in_both_reports_not_found(self, tmp_path, monkeypatch):
+        """A name absent from both dirs still yields a clean not-found error."""
+        self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("does_not_exist.py")
+        assert success is False
+        assert "not found" in output.lower()
+
+    def test_traversal_still_blocked_under_profile(self, tmp_path, monkeypatch):
+        """The root fallback must not weaken the containment guard."""
+        self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("../../etc/passwd")
+        assert success is False
+        assert "blocked" in output.lower() or "outside" in output.lower()

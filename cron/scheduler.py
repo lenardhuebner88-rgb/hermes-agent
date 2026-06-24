@@ -1212,28 +1212,50 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
-    scripts_dir = _get_hermes_home() / "scripts"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    scripts_dir_resolved = scripts_dir.resolve()
+    # Candidate scripts dirs, active-profile first then the default ROOT home.
+    # The cron jobs store + tick lock are anchored on the ROOT home (#32091) so
+    # all profile tickers share one jobs.json, but a job in that shared store
+    # references ``<root>/scripts/<x>``. When a non-default profile's ticker
+    # fires it, the active HERMES_HOME is ``<root>/profiles/<name>`` — without
+    # the root fallback every root-stored script cron fails "Script not found".
+    # Profile-first preserves genuinely per-profile script jobs.
+    from hermes_constants import get_default_hermes_root
+
+    candidate_dirs: list[Path] = []
+    for base in (_get_hermes_home(), get_default_hermes_root()):
+        scripts_dir = base / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        resolved = scripts_dir.resolve()
+        if resolved not in candidate_dirs:
+            candidate_dirs.append(resolved)
 
     raw = Path(script_path).expanduser()
-    if raw.is_absolute():
-        path = raw.resolve()
-    else:
-        path = (scripts_dir / raw).resolve()
-
+    path: Optional[Path] = None
+    contained_anywhere = False
     # Guard against path traversal, absolute path injection, and symlink
-    # escape — scripts MUST reside within HERMES_HOME/scripts/.
-    try:
-        path.relative_to(scripts_dir_resolved)
-    except ValueError:
-        return False, (
-            f"Blocked: script path resolves outside the scripts directory "
-            f"({scripts_dir_resolved}): {script_path!r}"
-        )
+    # escape — scripts MUST reside within one of the trusted scripts dirs.
+    for scripts_dir_resolved in candidate_dirs:
+        if raw.is_absolute():
+            candidate = raw.resolve()
+        else:
+            candidate = (scripts_dir_resolved / raw).resolve()
+        try:
+            candidate.relative_to(scripts_dir_resolved)
+        except ValueError:
+            continue
+        contained_anywhere = True
+        if candidate.exists():
+            path = candidate
+            break
 
-    if not path.exists():
-        return False, f"Script not found: {path}"
+    if path is None:
+        if not contained_anywhere:
+            return False, (
+                f"Blocked: script path resolves outside the scripts directory "
+                f"({candidate_dirs[0]}): {script_path!r}"
+            )
+        searched = ", ".join(str(d) for d in candidate_dirs)
+        return False, f"Script not found: {script_path!r} (searched: {searched})"
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
