@@ -122,6 +122,27 @@ def test_validate_spec_rubric_returns_none_for_clean_spec(tmp_path: Path):
     assert planspecs.validate_spec_rubric(spec) is None
 
 
+def test_rubric_allows_documentary_placeholder_examples(tmp_path: Path):
+    """Rubric documentation may quote the tokens it rejects without being
+    treated as an unfilled template slot itself.
+
+    Regression for the Phase-1 PlanSpec false positive: accepted AC can describe
+    error messages like "AC-less subtask: <id>", literal <…> placeholders, the
+    marker list TODO/FIXME/TBD, and bare …/... examples.
+    """
+    body = CLEAN.replace(
+        "\"Verbatim AC statement that must hold for this subtask\"",
+        "'Worker path .worktrees/kanban/<id>; deterministic checks report "
+        "\"AC-less subtask: <id>\", literal <…>-Winkelplatzhalter, "
+        "TODO/FIXME/TBD markers, bare …/... examples, read_escalation_ledger(...), "
+        "`lane: council`, and \"unknown lane: <x>\" in docs.'",
+    )
+    path = _write(plans_root := tmp_path / "03-Agents", body, name="doc-examples.md")
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    assert planspecs.validate_spec_rubric(spec) is None
+
+
 def test_inherited_plan_level_ac_satisfies_check1(kanban_home, tmp_path: Path):
     """A subtask with no per-subtask AC passes check 1 when a plan-wide
     (no-applies_to / free-form) top-level AC threads into every subtask."""
@@ -259,6 +280,15 @@ def test_residue_tokens_still_flags_genuine_prose_placeholders():
     assert planspecs._residue_tokens("Implement the <handler> for X") == ["<handler>"]
     assert planspecs._residue_tokens("TODO: write this") == ["TODO"]
     assert planspecs._residue_tokens("Do the thing ...") == ["..."]
+
+
+def test_residue_tokens_flags_placeholder_near_documentary_words():
+    """A genuine unfilled slot must not disappear just because the same line
+    contains words like "example"/"placeholder" in surrounding prose.
+    """
+    assert planspecs._residue_tokens("For example, implement the <handler> for X") == ["<handler>"]
+    assert planspecs._residue_tokens("Placeholder docs aside, fill <endpoint> here") == ["<endpoint>"]
+    assert planspecs._residue_tokens("Example text first ... fill later") == ["..."]
 
 
 def test_residue_marker_is_case_sensitive():

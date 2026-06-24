@@ -100,6 +100,7 @@ _CC_INSTRUMENT_AC_TOKENS = {
 _RESIDUE_ANGLE_RE = re.compile(r"<[^<>\n]{1,80}>")
 _RESIDUE_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|TBD)\b")
 _RESIDUE_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
+_RESIDUE_MARKER_LIST_RE = re.compile(r"\bTODO/FIXME/TBD\b")
 
 # An *obvious* path token: slash-joined word segments with an optional leading dot
 # — e.g. ``a/b/c.py``, ``.worktrees/kanban/t_x``, ``hermes_cli/planspecs.py``. A
@@ -675,6 +676,89 @@ def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
     return f"planspec-ingest:{spec.path}:{content_hash}"
 
 
+def _mask_quoted_spans(text: str) -> str:
+    """Mask single/double quoted spans that stay on one line.
+
+    The residue scanner is meant to reject unfilled template slots, not examples
+    of the exact error text it should emit (e.g. ``"AC-less subtask: <id>"``).
+    Backtick code spans are handled separately; this covers normal prose quotes.
+    """
+    chars = list(text)
+    closers = {"'": "'", '"': '"', "“": "”", "„": "“", "‘": "’"}
+    i = 0
+    while i < len(chars):
+        quote = chars[i]
+        closer = closers.get(quote)
+        if closer is None:
+            i += 1
+            continue
+        if quote == "'" and i > 0 and i + 1 < len(chars) and chars[i - 1].isalnum() and chars[i + 1].isalnum():
+            # Apostrophe in contractions/possessives, not a quoted example.
+            i += 1
+            continue
+        j = i + 1
+        while j < len(chars) and chars[j] not in {"\n", closer}:
+            j += 1
+        if j >= len(chars) or chars[j] != closer:
+            i += 1
+            continue
+        for p in range(i, j + 1):
+            chars[p] = " "
+        i = j + 1
+    return "".join(chars)
+
+
+def _line_window(text: str, start: int, end: int, *, pad: int = 48) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return text[max(line_start, start - pad) : min(line_end, end + pad)]
+
+
+def _mask_documentary_residue_examples(text: str) -> str:
+    """Mask explicit documentation/examples of residue tokens.
+
+    PlanSpecs may describe the rubric itself, including literal examples like
+    ``<…>-Winkelplatzhalter`` or the marker list ``TODO/FIXME/TBD``. Those are
+    not unfilled task slots. Keep this intentionally narrow: only specific
+    syntactic documentary shapes are masked, not whole prose lines containing
+    words like "example" or "placeholder".
+    """
+    chars = list(text)
+
+    def _blank(start: int, end: int) -> None:
+        for p in range(start, end):
+            if chars[p] != "\n":
+                chars[p] = " "
+
+    for match in _RESIDUE_MARKER_LIST_RE.finditer(text):
+        _blank(*match.span())
+
+    for match in _RESIDUE_ANGLE_RE.finditer(text):
+        start, end = match.span()
+        token = match.group(0)
+        before = text[max(0, start - 32) : start].lower()
+        after = text[end : min(len(text), end + 32)].lower()
+        path_context = before.endswith(".worktrees/kanban/")
+        literal_ellipsis_placeholder = (
+            token in {"<…>", "<...>"}
+            and "literal" in before
+            and ("platzhalter" in after or "placeholder" in after)
+        )
+        if path_context or literal_ellipsis_placeholder:
+            _blank(start, end)
+
+    for match in _RESIDUE_ELLIPSIS_RE.finditer(text):
+        start, end = match.span()
+        slash_adjacent = (start > 0 and text[start - 1] == "/") or (end < len(text) and text[end] == "/")
+        call_placeholder = start > 0 and text[start - 1] == "(" and end < len(text) and text[end] == ")"
+        if slash_adjacent or call_placeholder:
+            _blank(start, end)
+
+    return "".join(chars)
+
+
 def _mask_code_spans(text: str) -> str:
     """Return *text* with backtick code spans (inline ``code`` or fenced
     ```` ```…``` ````) replaced by equal-length runs of spaces (newlines kept), so
@@ -729,6 +813,8 @@ def _strip_code_and_paths(text: str) -> str:
     residue scan. Equal-length blank replacement keeps character offsets stable.
     """
     masked = _mask_code_spans(text)
+    masked = _mask_quoted_spans(masked)
+    masked = _mask_documentary_residue_examples(masked)
     return _PATH_TOKEN_RE.sub(lambda m: " " * len(m.group(0)), masked)
 
 
@@ -738,12 +824,11 @@ def _residue_tokens(text: str) -> list[str]:
     A ``<…>`` angle placeholder reports the whole bracketed token; an ellipsis
     that sits *inside* an angle placeholder is not reported twice.
 
-    Markers that are only *quoted* inside a backtick code span / code fence, or
-    that are part of an obvious path token, are documentary citations — NOT an
-    unfilled template slot — so those spans are masked out (replaced by
-    equal-length blanks, offsets preserved) before the scan. A genuine unfilled
-    placeholder sitting in prose is still caught, and the bare ``…``/``...``
-    ellipsis is only flagged *outside* of code.
+    Markers that are only *quoted* inside a backtick code span / code fence,
+    normal prose quotes, obvious path tokens, or explicit same-line documentation
+    examples are citations — NOT an unfilled template slot — so those spans are
+    masked out (replaced by equal-length blanks, offsets preserved) before the
+    scan. A genuine unfilled placeholder sitting in prose is still caught.
     """
     if not text:
         return []
@@ -827,9 +912,11 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
         if rt and rt not in VALID_REVIEW_TIERS:
             findings.append(f"unknown review_tier in {sid}: {subtask.review_tier}")
 
-        # 4b) No CC instrument baked into a worker AC.
+        # 4b) No CC instrument baked into a worker AC. Mask documentary code/quote
+        # examples first, so an AC may describe the rejected text (e.g.
+        # ``lane: council``) without becoming unfulfillable itself.
         for statement in ac_statements:
-            low = statement.lower()
+            low = _strip_code_and_paths(statement).lower()
             for token in _CC_INSTRUMENT_AC_TOKENS:
                 if re.search(rf"\b{re.escape(token)}\b", low):
                     findings.append(f"CC-instrument in AC of {sid}: {token}")
