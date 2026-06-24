@@ -147,6 +147,50 @@ def test_test_foundry_lane_always_dry_run(monkeypatch):
     assert all(item["max_mutants"] == 15 for item in seen)
 
 
+def test_test_foundry_lane_skips_remaining_targets_when_budget_exhausted(monkeypatch):
+    """A heavy night must degrade gracefully: once the wall-clock budget is
+    spent, remaining targets are marked skipped (not run) so the nightly posts a
+    partial report instead of overrunning the systemd timeout."""
+    seen = []
+    clock = {"t": 1000.0}
+
+    def fake_write_request(*, target, max_mutants, apply):
+        seen.append(target)
+        return {"request_path": f"/tmp/{target}.json"}
+
+    def fake_run_request_file(_path):
+        clock["t"] += 100.0  # each target burns 100s of wall-clock
+        return {"ok": True, "tests_kept": 1, "survivors": [], "tokens": 10, "model": "X", "reason": ""}
+
+    monkeypatch.setattr(nightly.test_foundry, "write_request", fake_write_request)
+    monkeypatch.setattr(nightly.test_foundry, "run_request_file", fake_run_request_file)
+    monkeypatch.setattr(nightly.time, "monotonic", lambda: clock["t"])
+
+    out = nightly.run_test_foundry_lane(
+        ["a", "b", "c"], max_mutants=15, started=1000.0, budget_seconds=150.0
+    )
+    # a: elapsed 0 -> run (t->1100); b: elapsed 100 -> run (t->1200); c: elapsed 200 >= 150 -> skip
+    assert seen == ["a", "b"]
+    assert out[2]["reason"].startswith("skipped")
+    assert out[2]["ok"] is False
+    assert out[0]["ok"] is True
+
+
+def test_test_foundry_lane_no_budget_runs_all(monkeypatch):
+    """Default (no budget) preserves prior behavior: every target runs."""
+    seen = []
+    monkeypatch.setattr(
+        nightly.test_foundry, "write_request",
+        lambda *, target, max_mutants, apply: seen.append(target) or {"request_path": f"/tmp/{target}.json"},
+    )
+    monkeypatch.setattr(
+        nightly.test_foundry, "run_request_file",
+        lambda _p: {"ok": True, "tests_kept": 0, "survivors": [], "tokens": 0, "model": "X", "reason": ""},
+    )
+    nightly.run_test_foundry_lane(["a", "b"], max_mutants=15)
+    assert seen == ["a", "b"]
+
+
 def test_nightly_tests_isolate_the_live_proposal_store():
     """Regression guard for the 2026-06-22 incident: a nightly test ran
     ``nightly.main()`` with the REAL reconciler (``_run_reconciler`` unmocked).

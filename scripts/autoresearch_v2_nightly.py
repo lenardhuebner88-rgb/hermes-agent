@@ -135,10 +135,36 @@ def run_deep_audit_lane(subsystem: str, *, max_files: int) -> dict[str, Any]:
     }
 
 
-def run_test_foundry_lane(targets: Sequence[str], *, max_mutants: int) -> list[dict[str, Any]]:
-    """Run Test-Foundry over each target (dry-run); return per-target summaries."""
+def run_test_foundry_lane(
+    targets: Sequence[str],
+    *,
+    max_mutants: int,
+    started: float | None = None,
+    budget_seconds: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Run Test-Foundry over each target (dry-run); return per-target summaries.
+
+    Mutation-testing a heavy target (large suite x ``max_mutants``) can run for
+    tens of minutes, and the day-rotated target pick means some nights overrun
+    the systemd start timeout and get SIGTERM'd mid-run (burning ~40 min CPU for
+    no report). When ``budget_seconds`` is set, the wall-clock budget is checked
+    BEFORE each target so a heavy night degrades gracefully — remaining targets
+    are marked skipped and the nightly still posts a partial report instead of
+    failing hard. ``started`` is the run start (``time.monotonic()``).
+    """
     summaries: list[dict[str, Any]] = []
     for target in targets:
+        if started is not None and _budget_exhausted(started, budget_seconds):
+            summaries.append({
+                "target": target,
+                "ok": False,
+                "tests_kept": 0,
+                "survivors": 0,
+                "tokens": 0,
+                "model": None,
+                "reason": "skipped: wall-clock budget exhausted",
+            })
+            continue
         payload = test_foundry.write_request(target=target, max_mutants=max_mutants, apply=False)
         result = test_foundry.run_request_file(Path(payload["request_path"]))
         summaries.append({
@@ -283,7 +309,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             targets = select_targets(test_foundry.curated_targets(), day, args.tf_targets)
             try:
-                tf_summary = run_test_foundry_lane(targets, max_mutants=args.tf_mutants)
+                tf_summary = run_test_foundry_lane(
+                    targets,
+                    max_mutants=args.tf_mutants,
+                    started=started,
+                    budget_seconds=budget_seconds,
+                )
             except Exception as exc:
                 traceback.print_exc()
                 circuit_failures += 1
