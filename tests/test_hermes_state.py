@@ -186,6 +186,31 @@ class TestSessionLifecycle:
         session = db.get_session("s1")
         assert session["model"] == "anthropic/claude-opus-4.6"
 
+    def test_update_token_counts_replaces_stale_billing_route(self, db):
+        db.create_session(session_id="s1", source="cli", model="claude-sonnet-4-6")
+
+        db.update_token_counts(
+            "s1",
+            input_tokens=1,
+            output_tokens=1,
+            billing_provider="openai-codex",
+            billing_base_url="https://api.openai.com/v1",
+            billing_mode="subscription_included",
+        )
+        db.update_token_counts(
+            "s1",
+            input_tokens=2,
+            output_tokens=3,
+            billing_provider="anthropic",
+            billing_base_url="https://api.anthropic.com",
+            billing_mode="official_docs_snapshot",
+        )
+
+        session = db.get_session("s1")
+        assert session["billing_provider"] == "anthropic"
+        assert session["billing_base_url"] == "https://api.anthropic.com"
+        assert session["billing_mode"] == "official_docs_snapshot"
+
     def test_update_session_model_overwrites_existing(self, db):
         """A mid-session /model switch must overwrite the stored model.
 
