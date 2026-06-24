@@ -677,14 +677,31 @@ def ingest_idempotency_key(spec: BindingPlanSpec) -> str:
 
 
 def _mask_quoted_spans(text: str) -> str:
-    """Mask single/double quoted spans that stay on one line.
+    """Mask narrow quoted rubric/code examples that stay on one line.
 
     The residue scanner is meant to reject unfilled template slots, not examples
     of the exact error text it should emit (e.g. ``"AC-less subtask: <id>"``).
-    Backtick code spans are handled separately; this covers normal prose quotes.
+    Backtick code spans are handled separately; normal prose quotes are *not*
+    masked by default because an operator-authored placeholder can appear inside
+    quotes and should still block ingest.
     """
     chars = list(text)
     closers = {"'": "'", '"': '"', "“": "”", "„": "“", "‘": "’"}
+
+    def _is_documentary_quote(content: str) -> bool:
+        stripped = content.strip()
+        lowered = stripped.lower()
+        # Keep the documented-rubric-placeholder behavior: PlanSpecs may quote
+        # the exact deterministic findings they are documenting without those
+        # angle examples becoming unfilled task slots.
+        if lowered.startswith(("ac-less subtask:", "unknown lane:")):
+            return True
+        # Also allow quoted YAML/code snippets used to describe lane hardening;
+        # these are relevant to the CC-instrument scan that reuses this masking.
+        if lowered.startswith(("lane:", "review_tier:")):
+            return True
+        return False
+
     i = 0
     while i < len(chars):
         quote = chars[i]
@@ -702,8 +719,9 @@ def _mask_quoted_spans(text: str) -> str:
         if j >= len(chars) or chars[j] != closer:
             i += 1
             continue
-        for p in range(i, j + 1):
-            chars[p] = " "
+        if _is_documentary_quote("".join(chars[i + 1 : j])):
+            for p in range(i, j + 1):
+                chars[p] = " "
         i = j + 1
     return "".join(chars)
 

@@ -291,6 +291,32 @@ def test_residue_tokens_flags_placeholder_near_documentary_words():
     assert planspecs._residue_tokens("Example text first ... fill later") == ["..."]
 
 
+def test_residue_tokens_flags_genuine_placeholders_inside_prose_quotes():
+    """Normal prose quotes are not enough to make an operator-authored slot
+    documentary; only explicit rubric examples should be masked.
+    """
+    assert planspecs._residue_tokens('Implement "<handler>" for X') == ["<handler>"]
+    assert planspecs._residue_tokens("Acceptance says 'TODO' but is still unfinished") == ["TODO"]
+    assert planspecs._residue_tokens('Fill the placeholder example "<endpoint>" here') == ["<endpoint>"]
+
+
+def test_quoted_placeholder_in_ac_with_documentary_words_blocks(kanban_home, tmp_path: Path):
+    """A real placeholder inside quotes still blocks, even when the line also
+    contains example/placeholder wording that used to trigger broad masking.
+    """
+    body = CLEAN.replace(
+        '        - "Verbatim AC statement that must hold for this subtask"',
+        '        - "Example placeholder wording aside: implement \'<endpoint>\' now"',
+    )
+    path = _write(plans_root := tmp_path / "03-Agents", body)
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+
+    assert any("placeholder residue in R1-S1" in f and "<endpoint>" in f for f in exc.value.findings)
+    assert _task_count() == 0
+
+
 def test_residue_marker_is_case_sensitive():
     """Fix(a) 2026-06-19: the TODO/FIXME/TBD marker is case-sensitive. The literal
     template markers are all-caps by convention; a lowercase status word like
