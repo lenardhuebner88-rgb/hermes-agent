@@ -1377,24 +1377,39 @@ def test_s1_subscription_actual_does_not_leak_into_metered(kanban_home, tmp_path
 
 
 def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
-    kanban_home, tmp_path, monkeypatch,
+    kanban_home, tmp_path, monkeypatch, caplog,
 ):
     """Real Claude subscription sessions can carry billing_provider=openai-codex.
 
     Pricing must key on the claude-* model label instead of trusting the mismatched
     billing provider, otherwise cost_usd_equivalent stays empty for real Opus runs.
     """
+    import logging
+
+    from agent.models_dev import ModelInfo
+
     profile_dir = tmp_path / "profiles" / "premium"
     monkeypatch.setattr(
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "premium" else None)
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
-        if model == "claude-opus-4-8" else None,
-    )
+
+    def fake_get_model_info(provider, model):
+        if (provider, model) == ("anthropic", "claude-opus-4-8"):
+            return ModelInfo(
+                id="claude-opus-4-8",
+                name="Claude Opus 4.8",
+                family="claude-opus",
+                provider_id="anthropic",
+                cost_input=5.0,
+                cost_output=25.0,
+                cost_cache_read=0.5,
+                cost_cache_write=6.25,
+            )
+        return None
+
+    monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="claude-mismatch", assignee="premium")
         run_id = _insert_run_window(
@@ -1407,7 +1422,8 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
              "model": "claude-opus-4-8", "billing_provider": "openai-codex",
              "cwd": f"/x/kanban/workspaces/{tid}"},
         ])
-        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+            assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
         row = conn.execute(
             "SELECT cost_usd, metadata FROM task_runs WHERE id=?",
             (run_id,)).fetchone()
@@ -1417,6 +1433,14 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
         assert meta["cost_usd_equivalent"] == pytest.approx(9.125)
         assert meta["model"] == "claude-opus-4-8"
         assert meta["billing_mode"] == "subscription_included"
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "model/billing_provider family mismatch" in message
+            and f"run_id={run_id}" in message
+            and "model=claude-opus-4-8" in message
+            and "billing_provider=openai-codex" in message
+            for message in warnings
+        ), warnings
 
 
 def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path, monkeypatch):

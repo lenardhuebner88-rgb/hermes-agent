@@ -5264,6 +5264,50 @@ _PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
 }
 
 
+def _model_billing_family(value: Optional[str]) -> Optional[str]:
+    """Best-effort provider/model family for mismatch warnings.
+
+    Unknown labels intentionally do not warn. The warning is diagnostics-only;
+    pricing remains keyed by the model label in _lookup_model_price_per_mtok.
+    """
+    if not value:
+        return None
+    label = str(value).lower()
+    if label.startswith("claude-") or "anthropic" in label or label == "claude":
+        return "anthropic"
+    if (
+        label.startswith("gpt-")
+        or label.startswith("o1")
+        or label.startswith("o3")
+        or label.startswith("o4")
+        or "openai" in label
+        or "codex" in label
+        or label == "chatgpt"
+    ):
+        return "openai"
+    if label.startswith("kimi-") or "kimi" in label or "moonshot" in label:
+        return "kimi"
+    if label.startswith("glm-") or "zai" in label or "neuralwatt" in label:
+        return "zai"
+    return None
+
+
+def _warn_model_billing_provider_mismatch(
+    *, run_id: object, model: Optional[str], billing_provider: Optional[str]
+) -> None:
+    model_family = _model_billing_family(model)
+    provider_family = _model_billing_family(billing_provider)
+    if not model_family or not provider_family or model_family == provider_family:
+        return
+    _log.warning(
+        "kanban cost backfill: model/billing_provider family mismatch "
+        "run_id=%s model=%s billing_provider=%s",
+        run_id,
+        model,
+        billing_provider,
+    )
+
+
 def _lookup_model_price_per_mtok(
     provider: Optional[str], model: Optional[str],
 ) -> Optional[tuple[float, float, float, float]]:
@@ -5601,6 +5645,11 @@ def backfill_run_costs_from_sessions(
                         # The runtime left it unpriced (codex 'included' sessions
                         # stamp estimated_cost_usd=0) → compute tokens × online
                         # price so the teure codex lanes stop looking free.
+                        _warn_model_billing_provider_mismatch(
+                            run_id=run_id,
+                            model=model_seen,
+                            billing_provider=provider_seen,
+                        )
                         equivalent = _equiv_from_tokens(
                             provider_seen, model_seen, in_sum, out_sum,
                             cache_read=cread_sum, cache_write=cwrite_sum,
