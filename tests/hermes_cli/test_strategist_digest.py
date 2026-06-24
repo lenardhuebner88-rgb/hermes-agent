@@ -46,19 +46,32 @@ def _payload() -> dict:
             {
                 "theme": "test isolation",
                 "item_ids": ["di_1", "di_2", "di_3"],
-                "severity": "scope-note",
+                "kind": "risk",
+                "source_severity": "real-risk",
+                "triage_severity": "overdue",
+                "age_days": 3,
                 "recommendation": "planspec",
                 "planspec_key": "receipt-t_abc",
             },
             {
                 "theme": "stray cleanup",
                 "item_ids": ["di_4"],
-                "severity": "none",
+                "kind": "follow_up",
+                "source_severity": "none",
+                "triage_severity": "none",
                 "recommendation": "drop",
             },
         ],
         "left": [
-            {"item_id": "di_5", "reason": "vague, no concrete action", "disposition": "verworfen"},
+            {
+                "item_id": "di_5",
+                "reason": "vague, no concrete action",
+                "kind": "follow_up",
+                "source_severity": "scope-note",
+                "triage_severity": "scope-note",
+                "age_days": 1,
+                "disposition": "verworfen",
+            },
         ],
     }
 
@@ -92,9 +105,15 @@ def test_write_stamps_generated_at_and_persists(digest_override):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["generated_at"] == 1750000000
     assert len(data["clusters"]) == 2
+    assert data["clusters"][0]["kind"] == "risk"
+    assert data["clusters"][0]["source_severity"] == "real-risk"
+    assert data["clusters"][0]["triage_severity"] == "overdue"
+    assert data["clusters"][0]["severity"] == "overdue"
+    assert data["clusters"][0]["age_days"] == 3
     assert data["clusters"][0]["recommendation"] == "planspec"
     assert data["clusters"][0]["planspec_key"] == "receipt-t_abc"
     assert data["left"][0]["item_id"] == "di_5"
+    assert data["left"][0]["triage_severity"] == "scope-note"
     assert data["left"][0]["disposition"] == "verworfen"
 
 
@@ -131,6 +150,13 @@ def test_write_rejects_non_dict_payload(digest_override):
 def test_write_rejects_unknown_recommendation(digest_override):
     payload = _payload()
     payload["clusters"][0]["recommendation"] = "escalate"  # not drop|collect|planspec
+    with pytest.raises(ValueError):
+        strategist.write_disposition_digest(digest_override.parent, payload, now=1)
+
+
+def test_write_rejects_llm_reinterpreted_triage_severity(digest_override):
+    payload = _payload()
+    payload["clusters"][0]["triage_severity"] = "critical"
     with pytest.raises(ValueError):
         strategist.write_disposition_digest(digest_override.parent, payload, now=1)
 

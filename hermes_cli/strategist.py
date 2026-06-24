@@ -1377,14 +1377,25 @@ def filter_followup_candidates(receipts: list[dict[str, Any]]) -> list[dict[str,
     for rc in receipts:
         low = (rc.get("excerpt") or "").lower()
         if any(marker in low for marker in FOLLOWUP_MARKERS):
-            kept.append(
-                {**rc, "suggested_key": f"receipt-{rc['task_id']}", "source": "keyword-fallback"}
-            )
+            age = _age_days(rc.get("completed_at"), now=int(time.time()))
+            cand = {
+                **rc,
+                "suggested_key": f"receipt-{rc['task_id']}",
+                "source": "keyword-fallback",
+                "kind": "follow_up",
+                "source_severity": "scope-note",
+                "triage_severity": "scope-note",
+                "severity": "scope-note",
+                "overdue": False,
+            }
+            if age is not None:
+                cand["age_days"] = age
+            kept.append(cand)
     return kept
 
 
 def load_followup_candidates_from_ledger(
-    conn, *, since_ts: int, realrisk_escalate_days: int = 2
+    conn, *, since_ts: int, realrisk_escalate_days: int = 2, now: int | None = None
 ) -> list[dict[str, Any]]:
     """Primäre Quelle: lädt offene Disposition-Ledger-Items als Harvest-Kandidaten.
 
@@ -1394,10 +1405,13 @@ def load_followup_candidates_from_ledger(
 
     Kandidaten-Format ist kompatibel mit dem keyword-Pfad (``filter_followup_candidates``),
     damit beide Quellen im Merge in ``run_harvest`` identisch behandelt werden.
+    ``source_severity`` bleibt das Ledger-Signal; ``triage_severity`` ist die
+    deterministische Harvest-Einordnung (real-risk|overdue|scope-note|none).
     """
     candidate_types = {"follow_up", "risk", "still_open"}
+    now_ts = int(time.time()) if now is None else int(now)
     escalate_days = max(0, int(realrisk_escalate_days or 0))
-    overdue_cutoff_ts = int(time.time()) - (escalate_days * 86400)
+    overdue_cutoff_ts = now_ts - (escalate_days * 86400)
     items = kanban_db.list_disposition_items(conn, status="open")
     out: list[dict[str, Any]] = []
     for item in items:
@@ -1406,8 +1420,14 @@ def load_followup_candidates_from_ledger(
         item_created_at = item.get("created_at") or 0
         disposition = item.get("disposition") or ""
         source_severity = item.get("severity") or "none"
+        age_days = _age_days(item_created_at, now=now_ts)
         is_real_risk = source_severity == "real-risk"
         is_overdue = is_real_risk and item_created_at < overdue_cutoff_ts
+        triage_severity = _triage_severity(
+            source_severity,
+            age_days=age_days,
+            realrisk_escalate_days=escalate_days,
+        )
         if item_created_at < since_ts and not is_overdue:
             continue
         source_task_id = item["source_task_id"]
@@ -1432,11 +1452,14 @@ def load_followup_candidates_from_ledger(
                 "excerpt": excerpt,
                 "suggested_key": f"disposition-{item['id']}",
                 "source": "ledger",
+                "kind": item.get("typ"),
                 "typ": item.get("typ"),
                 "disposition": disposition,
                 "source_severity": source_severity,
-                "severity": "urgent" if is_real_risk else "bundle",
-                "overdue": bool(is_overdue),
+                "triage_severity": triage_severity,
+                "severity": triage_severity,
+                "age_days": age_days,
+                "overdue": triage_severity == "overdue",
             }
         )
     return out
@@ -1513,6 +1536,15 @@ def read_last_runs(state_dir: Path) -> dict[str, Any]:
 _DIGEST_RECOMMENDATIONS = ("drop", "collect", "planspec")
 
 
+def _normalize_digest_triage_severity(value: Any) -> str:
+    severity = str(value or "none").strip().lower() or "none"
+    if severity not in TRIAGE_SEVERITIES:
+        raise ValueError(
+            f"digest triage_severity {severity!r} not in {sorted(TRIAGE_SEVERITIES)}"
+        )
+    return severity
+
+
 def disposition_digest_path(state_dir: Optional[Path] = None) -> Path:
     """Resolve the disposition-digest artifact path.
 
@@ -1566,12 +1598,21 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         seen_items.update(item_ids)
         if recommendation == "planspec":
             reaped_derived += 1
+        triage_severity = _normalize_digest_triage_severity(
+            cluster.get("triage_severity", cluster.get("severity"))
+        )
         norm = {
             "theme": theme,
             "item_ids": item_ids,
-            "severity": str(cluster.get("severity") or "none").strip() or "none",
+            "kind": str(cluster.get("kind") or "cluster").strip() or "cluster",
+            "source_severity": str(cluster.get("source_severity") or "none").strip() or "none",
+            "triage_severity": triage_severity,
+            "severity": triage_severity,
             "recommendation": recommendation,
         }
+        age_days = cluster.get("age_days")
+        if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
+            norm["age_days"] = age_days
         planspec_key = cluster.get("planspec_key")
         if planspec_key:
             norm["planspec_key"] = str(planspec_key).strip()
@@ -1588,10 +1629,20 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         if not item_id:
             raise ValueError(f"left[{idx}] has an empty 'item_id'")
         seen_items.add(item_id)
+        triage_severity = _normalize_digest_triage_severity(
+            entry.get("triage_severity", entry.get("severity"))
+        )
         norm_left: dict[str, Any] = {
             "item_id": item_id,
             "reason": str(entry.get("reason") or "").strip(),
+            "kind": str(entry.get("kind") or "item").strip() or "item",
+            "source_severity": str(entry.get("source_severity") or "none").strip() or "none",
+            "triage_severity": triage_severity,
+            "severity": triage_severity,
         }
+        age_days = entry.get("age_days")
+        if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
+            norm_left["age_days"] = age_days
         disposition = entry.get("disposition")
         if disposition:
             norm_left["disposition"] = str(disposition).strip()
@@ -1864,6 +1915,29 @@ FOLLOWUP_MARKERS = (
     "sollte noch",
 )
 
+TRIAGE_SEVERITIES = {"real-risk", "overdue", "scope-note", "none"}
+
+
+def _age_days(created_at: Any, *, now: int) -> int | None:
+    try:
+        created = int(created_at)
+    except (TypeError, ValueError):
+        return None
+    return max(0, (now - created) // 86400)
+
+
+def _triage_severity(
+    source_severity: Any, *, age_days: int | None, realrisk_escalate_days: int
+) -> str:
+    source = str(source_severity or "none")
+    if source == "scope-note":
+        return "scope-note"
+    if source == "real-risk":
+        if age_days is not None and age_days >= int(realrisk_escalate_days):
+            return "overdue"
+        return "real-risk"
+    return "none"
+
 
 def _read_harvest_since(marker_path: Path, *, now: int) -> int:
     """Letzter Harvest-Lauf aus dem Marker, sonst Fenster-Fallback (now-48h)."""
@@ -1911,6 +1985,7 @@ def run_harvest(args) -> dict[str, Any]:
             conn,
             since_ts=since_ts,
             realrisk_escalate_days=realrisk_escalate_days,
+            now=now,
         )
         receipts = gather_recent_receipts(conn, since_ts=since_ts)
     finally:

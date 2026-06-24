@@ -103,6 +103,52 @@ def test_filter_keeps_only_marker_receipts():
     kept = strategist.filter_followup_candidates(receipts)
     assert [c["task_id"] for c in kept] == ["t_b"]
     assert kept[0]["suggested_key"] == "receipt-t_b"
+    assert kept[0]["kind"] == "follow_up"
+    assert kept[0]["source_severity"] == "scope-note"
+    assert kept[0]["triage_severity"] == "scope-note"
+
+
+def test_ledger_candidates_emit_deterministic_triage_schema(kanban_home):
+    now = 10 * 86400
+    cases = [
+        ("risk", "real-risk", now - 3600, "real-risk", 0),
+        ("risk", "real-risk", now - 3 * 86400, "overdue", 3),
+        ("follow_up", "scope-note", now - 3600, "scope-note", 0),
+        ("follow_up", "none", now - 3600, "none", 0),
+    ]
+    with kb.connect() as conn:
+        for idx, (typ, severity, created_at, _triage, _age) in enumerate(cases):
+            tid = kb.create_task(conn, title=f"Source {idx}", assignee="coder", created_by="test")
+            item_id = kb.insert_disposition_item(
+                conn,
+                source_task_id=tid,
+                typ=typ,
+                disposition="defer",
+                next_action="follow up",
+                severity=severity,
+                evidence="test",
+            )
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE disposition_items SET created_at=? WHERE id=?",
+                    (created_at, item_id),
+                )
+        candidates = strategist.load_followup_candidates_from_ledger(
+            conn,
+            since_ts=now - 86400,
+            realrisk_escalate_days=2,
+            now=now,
+        )
+
+    by_triage = {c["triage_severity"]: c for c in candidates}
+    assert set(by_triage) == {"real-risk", "overdue", "scope-note", "none"}
+    for typ, severity, _created_at, triage, age_days in cases:
+        cand = by_triage[triage]
+        assert cand["kind"] == typ
+        assert cand["source_severity"] == severity
+        assert cand["severity"] == triage
+        assert cand["age_days"] == age_days
+        assert cand["overdue"] is (triage == "overdue")
 
 
 def test_filter_ignores_generic_todo_and_should_be_phrases():
