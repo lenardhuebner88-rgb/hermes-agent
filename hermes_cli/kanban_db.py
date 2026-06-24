@@ -92,6 +92,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod
+from hermes_cli import kanban_templates
 
 _log = logging.getLogger(__name__)
 
@@ -17332,6 +17333,24 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+            # PlanSpec B: stamp the expanded scope-contract trace onto the run
+            # so it is permanently auditable WHAT contract the worker saw. Only
+            # the in-process worker path reads it (via build_worker_context);
+            # the claude-CLI path does not expand templates (Pitfall 10 /
+            # non-goal), so stamping there would record a contract the worker
+            # never read. No-op unless the body carries a valid contract_profile.
+            if not _run_is_claude_cli(claimed.assignee, board=board):
+                try:
+                    _stamp_expanded_contract(conn, claimed)
+                except Exception:
+                    # Trace-only side effect: a stamp failure must never be
+                    # misattributed as a spawn failure by the except below
+                    # (which counts against consecutive_failures). The worker
+                    # already spawned fine; the missing trace is cosmetic.
+                    _log.warning(
+                        "kanban: failed to stamp expanded_contract for task %s",
+                        claimed.id, exc_info=True,
+                    )
             # NOTE: we intentionally do NOT reset consecutive_failures
             # here. A successful spawn proves the worker can start but
             # doesn't prove the run will succeed. Under unified
@@ -19016,6 +19035,166 @@ def _render_parent_results_and_role_history(
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Scope-contract template expansion (PlanSpec B)
+#
+# A task body may reference a reusable contract template via a
+# ``contract_profile: <name>`` line instead of carrying inline ``scope_contract``
+# YAML. The worker-context renderer expands it for the worker to read; the
+# dispatcher records the expansion in ``run.metadata.expanded_contract`` as the
+# permanent trace. ``build_worker_context`` stays a READ-ONLY renderer — it
+# never writes run metadata; only the dispatcher (:func:`_stamp_expanded_contract`)
+# does that. Templates and the security invariant live in ``kanban_templates``.
+# ---------------------------------------------------------------------------
+
+def _referenced_contract_profile(body: str) -> Optional[str]:
+    """Return the raw name on the first ``contract_profile:`` line, valid or not.
+
+    Used only to log unknown references (Pitfall 9); validity/inline-conflict
+    resolution is :func:`_parse_contract_profile`'s job.
+    """
+    if not body:
+        return None
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("contract_profile:"):
+            name = stripped.split(":", 1)[1]
+            name = name.split("#", 1)[0].strip().strip("'\"")
+            return name or None
+    return None
+
+
+def _parse_contract_profile(body: str) -> Optional[str]:
+    """Extract a *valid* ``contract_profile`` reference from a task body.
+
+    Returns the template name only when ALL hold:
+      * a standalone ``contract_profile: <name>`` line is present,
+      * ``<name>`` is a known template in ``SCOPE_CONTRACT_TEMPLATES``,
+      * the body does NOT also carry an inline ``scope_contract:`` block
+        (Pitfall 8 — an explicit inline contract wins; the body is left raw).
+    Otherwise returns ``None`` and the body is rendered unchanged (Pitfall 9 —
+    unknown names never expand; no implicit matching).
+    """
+    if not body:
+        return None
+    # Pitfall 8: an inline scope_contract block is more explicit — defer to it.
+    for line in body.splitlines():
+        if line.strip().startswith("scope_contract:"):
+            return None
+    name = _referenced_contract_profile(body)
+    if name and name in kanban_templates.SCOPE_CONTRACT_TEMPLATES:
+        return name
+    return None
+
+
+def _strip_contract_profile_line(body: str) -> str:
+    """Drop the ``contract_profile:`` directive line(s) from a body."""
+    return "\n".join(
+        line for line in body.splitlines()
+        if not line.strip().startswith("contract_profile:")
+    ).strip()
+
+
+def expand_contract_for_body(body: str) -> Optional[dict]:
+    """Return the expanded scope contract for a body's ``contract_profile`` ref.
+
+    Pure / side-effect-free. Returns the trace payload (suitable for
+    ``run.metadata.expanded_contract``) or ``None`` when no valid template
+    reference is present. Shared by the worker-context renderer and the
+    dispatcher's trace-stamping so both see byte-identical expansion.
+    """
+    name = _parse_contract_profile(body)
+    template = kanban_templates.get_template(name)
+    if not template:
+        return None
+    payload: dict = {
+        "template": name,
+        "scope_contract_version": int(template.get("scope_contract_version", 2)),
+        "forbidden_actions": list(template.get("forbidden_actions", [])),
+        "in_scope": list(template.get("in_scope", [])),
+        "out_of_scope": list(template.get("out_of_scope", [])),
+        "auto_fill": dict(template.get("auto_fill", {})),
+    }
+    evidence = template.get("evidence_requirements")
+    if evidence:
+        payload["evidence_requirements"] = list(evidence)
+    return payload
+
+
+def _render_expanded_contract_block(expanded: dict) -> list[str]:
+    """Markdown lines describing an expanded template contract for a worker."""
+    def _fmt(vals: object) -> str:
+        seq = list(vals) if isinstance(vals, (list, tuple)) else []
+        return ", ".join(str(v) for v in seq) if seq else "(none)"
+
+    name = expanded.get("template", "unknown")
+    version = expanded.get("scope_contract_version")
+    lines = [f"## Scope Contract (expanded from template `{name}`)"]
+    lines.append(f"**In scope:** {_fmt(expanded.get('in_scope'))}")
+    lines.append(f"**Out of scope:** {_fmt(expanded.get('out_of_scope'))}")
+    lines.append(f"**Forbidden actions:** {_fmt(expanded.get('forbidden_actions'))}")
+    if expanded.get("evidence_requirements"):
+        lines.append(f"**Evidence:** {_fmt(expanded.get('evidence_requirements'))}")
+    lines.append(f"**Scope contract version:** {version}")
+    auto = expanded.get("auto_fill") or {}
+    if auto:
+        af = ", ".join(f"{k}={v}" for k, v in sorted(auto.items()))
+        lines.append(
+            f"_Auto-filled by template (you do not set these): {af}. Report "
+            f"scope_contract_version={version} at completion. All other gate "
+            "fields (scope_attestation, forbidden_actions_taken) remain YOUR "
+            "runtime assertions and must NOT be fabricated from this template._"
+        )
+    return lines
+
+
+def _stamp_expanded_contract(conn: sqlite3.Connection, task: "Task") -> None:
+    """Record ``run.metadata.expanded_contract`` for an in-process worker run.
+
+    No-op when the task body carries no valid ``contract_profile`` reference.
+    Merges into the run's existing metadata (preserving spawn-identity fields)
+    so the trace is the permanent record of the contract the worker saw. This
+    is the ONLY place the expansion is persisted — ``build_worker_context``
+    stays read-only. Caller must scope this to the in-process worker path
+    (the claude-CLI path does not expand templates — Pitfall 10 / non-goal).
+    """
+    body = getattr(task, "body", "") or ""
+    expanded = expand_contract_for_body(body)
+    if expanded is None:
+        raw = _referenced_contract_profile(body)
+        if (
+            raw
+            and raw not in kanban_templates.SCOPE_CONTRACT_TEMPLATES
+            and "scope_contract:" not in body
+        ):
+            _log.warning(
+                "kanban: unknown contract_profile %r on task %s; "
+                "body rendered unchanged, no expansion",
+                raw, getattr(task, "id", "?"),
+            )
+        return
+    with write_txn(conn):
+        run_id = _current_run_id(conn, task.id)
+        if run_id is None:
+            return
+        row = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        existing: dict = {}
+        if row and row["metadata"]:
+            try:
+                loaded = json.loads(row["metadata"])
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (ValueError, TypeError):
+                existing = {}
+        existing["expanded_contract"] = expanded
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ?",
+            (json.dumps(existing, ensure_ascii=False), run_id),
+        )
+
+
 def build_worker_context(
     conn: sqlite3.Connection,
     task_id: str,
@@ -19089,8 +19268,20 @@ def build_worker_context(
     lines.append("")
 
     if task.body and task.body.strip():
+        # PlanSpec B: when the body references a known contract_profile (and
+        # carries no inline scope_contract block), render the expanded template
+        # contract instead of the raw boilerplate. Pure render — the permanent
+        # trace is stamped onto run.metadata by the dispatcher, not here.
+        expanded = expand_contract_for_body(task.body)
         lines.append("## Body")
-        lines.append(_cap(task.body, body_bytes))
+        if expanded is not None:
+            cleaned = _strip_contract_profile_line(task.body)
+            if cleaned:
+                lines.append(_cap(cleaned, body_bytes))
+                lines.append("")
+            lines.extend(_render_expanded_contract_block(expanded))
+        else:
+            lines.append(_cap(task.body, body_bytes))
         lines.append("")
 
     # A2: verifier-only section (acceptance checklist + changed-files snapshot).
