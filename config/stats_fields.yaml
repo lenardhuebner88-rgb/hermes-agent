@@ -1,0 +1,65 @@
+# Declarative field config for the /control Stats tab (Statistik + Abo-Limits-Cockpit).
+#
+# These definitions used to be hardcoded across the frontend (StatistikView,
+# AccountUsageTile, accountUsage). They now live here and are served at runtime via
+# `GET /api/stats-config` (TTL+mtime cached, fail-soft to built-in defaults).
+#
+# Edit this file to change the rendered provider/window/lane fields — their labels,
+# their order, or their visibility — WITHOUT a code change or frontend rebuild. The
+# change is picked up on the next poll (≈ backend TTL 30 s + frontend poll 60 s).
+# A missing or malformed file degrades gracefully to the built-in defaults, so a bad
+# edit can never blank the stats tab.
+version: 1
+
+# Provider cards in the Abo-Limits-Cockpit (one card per subscription with a real
+# usage window). `lane` is the worker-run reconciliation lane (null = API-billed, no
+# subscription bucket). Order here = display/grouping order. `visible: false` hides a
+# provider entirely (card + footer) without deleting its definition — declutter knob.
+providers:
+  - id: anthropic
+    label: Claude
+    lane: claude
+    visible: true
+  - id: openai-codex
+    label: ChatGPT / Codex
+    lane: chatgpt
+    visible: true
+  - id: kimi
+    label: Kimi
+    lane: kimi
+    visible: true
+  - id: openrouter
+    label: OpenRouter
+    lane: null
+    visible: true
+
+# Provider usage windows. `kind` drives layout: session/weekly render as the two
+# primary horizontal bars; `other` collapses into the per-card "Details" disclosure.
+# `label` is the German display label shown next to the bar.
+windows:
+  - key: session
+    label: 5-Std-Fenster
+    kind: session
+  - key: weekly
+    label: Diese Woche
+    kind: weekly
+  - key: opus_week
+    label: Opus-Woche
+    kind: other
+  - key: sonnet_week
+    label: Sonnet-Woche
+    kind: other
+
+# Subscription token buckets (Abo-Token panel + per-card worker-run reconciliation).
+# `key` must match a provider `lane` above. Order = display order; `visible: false`
+# drops a bucket from the panel.
+subscription_lanes:
+  - key: chatgpt
+    label: ChatGPT/Codex Abo
+    visible: true
+  - key: claude
+    label: Claude Max Abo
+    visible: true
+  - key: kimi
+    label: Kimi Abo
+    visible: true

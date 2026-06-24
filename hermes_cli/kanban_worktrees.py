@@ -366,6 +366,7 @@ def _git(
     *args: str,
     check: bool = True,
     timeout: int | None = None,
+    strip: bool = True,
 ) -> str:
     # Read the timeout at call time so HERMES_WORKTREE_GIT_TIMEOUT (operator
     # tuning, tests) is honored — a default-arg bound at import time would
@@ -389,7 +390,10 @@ def _git(
             f"git {' '.join(args[:3])}… failed in {repo}: "
             f"{(proc.stderr or proc.stdout).strip()[:500]}"
         )
-    return proc.stdout.strip()
+    # ``strip=False`` for NUL-delimited output (``-z``): stripping would eat the
+    # leading status-column space of the FIRST porcelain record (" M path"),
+    # shifting the parse and dropping the first character of that path.
+    return proc.stdout.strip() if strip else proc.stdout
 
 
 def repo_root_for(path) -> Optional[Path]:
@@ -433,8 +437,9 @@ def dirty_files(repo: Path) -> list[str]:
     worktree namespace and the planted node_modules symlinks filtered out.
 
     Uses ``-z`` (NUL-separated) so paths with spaces/special chars arrive
-    unquoted — the overlap check must compare exact paths."""
-    out = _git(repo, "status", "--porcelain", "-uall", "-z")
+    unquoted — the overlap check must compare exact paths. ``strip=False`` keeps
+    the leading status-column space of the first record intact (see ``_git``)."""
+    out = _git(repo, "status", "--porcelain", "-uall", "-z", strip=False)
     files: list[str] = []
     entries = out.split("\0")
     i = 0

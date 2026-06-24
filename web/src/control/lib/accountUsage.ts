@@ -5,23 +5,30 @@
  * (Fallback: Label-Heuristik), liefert deutsche Labels, das knappste Fenster über
  * alle Abos (Engpass) und die Lane-Zuordnung für den Worker-Run-Abgleich.
  *
+ * Die Feld-Definitionen (Provider-Labels, Fenster-Labels/-Kinds, Lanes) sind
+ * config-getrieben: sie kommen aus `StatsFieldConfig` (`/api/stats-config`,
+ * Default = `DEFAULT_STATS_CONFIG`) statt aus hartcodierten Konstanten.
+ *
  * Bewusst seiteneffektfrei: `formatReset` bekommt `now` injiziert (kein
  * `Date.now()`), damit die Funktionen deterministisch testbar sind.
  */
 import type { AccountUsageProvider, AccountUsageWindow } from "./types";
+import {
+  DEFAULT_STATS_CONFIG,
+  laneForProvider,
+  windowField,
+  windowLabelForKind,
+  type StatsFieldConfig,
+} from "./statsFields";
 
 export type WindowKind = "session" | "weekly" | "other";
 
-/** window_key → deutsches Label. Fallback (unbekannter Key): roher `label`. */
-export const WINDOW_DE: Record<string, string> = {
-  session: "5-Std-Fenster",
-  weekly: "Diese Woche",
-  opus_week: "Opus-Woche",
-  sonnet_week: "Sonnet-Woche",
-};
-
-/** Subscription-Lanes des Worker-Run-Abgleichs (StatistikView SUBSCRIPTION_BUCKETS). */
-export type SubscriptionLane = "claude" | "chatgpt" | "kimi";
+/**
+ * Subscription-Lane des Worker-Run-Abgleichs. Die konkreten Lanes sind config-
+ * getrieben (`subscription_lanes` in der StatsFieldConfig), daher ein offener
+ * String statt einer festen Union.
+ */
+export type SubscriptionLane = string;
 
 export interface Bottleneck {
   providerId: string;
@@ -32,15 +39,13 @@ export interface Bottleneck {
 }
 
 /**
- * Klassifiziert ein Fenster robust: primär über das stabile Backend-`window_key`,
+ * Klassifiziert ein Fenster robust: primär über das config-deklarierte `window_key`,
  * erst als Fallback über eine Label-Heuristik (falls ein Provider künftig ohne
  * Key liefert oder umbenennt).
  */
-export function classifyWindow(w: AccountUsageWindow): WindowKind {
-  const key = w.window_key;
-  if (key === "session") return "session";
-  if (key === "weekly") return "weekly";
-  if (key === "opus_week" || key === "sonnet_week" || key === "other") return "other";
+export function classifyWindow(w: AccountUsageWindow, cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG): WindowKind {
+  const field = windowField(cfg, w.window_key);
+  if (field) return field.kind;
 
   const label = (w.label ?? "").toLowerCase();
   if (/session|sitzung|5\s?h|5-std/.test(label)) return "session";
@@ -48,12 +53,15 @@ export function classifyWindow(w: AccountUsageWindow): WindowKind {
   return "other";
 }
 
-/** Deutsches Label für ein Fenster — über window_key, dann Heuristik, dann roher Label. */
-export function windowLabelDe(w: AccountUsageWindow): string {
-  if (w.window_key && WINDOW_DE[w.window_key]) return WINDOW_DE[w.window_key];
-  const kind = classifyWindow(w);
-  if (kind === "session") return WINDOW_DE.session;
-  if (kind === "weekly") return WINDOW_DE.weekly;
+/** Deutsches Label für ein Fenster — über config-`window_key`, dann Heuristik, dann roher Label. */
+export function windowLabelDe(w: AccountUsageWindow, cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG): string {
+  const field = windowField(cfg, w.window_key);
+  if (field) return field.label;
+  const kind = classifyWindow(w, cfg);
+  if (kind === "session" || kind === "weekly") {
+    const byKind = windowLabelForKind(cfg, kind);
+    if (byKind) return byKind;
+  }
   return w.label || "Limit";
 }
 
@@ -63,12 +71,15 @@ export function windowLabelDe(w: AccountUsageWindow): string {
  * (der Aufrufer entscheidet den Ton ab 75/90 %); `null` nur, wenn es gar kein
  * session/weekly-Fenster mit Prozentwert gibt.
  */
-export function pickBottleneck(providers: AccountUsageProvider[]): Bottleneck | null {
+export function pickBottleneck(
+  providers: AccountUsageProvider[],
+  cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
+): Bottleneck | null {
   let best: Bottleneck | null = null;
   for (const provider of providers) {
     if (!provider.available) continue;
     for (const w of provider.windows) {
-      const kind = classifyWindow(w);
+      const kind = classifyWindow(w, cfg);
       if (kind !== "session" && kind !== "weekly") continue;
       const used =
         typeof w.used_percent === "number" && Number.isFinite(w.used_percent) ? w.used_percent : null;
@@ -77,7 +88,7 @@ export function pickBottleneck(providers: AccountUsageProvider[]): Bottleneck | 
         best = {
           providerId: provider.provider,
           kind,
-          windowLabel: windowLabelDe(w),
+          windowLabel: windowLabelDe(w, cfg),
           usedPercent: used,
           resetAt: w.reset_at,
         };
@@ -116,11 +127,12 @@ export function formatReset(resetAt: string | null, nowMs: number): string {
 
 /**
  * Provider → Worker-Run-Subscription-Lane (für den Abgleich Provider-% ↔
- * Worker-Run-Verbrauch). Provider ohne Lane (OpenRouter = $-Guthaben) → null.
+ * Worker-Run-Verbrauch), config-getrieben. Provider ohne Lane (OpenRouter =
+ * $-Guthaben) → null.
  */
-export function providerToLane(provider: string): SubscriptionLane | null {
-  if (provider === "anthropic") return "claude";
-  if (provider === "openai-codex") return "chatgpt";
-  if (provider === "kimi") return "kimi";
-  return null;
+export function providerToLane(
+  provider: string,
+  cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
+): SubscriptionLane | null {
+  return laneForProvider(cfg, provider);
 }

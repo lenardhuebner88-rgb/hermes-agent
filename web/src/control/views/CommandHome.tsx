@@ -27,8 +27,10 @@ import {
   useHermesTodayDigest,
   useHermesWorkers,
   useStrategistCount,
+  useStatsConfig,
   useSystemHealth,
 } from "../hooks/useControlData";
+import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
 import type { Density } from "../hooks/useDensity";
 import type { BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
@@ -59,6 +61,7 @@ export function CommandHome({ density }: { density: Density }) {
   const inbox = useDecisionInbox();
   const health = useSystemHealth();
   const accountUsage = useAccountUsage();
+  const statsConfig = useStatsConfig();
   const workers = useHermesWorkers();
   const digest = useHermesTodayDigest();
   const board = useBoard();
@@ -155,7 +158,7 @@ export function CommandHome({ density }: { density: Density }) {
       <StrategistSignalTile onOpen={() => navigate("/control/stratege")} />
 
       {/* ── ABO-LIMITS ──────────────────────────────────────────────────────── */}
-      <AccountUsageTile usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} />
+      <AccountUsageTile usage={accountUsage.data} loading={accountUsage.loading && !accountUsage.data} error={accountUsage.error} config={statsConfig.data ?? DEFAULT_STATS_CONFIG} />
 
       {/* ── THE QUEUE ───────────────────────────────────────────────────────── */}
       {!calm && !settling ? (

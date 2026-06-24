@@ -65,6 +65,7 @@ from hermes_cli.config import (
     write_platform_config_field,
 )
 from hermes_cli.error_sanitize import safe_detail, scrub_detail
+from hermes_cli.stats_config import load_stats_config
 from hermes_cli.memory_providers import (
     MemoryProvider,
     ProviderField,
@@ -2514,6 +2515,11 @@ async def get_account_usage():
         "providers": providers,
         "cache_ttl_seconds": _ACCOUNT_USAGE_CACHE_TTL_SECONDS,
     }
+
+
+@app.get("/api/stats-config")
+async def get_stats_config():
+    return load_stats_config()
 
 
 # ---------------------------------------------------------------------------

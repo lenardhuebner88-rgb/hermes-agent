@@ -1249,6 +1249,23 @@ def test_two_chains_two_separate_merge_commits(repo):
     assert len(merges) == 2
 
 
+def test_dirty_files_reports_full_path_of_unstaged_first_entry(repo):
+    """Regression: a single unstaged modification must report its FULL path.
+
+    ``git status --porcelain -z`` renders an unstaged change as ``" M a.txt\0"``
+    — a leading space in the status column. ``dirty_files`` must not let that
+    leading space be stripped away (it would shift the parse and drop the first
+    character of the path, e.g. ``a.txt`` -> ``.txt``), or the overlap pre-check
+    silently misses real dirty-overlaps and a transient park misclassifies as a
+    merge conflict.
+    """
+    (repo / "a.txt").write_text("foreign edit\n")
+    assert kwt.dirty_files(repo) == ["a.txt"]
+    # A second dirty file must still parse correctly regardless of ordering.
+    (repo / "z_new.txt").write_text("new\n")
+    assert set(kwt.dirty_files(repo)) == {"a.txt", "z_new.txt"}
+
+
 def test_overlap_with_dirty_live_checkout_parks(repo):
     info = _provisioned_chain(repo, "t_ovl", relpath="a.txt",
                               content="branch change\n")

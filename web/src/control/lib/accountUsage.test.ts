@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { AccountUsageProvider, AccountUsageWindow } from "./types";
 import {
-  WINDOW_DE,
   classifyWindow,
   formatReset,
   pickBottleneck,
   providerToLane,
   windowLabelDe,
 } from "./accountUsage";
+import { DEFAULT_STATS_CONFIG, type StatsFieldConfig } from "./statsFields";
+
+// Default-config window labels, by key — the helpers fall back to DEFAULT_STATS_CONFIG.
+const WINDOW_DE = Object.fromEntries(DEFAULT_STATS_CONFIG.windows.map((w) => [w.key, w.label]));
 
 function win(partial: Partial<AccountUsageWindow>): AccountUsageWindow {
   return {
@@ -159,11 +162,47 @@ describe("formatReset", () => {
 });
 
 describe("providerToLane", () => {
-  it("maps providers to subscription-token lanes", () => {
+  it("maps providers to subscription-token lanes (default config)", () => {
     expect(providerToLane("anthropic")).toBe("claude");
     expect(providerToLane("openai-codex")).toBe("chatgpt");
     expect(providerToLane("kimi")).toBe("kimi");
     expect(providerToLane("openrouter")).toBeNull();
     expect(providerToLane("whatever")).toBeNull();
+  });
+});
+
+// AC-2 at the unit level: the helpers are config-driven — a different config yields
+// different labels/lanes/kinds with no code change.
+describe("config-driven overrides", () => {
+  const cfg: StatsFieldConfig = {
+    version: 1,
+    providers: [
+      { id: "anthropic", label: "Claude Custom", lane: "max", visible: true },
+      { id: "newprov", label: "Brand New", lane: null, visible: true },
+    ],
+    windows: [
+      { key: "session", label: "Sitzung (5h)", kind: "session" },
+      { key: "rolling", label: "Rollierend", kind: "weekly" },
+    ],
+    subscription_lanes: [{ key: "max", label: "Max Abo", visible: true }],
+  };
+
+  it("windowLabelDe resolves labels from the supplied config", () => {
+    expect(windowLabelDe(win({ window_key: "session" }), cfg)).toBe("Sitzung (5h)");
+    expect(windowLabelDe(win({ window_key: "rolling" }), cfg)).toBe("Rollierend");
+    // window_key absent from config → heuristic kind → first window of that kind.
+    expect(windowLabelDe(win({ window_key: "weekly", label: "Current week" }), cfg)).toBe("Rollierend");
+  });
+
+  it("classifyWindow uses the config's kind mapping", () => {
+    expect(classifyWindow(win({ window_key: "rolling" }), cfg)).toBe("weekly");
+    expect(classifyWindow(win({ window_key: "session" }), cfg)).toBe("session");
+  });
+
+  it("providerToLane follows the config's provider→lane mapping", () => {
+    expect(providerToLane("anthropic", cfg)).toBe("max");
+    expect(providerToLane("newprov", cfg)).toBeNull();
+    // openai-codex is not in this config at all → null
+    expect(providerToLane("openai-codex", cfg)).toBeNull();
   });
 });

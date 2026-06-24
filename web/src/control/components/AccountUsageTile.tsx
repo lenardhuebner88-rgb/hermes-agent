@@ -23,11 +23,12 @@ import {
   type SubscriptionLane,
 } from "../lib/accountUsage";
 import { fmtTokens, nowSec } from "../lib/derive";
+import { DEFAULT_STATS_CONFIG, isProviderVisible, providerLabel as configuredProviderLabel, providerOrder, type StatsFieldConfig } from "../lib/statsFields";
 import { StatusPill, ToneCallout } from "./atoms";
 import { Eyebrow } from "./primitives";
 import { RateBar } from "./charts/charts";
 
-function providerLabel(provider: string): string {
+function fallbackProviderLabel(provider: string): string {
   if (provider === "openai-codex") return "ChatGPT / Codex";
   if (provider === "anthropic") return "Claude";
   if (provider === "kimi") return "Kimi";
@@ -43,7 +44,7 @@ function limitTone(value: number | null): ToneName {
 }
 
 /** Eine Fenster-Zeile: deutsches Label · waagerechter Balken · % + Reset-Countdown. */
-function AccountWindowRow({ window, nowMs }: { window: AccountUsageWindow; nowMs: number }) {
+function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindow; nowMs: number; config: StatsFieldConfig }) {
   const used =
     typeof window.used_percent === "number" && Number.isFinite(window.used_percent)
       ? Math.max(0, Math.min(100, window.used_percent))
@@ -52,7 +53,7 @@ function AccountWindowRow({ window, nowMs }: { window: AccountUsageWindow; nowMs
   // Accessible-Name + role="meter": der RateBar ist aria-hidden (rein dekorativ),
   // also trägt die Zeile die Gauge-Semantik — Screenreader (und der control-smoke-
   // e2e) lesen "<Fenster>: <N> % genutzt" bzw. "<Fenster>: unbekannt".
-  const label = windowLabelDe(window);
+  const label = windowLabelDe(window, config);
   const meterName = `${label}: ${used == null ? "unbekannt" : `${Math.round(used)} % genutzt`}`;
   return (
     <div
@@ -84,15 +85,17 @@ function AccountProviderCard({
   provider,
   nowMs,
   align,
+  config,
 }: {
   provider: AccountUsageProvider;
   nowMs: number;
   align?: { tokens: number; runs: number } | null;
+  config: StatsFieldConfig;
 }) {
-  const session = provider.windows.find((w) => classifyWindow(w) === "session");
-  const weekly = provider.windows.find((w) => classifyWindow(w) === "weekly");
+  const session = provider.windows.find((w) => classifyWindow(w, config) === "session");
+  const weekly = provider.windows.find((w) => classifyWindow(w, config) === "weekly");
   const primary = [session, weekly].filter((w): w is AccountUsageWindow => Boolean(w));
-  const others = provider.windows.filter((w) => classifyWindow(w) === "other");
+  const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
   const tone: ToneName = provider.windows.some((w) => (w.used_percent ?? 0) >= 90)
     ? "red"
     : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
@@ -103,13 +106,13 @@ function AccountProviderCard({
     <article className="rounded-xl border border-[var(--hc-border)] bg-black/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-white">{providerLabel(provider.provider)}</p>
+          <p className="truncate text-sm font-semibold text-white">{configuredProviderLabel(config, provider.provider) || fallbackProviderLabel(provider.provider)}</p>
           {provider.plan ? <p className="text-xs hc-dim">{provider.plan}</p> : null}
         </div>
         <StatusPill tone={tone} label={provider.cached ? "Cache" : "Live"} dot="live" />
       </div>
       <div className="mt-3 space-y-1.5">
-        {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} />)}
+        {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}
       </div>
       {align ? (
         <p className="mt-2 text-[0.7rem] hc-dim">
@@ -122,7 +125,7 @@ function AccountProviderCard({
           <div className="mt-1 space-y-1 hc-soft">
             {others.map((w) => (
               <p key={w.window_key ?? w.label}>
-                {windowLabelDe(w)}{" "}
+                {windowLabelDe(w, config)}{" "}
                 {typeof w.used_percent === "number" ? `${Math.round(w.used_percent)} %` : "—"}
               </p>
             ))}
@@ -146,21 +149,25 @@ export function AccountUsageTile({
   loading,
   error,
   laneUsage,
+  config = DEFAULT_STATS_CONFIG,
 }: {
   usage: AccountUsageResponse | null;
   loading: boolean;
   error: string | null;
   laneUsage?: Partial<Record<SubscriptionLane, { tokens: number; runs: number }>>;
+  config?: StatsFieldConfig;
 }) {
-  const providers = usage?.providers ?? [];
+  const providers = (usage?.providers ?? [])
+    .filter((p) => isProviderVisible(config, p.provider))
+    .sort((a, b) => providerOrder(config, a.provider) - providerOrder(config, b.provider));
   const available = providers.filter((p) => p.available).length;
   const nowMs = nowSec() * 1000;
   // Kimi = lokale Schätzung aus kanban.db, kein Provider-Limit → nie als Engpass
   // oder volle Karte (§8). Bleibt unten in der Fußzeile sichtbar.
-  const realProviders = providers.filter((p) => p.provider !== "kimi");
+  const realProviders = providers.filter((p) => providerToLane(p.provider, config) !== "kimi");
   const bottleneck = pickBottleneck(realProviders);
   const cockpit = realProviders.filter(
-    (p) => p.available && p.windows.some((w) => classifyWindow(w) !== "other"),
+    (p) => p.available && p.windows.some((w) => classifyWindow(w, config) !== "other"),
   );
   const footer = providers.filter((p) => !cockpit.includes(p));
   // Engpass-Ton: rot ab 90 %, gelb ab 75 %, sonst neutral (kein ⚠) — §3.
@@ -188,7 +195,7 @@ export function AccountUsageTile({
       </div>
       {bottleneck ? (
         <ToneCallout tone={bnTone}>
-          {bnTone === "zinc" ? "Höchste Auslastung" : "⚠ Engpass"}: {providerLabel(bottleneck.providerId)}-
+          {bnTone === "zinc" ? "Höchste Auslastung" : "⚠ Engpass"}: {configuredProviderLabel(config, bottleneck.providerId) || fallbackProviderLabel(bottleneck.providerId)}-
           {bottleneck.windowLabel} {Math.round(bottleneck.usedPercent)} %
           {bnReset ? ` — Reset ${bnReset}` : ""}
         </ToneCallout>
@@ -198,9 +205,9 @@ export function AccountUsageTile({
       ) : cockpit.length ? (
         <div className="grid gap-3 lg:grid-cols-2">
           {cockpit.map((p) => {
-            const lane = providerToLane(p.provider);
+            const lane = providerToLane(p.provider, config);
             const align = lane && laneUsage ? laneUsage[lane] ?? null : null;
-            return <AccountProviderCard key={p.provider} provider={p} nowMs={nowMs} align={align} />;
+            return <AccountProviderCard key={p.provider} provider={p} nowMs={nowMs} align={align} config={config} />;
           })}
         </div>
       ) : providers.length === 0 ? (
@@ -212,7 +219,7 @@ export function AccountUsageTile({
           {footer.map((p, i) => (
             <span key={p.provider}>
               {i > 0 ? " · " : ""}
-              <span className="text-white">{providerLabel(p.provider)}</span>{" "}
+              <span className="text-white">{configuredProviderLabel(config, p.provider) || fallbackProviderLabel(p.provider)}</span>{" "}
               {p.available
                 ? p.details.length
                   ? p.details.join(", ")

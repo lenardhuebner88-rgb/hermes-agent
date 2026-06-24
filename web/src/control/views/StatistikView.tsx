@@ -29,6 +29,7 @@ import {
   useHermesRunSummary,
   useHermesWindowedRollup,
   useHermesSubscriptionBurn,
+  useStatsConfig,
 } from "../hooks/useControlData";
 import type {
   AccountUsageProvider,
@@ -41,6 +42,8 @@ import type {
   WindowedRollupRoot,
   WindowedRollupWorker,
 } from "../lib/schemas";
+import { AccountUsageTile } from "../components/AccountUsageTile";
+import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
 import {
   BroadsheetShell,
   BroadsheetFooter,
@@ -704,6 +707,7 @@ export function StatistikView() {
   const daily = useHermesRunsDaily();
   const issues = useHermesRunsIssues();
   const accountUsage = useAccountUsage();
+  const statsConfig = useStatsConfig();
   const costs = useHermesRunsCosts();
   const subscriptionBurn = useHermesSubscriptionBurn();
   const chain = useChainCompletion();
@@ -729,6 +733,14 @@ export function StatistikView() {
       ) : null}
 
       <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
+
+      {/* Abo-Limits-Cockpit — Provider-Tokenverbrauch stays first-class in /control/statistik. */}
+      <AccountUsageTile
+        usage={accountUsage.data}
+        loading={accountUsage.loading && !accountUsage.data}
+        error={accountUsage.error}
+        config={statsConfig.data ?? DEFAULT_STATS_CONFIG}
+      />
 
       <LatencySection
         p50={summary.data?.cycle_time_p50_seconds ?? null}
