@@ -162,6 +162,57 @@ def test_default_quick_gate_ruff_multiple_py_files_all_passed(repo, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Post-merge gate runs pytest per-file-isolated (regression: chain t_c4ff7329)
+# ---------------------------------------------------------------------------
+
+def test_default_quick_gate_pytest_uses_per_file_isolation(repo, monkeypatch):
+    """The post-merge gate must run affected pytest modules through the
+    canonical per-file isolation runner (run_tests_parallel.py), NOT a single
+    ``pytest <all modules>`` process.
+
+    ``tests/conftest.py`` documents per-file subprocess isolation as THE
+    cross-file isolation boundary and deliberately does not reset module-level
+    state between files; running multiple files in one pytest process surfaces
+    latent cross-file leaks as false failures. The package-directory fallback
+    in ``_affected_pytest_modules`` can select a whole ``tests/<pkg>/``
+    directory — that parked chain t_c4ff7329 (web_* tests that pass standalone
+    failed when run after kanban tests in the same single pytest process).
+    """
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    # Fixed affected set including a whole-directory entry (the fallback shape).
+    monkeypatch.setattr(
+        kwt, "_affected_pytest_modules",
+        lambda root, changed: ["tests/hermes_cli/", "tests/foo/test_bar.py"],
+    )
+    monkeypatch.setattr(kwt.shutil, "which", lambda name: "/usr/bin/ruff" if name == "ruff" else None)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["hermes_cli/kanban.py"])
+
+    assert ok is True, detail
+    # The pytest-step call is the one carrying the affected modules.
+    pytest_calls = [c for c in calls if any("tests/hermes_cli/" in a for a in c)]
+    assert pytest_calls, f"no pytest-step call captured: {calls}"
+    pcall = pytest_calls[0]
+    # Must go through the per-file isolation runner...
+    assert any(a.endswith("run_tests_parallel.py") for a in pcall), (
+        f"post-merge pytest did not use run_tests_parallel.py: {pcall}"
+    )
+    # ...and must NOT be a single ``-m pytest <modules>`` process (the old,
+    # pollution-prone shape).
+    assert not ("-m" in pcall and "pytest" in pcall), (
+        f"post-merge pytest ran a single multi-file pytest process: {pcall}"
+    )
+    # Both affected modules are forwarded to the isolated runner.
+    assert "tests/hermes_cli/" in pcall and "tests/foo/test_bar.py" in pcall
+
+
+# ---------------------------------------------------------------------------
 # #3-A — worker_gate stamp in submitted_for_review + verifier render
 # ---------------------------------------------------------------------------
 

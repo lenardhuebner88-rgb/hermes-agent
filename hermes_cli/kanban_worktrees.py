@@ -1641,9 +1641,34 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
 
     modules = _affected_pytest_modules(repo_root, changed_files)
     if modules:
+        # Run the affected modules through the canonical per-file isolation
+        # runner (one freshly-spawned ``python -m pytest <file>`` subprocess
+        # per file) rather than a single ``pytest <all modules>`` process.
+        #
+        # Why: ``tests/conftest.py`` documents per-file subprocess isolation as
+        # THE cross-file isolation boundary and deliberately does NOT reset
+        # module-level state between files — so running multiple files in one
+        # pytest process can surface latent cross-file leaks as false-positive
+        # failures. The worker gate (``scripts/run-affected.sh`` →
+        # ``run_tests.sh`` → ``run_tests_parallel.py``) already isolates; this
+        # post-merge gate must match it. The package-directory fallback in
+        # ``_affected_pytest_modules`` (which can select a whole ``tests/<pkg>/``
+        # directory) made the single-process run span hundreds of files and
+        # parked chain t_c4ff7329 on exactly such a leak (web_* tests that pass
+        # standalone failed when run after kanban tests in the same process).
+        # The fallback's own walltime calibration (~26s for 437 files) assumes
+        # the parallel isolated runner, not a single process.
+        #
+        # No extra pytest flags: invoke exactly like the canonical runner
+        # (``python -m pytest <file>``). The previous ``-p no:cacheprovider``
+        # was inherited into ``sys.argv`` by ``relaunch.build_relaunch_argv``
+        # (it copies ambient process flags), failing test_relaunch.py — the
+        # other half of the t_c4ff7329 park. ``.pytest_cache`` is gitignored,
+        # so dropping the flag does not dirty the post-merge tree.
+        runner = str(repo_root / "scripts" / "run_tests_parallel.py")
         err = _run(
             f"pytest[{len(modules)}]",
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *modules],
+            [sys.executable, runner, *modules],
             repo_root, 1200,
         )
         if err:
