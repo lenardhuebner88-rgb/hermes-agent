@@ -2,7 +2,8 @@
 
 Deckt ab:
   1. load_followup_candidates_from_ledger: open follow_up/risk/still_open → Kandidaten
-  2. Severity-Split: real-risk → urgent; scope-note/none → bundle; overdue-Flag
+  2. Severity-Split: source_severity bleibt Ledger-Signal;
+     triage_severity/severity sind real-risk|overdue|scope-note|none
   3. status!=open → nicht; created_at < since_ts → nicht, außer overdue real-risk
   4. Titel-Fallback: source_task_id ohne tasks-Zeile → title == source_task_id
   5. run_harvest Merge+Dedup: Ledger-Item gewinnt gegen Keyword-Receipt für selben task_id
@@ -134,12 +135,18 @@ def test_load_ledger_includes_follow_up_risk_still_open_with_severity(kanban_hom
     by_task = {cand["task_id"]: cand for cand in cands}
     assert set(by_task) == {follow_tid, risk_tid, still_open_tid}
     assert by_task[follow_tid]["typ"] == "follow_up"
-    assert by_task[follow_tid]["severity"] == "bundle"
+    assert by_task[follow_tid]["source_severity"] == "scope-note"
+    assert by_task[follow_tid]["triage_severity"] == "scope-note"
+    assert by_task[follow_tid]["severity"] == "scope-note"
     assert by_task[risk_tid]["typ"] == "risk"
-    assert by_task[risk_tid]["severity"] == "urgent"
+    assert by_task[risk_tid]["source_severity"] == "real-risk"
+    assert by_task[risk_tid]["triage_severity"] == "real-risk"
+    assert by_task[risk_tid]["severity"] == "real-risk"
     assert by_task[risk_tid]["overdue"] is False
     assert by_task[still_open_tid]["typ"] == "still_open"
-    assert by_task[still_open_tid]["severity"] == "bundle"
+    assert by_task[still_open_tid]["source_severity"] == "none"
+    assert by_task[still_open_tid]["triage_severity"] == "none"
+    assert by_task[still_open_tid]["severity"] == "none"
 
 
 def test_load_ledger_excludes_non_open_status(kanban_home):
@@ -200,7 +207,9 @@ def test_load_ledger_includes_overdue_real_risk_before_since_ts(kanban_home):
         )
 
     assert [cand["task_id"] for cand in cands] == [overdue_tid]
-    assert cands[0]["severity"] == "urgent"
+    assert cands[0]["source_severity"] == "real-risk"
+    assert cands[0]["triage_severity"] == "overdue"
+    assert cands[0]["severity"] == "overdue"
     assert cands[0]["overdue"] is True
 
 
@@ -283,7 +292,9 @@ def test_run_harvest_reads_realrisk_escalate_days_config(kanban_home, monkeypatc
     )
     monkeypatch.setattr(strategist, "gather_recent_receipts", lambda conn, *, since_ts: [])
 
-    def fake_load_followup_candidates_from_ledger(conn, *, since_ts, realrisk_escalate_days):
+    def fake_load_followup_candidates_from_ledger(
+        conn, *, since_ts, realrisk_escalate_days, now
+    ):
         captured["realrisk_escalate_days"] = realrisk_escalate_days
         return []
 
