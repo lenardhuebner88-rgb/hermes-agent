@@ -1274,7 +1274,13 @@ def test_overlap_with_dirty_live_checkout_parks(repo):
     out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
                               gate_runner=_ok_gate)
     assert out["action"] == "parked"
-    assert "overlap" in out["reason"]
+    # Be specific: the park must be the OVERLAP pre-check, not an incidental
+    # "overlap" substring leaking in from the tmp repo path inside a merge-error
+    # reason. That coincidence masked a real dirty_files parse bug before.
+    assert out["reason"].startswith(
+        "dirty files in live checkout overlap the branch diff:"
+    )
+    assert "a.txt" in out["reason"]
     # Nothing merged; the manual edit is untouched.
     assert (repo / "a.txt").read_text() == "manual session edit\n"
     assert _git(repo, "log", "--merges", "--oneline") == ""
@@ -1986,6 +1992,112 @@ def _make_release_gate_child(conn, *, root_id=None, merge_commit="abc123def456")
     )
     return source_id, child_id, root
 
+
+
+# ---------------------------------------------------------------------------
+# S6 — end-to-end capstone: park -> clear -> auto-merge against a REAL repo
+# ---------------------------------------------------------------------------
+
+def _age_integration_retry_events(conn, task_id: str) -> None:
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_events SET created_at = created_at - ? WHERE task_id = ?",
+            (kb.INTEGRATION_RETRY_BACKOFF_SECONDS + 5, task_id),
+        )
+
+
+def test_e2e_dirty_overlap_park_clears_and_auto_merges(kanban_home, repo, monkeypatch):
+    """Real incident shape: dirty overlap parks, remains blocked while dirty,
+    then self-heals through the integration retry lane once the operator clears
+    the checkout — no worker respawn and no operator escalation."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    spawned: list[str] = []
+
+    def recording_spawn(task, workspace, *a, **kw):
+        spawned.append(task.id)
+        return None
+
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(ws, "a.txt", "branch change\n", msg=f"kanban({tid}): work")
+        (repo / "a.txt").write_text("manual session edit\n")
+
+        assert kb.complete_task(conn, tid, result="done")
+        parked = kb.get_task(conn, tid)
+        park_events = _events(conn, tid, "integration_parked")
+        assert parked.status == "blocked"
+        assert park_events and "overlap" in park_events[0]["reason"]
+        assert _git(repo, "log", "--merges", "--oneline") == ""
+        assert (repo / "a.txt").read_text() == "manual session edit\n"
+        assert ws.exists()
+
+        # Fresh park: default backoff keeps the sweep silent and does not escalate.
+        fresh = kb.no_silent_stall_sweep(conn)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert kb.OPERATOR_ESCALATION_EVENT not in kinds
+        assert kb.NO_SILENT_STALL_EVENT not in kinds
+        assert not any(p["task_id"] == tid for p in fresh["parked"])
+
+        # Still dirty after the backoff: retry attempts the real integrator, sees
+        # the same transient park, and leaves the task blocked (never ready).
+        _age_integration_retry_events(conn, tid)
+        dirty_retry = kb.no_silent_stall_sweep(conn)
+        still = kb.get_task(conn, tid)
+        assert any(r["task_id"] == tid for r in dirty_retry["integration_retried"])
+        assert still.status == "blocked"
+        assert _git(repo, "log", "--merges", "--oneline") == ""
+
+        # Operator clears the overlap. The next due sweep auto-merges through the
+        # real integration path. dispatch_once is called too to prove the done
+        # chain is not re-spawned as worker work.
+        _git(repo, "checkout", "--", "a.txt")
+        assert kwt.dirty_files(repo) == []
+        _age_integration_retry_events(conn, tid)
+        healed = kb.no_silent_stall_sweep(conn)
+        res = kb.dispatch_once(conn, spawn_fn=recording_spawn)
+        done = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        merges = _git(repo, "log", "--merges", "--oneline").splitlines()
+
+    assert any(h["task_id"] == tid for h in healed["self_healed"])
+    assert done.status == "done"
+    assert len(merges) == 1
+    assert (repo / "a.txt").read_text() == "branch change\n"
+    assert not ws.exists()
+    assert "integration_merged" in kinds
+    assert "INTEGRATOR_VERIFIED" in kinds
+    assert "integration_retry_succeeded" in kinds
+    assert tid not in spawned
+    assert res.spawned == []
+    assert kb.OPERATOR_ESCALATION_EVENT not in kinds
+    assert "auto_retried" not in kinds
+
+
+def test_e2e_auto_merge_tick_is_idempotent(kanban_home, repo, monkeypatch):
+    """After a transient integration park self-heals, subsequent sweeps/ticks are
+    no-ops: no second merge, no respawn, and the task stays done."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(ws, "a.txt", "branch change\n", msg=f"kanban({tid}): work")
+        (repo / "a.txt").write_text("manual session edit\n")
+        assert kb.complete_task(conn, tid, result="done")
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        _git(repo, "checkout", "--", "a.txt")
+        _age_integration_retry_events(conn, tid)
+        first = kb.no_silent_stall_sweep(conn)
+        second = kb.no_silent_stall_sweep(conn)
+        dispatch_second = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: None)
+        done = kb.get_task(conn, tid)
+        merges = _git(repo, "log", "--merges", "--oneline").splitlines()
+
+    assert any(h["task_id"] == tid for h in first["self_healed"])
+    assert not any(h["task_id"] == tid for h in second["self_healed"])
+    assert not any(r["task_id"] == tid for r in second["integration_retried"])
+    assert dispatch_second.spawned == []
+    assert done.status == "done"
+    assert len(merges) == 1
 
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> success event, no fixer, child done."""
