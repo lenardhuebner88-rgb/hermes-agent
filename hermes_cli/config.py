@@ -2490,6 +2490,16 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Disposition/Strategist thresholds. Keep defaults visible through
+        # load_config() so operator-tunable production behaviour does not rely
+        # on hardcoded call-site fallbacks.
+        "disposition_realrisk_escalate_days": 2,
+        "disposition_special_run_threshold": 25,
+        "disposition_special_run_rearm": 20,
+        "disposition_stale_max_age_seconds": 4 * 24 * 3600,
+        # Legacy passive stale rows in the decision queue were replaced by the
+        # disposition digest. Leave an explicit opt-in escape hatch, default OFF.
+        "disposition_stale_in_decision_queue": False,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

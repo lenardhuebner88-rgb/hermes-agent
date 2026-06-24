@@ -88,6 +88,22 @@ class TestLoadConfigDefaults:
             assert config["kanban"]["daily_token_cap_per_profile"] is None
             assert config["kanban"]["daily_cost_cap_usd"] is None
 
+    def test_disposition_thresholds_resolve_to_defaults_when_keys_omitted(self, tmp_path):
+        """Disposition health thresholds are readable through load_config defaults."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text(
+                "kanban:\n  dispatch_enabled: true\n",
+                encoding="utf-8",
+            )
+
+            config = load_config()
+
+            assert config["kanban"]["disposition_realrisk_escalate_days"] == 2
+            assert config["kanban"]["disposition_special_run_threshold"] == 25
+            assert config["kanban"]["disposition_special_run_rearm"] == 20
+            assert config["kanban"]["disposition_stale_max_age_seconds"] == 345600
+            assert config["kanban"]["disposition_stale_in_decision_queue"] is False
+
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"

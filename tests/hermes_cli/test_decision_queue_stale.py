@@ -37,7 +37,8 @@ def db_conn(tmp_path, monkeypatch):
 # Helpers
 # ---------------------------------------------------------------------------
 
-_DEFAULT_THRESHOLD = 7 * 24 * 3600  # 7 days in seconds
+_DEFAULT_THRESHOLD = 4 * 24 * 3600  # 4 days in seconds
+_STALE_CONFIG = {"disposition_stale_in_decision_queue": True}
 
 
 def _make_done_task(conn: sqlite3.Connection, title: str = "a done task") -> str:
@@ -111,7 +112,7 @@ def test_old_follow_up_surfaces_as_disposition_stale(db_conn):
         now=t_now,
     )
 
-    result = kb.decision_queue(conn, now=t_now)
+    result = kb.decision_queue(conn, now=t_now, config=_STALE_CONFIG)
 
     entries = _stale_entries_for_task(tid, result)
     assert len(entries) == 1, f"expected 1 disposition_stale entry, got {entries}"
@@ -137,7 +138,7 @@ def test_young_follow_up_not_surfaced_as_stale(db_conn):
         now=t_now,
     )
 
-    result = kb.decision_queue(conn, now=t_now)
+    result = kb.decision_queue(conn, now=t_now, config=_STALE_CONFIG)
 
     entries = _stale_entries_for_task(tid, result)
     assert len(entries) == 0, (
@@ -176,7 +177,7 @@ def test_old_risk_item_not_as_disposition_stale(db_conn):
         (created_at, item_id),
     )
 
-    result = kb.decision_queue(conn, now=t_now)
+    result = kb.decision_queue(conn, now=t_now, config=_STALE_CONFIG)
 
     # Muss als disposition_risk auftauchen (via Senke 1 / Block 8)
     kinds = _kinds_for_task(tid, result)
@@ -209,7 +210,7 @@ def test_old_still_open_surfaces_as_disposition_stale(db_conn):
         now=t_now,
     )
 
-    result = kb.decision_queue(conn, now=t_now)
+    result = kb.decision_queue(conn, now=t_now, config=_STALE_CONFIG)
 
     entries = _stale_entries_for_task(tid, result)
     assert len(entries) == 1, (
@@ -238,7 +239,7 @@ def test_dismissed_stale_item_not_surfaced(db_conn):
         now=t_now,
     )
 
-    result = kb.decision_queue(conn, now=t_now)
+    result = kb.decision_queue(conn, now=t_now, config=_STALE_CONFIG)
 
     entries = _stale_entries_for_task(tid, result)
     assert len(entries) == 0, (
@@ -271,7 +272,7 @@ def test_cap_limits_disposition_stale_entries(db_conn):
         )
         task_ids.append(tid)
 
-    config = {"disposition_stale_cap": cap}
+    config = {**_STALE_CONFIG, "disposition_stale_cap": cap}
     result = kb.decision_queue(conn, now=t_now, config=config)
 
     stale_entries = [d for d in result["decisions"] if d["kind"] == "disposition_stale"]
@@ -292,7 +293,7 @@ def test_configurable_threshold_surfaces_young_item(db_conn):
     t_now = int(time.time())
     tid = _make_done_task(conn, title="Konfigurierbare-Schwelle Task")
 
-    item_age_seconds = 3600  # 1 Stunde alt — jünger als 7-Tage-Default
+    item_age_seconds = 3600  # 1 Stunde alt — jünger als 4-Tage-Default
     _insert_item(
         conn,
         source_task_id=tid,
@@ -301,15 +302,15 @@ def test_configurable_threshold_surfaces_young_item(db_conn):
         now=t_now,
     )
 
-    # Ohne config: sollte NICHT erscheinen (zu jung)
+    # Ohne Opt-in: sollte NICHT erscheinen (passiver stale-Block default-off)
     result_default = kb.decision_queue(conn, now=t_now)
     entries_default = _stale_entries_for_task(tid, result_default)
     assert len(entries_default) == 0, (
-        f"Item sollte bei Default-Schwelle nicht erscheinen; got {entries_default}"
+        f"Item sollte ohne Opt-in nicht erscheinen; got {entries_default}"
     )
 
     # Mit kleiner Schwelle (30 Minuten): sollte erscheinen
-    config = {"disposition_stale_max_age_seconds": 1800}
+    config = {**_STALE_CONFIG, "disposition_stale_max_age_seconds": 1800}
     result_small = kb.decision_queue(conn, now=t_now, config=config)
     entries_small = _stale_entries_for_task(tid, result_small)
     assert len(entries_small) == 1, (

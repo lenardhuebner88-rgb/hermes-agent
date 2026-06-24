@@ -2825,9 +2825,16 @@ def get_decision_queue(
     :func:`kanban_db.decision_queue` (read-only, fail-soft per category).
     """
     board = _resolve_board(board)
+    try:
+        from hermes_cli.config import load_config
+
+        kanban_config = ((load_config() or {}).get("kanban") or {})
+    except Exception:
+        kanban_config = {}
+
     conn = _conn(board=board)
     try:
-        return kanban_db.decision_queue(conn)
+        return kanban_db.decision_queue(conn, config=kanban_config)
     finally:
         conn.close()
 
