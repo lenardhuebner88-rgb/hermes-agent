@@ -321,6 +321,14 @@ _CTX_CAP_PROFILES = {
         "comment_bytes": 1024,
         "role_history": 2,
     },
+    "retry": {
+        "prior_attempts": 1,
+        "comments": 4,
+        "field_bytes": 1024,
+        "body_bytes": 2560,
+        "comment_bytes": 512,
+        "role_history": 0,
+    },
 }
 
 
@@ -18968,7 +18976,12 @@ def _render_parent_results_and_role_history(
     #     so a scout gets no recent-work block at all.
     #   * Labelled advisory: even same-tenant history is continuity, NOT this
     #     task's scope; the task body + operator directives stay authoritative.
-    if task.assignee and task.assignee != "scout":
+    if (
+        task.assignee
+        and task.assignee != "scout"
+        and role_history_limit > 0
+        and int(task.continuation_count or 0) == 0
+    ):
         if task.tenant:
             tenant_clause = "AND t.tenant = ? "
             role_params = (task.assignee, task.tenant, task.id, role_history_limit)
@@ -19034,6 +19047,8 @@ def build_worker_context(
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
+    if int(task.continuation_count or 0) > 0 and profile == "worker_slim":
+        profile = "retry"
     caps = _CTX_CAP_PROFILES.get(profile, _CTX_CAP_PROFILES["full"])
     prior_attempts_limit = int(caps["prior_attempts"])
     comments_limit = int(caps["comments"])

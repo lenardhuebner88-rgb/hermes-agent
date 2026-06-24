@@ -3681,6 +3681,55 @@ def test_worker_context_worker_slim_uses_tighter_caps(kanban_home):
     assert "[truncated," in slim
 
 
+def test_worker_context_worker_slim_retry_uses_retry_profile(kanban_home):
+    """Continuation workers on worker_slim use the tighter retry caps."""
+    big_body = "BODY-" + ("x" * 3000)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="retry caps", body=big_body, assignee="coder")
+        for idx in range(6):
+            kb.add_comment(conn, t, "worker", f"comment-{idx}")
+        now = 1_800_000_000
+        for idx in range(3):
+            conn.execute(
+                """
+                INSERT INTO task_runs (
+                    task_id, profile, status, started_at, ended_at, outcome, summary
+                ) VALUES (?, ?, 'done', ?, ?, 'completed', ?)
+                """,
+                (t, "coder", now + idx, now + idx + 1, f"summary-{idx}"),
+            )
+        conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (t,))
+        conn.commit()
+
+        ctx = kb.build_worker_context(conn, t, profile="worker_slim")
+
+    assert "This is continuation run 1/" in ctx
+    assert "showing most recent 1" in ctx
+    assert "summary-0" not in ctx
+    assert "summary-1" not in ctx
+    assert "summary-2" in ctx
+    assert "showing most recent 4" in ctx
+    assert "comment-1" not in ctx
+    assert "comment-2" in ctx
+    assert "[truncated," in ctx
+
+
+def test_worker_context_retry_suppresses_recent_work(kanban_home):
+    """Continuation workers do not receive cross-task recent-work history."""
+    with kb.connect() as conn:
+        previous = kb.create_task(conn, title="previous", assignee="coder")
+        _seed_completed_run(conn, previous, "coder", 1_800_000_000, "PRIOR_RECENT_WORK")
+
+        t = kb.create_task(conn, title="retry followup", assignee="coder")
+        conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (t,))
+        conn.commit()
+
+        ctx = kb.build_worker_context(conn, t, profile="worker_slim")
+
+    assert "## Recent work by @coder" not in ctx
+    assert "PRIOR_RECENT_WORK" not in ctx
+
+
 def _seed_completed_run(conn, task_id, profile, ended_at, summary):
     """Insert a completed task_runs row for role-history."""
     conn.execute(
