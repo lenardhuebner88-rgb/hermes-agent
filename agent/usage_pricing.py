@@ -14,6 +14,7 @@ DEFAULT_PRICING = {"input": 0.0, "output": 0.0}
 _ZERO = Decimal("0")
 _ONE_MILLION = Decimal("1000000")
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
+_NEURALWATT_DEFAULT_BASE_URL = "https://api.neuralwatt.com/v1"
 
 CostStatus = Literal["actual", "estimated", "included", "unknown"]
 CostSource = Literal[
@@ -581,6 +582,8 @@ def resolve_billing_route(
         return BillingRoute(provider="openrouter", model=model, base_url=base_url or "", billing_mode="official_models_api")
     if provider_name == "nous" or base_url_host_matches(base_url or "", "inference-api.nousresearch.com"):
         return BillingRoute(provider="nous", model=model, base_url=base_url or _NOUS_DEFAULT_BASE_URL, billing_mode="official_models_api")
+    if provider_name in {"neuralwatt", "neural-watt", "nwatt"} or base_url_host_matches(base_url or "", "api.neuralwatt.com"):
+        return BillingRoute(provider="neuralwatt", model=model, base_url=base_url or _NEURALWATT_DEFAULT_BASE_URL, billing_mode="official_models_api")
     if provider_name == "anthropic":
         return BillingRoute(provider="anthropic", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     if provider_name == "openai":

@@ -5,6 +5,7 @@ from agent.usage_pricing import (
     estimate_usage_cost,
     get_pricing_entry,
     normalize_usage,
+    resolve_billing_route,
 )
 
 
@@ -216,6 +217,38 @@ def test_nous_portal_pricing_preserves_vendor_prefixed_model_ids(monkeypatch):
     assert seen["base_url"] == "https://inference-api.nousresearch.com/v1"
     assert float(entry.input_cost_per_million) == 25.0
     assert float(entry.output_cost_per_million) == 125.0
+
+
+def test_neuralwatt_glm_fast_pricing_uses_exact_endpoint_model_id(monkeypatch):
+    seen = {}
+
+    def _fake_fetch_endpoint_model_metadata(base_url, api_key=None):
+        seen["base_url"] = base_url
+        seen["api_key"] = api_key
+        return {
+            "glm-5.2-short-fast": {
+                "pricing": {"prompt": "0.00000011", "completion": "0.00000022"}
+            },
+            "glm-5.2-short": {
+                "pricing": {"prompt": "0.00000033", "completion": "0.00000044"}
+            },
+        }
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _fake_fetch_endpoint_model_metadata,
+    )
+
+    route = resolve_billing_route("glm-5.2-short-fast", provider="neuralwatt")
+    entry = get_pricing_entry("glm-5.2-short-fast", provider="neuralwatt", api_key="secret")
+
+    assert route.provider == "neuralwatt"
+    assert route.model == "glm-5.2-short-fast"
+    assert route.billing_mode == "official_models_api"
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.11
+    assert float(entry.output_cost_per_million) == 0.22
+    assert seen == {"base_url": "https://api.neuralwatt.com/v1", "api_key": "secret"}
 
 
 def test_deepseek_v4_pro_pricing_entry_exists():

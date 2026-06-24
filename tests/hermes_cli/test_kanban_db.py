@@ -1077,6 +1077,11 @@ def test_k17_extract_claude_cli_cost_shapes():
     assert full == (150, 7, 1.5)
     no_usage = kb._extract_claude_cli_cost({"total_cost_usd": 0.1})
     assert no_usage == (None, None, 0.1)
+    zero_cost_partial_usage = kb._extract_claude_cli_cost({
+        "total_cost_usd": 0,
+        "usage": {"cache_creation_input_tokens": 12, "output_tokens": 4},
+    })
+    assert zero_cost_partial_usage == (12, 4, 0.0)
     empty = kb._extract_claude_cli_cost({})
     assert empty == (None, None, None)
 
