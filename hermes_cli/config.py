@@ -1311,20 +1311,6 @@ DEFAULT_CONFIG = {
                                       # after live validation.
     },
 
-    # Kanban subsystem (orchestrator workers + dispatcher-driven child tasks).
-    # See tools/kanban_tools.py and hermes_cli/kanban_db.py for the actual
-    # implementations. Per-platform notification opt-out is handled by the
-    # kanban dashboard (see ``hermes dashboard`` -> Notifications).
-    "kanban": {
-        # Auto-subscribe the originating gateway/TUI session to task
-        # completion + block events when ``kanban_create`` is called from
-        # inside a session that has a persistent delivery channel. The
-        # agent that dispatched the task will get notified automatically
-        # instead of having to poll. Disable to mirror pre-feature
-        # behaviour — e.g. for a profile that prefers explicit
-        # ``kanban_notify-subscribe`` calls per task.
-        "auto_subscribe_on_create": True,
-    },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
@@ -2358,6 +2344,14 @@ DEFAULT_CONFIG = {
         # only if you run the dispatcher as a separate systemd unit or
         # don't want the gateway to spawn workers.
         "dispatch_in_gateway": True,
+        # Auto-subscribe the originating gateway/TUI session to task
+        # completion + block events when ``kanban_create`` is called from
+        # inside a session that has a persistent delivery channel. The
+        # agent that dispatched the task will get notified automatically
+        # instead of having to poll. Disable to mirror pre-feature
+        # behaviour — e.g. for a profile that prefers explicit
+        # ``kanban_notify-subscribe`` calls per task.
+        "auto_subscribe_on_create": True,
         # Optional Discord channel used for kanban reporting notifications
         # (completed/received and other report-worthy events). When set, the
         # gateway notifier sends normal Discord reports here instead of the
@@ -2475,15 +2469,6 @@ DEFAULT_CONFIG = {
         # large bulk-load of triage tasks from spending a burst of aux
         # LLM calls in one tick. Excess tasks defer to the next tick.
         "auto_decompose_per_tick": 3,
-        # Strategist harvest escalation window: open real-risk disposition
-        # items older than this many days stay visible as overdue candidates
-        # even if they predate the normal harvest marker.
-        "disposition_realrisk_escalate_days": 2,
-        # Cheap strategist harvest watchdog: open disposition-items above this
-        # count trigger an extra harvest run, then re-arm only after the open
-        # count drops below the rearm value.
-        "disposition_special_run_threshold": 25,
-        "disposition_special_run_rearm": 20,
         # Stale detection: running tasks that have exceeded this many
         # seconds without a heartbeat (since ``last_heartbeat_at``) are
         # auto-reclaimed to ``ready`` on the next dispatcher tick. The

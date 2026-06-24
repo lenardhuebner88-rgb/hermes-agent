@@ -104,6 +104,15 @@ class TestLoadConfigDefaults:
             assert config["kanban"]["disposition_stale_max_age_seconds"] == 345600
             assert config["kanban"]["disposition_stale_in_decision_queue"] is False
 
+    def test_kanban_auto_subscribe_default_is_visible(self, tmp_path):
+        """Auto-subscribe default is present in DEFAULT_CONFIG and load_config."""
+        assert DEFAULT_CONFIG["kanban"]["auto_subscribe_on_create"] is True
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+
+        assert config["kanban"]["auto_subscribe_on_create"] is True
+
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"
