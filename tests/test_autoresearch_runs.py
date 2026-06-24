@@ -46,23 +46,6 @@ def test_append_and_read_newest_first(audit):
     assert runs[0]["vetoed"] == 2 and runs[0]["model"] == "test-model"
 
 
-def test_append_persists_neuralwatt_usage_metadata(audit):
-    autoresearch_runs.append_run(
-        lane="code",
-        request_id="nw1",
-        cost={"request_cost_usd": 0.0042},
-        energy={"energy_kwh": 0.0007},
-        response_usage_metadata=[
-            {"cost": {"request_cost_usd": 0.0042}, "energy": {"energy_kwh": 0.0007}}
-        ],
-    )
-
-    run = autoresearch_runs.read_runs()[0]
-    assert run["cost"]["request_cost_usd"] == 0.0042
-    assert run["energy"]["energy_kwh"] == 0.0007
-    assert run["response_usage_metadata"][0]["cost"]["request_cost_usd"] == 0.0042
-
-
 def test_history_capped_to_30(audit):
     for i in range(35):
         autoresearch_runs.append_run(lane="skill", request_id=f"r{i}", tokens=i)

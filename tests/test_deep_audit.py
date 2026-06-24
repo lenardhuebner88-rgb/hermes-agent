@@ -14,22 +14,12 @@ from hermes_cli import deep_audit
 _REPO = Path(__file__).resolve().parents[1]
 
 
-def _response(
-    *,
-    content: str = "",
-    tool_calls=None,
-    model: str = "unit-model",
-    tokens: int = 11,
-    energy=None,
-    cost=None,
-):
+def _response(*, content: str = "", tool_calls=None, model: str = "unit-model", tokens: int = 11):
     msg = SimpleNamespace(content=content, tool_calls=tool_calls)
     return SimpleNamespace(
         model=model,
         usage=SimpleNamespace(total_tokens=tokens),
         choices=[SimpleNamespace(message=msg)],
-        energy=energy,
-        cost=cost,
     )
 
 
@@ -107,42 +97,6 @@ def test_tool_loop_reads_file_then_reports_grounded_finding(monkeypatch):
     tool_acks = [m for m in calls[2] if m.get("role") == "tool"]
     assert tool_acks, "report_finding should be acked as a tool result"
     assert any(json.loads(m["content"]).get("recorded") is True for m in tool_acks)
-
-
-def test_tool_loop_aggregates_neuralwatt_usage_metadata(monkeypatch):
-    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
-    calls = 0
-
-    def fake_llm(**_kwargs):
-        nonlocal calls
-        calls += 1
-        tool_call = (
-            _tool_call("read_file", {"path": "hermes_cli/autoresearch_runs.py"}, call_id="read_1")
-            if calls == 1
-            else _tool_call("finish_audit", {}, call_id="finish_2")
-        )
-        return _response(
-            tool_calls=[tool_call],
-            energy={"energy_kwh": 0.001 * calls, "carbon_g_co2eq": 0.01 * calls},
-            cost={"request_cost_usd": 0.02 * calls},
-        )
-
-    result = deep_audit.run_deep_audit(subsystem="unit", focus="usage", llm_call=fake_llm)
-
-    assert calls == 2
-    assert result["cost"]["request_cost_usd"] == 0.06
-    assert result["energy"]["energy_kwh"] == 0.003
-    assert result["energy"]["carbon_g_co2eq"] == 0.03
-    assert result["response_usage_metadata"] == [
-        {
-            "energy": {"energy_kwh": 0.001, "carbon_g_co2eq": 0.01},
-            "cost": {"request_cost_usd": 0.02},
-        },
-        {
-            "energy": {"energy_kwh": 0.002, "carbon_g_co2eq": 0.02},
-            "cost": {"request_cost_usd": 0.04},
-        },
-    ]
 
 
 def test_report_finding_grounding_tolerates_whitespace_reflow(monkeypatch):
@@ -292,40 +246,6 @@ def test_run_request_file_persists_detection_only_proposal(tmp_path, monkeypatch
     assert payload["proposals"][0]["apply_blocked_reason"] == "Deep-Audit-Befund — Fix manuell"
     assert proposals.apply_proposal(payload["proposals"][0]["id"], confirm=True)["ok"] is False
     assert runs.read_runs()[0]["lane"] == "deep-audit"
-
-
-def test_run_request_file_persists_neuralwatt_usage_to_run_history(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "audit"))
-    monkeypatch.setenv("HERMES_AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))
-    import hermes_cli.autoresearch_runs as runs
-
-    importlib.reload(runs)
-    monkeypatch.setitem(deep_audit.SUBSYSTEM_GLOBS, "unit", ("hermes_cli/autoresearch_runs.py",))
-    request = deep_audit.write_request(subsystem="unit", focus="usage", max_files=1)
-
-    monkeypatch.setattr(deep_audit, "run_deep_audit", lambda **_kwargs: {
-        "ok": True,
-        "findings": [],
-        "subsystem": "unit",
-        "model": "neuralwatt/unit",
-        "tokens": 10,
-        "iterations": 1,
-        "reason": "",
-        "files": [],
-        "cost": {"request_cost_usd": 0.031},
-        "energy": {"energy_kwh": 0.002},
-        "response_usage_metadata": [
-            {"cost": {"request_cost_usd": 0.031}, "energy": {"energy_kwh": 0.002}}
-        ],
-    })
-
-    deep_audit.run_request_file(Path(request["request_path"]))
-
-    run = runs.read_runs()[0]
-    assert run["model"] == "neuralwatt/unit"
-    assert run["cost"]["request_cost_usd"] == 0.031
-    assert run["energy"]["energy_kwh"] == 0.002
-    assert run["response_usage_metadata"][0]["cost"]["request_cost_usd"] == 0.031
 
 
 def test_deep_audit_endpoints_trigger_409_and_findings(tmp_path, monkeypatch):

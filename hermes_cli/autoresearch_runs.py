@@ -82,9 +82,6 @@ def read_runs(limit: int = _MAX_RUNS) -> list[dict[str, Any]]:
 def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
                proposed: int = 0, errors: int = 0, scanned: int = 0,
                vetoed: int = 0, model: str | None = None,
-               cost: dict[str, Any] | None = None,
-               energy: dict[str, Any] | None = None,
-               response_usage_metadata: list[dict[str, Any]] | None = None,
                at: str | None = None) -> None:
     """Prepend one run record (newest first), capped to the last _MAX_RUNS.
     Best-effort: never raises — history is observability, not a source of truth."""
@@ -100,12 +97,6 @@ def append_run(*, lane: str, request_id: str | None = None, tokens: int = 0,
             "model": str(model or "") or None,
             "scanned": int(scanned or 0),
         }
-        if cost:
-            record["cost"] = cost
-        if energy:
-            record["energy"] = energy
-        if response_usage_metadata:
-            record["response_usage_metadata"] = response_usage_metadata
         runs = [record, *read_runs(_MAX_RUNS)][:_MAX_RUNS]
         _atomic_write_json(_runs_path(), {"runs": runs})
     except Exception:

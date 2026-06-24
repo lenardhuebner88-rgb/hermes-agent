@@ -31,7 +31,7 @@ def test_default_autoresearch_aux_profiles_stay_secret_neutral():
     assert lanes.default_lane_profile("skills_hub")["model"] == "kimi-k2.6-fast"
 
 
-def test_tool_call_smoke_uses_chat_completions_tools_and_reads_usage_metadata():
+def test_tool_call_smoke_uses_chat_completions_tools_and_reads_energy():
     calls: list[dict] = []
 
     class FakeCompletions:
@@ -48,7 +48,6 @@ def test_tool_call_smoke_uses_chat_completions_tools_and_reads_usage_metadata():
                     )
                 ],
                 energy={"energy_kwh": 0.00042, "avg_power_watts": 38.0, "carbon_g_co2eq": 0.0147},
-                cost={"request_cost_usd": 0.0019},
             )
 
     class FakeClient:
@@ -68,21 +67,6 @@ def test_tool_call_smoke_uses_chat_completions_tools_and_reads_usage_metadata():
     assert all(call["tool_choice"] == "auto" for call in calls)
     assert result["models"][0]["tool_call"] == "record_signal"
     assert result["models"][0]["energy"]["energy_kwh"] == 0.00042
-    assert result["models"][0]["cost"]["request_cost_usd"] == 0.0019
-
-
-def test_response_usage_metadata_reads_cost_from_model_extra():
-    resp = SimpleNamespace(
-        model_extra={
-            "energy": {"energy_kwh": 0.03},
-            "cost": {"request_cost_usd": 0.42},
-        }
-    )
-
-    assert lanes.response_usage_metadata(resp) == {
-        "energy": {"energy_kwh": 0.03},
-        "cost": {"request_cost_usd": 0.42},
-    }
 
 
 def test_tool_call_smoke_fails_closed_without_tool_call():
