@@ -639,3 +639,47 @@ class TestRootScriptsFallback:
         success, output = _run_job_script("../../etc/passwd")
         assert success is False
         assert "blocked" in output.lower() or "outside" in output.lower()
+
+    def test_script_executes_under_root_home(self, tmp_path, monkeypatch):
+        """Root-store scripts must EXECUTE under the default ROOT home so they
+        reach root state (kanban.db, state.db) regardless of which profile's
+        ticker fired them — not the profile's HERMES_HOME."""
+        root, profile_home = self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        (root / "scripts" / "watchdog.py").write_text(
+            "import os; print(os.environ.get('HERMES_HOME', ''))\n"
+        )
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == str(root)
+        assert output != str(profile_home)
+
+    def test_profile_script_executes_under_profile_home(self, tmp_path, monkeypatch):
+        """A script resolved from the PROFILE scripts dir must run under the
+        profile home, NOT root — execution context follows the script's
+        location so a profile script never gets root state forced on it."""
+        root, profile_home = self._profile_mode(tmp_path, monkeypatch, in_root=False)
+        (profile_home / "scripts" / "watchdog.py").write_text(
+            "import os; print(os.environ.get('HERMES_HOME', ''))\n"
+        )
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == str(profile_home)
+        assert output != str(root)
+
+    def test_shadowing_profile_script_keeps_profile_home(self, tmp_path, monkeypatch):
+        """When a script name exists in BOTH dirs, the profile script wins
+        resolution AND runs under the profile home (no boundary crossing)."""
+        root, profile_home = self._profile_mode(tmp_path, monkeypatch, in_root=True)
+        # same name present in both root and profile scripts dirs
+        (profile_home / "scripts" / "watchdog.py").write_text(
+            "import os; print(os.environ.get('HERMES_HOME', ''))\n"
+        )
+        from cron.scheduler import _run_job_script
+
+        success, output = _run_job_script("watchdog.py")
+        assert success is True
+        assert output == str(profile_home)

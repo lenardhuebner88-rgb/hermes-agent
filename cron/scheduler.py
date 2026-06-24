@@ -38,7 +38,7 @@ from typing import List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
@@ -1212,29 +1212,33 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
-    # Candidate scripts dirs, active-profile first then the default ROOT home.
-    # The cron jobs store + tick lock are anchored on the ROOT home (#32091) so
-    # all profile tickers share one jobs.json, but a job in that shared store
-    # references ``<root>/scripts/<x>``. When a non-default profile's ticker
-    # fires it, the active HERMES_HOME is ``<root>/profiles/<name>`` — without
-    # the root fallback every root-stored script cron fails "Script not found".
-    # Profile-first preserves genuinely per-profile script jobs.
-    from hermes_constants import get_default_hermes_root
-
-    candidate_dirs: list[Path] = []
+    # Candidate (home, scripts-dir) pairs, active-profile first then the default
+    # ROOT home. The cron jobs store + tick lock are anchored on the ROOT home
+    # (#32091) so all profile tickers share one jobs.json, but a job in that
+    # shared store references ``<root>/scripts/<x>``. When a non-default
+    # profile's ticker fires it, the active HERMES_HOME is
+    # ``<root>/profiles/<name>`` — without the root fallback every root-stored
+    # script cron fails "Script not found". Profile-first preserves genuinely
+    # per-profile script jobs. ``chosen_home`` is the home the script was
+    # resolved from; the subprocess later runs under it so execution context
+    # always matches the script's location (no profile/root boundary crossing).
+    candidates: list[tuple[Path, Path]] = []
+    seen_dirs: set[Path] = set()
     for base in (_get_hermes_home(), get_default_hermes_root()):
         scripts_dir = base / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
         resolved = scripts_dir.resolve()
-        if resolved not in candidate_dirs:
-            candidate_dirs.append(resolved)
+        if resolved not in seen_dirs:
+            seen_dirs.add(resolved)
+            candidates.append((base, resolved))
 
     raw = Path(script_path).expanduser()
     path: Optional[Path] = None
+    chosen_home: Optional[Path] = None
     contained_anywhere = False
     # Guard against path traversal, absolute path injection, and symlink
     # escape — scripts MUST reside within one of the trusted scripts dirs.
-    for scripts_dir_resolved in candidate_dirs:
+    for base_home, scripts_dir_resolved in candidates:
         if raw.is_absolute():
             candidate = raw.resolve()
         else:
@@ -1246,15 +1250,16 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         contained_anywhere = True
         if candidate.exists():
             path = candidate
+            chosen_home = base_home
             break
 
     if path is None:
         if not contained_anywhere:
             return False, (
                 f"Blocked: script path resolves outside the scripts directory "
-                f"({candidate_dirs[0]}): {script_path!r}"
+                f"({candidates[0][1]}): {script_path!r}"
             )
-        searched = ", ".join(str(d) for d in candidate_dirs)
+        searched = ", ".join(str(d) for _, d in candidates)
         return False, f"Script not found: {script_path!r} (searched: {searched})"
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
@@ -1289,13 +1294,23 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         from tools.environments.local import _sanitize_subprocess_env
 
         popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+        # Execute under the home the script was RESOLVED from, not the firing
+        # gateway's active profile. The cron jobs store + tick lock are
+        # root-anchored (#32091), so a global utility cron fired by a non-default
+        # profile's ticker must still run under the ROOT home — inheriting the
+        # ticker's profile HERMES_HOME made root-state scripts fail at runtime
+        # (e.g. kanban.db lookups -> "kanban_db_missing"). Using ``chosen_home``
+        # keeps execution context consistent with the script's location: root
+        # scripts run under root, per-profile scripts under their own profile.
+        script_env = _sanitize_subprocess_env(os.environ.copy())
+        script_env["HERMES_HOME"] = str(chosen_home)
         result = subprocess.run(
             argv,
             capture_output=True,
             text=True,
             timeout=script_timeout,
             cwd=str(path.parent),
-            env=_sanitize_subprocess_env(os.environ.copy()),
+            env=script_env,
             **popen_kwargs,
         )
         stdout = (result.stdout or "").strip()
