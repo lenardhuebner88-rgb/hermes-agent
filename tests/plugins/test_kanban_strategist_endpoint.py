@@ -396,8 +396,8 @@ def test_trigger_specs_argv_and_env(trigger_ctx):
     assert pspec["argv"][0] == "bash" and pspec["argv"][-1] == "propose"
     assert "strategist-cron.sh" in pspec["argv"][1]
     hspec = mod._TRIGGER_SPECS["strategist-harvest-watch"]
-    assert hspec["argv"][0] == "bash" and hspec["argv"][-1] == "harvest-watch"
-    assert "strategist-cron.sh" in hspec["argv"][1]
+    assert hspec["argv"] == ["hermes", "vision", "strategist", "--mode", "harvest-watch"]
+    assert all("strategist-cron.sh" not in part for part in hspec["argv"])
     gspec = mod._TRIGGER_SPECS["gutachter"]
     assert gspec["argv"][-1].endswith("run.sh")
     assert gspec["env"]["DELIVER_MODE"] == "live"  # Phase-A live (Kommentar+Discord)

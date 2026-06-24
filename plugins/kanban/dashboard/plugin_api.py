@@ -4607,8 +4607,10 @@ def veto_operator_escalation_route(task_id: str, board: Optional[str] = Query(No
 # ── Manuelle Trigger: Stratege (propose) + Gutachter (Bewerter) ──────────────
 # Zwei operator-getriggerte Jobs für die /control-Buttons. Auth läuft über die
 # globale ``auth_middleware`` (Worker ohne Session-Token können NICHT triggern).
-# Detached gespawnt (Haus-Muster ``autoresearch_view._spawn_runner``); die
-# Wrapper-Skripte sind flock-geschützt, sodass manuell+Timer sauber kollidieren.
+# Detached gespawnt (Haus-Muster ``autoresearch_view._spawn_runner``). Propose
+# nutzt weiter den flock-geschützten Runtime-Wrapper; harvest-watch nutzt den
+# repo-seitig vorhandenen CLI-Callable, damit der Dashboard-Button nicht von
+# einem Runtime-Wrapper-Modus abhängt, der ggf. nicht installiert ist.
 _TRIGGER_LOG_DIR = os.path.expanduser("~/.hermes/logs/manual-triggers")
 _STRATEGIST_CRON = os.path.expanduser("~/.hermes/scripts/strategist-cron.sh")
 _TRIGGER_SPECS: dict[str, dict[str, Any]] = {
@@ -4618,7 +4620,7 @@ _TRIGGER_SPECS: dict[str, dict[str, Any]] = {
         "env": {},
     },
     "strategist-harvest-watch": {
-        "argv": ["bash", _STRATEGIST_CRON, "harvest-watch"],
+        "argv": ["hermes", "vision", "strategist", "--mode", "harvest-watch"],
         "log": os.path.join(_TRIGGER_LOG_DIR, "strategist-harvest-watch.log"),
         "env": {},
     },
@@ -4695,7 +4697,7 @@ def run_strategist_propose():
 
 @router.post("/strategist/run-harvest-watch")
 def run_strategist_harvest_watch():
-    """Harvest-watch manuell anstoßen (derselbe Wrapper wie der Watch-Timer)."""
+    """Harvest-watch manuell über den Repo-CLI-Callable anstoßen."""
     p = _spawn_trigger("strategist-harvest-watch")
     if p is None:
         return {"ok": False, "running": True, "detail": "Harvest-watch-Lauf läuft bereits"}

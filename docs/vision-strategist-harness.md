@@ -31,9 +31,9 @@ claude -p --model claude-opus-4-8 "$(cat strategist-propose-prompt.md)"
 claude -p --model claude-opus-4-8 "$(cat strategist-reflect-prompt.md)"
 
 # HARVEST-WATCH — cheap autonomous backlog watchdog (operator timer/cron).
-# The wrapper reads Hermes config and only runs a special harvest when the
+# The repo CLI reads Hermes config and only runs a special harvest when the
 # disposition backlog crosses disposition_special_run_threshold/rearm.
-bash ~/.hermes/scripts/strategist-cron.sh harvest-watch
+hermes vision strategist --mode harvest-watch
 ```
 
 The Opus prompt instructs the strategist to:
@@ -72,11 +72,12 @@ task creation.
 Repo-side manual/dashboard trigger path:
 
 ```sh
-bash ~/.hermes/scripts/strategist-cron.sh harvest-watch
+hermes vision strategist --mode harvest-watch
 ```
 
-Installing or changing the external cron/systemd timer remains explicit operator
-work outside this repo; this document only records the callable contract.
+Installing or changing the external cron/systemd timer or any wrapper script
+(e.g. `~/.hermes/scripts/strategist-cron.sh`) remains explicit operator/runtime
+work outside this repo; this document records the repo-callable contract.
 
 ## `--mode propose`
 
