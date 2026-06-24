@@ -2569,6 +2569,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "task_runs", "cost_usd", "cost_usd REAL"
             )
+        if "cost_status" not in run_cols:
+            _add_column_if_missing(
+                conn,
+                "task_runs",
+                "cost_status",
+                "cost_status TEXT CHECK (cost_status IN ('actual','estimated'))",
+            )
         # B2 (N-B2): machine-readable review verdict. NULL on every non-review
         # run; the review lane writes 'APPROVED' (complete) / 'REQUEST_CHANGES'
         # (block). Distinct from metadata['verdict'] which stays untouched.
@@ -2722,12 +2729,14 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        # input_tokens/output_tokens/cost_usd/verdict are appended to fresh DBs
+        # input_tokens/output_tokens/cost_usd/cost_status/verdict are appended to fresh DBs
         # by the additive run_cols migration; mirror them here in the same order
         # so a rebuilt legacy task_runs stays byte-identical to fresh and does
         # not silently drop the budget columns (dispatcher) / verdict (review).
         " error TEXT, input_tokens INTEGER, output_tokens INTEGER,"
-        " cost_usd REAL, verdict TEXT)",
+        " cost_usd REAL,"
+        " cost_status TEXT CHECK (cost_status IN ('actual','estimated')),"
+        " verdict TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
@@ -4571,6 +4580,24 @@ def _coerce_float(val: Any) -> Optional[float]:
         return None
 
 
+def _normalize_cost_status(
+    status: Any = None,
+    *,
+    actual_cost_usd: Any = None,
+    estimated_cost_usd: Any = None,
+) -> Optional[str]:
+    """Normalize cost provenance to the persisted actual|estimated enum."""
+    if isinstance(status, str):
+        lowered = status.strip().lower()
+        if lowered in {"actual", "estimated"}:
+            return lowered
+    if _coerce_float(actual_cost_usd) is not None:
+        return "actual"
+    if _coerce_float(estimated_cost_usd) is not None:
+        return "estimated"
+    return None
+
+
 def _extract_run_cost_tokens(
     metadata: Optional[dict],
 ) -> tuple[Optional[int], Optional[int], Optional[float]]:
@@ -4623,6 +4650,19 @@ def _extract_run_cost_tokens(
     return input_tokens, output_tokens, cost_usd
 
 
+def _extract_run_cost_status(metadata: Optional[dict]) -> Optional[str]:
+    if not isinstance(metadata, dict):
+        return None
+    usage = metadata.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    return _normalize_cost_status(
+        metadata.get("cost_status") or usage.get("cost_status"),
+        actual_cost_usd=metadata.get("actual_cost_usd") or usage.get("actual_cost_usd"),
+        estimated_cost_usd=metadata.get("estimated_cost_usd")
+        or usage.get("estimated_cost_usd"),
+    )
+
+
 def _state_db_path() -> Path:
     """Path to the agent session DB (``state.db``), paired with kanban.db's
     root. Mirrors ``hermes_state.DEFAULT_DB_PATH`` without importing that
@@ -4661,6 +4701,7 @@ def _backfill_usage_from_state_db(
         "output_tokens": None,
         "actual_cost_usd": None,
         "estimated_cost_usd": None,
+        "cost_status": None,
         "model": None,
         "billing_provider": None,
         "cache_read_tokens": None,
@@ -4716,6 +4757,11 @@ def _backfill_usage_from_state_db(
     out["cache_write_tokens"] = _coerce_int(out["cache_write_tokens"])
     out["actual_cost_usd"] = _coerce_float(out["actual_cost_usd"])
     out["estimated_cost_usd"] = _coerce_float(out["estimated_cost_usd"])
+    out["cost_status"] = _normalize_cost_status(
+        out.get("cost_status"),
+        actual_cost_usd=out.get("actual_cost_usd"),
+        estimated_cost_usd=out.get("estimated_cost_usd"),
+    )
     return out
 
 
@@ -5168,8 +5214,8 @@ def _read_state_sessions(path: Path) -> list[dict]:
     read-only and fail-soft.
 
     Returns a list of dicts with ``id, source, started_at, input_tokens,
-    output_tokens, cost, cwd``. ``cost`` resolves ``actual_cost_usd`` then
-    ``estimated_cost_usd``. Optional columns absent in older schemas
+    output_tokens, cost, cost_status, cwd``. ``cost`` resolves
+    ``actual_cost_usd`` then ``estimated_cost_usd``. Optional columns absent in older schemas
     (``cwd``/``source``) default to ``None``. Any error (missing/locked db,
     no ``sessions`` table) yields ``[]`` — it must NEVER raise into the
     backfill loop, and opens a SEPARATE read-only connection so it can never
@@ -5193,6 +5239,7 @@ def _read_state_sessions(path: Path) -> list[dict]:
         has_started = "started_at" in cols
         has_model = "model" in cols
         has_provider = "billing_provider" in cols
+        has_cost_status = "cost_status" in cols
         has_cread = "cache_read_tokens" in cols
         has_cwrite = "cache_write_tokens" in cols
         has_cost_status = "cost_status" in cols
@@ -5204,6 +5251,7 @@ def _read_state_sessions(path: Path) -> list[dict]:
             + ("cwd" if has_cwd else "NULL AS cwd") + ", "
             + ("model" if has_model else "NULL AS model") + ", "
             + ("billing_provider" if has_provider else "NULL AS billing_provider") + ", "
+            + ("cost_status" if has_cost_status else "NULL AS cost_status") + ", "
             + ("cache_read_tokens" if has_cread else "NULL AS cache_read_tokens") + ", "
             + ("cache_write_tokens" if has_cwrite else "NULL AS cache_write_tokens") + ", "
             + ("cost_status" if has_cost_status else "NULL AS cost_status")
@@ -5234,6 +5282,11 @@ def _read_state_sessions(path: Path) -> list[dict]:
             "cost": cost,
             "actual_cost": actual_cost,
             "est_cost": est_cost,
+            "cost_status": _normalize_cost_status(
+                r["cost_status"],
+                actual_cost_usd=actual_cost,
+                estimated_cost_usd=est_cost,
+            ),
             "model": r["model"],
             "provider": r["billing_provider"],
             # cache_read/cache_write are SEPARATE, additive token columns
@@ -5607,6 +5660,7 @@ def backfill_run_costs_from_sessions(
             stamp_in: Optional[int] = None
             stamp_out: Optional[int] = None
             stamp_cost: Optional[float] = None
+            stamp_status: Optional[str] = None
             equivalent: Optional[float] = None
             billing_mode: Optional[str] = None
             subscription: Optional[str] = None
@@ -5633,6 +5687,7 @@ def backfill_run_costs_from_sessions(
                     # tasks_without_cost_data metric. The value is surfaced only
                     # as the (clearly-labeled) equivalent.
                     stamp_cost = 0.0
+                    stamp_status = "actual"
                     if est_sum is not None and est_sum > 0:
                         # The runtime already priced the session (claude/minimax
                         # 'estimated' sessions) — trust its number.
@@ -5660,8 +5715,10 @@ def backfill_run_costs_from_sessions(
                     # runtime estimate as the best proxy when no actual was
                     # recorded. A matched run always gets a non-NULL cost.
                     stamp_cost = actual_sum if actual_sum is not None else est_sum
+                    stamp_status = "actual" if actual_sum is not None else "estimated"
                     if stamp_cost is None:
                         stamp_cost = 0.0
+                        stamp_status = "actual"
                     if stamp_cost > 0:
                         billing_mode = "metered"
             else:
@@ -5672,6 +5729,7 @@ def backfill_run_costs_from_sessions(
                     sub = None
                 if sub:
                     stamp_cost = 0.0
+                    stamp_status = "actual"
                     billing_mode = "subscription_included"
                     subscription = sub
                     source = "subscription_zero_metered"
@@ -5707,12 +5765,13 @@ def backfill_run_costs_from_sessions(
                        SET input_tokens  = COALESCE(?, input_tokens),
                            output_tokens = COALESCE(?, output_tokens),
                            cost_usd      = COALESCE(cost_usd, ?),
+                           cost_status   = COALESCE(cost_status, ?),
                            metadata      = ?
                      WHERE id = ?
                        AND cost_usd IS NULL
                     """,
                     (
-                        stamp_in, stamp_out, stamp_cost,
+                        stamp_in, stamp_out, stamp_cost, stamp_status,
                         json.dumps(new_meta, ensure_ascii=False), run_id,
                     ),
                 )
@@ -5754,22 +5813,37 @@ def _end_run(
     # keeps any value a prior write already set, so re-closing never clobbers
     # real numbers with NULL.
     in_tok, out_tok, cost = _extract_run_cost_tokens(metadata)
+    cost_status = _extract_run_cost_status(metadata)
     # K5b: cross-DB backfill. Only when in-process data left a gap AND the run
     # carries a worker_session_id, look it up in state.db (read-only, fail-soft,
     # partial coverage = ACP workers only). Never raises; can't lock kanban.db.
-    if (in_tok is None or out_tok is None or cost is None) and isinstance(metadata, dict):
+    if (in_tok is None or out_tok is None or cost is None or cost_status is None) and isinstance(metadata, dict):
         session_id = metadata.get("worker_session_id")
         if session_id:
             try:
-                b_in, b_out, b_cost = _backfill_cost_from_state_db(str(session_id))
+                backfill = _backfill_usage_from_state_db(str(session_id))
+                b_in = _coerce_int(backfill.get("input_tokens"))
+                b_out = _coerce_int(backfill.get("output_tokens"))
+                b_actual = _coerce_float(backfill.get("actual_cost_usd"))
+                b_estimated = _coerce_float(backfill.get("estimated_cost_usd"))
+                b_cost = b_actual if b_actual is not None else b_estimated
+                b_status = _normalize_cost_status(
+                    backfill.get("cost_status"),
+                    actual_cost_usd=b_actual,
+                    estimated_cost_usd=b_estimated,
+                )
             except Exception:
-                b_in = b_out = b_cost = None
+                b_in = b_out = b_cost = b_status = None
             if in_tok is None:
                 in_tok = b_in
             if out_tok is None:
                 out_tok = b_out
             if cost is None:
                 cost = b_cost
+            if cost_status is None:
+                cost_status = b_status
+    if cost_status is None and cost is not None:
+        cost_status = "actual"
     conn.execute(
         """
         UPDATE task_runs
@@ -5782,6 +5856,7 @@ def _end_run(
                input_tokens  = COALESCE(?, input_tokens),
                output_tokens = COALESCE(?, output_tokens),
                cost_usd      = COALESCE(?, cost_usd),
+               cost_status   = COALESCE(?, cost_status),
                claim_lock    = NULL,
                claim_expires = NULL,
                worker_pid    = NULL
@@ -5798,6 +5873,7 @@ def _end_run(
             in_tok,
             out_tok,
             cost,
+            cost_status,
             run_id,
         ),
     )
@@ -19647,18 +19723,32 @@ def _empty_cost_bucket() -> dict:
         "billing_neuralwatt_cost_usd": None,
         "input_tokens": None,
         "output_tokens": None,
+        "cost_status": None,
+        "estimated_cost_runs": 0,
+        "actual_cost_runs": 0,
     }
 
 
 def _cost_bucket_add(
     bucket: dict, *, cost, equiv, tokens_in, tokens_out,
-    neuralwatt_kwh=None, neuralwatt_cost=None,
+    cost_status=None, neuralwatt_kwh=None, neuralwatt_cost=None,
 ) -> None:
     bucket["runs"] += 1
     if cost is not None:
         raw = float(cost)
         bucket["cost_usd"] = round((bucket["cost_usd"] or 0.0) + raw, 6)
         bucket["actual_cost_usd"] = round((bucket["actual_cost_usd"] or 0.0) + raw, 6)
+        status = _normalize_cost_status(cost_status, actual_cost_usd=cost)
+        if status == "estimated":
+            bucket["estimated_cost_runs"] += 1
+        elif status == "actual":
+            bucket["actual_cost_runs"] += 1
+        if status == "estimated" or (
+            status is None and bucket.get("cost_status") == "estimated"
+        ):
+            bucket["cost_status"] = "estimated"
+        elif bucket.get("cost_status") is None and status == "actual":
+            bucket["cost_status"] = "actual"
     if equiv is not None:
         eq = float(equiv)
         bucket["cost_usd_equivalent"] = round(
@@ -19961,7 +20051,9 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     profiles: dict[str, dict] = {}
 
     for row in conn.execute(
-        "SELECT profile, ended_at, cost_usd, input_tokens, output_tokens, metadata "
+        "SELECT profile, ended_at, cost_usd, "
+        "COALESCE(cost_status, json_extract(metadata, '$.cost_status')) AS cost_status, "
+        "input_tokens, output_tokens, metadata "
         "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ?",
         (window_start,),
     ).fetchall():
@@ -19994,6 +20086,7 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             "equiv": equiv,
             "tokens_in": row["input_tokens"],
             "tokens_out": row["output_tokens"],
+            "cost_status": row["cost_status"],
             "neuralwatt_kwh": neuralwatt_kwh,
             "neuralwatt_cost": neuralwatt_cost,
         }
@@ -22747,7 +22840,10 @@ def batch_task_costs(
                 COALESCE(SUM(COALESCE(
                     json_extract(metadata, '$.cost_usd_equivalent'), 0.0
                 )), 0.0)                                          AS cost_usd_equivalent,
-                MAX(json_extract(metadata, '$.cost_status'))        AS cost_status
+                SUM(CASE WHEN COALESCE(cost_status, json_extract(metadata, '$.cost_status')) = 'estimated' THEN 1 ELSE 0 END)
+                                                                    AS estimated_cost_runs,
+                SUM(CASE WHEN COALESCE(cost_status, json_extract(metadata, '$.cost_status')) = 'actual' THEN 1 ELSE 0 END)
+                                                                    AS actual_cost_runs
             FROM task_runs
             WHERE task_id IN ({placeholders})
             GROUP BY task_id
@@ -22760,13 +22856,17 @@ def batch_task_costs(
     for row in rows:
         c_usd = float(row["cost_usd"])
         c_equiv = float(row["cost_usd_equivalent"])
+        estimated_runs = int(row["estimated_cost_runs"] or 0)
+        actual_runs = int(row["actual_cost_runs"] or 0)
         out[row["task_id"]] = {
             "input_tokens": int(row["input_tokens"]),
             "output_tokens": int(row["output_tokens"]),
             "cost_usd": c_usd,
             "cost_usd_equivalent": c_equiv,
             "cost_effective_usd": c_usd + c_equiv,
-            "cost_status": row["cost_status"],
+            "cost_status": "estimated" if estimated_runs else "actual" if actual_runs else None,
+            "estimated_cost_runs": estimated_runs,
+            "actual_cost_runs": actual_runs,
         }
     return out
 

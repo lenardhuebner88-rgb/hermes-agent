@@ -1098,7 +1098,7 @@ def _write_session_rows(db_path, rows):
             "id TEXT PRIMARY KEY, source TEXT, started_at REAL, ended_at REAL, "
             "input_tokens INTEGER, output_tokens INTEGER, "
             "actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT, "
-            "model TEXT, billing_provider TEXT, "
+            "model TEXT, billing_provider TEXT, cost_status TEXT, "
             "cache_read_tokens INTEGER, cache_write_tokens INTEGER)"
         )
         for r in rows:
@@ -1106,14 +1106,14 @@ def _write_session_rows(db_path, rows):
                 "INSERT INTO sessions (id, source, started_at, ended_at, "
                 "input_tokens, output_tokens, actual_cost_usd, "
                 "estimated_cost_usd, cwd, model, billing_provider, "
-                "cache_read_tokens, cache_write_tokens) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cost_status, cache_read_tokens, cache_write_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     r["id"], r.get("source", "cli"), r.get("started_at"),
                     r.get("ended_at"), r.get("input_tokens"),
                     r.get("output_tokens"), r.get("actual_cost_usd"),
                     r.get("estimated_cost_usd"), r.get("cwd"), r.get("model"),
-                    r.get("billing_provider"),
+                    r.get("billing_provider"), r.get("cost_status"),
                     r.get("cache_read_tokens"), r.get("cache_write_tokens"),
                 ),
             )
@@ -1152,16 +1152,16 @@ def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
                 conn.execute(
                     "INSERT INTO task_runs "
                     "(task_id, profile, status, started_at, ended_at, outcome, "
-                    "input_tokens, output_tokens, cost_usd, metadata) "
-                    "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', ?, ?, ?, NULL)",
+                    "input_tokens, output_tokens, cost_usd, cost_status, metadata) "
+                    "VALUES (?, 'coder', 'done', 1000, 1010, 'completed', ?, ?, ?, 'actual', NULL)",
                     (ran, tin, tout, cusd),
                 )
             # Subscription run: metered cost_usd 0, but an estimated $-equivalent.
             conn.execute(
                 "INSERT INTO task_runs "
                 "(task_id, profile, status, started_at, ended_at, outcome, "
-                "input_tokens, output_tokens, cost_usd, metadata) "
-                "VALUES (?, 'coder-claude', 'done', 1000, 1010, 'completed', ?, ?, ?, ?)",
+                "input_tokens, output_tokens, cost_usd, cost_status, metadata) "
+                "VALUES (?, 'coder-claude', 'done', 1000, 1010, 'completed', ?, ?, ?, 'actual', ?)",
                 (sub, 3000, 400, 0.0, json.dumps({"cost_usd_equivalent": 0.42})),
             )
 
@@ -1173,10 +1173,12 @@ def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
     assert costs[ran]["cost_usd"] == pytest.approx(0.15)
     assert costs[ran]["cost_usd_equivalent"] == pytest.approx(0.0)
     assert costs[ran]["cost_effective_usd"] == pytest.approx(0.15)
+    assert costs[ran]["cost_status"] == "actual"
     # Subscription task: metered $0 but the estimated equivalent is the effective $.
     assert costs[sub]["cost_usd"] == pytest.approx(0.0)
     assert costs[sub]["cost_usd_equivalent"] == pytest.approx(0.42)
     assert costs[sub]["cost_effective_usd"] == pytest.approx(0.42)
+    assert costs[sub]["cost_status"] == "actual"
     assert costs[sub]["input_tokens"] == 3000
     # A task with no runs is omitted entirely → its card renders no cost footer.
     assert idle not in costs
@@ -1210,11 +1212,12 @@ def test_s1_cwd_match_stamps_real_tokens_and_cost(kanban_home, tmp_path, monkeyp
         ])
         assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
         row = conn.execute(
-            "SELECT input_tokens, output_tokens, cost_usd, metadata "
+            "SELECT input_tokens, output_tokens, cost_usd, cost_status, metadata "
             "FROM task_runs WHERE id=?", (run_id,)).fetchone()
         assert row["input_tokens"] == 500
         assert row["output_tokens"] == 40
         assert row["cost_usd"] == pytest.approx(0.12)
+        assert row["cost_status"] == "actual"
         meta = json.loads(row["metadata"])
         assert meta["cost_source"] == "session_cwd"
         assert any("S-match" in e for e in meta["cost_session_ids"])
@@ -1246,16 +1249,48 @@ def test_s1_window_match_in_own_profile_consumed_once(kanban_home, tmp_path, mon
         ])
         assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 2
         rows = {r["id"]: r for r in conn.execute(
-            "SELECT id, input_tokens, cost_usd, metadata FROM task_runs")}
+            "SELECT id, input_tokens, cost_usd, cost_status, metadata FROM task_runs")}
         assert rows[r1]["input_tokens"] == 100
         assert rows[r1]["cost_usd"] == pytest.approx(0.05)
+        assert rows[r1]["cost_status"] == "actual"
         assert rows[r2]["input_tokens"] == 200
         assert rows[r2]["cost_usd"] == pytest.approx(0.07)
+        assert rows[r2]["cost_status"] == "estimated"
         assert json.loads(rows[r1]["metadata"])["cost_source"] == "session_window"
         # S-outside never attributed → its $5.0 never enters any run.
         total = conn.execute(
             "SELECT COALESCE(SUM(cost_usd),0) FROM task_runs").fetchone()[0]
         assert total == pytest.approx(0.12)
+
+
+def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, monkeypatch):
+    """OpenRouter state.db estimated cost stays value-identical and is labeled."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="openrouter-estimated", assignee="coder")
+        run_id = _insert_run_window(
+            conn, tid, profile="coder", started_at=800, ended_at=900,
+        )
+        _write_session_rows(profile_dir / "state.db", [
+            {"id": "837", "source": "cli", "started_at": 837,
+             "input_tokens": 1000, "output_tokens": 200,
+             "estimated_cost_usd": 0.03760227, "cost_status": "estimated",
+             "model": "deepseek/deepseek-chat", "billing_provider": "openrouter"},
+        ])
+        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
+        row = conn.execute(
+            "SELECT cost_usd, cost_status FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        costs = kb.batch_task_costs(conn, [tid])
+
+    assert row["cost_usd"] == pytest.approx(0.03760227)
+    assert row["cost_status"] == "estimated"
+    assert costs[tid]["cost_usd"] == pytest.approx(0.03760227)
+    assert costs[tid]["cost_status"] == "estimated"
 
 
 def test_s1_window_does_not_cross_profiles(kanban_home, tmp_path, monkeypatch):
