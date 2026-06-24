@@ -4610,10 +4610,16 @@ def veto_operator_escalation_route(task_id: str, board: Optional[str] = Query(No
 # Detached gespawnt (Haus-Muster ``autoresearch_view._spawn_runner``); die
 # Wrapper-Skripte sind flock-geschützt, sodass manuell+Timer sauber kollidieren.
 _TRIGGER_LOG_DIR = os.path.expanduser("~/.hermes/logs/manual-triggers")
+_STRATEGIST_CRON = os.path.expanduser("~/.hermes/scripts/strategist-cron.sh")
 _TRIGGER_SPECS: dict[str, dict[str, Any]] = {
     "strategist-propose": {
-        "argv": ["bash", os.path.expanduser("~/.hermes/scripts/strategist-cron.sh"), "propose"],
+        "argv": ["bash", _STRATEGIST_CRON, "propose"],
         "log": os.path.join(_TRIGGER_LOG_DIR, "strategist-propose.log"),
+        "env": {},
+    },
+    "strategist-harvest-watch": {
+        "argv": ["bash", _STRATEGIST_CRON, "harvest-watch"],
+        "log": os.path.join(_TRIGGER_LOG_DIR, "strategist-harvest-watch.log"),
         "env": {},
     },
     "gutachter": {
@@ -4687,6 +4693,15 @@ def run_strategist_propose():
     return {"ok": True, "name": "strategist-propose", "pid": p.pid}
 
 
+@router.post("/strategist/run-harvest-watch")
+def run_strategist_harvest_watch():
+    """Harvest-watch manuell anstoßen (derselbe Wrapper wie der Watch-Timer)."""
+    p = _spawn_trigger("strategist-harvest-watch")
+    if p is None:
+        return {"ok": False, "running": True, "detail": "Harvest-watch-Lauf läuft bereits"}
+    return {"ok": True, "name": "strategist-harvest-watch", "pid": p.pid}
+
+
 @router.post("/strategist/run-gutachter")
 def run_gutachter():
     """Bewerter (stratege-gutachter) manuell anstoßen — Phase-A live (Kommentar+Discord)."""
@@ -4698,9 +4713,10 @@ def run_gutachter():
 
 @router.get("/strategist/run-status")
 def strategist_run_status():
-    """Running / letzter-Lauf-Status der zwei manuellen Trigger (Button-Feedback)."""
+    """Running / letzter-Lauf-Status der manuellen Trigger (Button-Feedback)."""
     return {
         "propose": _trigger_status("strategist-propose"),
+        "harvest_watch": _trigger_status("strategist-harvest-watch"),
         "gutachter": _trigger_status("gutachter"),
     }
 

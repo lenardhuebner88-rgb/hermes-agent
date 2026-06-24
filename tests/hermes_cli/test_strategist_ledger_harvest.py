@@ -270,6 +270,35 @@ def test_run_harvest_keyword_only_task_appears_as_fallback(kanban_home):
     assert "ledger" not in sources
 
 
+def test_run_harvest_reads_realrisk_escalate_days_config(kanban_home, monkeypatch):
+    """run_harvest passes the operator config threshold into the ledger loader."""
+    captured: dict[str, int] = {}
+
+    from hermes_cli import config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {"kanban": {"disposition_realrisk_escalate_days": 7}},
+    )
+    monkeypatch.setattr(strategist, "gather_recent_receipts", lambda conn, *, since_ts: [])
+
+    def fake_load_followup_candidates_from_ledger(conn, *, since_ts, realrisk_escalate_days):
+        captured["realrisk_escalate_days"] = realrisk_escalate_days
+        return []
+
+    monkeypatch.setattr(
+        strategist,
+        "load_followup_candidates_from_ledger",
+        fake_load_followup_candidates_from_ledger,
+    )
+
+    result = strategist.run_harvest(types.SimpleNamespace(board=None))
+
+    assert result["mode"] == "harvest"
+    assert captured == {"realrisk_escalate_days": 7}
+
+
 def test_run_harvest_reaps_worker_drop_items_only(kanban_home):
     """Harvest dismisses explicit worker-drop ledger items, leaving other dispositions open."""
     with kb.connect() as conn:

@@ -11,8 +11,8 @@ repo-side, callable logic (`hermes_cli/strategist.py`, exposed as
 
 | Piece | Location | Owner |
 |---|---|---|
-| Repo logic (propose/reflect) | `hermes_cli/strategist.py` | this repo (I1) |
-| CLI surface | `hermes vision strategist --mode propose\|reflect` | this repo |
+| Repo logic (propose/reflect/harvest/harvest-watch/digest) | `hermes_cli/strategist.py` | this repo (I1) |
+| CLI surface | `hermes vision strategist --mode propose\|reflect\|harvest\|harvest-watch\|digest` | this repo |
 | Annotation contract (emit/parse) | `hermes_cli/strategist_surface.py` (`format_annotation` / `parse_annotation`) | G1 |
 | Held-proposal surface (read side) | `strategist_surface.held_operator_proposals` + `/api/strategist/proposals` | G1 |
 | Escalation ledger (input) | `kanban_db.read_escalation_ledger` | Phase 1 (Heiler) |
@@ -29,6 +29,11 @@ claude -p --model claude-opus-4-8 "$(cat strategist-propose-prompt.md)"
 
 # REFLECT — once daily, after the operator has had time to triage.
 claude -p --model claude-opus-4-8 "$(cat strategist-reflect-prompt.md)"
+
+# HARVEST-WATCH — cheap autonomous backlog watchdog (operator timer/cron).
+# The wrapper reads Hermes config and only runs a special harvest when the
+# disposition backlog crosses disposition_special_run_threshold/rearm.
+bash ~/.hermes/scripts/strategist-cron.sh harvest-watch
 ```
 
 The Opus prompt instructs the strategist to:
@@ -54,6 +59,24 @@ The Opus prompt instructs the strategist to:
 Either path applies the same rails. The deterministic baseline guarantees the
 harness works headless even if the LLM adds nothing; `--drafts-file` is the
 seam where Opus's judgement enters.
+
+## `--mode harvest-watch`
+
+Cheap autonomous backlog watchdog for disposition-harvest cadence. It reads the
+normal Hermes config keys (`disposition_special_run_threshold` and
+`disposition_special_run_rearm`), counts open disposition ledger rows, and
+delegates to the regular `harvest` path only when the backlog crosses the
+configured threshold/cooldown. It performs no deploy, restart, push, or direct
+task creation.
+
+Repo-side manual/dashboard trigger path:
+
+```sh
+bash ~/.hermes/scripts/strategist-cron.sh harvest-watch
+```
+
+Installing or changing the external cron/systemd timer remains explicit operator
+work outside this repo; this document only records the callable contract.
 
 ## `--mode propose`
 
