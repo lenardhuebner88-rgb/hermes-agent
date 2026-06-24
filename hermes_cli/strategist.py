@@ -1445,9 +1445,7 @@ def load_followup_candidates_from_ledger(
 def reap_worker_drop_disposition_items(conn) -> int:
     """Dismiss open disposition-ledger items explicitly marked as worker ``drop``."""
     reaped = 0
-    for item in kanban_db.list_disposition_items(conn, status="open"):
-        if item.get("disposition") != "drop":
-            continue
+    for item in kanban_db.list_disposition_items(conn, status="open", disposition="drop"):
         updated = kanban_db.set_disposition_status(
             conn,
             item["id"],
@@ -1481,8 +1479,13 @@ def append_run_history(state_dir: Path, entry: dict[str, Any]) -> None:
 
 
 def read_last_runs(state_dir: Path) -> dict[str, Any]:
-    """Most-recent run-history entry per mode (harvest/propose/digest), or None."""
-    out: dict[str, Any] = {"harvest": None, "propose": None, "digest": None}
+    """Most-recent run-history entry per mode, or None."""
+    out: dict[str, Any] = {
+        "harvest": None,
+        "harvest-watch": None,
+        "propose": None,
+        "digest": None,
+    }
     path = Path(state_dir) / "run-history.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()

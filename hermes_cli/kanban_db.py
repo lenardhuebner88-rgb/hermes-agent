@@ -21358,6 +21358,7 @@ def list_disposition_items(
     *,
     status: Optional[str] = None,
     source_task_id: Optional[str] = None,
+    disposition: Optional[str] = None,
     typ: Optional[str] = None,
 ) -> list[dict]:
     """List disposition-ledger items, newest first.
@@ -21372,6 +21373,9 @@ def list_disposition_items(
     if source_task_id is not None:
         clauses.append("source_task_id = ?")
         params.append(source_task_id)
+    if disposition is not None:
+        clauses.append("disposition = ?")
+        params.append(disposition)
     if typ is not None:
         clauses.append("typ = ?")
         params.append(typ)

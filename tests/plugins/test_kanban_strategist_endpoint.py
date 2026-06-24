@@ -356,6 +356,17 @@ def test_run_propose_triggers_and_returns_pid(trigger_ctx):
     assert calls == ["strategist-propose"]
 
 
+def test_run_harvest_watch_triggers_and_returns_pid(trigger_ctx):
+    _mod, client, calls = trigger_ctx
+    r = client.post(f"{PREFIX}/strategist/run-harvest-watch")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["pid"] == 4242
+    assert body["name"] == "strategist-harvest-watch"
+    assert calls == ["strategist-harvest-watch"]
+
+
 def test_run_gutachter_triggers(trigger_ctx):
     _mod, client, _calls = trigger_ctx
     r = client.post(f"{PREFIX}/strategist/run-gutachter")
@@ -373,7 +384,7 @@ def test_double_trigger_is_guarded(trigger_ctx):
 def test_run_status_shape(trigger_ctx):
     _mod, client, _calls = trigger_ctx
     data = client.get(f"{PREFIX}/strategist/run-status").json()
-    for key in ("propose", "gutachter"):
+    for key in ("propose", "harvest_watch", "gutachter"):
         assert key in data
         assert set(data[key]) == {"running", "exit_code", "last_modified", "tail"}
         assert data[key]["running"] is False  # noch nichts gespawnt
@@ -384,6 +395,9 @@ def test_trigger_specs_argv_and_env(trigger_ctx):
     pspec = mod._TRIGGER_SPECS["strategist-propose"]
     assert pspec["argv"][0] == "bash" and pspec["argv"][-1] == "propose"
     assert "strategist-cron.sh" in pspec["argv"][1]
+    hspec = mod._TRIGGER_SPECS["strategist-harvest-watch"]
+    assert hspec["argv"] == ["hermes", "vision", "strategist", "--mode", "harvest-watch"]
+    assert all("strategist-cron.sh" not in part for part in hspec["argv"])
     gspec = mod._TRIGGER_SPECS["gutachter"]
     assert gspec["argv"][-1].endswith("run.sh")
     assert gspec["env"]["DELIVER_MODE"] == "live"  # Phase-A live (Kommentar+Discord)

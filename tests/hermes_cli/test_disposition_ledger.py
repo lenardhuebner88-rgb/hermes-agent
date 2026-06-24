@@ -195,6 +195,18 @@ def test_list_filter_by_source_task_id(db_conn):
     assert id_b not in ids
 
 
+def test_list_filter_by_disposition(db_conn):
+    id_drop = _insert_basic(db_conn, source_task_id="t_x", disposition="drop")
+    id_done = _insert_basic(db_conn, source_task_id="t_x", disposition="done")
+
+    drops = kb.list_disposition_items(db_conn, disposition="drop")
+    ids = [i["id"] for i in drops]
+
+    assert id_drop in ids
+    assert id_done not in ids
+    assert all(i["disposition"] == "drop" for i in drops)
+
+
 def test_list_filter_by_typ(db_conn):
     id_risk = _insert_basic(db_conn, source_task_id="t_x", typ="risk")
     id_fu = _insert_basic(db_conn, source_task_id="t_x", typ="follow_up")
@@ -209,15 +221,19 @@ def test_list_filter_by_typ(db_conn):
 
 
 def test_list_combined_filters(db_conn):
-    id_match = _insert_basic(db_conn, source_task_id="t_Z", typ="risk")
+    id_match = _insert_basic(db_conn, source_task_id="t_Z", typ="risk", disposition="delegate")
     id_wrong_typ = _insert_basic(db_conn, source_task_id="t_Z", typ="follow_up")
     id_wrong_src = _insert_basic(db_conn, source_task_id="t_Y", typ="risk")
+    id_wrong_disposition = _insert_basic(db_conn, source_task_id="t_Z", typ="risk", disposition="drop")
 
-    result = kb.list_disposition_items(db_conn, source_task_id="t_Z", typ="risk")
+    result = kb.list_disposition_items(
+        db_conn, source_task_id="t_Z", typ="risk", disposition="delegate"
+    )
     ids = [i["id"] for i in result]
     assert id_match in ids
     assert id_wrong_typ not in ids
     assert id_wrong_src not in ids
+    assert id_wrong_disposition not in ids
 
 
 # ===========================================================================
