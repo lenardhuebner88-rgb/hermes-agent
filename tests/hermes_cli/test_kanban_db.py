@@ -1263,36 +1263,6 @@ def test_s1_window_match_in_own_profile_consumed_once(kanban_home, tmp_path, mon
         assert total == pytest.approx(0.12)
 
 
-def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, monkeypatch):
-    """OpenRouter state.db estimated cost stays value-identical and is labeled."""
-    profile_dir = tmp_path / "profiles" / "coder"
-    monkeypatch.setattr(
-        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
-    )
-    monkeypatch.setattr(kb, "_profile_subscription", lambda p: None)
-    with kb.connect() as conn:
-        tid = kb.create_task(conn, title="openrouter-estimated", assignee="coder")
-        run_id = _insert_run_window(
-            conn, tid, profile="coder", started_at=800, ended_at=900,
-        )
-        _write_session_rows(profile_dir / "state.db", [
-            {"id": "837", "source": "cli", "started_at": 837,
-             "input_tokens": 1000, "output_tokens": 200,
-             "estimated_cost_usd": 0.03760227, "cost_status": "estimated",
-             "model": "deepseek/deepseek-chat", "billing_provider": "openrouter"},
-        ])
-        assert kb.backfill_run_costs_from_sessions(conn, limit=50) == 1
-        row = conn.execute(
-            "SELECT cost_usd, cost_status FROM task_runs WHERE id=?", (run_id,)
-        ).fetchone()
-        costs = kb.batch_task_costs(conn, [tid])
-
-    assert row["cost_usd"] == pytest.approx(0.03760227)
-    assert row["cost_status"] == "estimated"
-    assert costs[tid]["cost_usd"] == pytest.approx(0.03760227)
-    assert costs[tid]["cost_status"] == "estimated"
-
-
 def test_s1_window_does_not_cross_profiles(kanban_home, tmp_path, monkeypatch):
     """S1: window correlation reads ONLY the run's own profile state.db — a
     session in a different profile's db is never window-matched."""
@@ -13097,6 +13067,22 @@ def test_claude_opus_equivalent_uses_anthropic_model_label_prices():
     assert equivalent > 0
 
 
+def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
+    """S5 golden: Codex gpt-5.5 (run 4828) reproduces $7.92776 exactly from the
+    models.dev prices ($5/$30/cr$0.5 per Mtok). 979746 in / 26557 out / 4464640
+    cache_read; the 2999 reasoning tokens are ALREADY inside the 26557
+    output_tokens and must never be added a second time (would double-count)."""
+    equivalent = kb._equiv_from_tokens(
+        "openai", "gpt-5.5",
+        979_746, 26_557,
+        cache_read=4_464_640,
+    )
+    assert equivalent is not None
+    # 979746·$5 + 26557·$30 + 4464640·$0.5 (per Mtok) = $7.92776
+    assert equivalent == pytest.approx(7.92776)
+    assert equivalent > 0
+
+
 def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
     by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""
@@ -13418,7 +13404,6 @@ def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, m
         costs = kb.batch_task_costs(conn, [tid])
 
     meta = json.loads(row["metadata"] or "{}")
-    row_status = row.keys() and meta.get("cost_status")
     assert row["cost_usd"] == pytest.approx(0.03760227)
     assert meta.get("cost_status") == "estimated"
     assert costs[tid]["cost_usd"] == pytest.approx(0.03760227)
