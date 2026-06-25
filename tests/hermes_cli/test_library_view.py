@@ -337,3 +337,58 @@ def test_deliverable_adapter_lists_markdown(kanban_home):
     assert "Fertig." in items[0].body_md
     detail = lv._get_item(items[0].id)
     assert detail is not None and "Fertig." in detail.body_md
+
+
+def test_library_deliverable_artifacts_scan(kanban_home, tmp_path):
+    vault = tmp_path / "vault"
+    deliverables = vault / "03-Agents" / "Hermes" / "deliverables"
+    deliverables.mkdir(parents=True)
+    valid = deliverables / "test.md"
+    valid.write_text("# Vault Deliverable\nSichtbar.", encoding="utf-8")
+    tmp_md = tmp_path / "test.md"
+    tmp_md.write_text("# Non-Vault\nIgnorieren.", encoding="utf-8")
+
+    many = []
+    for n in range(10):
+        target = deliverables / f"cap-{n}.md"
+        target.write_text(f"# Cap {n}\n", encoding="utf-8")
+        many.append(str(target))
+
+    receipt_dir = vault / "03-Agents" / "Hermes" / "receipts" / "auto"
+    receipt_dir.mkdir(parents=True)
+    receipt_artifact = receipt_dir / "t_foo.md"
+    receipt_artifact.write_text("# Already a Receipt\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        t_valid = kb.create_task(conn, title="Artifact Task")
+        kb.complete_task(conn, t_valid, summary="done", metadata={
+            "artifacts": [str(valid), "/etc/passwd", str(tmp_md)],
+        })
+        t_many = kb.create_task(conn, title="Many Artifacts")
+        kb.complete_task(conn, t_many, summary="done", metadata={"artifacts": many})
+        t_receipt = kb.create_task(conn, title="Receipt Duplicate")
+        kb.complete_task(conn, t_receipt, summary="done", metadata={
+            "artifacts": [str(receipt_artifact)],
+        })
+        t_none = kb.create_task(conn, title="No Metadata")
+        kb.complete_task(conn, t_none, summary="done")
+        t_bad = kb.create_task(conn, title="Bad Metadata")
+        kb.complete_task(conn, t_bad, summary="done", metadata={"artifacts": [str(valid)]})
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE task_id = ?",
+            ("not json artifacts", t_bad),
+        )
+
+    items = lv._collect_deliverable_items(with_bodies=True)
+    ids = {i.id for i in items}
+    assert f"deliverable::{t_valid}::test.md" in ids
+    assert all("passwd" not in i.id for i in items)
+    valid_item = next(i for i in items if i.id == f"deliverable::{t_valid}::test.md")
+    assert valid_item.body_md is not None and valid_item.body_md.endswith("Sichtbar.")
+    detail = lv._get_item(f"deliverable::{t_valid}::test.md")
+    assert detail is not None and detail.body_md is not None
+    assert detail.body_md.endswith("Sichtbar.")
+    assert sum(i.id.startswith(f"deliverable::{t_many}::") for i in items) == 3
+    assert f"deliverable::{t_receipt}::t_foo.md" not in ids
+    assert all(not i.id.startswith(f"deliverable::{t_none}::") for i in items)
+    assert all(not i.id.startswith(f"deliverable::{t_bad}::") for i in items)

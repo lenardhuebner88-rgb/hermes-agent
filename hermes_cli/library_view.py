@@ -470,8 +470,6 @@ _DELIVERABLE_MAX_PER_TASK = 3
 def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> list[_Item]:
     items: list[_Item] = []
     reports_root = _hermes_home() / "reports" / "by-task"
-    if not reports_root.is_dir():
-        return items
     from hermes_cli import kanban_db
     titles: dict[str, str] = {}
     try:
@@ -485,37 +483,143 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
             conn.close()
     except Exception:
         logger.debug("library: deliverable title lookup failed", exc_info=True)
-    task_dirs = sorted(
-        (d for d in reports_root.iterdir() if d.is_dir()),
-        key=lambda d: d.stat().st_mtime, reverse=True,
-    )[:limit_tasks]
-    for task_dir in task_dirs:
-        if not _TASK_ID_RE.match(task_dir.name):
+    seen_task_ids: set[str] = set()
+    if reports_root.is_dir():
+        task_dirs = sorted(
+            (d for d in reports_root.iterdir() if d.is_dir()),
+            key=lambda d: d.stat().st_mtime, reverse=True,
+        )[:limit_tasks]
+        for task_dir in task_dirs:
+            if not _TASK_ID_RE.match(task_dir.name):
+                continue
+            seen_task_ids.add(task_dir.name)
+            md_files = sorted(task_dir.rglob("*.md"))[:_DELIVERABLE_MAX_PER_TASK]
+            for md_file in md_files:
+                try:
+                    stat = md_file.stat()
+                    body = md_file.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+                except OSError:
+                    continue
+                if not body.strip():
+                    continue
+                rel = md_file.relative_to(task_dir).as_posix()
+                task_title = titles.get(task_dir.name, task_dir.name)
+                suffix = "" if rel == "RESULT.md" else f" · {rel}"
+                items.append(_Item(
+                    id=f"deliverable::{task_dir.name}::{rel}",
+                    category="arbeit",
+                    series_id="deliverables",
+                    series="Arbeit & Receipts",
+                    title=f"{task_title}{suffix}",
+                    ts=int(stat.st_mtime),
+                    preview=_preview(body),
+                    source_ref=f"task:{task_dir.name}/{rel}",
+                    body_md=body if with_bodies else None,
+                ))
+    receipt_paths = _receipt_file_paths()
+    vault_root = (Path.home() / "vault").resolve()
+    try:
+        conn = kanban_db.connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT tr.task_id, tr.metadata, t.title, t.completed_at
+                  FROM task_runs tr JOIN tasks t ON t.id = tr.task_id
+                 WHERE t.status IN ("done", "review")
+                   AND tr.metadata IS NOT NULL AND tr.metadata != ""
+                   AND tr.metadata LIKE "%artifacts%"
+                   AND t.completed_at > strftime("%s", "now") - 86400 * 14
+                 ORDER BY t.completed_at DESC LIMIT ?
+                """,
+                (limit_tasks,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("library: deliverable artifact lookup failed", exc_info=True)
+        rows = []
+    for row in rows:
+        task_id = row["task_id"]
+        if task_id in seen_task_ids:
             continue
-        md_files = sorted(task_dir.rglob("*.md"))[:_DELIVERABLE_MAX_PER_TASK]
-        for md_file in md_files:
+        try:
+            md = json.loads(row["metadata"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        artifacts = md.get("artifacts", []) if isinstance(md, dict) else []
+        if not isinstance(artifacts, list):
+            continue
+        emitted = 0
+        seen_names: set[str] = set()
+        for art_path in artifacts:
+            if emitted >= _DELIVERABLE_MAX_PER_TASK or not isinstance(art_path, str):
+                continue
+            p_resolved = _validated_artifact_path(art_path, vault_root=vault_root)
+            if p_resolved is None:
+                continue
+            if p_resolved in receipt_paths or not p_resolved.is_file():
+                continue
+            name = p_resolved.name
+            if name in seen_names:
+                continue
             try:
-                stat = md_file.stat()
-                body = md_file.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+                stat = p_resolved.stat()
+                body = p_resolved.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
             except OSError:
                 continue
             if not body.strip():
                 continue
-            rel = md_file.relative_to(task_dir).as_posix()
-            task_title = titles.get(task_dir.name, task_dir.name)
-            suffix = "" if rel == "RESULT.md" else f" · {rel}"
+            task_title = row["title"] or titles.get(task_id, task_id)
             items.append(_Item(
-                id=f"deliverable::{task_dir.name}::{rel}",
+                id=f"deliverable::{task_id}::{name}",
                 category="arbeit",
                 series_id="deliverables",
                 series="Arbeit & Receipts",
-                title=f"{task_title}{suffix}",
+                title=f"{task_title} - {name}",
                 ts=int(stat.st_mtime),
                 preview=_preview(body),
-                source_ref=f"task:{task_dir.name}/{rel}",
+                source_ref=f"artifact:{task_id}/{name}",
                 body_md=body if with_bodies else None,
             ))
+            emitted += 1
+            seen_names.add(name)
     return items
+
+
+def _validated_artifact_path(art_path: str, *, vault_root: Path) -> Optional[Path]:
+    p = Path(art_path).expanduser()
+    if not p.is_absolute() or p.suffix != ".md":
+        return None
+    try:
+        p_resolved = p.resolve()
+        p_resolved.relative_to(vault_root)
+    except (OSError, ValueError):
+        return None
+    return p_resolved
+
+
+def _receipt_file_paths() -> set[Path]:
+    receipt_paths: set[Path] = set()
+    agents_root = _receipts_root()
+    if not agents_root.is_dir():
+        return receipt_paths
+    for agent_dir in sorted(agents_root.iterdir()):
+        if not agent_dir.is_dir() or not _TASK_ID_RE.match(agent_dir.name):
+            continue
+        receipts_dir = agent_dir / "receipts"
+        if not receipts_dir.is_dir():
+            continue
+        receipt_dirs = [receipts_dir]
+        receipt_dirs.extend(
+            d for d in sorted(receipts_dir.iterdir()) if d.is_dir() and _TASK_ID_RE.match(d.name)
+        )
+        for receipt_dir in receipt_dirs:
+            for fname in _newest_receipt_names(receipt_dir):
+                try:
+                    receipt_paths.add((receipt_dir / fname).resolve())
+                except OSError:
+                    continue
+    return receipt_paths
 
 
 def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
@@ -528,7 +632,7 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
     if not str(target).startswith(str(reports_root) + "/"):
         raise ValueError("path escape")
     if not target.is_file():
-        return None
+        return _read_artifact_deliverable_item(task_id, rel_path)
     body = target.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
     return _Item(
         id=f"deliverable::{task_id}::{rel_path}",
@@ -541,6 +645,71 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
         source_ref=f"task:{task_id}/{rel_path}",
         body_md=body,
     )
+
+
+def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
+    if "/" in name or "\\" in name:
+        return None
+    vault_root = (Path.home() / "vault").resolve()
+    receipt_paths = _receipt_file_paths()
+    from hermes_cli import kanban_db
+    try:
+        conn = kanban_db.connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT tr.metadata, t.title
+                  FROM task_runs tr JOIN tasks t ON t.id = tr.task_id
+                 WHERE tr.task_id = ?
+                   AND t.status IN ("done", "review")
+                   AND tr.metadata IS NOT NULL AND tr.metadata != ""
+                   AND tr.metadata LIKE "%artifacts%"
+                 ORDER BY tr.id DESC
+                """,
+                (task_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("library: artifact deliverable lookup failed", exc_info=True)
+        return None
+    for row in rows:
+        try:
+            md = json.loads(row["metadata"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        artifacts = md.get("artifacts", []) if isinstance(md, dict) else []
+        if not isinstance(artifacts, list):
+            continue
+        emitted = 0
+        for art_path in artifacts:
+            if emitted >= _DELIVERABLE_MAX_PER_TASK or not isinstance(art_path, str):
+                continue
+            p_resolved = _validated_artifact_path(art_path, vault_root=vault_root)
+            if p_resolved is None:
+                continue
+            if p_resolved in receipt_paths or not p_resolved.is_file():
+                continue
+            emitted += 1
+            if p_resolved.name != name:
+                continue
+            try:
+                body = p_resolved.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+                stat = p_resolved.stat()
+            except OSError:
+                return None
+            return _Item(
+                id=f"deliverable::{task_id}::{name}",
+                category="arbeit",
+                series_id="deliverables",
+                series="Arbeit & Receipts",
+                title=f"{row['title'] or task_id} - {name}",
+                ts=int(stat.st_mtime),
+                preview=_preview(body),
+                source_ref=f"artifact:{task_id}/{name}",
+                body_md=body,
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
