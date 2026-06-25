@@ -415,6 +415,23 @@ class TestBuildSkillsSystemPrompt:
         assert "Debug Python scripts" in result
         assert "available_skills" in result
 
+    def test_verifier_efficiency_skill_loads_from_profile_home(self, monkeypatch, tmp_path):
+        verifier_home = tmp_path / "profiles" / "verifier"
+        monkeypatch.setenv("HERMES_HOME", str(verifier_home))
+        monkeypatch.setenv("HERMES_PROFILE", "verifier")
+        skills_dir = verifier_home / "skills" / "devops" / "verifier-efficiency"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: verifier-efficiency\n"
+            "description: Token/speed/quality discipline for verifier review runs.\n"
+            "---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "verifier-efficiency" in result
+        assert "Token/speed/quality discipline" in result
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"

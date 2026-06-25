@@ -19323,7 +19323,7 @@ def build_worker_context(
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
-    if int(task.continuation_count or 0) > 0 and profile == "worker_slim":
+    if int(task.continuation_count or 0) > 0 and profile in {"worker_slim", "full"}:
         profile = "retry"
     caps = _CTX_CAP_PROFILES.get(profile, _CTX_CAP_PROFILES["full"])
     prior_attempts_limit = int(caps["prior_attempts"])
