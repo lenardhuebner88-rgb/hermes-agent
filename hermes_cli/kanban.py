@@ -953,9 +953,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="S1b audited dry-run/classification for missing Claude cost_usd_equivalent stamps",
     )
     p_bfcost.add_argument(
+        "--audited-non-claude-equivalent",
+        action="store_true",
+        help="S1c audited dry-run/classification for missing non-Claude cost_usd_equivalent stamps",
+    )
+    p_bfcost.add_argument(
         "--apply",
         action="store_true",
-        help="Apply S1b audited Claude stamps; only use after explicit operator approval",
+        help="Apply audited equivalent stamps; only use after explicit operator approval",
     )
 
     # --- notify subscribe / list / remove ---
@@ -3388,8 +3393,17 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             )
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0
+        if getattr(args, "audited_non_claude_equivalent", False):
+            report = kb.audit_non_claude_cost_equivalent_backfill(
+                conn,
+                limit=args.limit,
+                board=getattr(args, "board", None),
+                apply=bool(getattr(args, "apply", False)),
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
         if getattr(args, "apply", False):
-            print("--apply is only valid with --audited-claude-equivalent", file=sys.stderr)
+            print("--apply is only valid with --audited-claude-equivalent or --audited-non-claude-equivalent", file=sys.stderr)
             return 2
         n = kb.backfill_run_costs(
             conn,
