@@ -6268,8 +6268,10 @@ async def async_call_llm(
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)
         )
-        # Capacity errors (payment/quota/connection) bypass the explicit-provider
-        # gate — the provider cannot serve the request regardless of user intent.
+        # Capacity errors (payment/quota/connection/rate-limit) bypass the
+        # explicit-provider gate — the provider cannot serve the request
+        # regardless of user intent. Rate limits are included: after retries
+        # are exhausted, a 429 means the provider is at capacity. See #52228.
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = (
