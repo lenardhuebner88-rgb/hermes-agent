@@ -5567,6 +5567,26 @@ _S1B_CLASS_KEYS = (
     "operator_integration",
 )
 
+_S1C_CLASS_KEYS = (
+    "stampable_with_model_and_price",
+    "null_cost_no_cost_evidence",
+)
+
+# Approved S1c PlanSpec prices for non-Claude subscription-equivalent stamps.
+# Kept local to the audited S1c path so older K16 repair semantics stay intact.
+_S1C_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
+    "gpt-5.5": (5.0, 30.0, 0.5, 5.0),
+    "gpt-5.4": (5.0, 30.0, 0.5, 5.0),
+    "gpt-5.4-mini": (5.0, 30.0, 0.5, 5.0),
+    "kimi-k2.6": (0.55, 2.79, 0.014, 0.55),
+    "kimi-k2.7": (0.55, 2.79, 0.014, 0.55),
+    "kimi-k2.7-code": (0.55, 2.79, 0.014, 0.55),
+    "moonshotai/Kimi-K2.6": (0.55, 2.79, 0.014, 0.55),
+    "moonshotai/Kimi-K2.7": (0.55, 2.79, 0.014, 0.55),
+    "glm-5.2-fast": (0.07, 0.28, 0.007, 0.07),
+    "gemini-3.5-flash": (0.075, 0.30, 0.01875, 0.075),
+}
+
 
 def _s1b_cache_tokens_from_usage(usage: Mapping[str, Any]) -> tuple[Optional[int], Optional[int]]:
     read = _coerce_int(usage.get("cache_read_tokens"))
@@ -5769,6 +5789,123 @@ def audit_claude_cost_equivalent_backfill(
         "stampable": classes["worker_receipt_without_cost_stamp"],
         "updated": updated,
         "provider_model_sources_allowed": ["run_metadata", "session_log"],
+    }
+
+
+def audit_non_claude_cost_equivalent_backfill(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 1000,
+    apply: bool = False,
+    board: Optional[str] = None,
+) -> dict[str, Any]:
+    """S1c audited API-equivalent cost backfill for non-Claude worker runs.
+
+    Only considers non-Claude lanes whose metered ``cost_usd`` is absent/zero
+    and whose metadata lacks ``cost_usd_equivalent``. The model label must come
+    from durable run metadata or the matched worker session; lane-current
+    fallback is deliberately not used, so no-model rows remain unstamped.
+    """
+
+    scan_limit = max(0, int(limit))
+    classes: dict[str, int] = {key: 0 for key in _S1C_CLASS_KEYS}
+    examples: dict[str, list[dict[str, Any]]] = {key: [] for key in _S1C_CLASS_KEYS}
+    sql = (
+        "SELECT id, task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd, metadata "
+        "FROM task_runs "
+        "WHERE (cost_usd IS NULL OR cost_usd <= 0) "
+        "AND (profile IS NULL OR profile NOT IN ('coder-claude', 'premium')) "
+        "AND json_extract(metadata, '$.worker_session_id') IS NOT NULL "
+        "AND (metadata IS NULL OR json_extract(metadata, '$.cost_usd_equivalent') IS NULL) "
+        "ORDER BY id ASC LIMIT ?"
+    )
+    rows = conn.execute(sql, (scan_limit,)).fetchall()
+    sessions_by_id = _s1b_session_index(rows, board)
+    price_cache: dict[tuple[str, str], Optional[tuple[float, float, float, float]]] = {}
+    updates: list[tuple[int, str]] = []
+
+    def add_example(cls: str, row: sqlite3.Row, extra: Optional[dict[str, Any]] = None) -> None:
+        if len(examples[cls]) >= 5:
+            return
+        sample: dict[str, Any] = {
+            "run_id": row["id"],
+            "task_id": row["task_id"],
+            "profile": row["profile"],
+        }
+        if extra:
+            sample.update(extra)
+        examples[cls].append(sample)
+
+    for row in rows:
+        metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        usage, source = _s1b_usage_for_run(row, metadata, sessions_by_id)
+        if not usage or not usage.get("model") or source not in {"run_metadata", "session_log"}:
+            classes["null_cost_no_cost_evidence"] += 1
+            add_example("null_cost_no_cost_evidence", row, {"reason": "missing_model_or_usage", "source": source})
+            continue
+
+        provider = usage.get("provider")
+        model = usage.get("model")
+        plan_price = _S1C_PRICE_OVERRIDES_PER_MTOK.get(str(model))
+        if plan_price is not None:
+            price_cache[(str(provider), str(model))] = plan_price
+        equivalent = _equiv_from_tokens(
+            provider,
+            model,
+            _coerce_int(usage.get("input_tokens")),
+            _coerce_int(usage.get("output_tokens")),
+            cache_read=_coerce_int(usage.get("cache_read")),
+            cache_write=_coerce_int(usage.get("cache_write")),
+            cache=price_cache,
+        )
+        if equivalent is None:
+            classes["null_cost_no_cost_evidence"] += 1
+            add_example(
+                "null_cost_no_cost_evidence",
+                row,
+                {"reason": "missing_model_price", "model": model, "source": source},
+            )
+            continue
+
+        classes["stampable_with_model_and_price"] += 1
+        add_example(
+            "stampable_with_model_and_price",
+            row,
+            {"model": model, "provider": provider, "source": source, "cost_usd_equivalent": round(equivalent, 6)},
+        )
+        stamped = dict(metadata)
+        stamped["cost_usd_equivalent"] = float(equivalent)
+        stamped["cost_equivalent_model"] = model
+        if provider:
+            stamped["cost_equivalent_provider"] = provider
+        stamped["provider_model_source"] = source
+        stamped["cost_equivalent_source"] = "s1c_audited_session_usage"
+        stamped.setdefault("billing_mode", "subscription_included")
+        stamped["cost_equivalent_input_tokens"] = _coerce_int(usage.get("input_tokens")) or 0
+        stamped["cost_equivalent_output_tokens"] = _coerce_int(usage.get("output_tokens")) or 0
+        stamped["cost_equivalent_cache_read_tokens"] = _coerce_int(usage.get("cache_read")) or 0
+        stamped["cost_equivalent_cache_write_tokens"] = _coerce_int(usage.get("cache_write")) or 0
+        updates.append((int(row["id"]), json.dumps(stamped, ensure_ascii=False, sort_keys=True)))
+
+    updated = 0
+    if apply and updates:
+        with write_txn(conn):
+            for run_id, stamped_json in updates:
+                conn.execute("UPDATE task_runs SET metadata = ? WHERE id = ?", (stamped_json, run_id))
+                updated += 1
+    return {
+        "mode": "apply" if apply else "dry_run",
+        "scan_limit": scan_limit,
+        "candidates_scanned": len(rows),
+        "classes": classes,
+        "examples": examples,
+        "stampable": classes["stampable_with_model_and_price"],
+        "updated": updated,
+        "provider_model_sources_allowed": ["run_metadata", "session_log"],
+        "excluded_profiles": ["coder-claude", "premium"],
     }
 
 

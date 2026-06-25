@@ -1639,6 +1639,125 @@ def test_s1b_audited_claude_equivalent_classifies_non_workers(kanban_home):
         assert report["updated"] == 0
 
 
+def test_s1c_audited_non_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, monkeypatch):
+    """S1c: stamp non-Claude rows from session evidence including cache tokens.
+
+    Golden GPT-5.5 run: 979746 input, 26557 output, 4464640 cache-read -> $7.92776.
+    Dry-run reports the candidate but does not mutate; apply writes only the stampable row.
+    """
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="s1c-golden", assignee="coder")
+        run_id = _insert_run_window(
+            conn,
+            tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-gpt"},
+        )
+        _write_session_rows(profile_dir / "state.db", [{
+            "id": "S-gpt", "source": "cli", "started_at": 1500,
+            "input_tokens": 979_746, "output_tokens": 26_557,
+            "cache_read_tokens": 4_464_640, "cache_write_tokens": 0,
+            "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+            "model": "gpt-5.5", "billing_provider": "openai-codex",
+            "cwd": f"/x/kanban/workspaces/{tid}",
+        }])
+
+        dry = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50)
+        assert dry["mode"] == "dry_run"
+        assert dry["classes"]["stampable_with_model_and_price"] == 1
+        assert dry["classes"]["null_cost_no_cost_evidence"] == 0
+        assert dry["updated"] == 0
+        assert json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()[0]).get("cost_usd_equivalent") is None
+
+        applied = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
+        assert applied["updated"] == 1
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()[0])
+        assert meta["cost_usd_equivalent"] == pytest.approx(7.92776)
+        assert meta["cost_equivalent_model"] == "gpt-5.5"
+        assert meta["cost_equivalent_provider"] == "openai-codex"
+        assert meta["provider_model_source"] == "session_log"
+        assert meta["cost_equivalent_source"] == "s1c_audited_session_usage"
+        assert meta["cost_equivalent_cache_read_tokens"] == 4_464_640
+
+
+def test_s1c_audited_non_claude_equivalent_skips_no_model_claude_and_metered(
+    kanban_home, tmp_path, monkeypatch
+):
+    """S1c: no model stays null; Claude lanes and metered OpenRouter runs are untouched."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
+    with kb.connect() as conn:
+        no_model_tid = kb.create_task(conn, title="s1c-no-model", assignee="coder")
+        claude_tid = kb.create_task(conn, title="s1c-claude", assignee="premium")
+        metered_tid = kb.create_task(conn, title="s1c-openrouter", assignee="coder")
+        no_model_run = _insert_run_window(
+            conn,
+            no_model_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-no-model"},
+        )
+        claude_run = _insert_run_window(
+            conn,
+            claude_tid,
+            profile="premium",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-claude", "cost_usd_equivalent": 0.953664},
+        )
+        metered_run = _insert_run_window(
+            conn,
+            metered_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-metered"},
+        )
+        conn.execute("UPDATE task_runs SET cost_usd = 0.25 WHERE id = ?", (metered_run,))
+        _write_session_rows(profile_dir / "state.db", [{
+            "id": "S-no-model", "source": "cli", "started_at": 1500,
+            "input_tokens": 979_746, "output_tokens": 26_557,
+            "cache_read_tokens": 4_464_640, "cache_write_tokens": 0,
+            "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+            "model": None, "billing_provider": "openai-codex",
+            "cwd": f"/x/kanban/workspaces/{no_model_tid}",
+        }, {
+            "id": "S-metered", "source": "cli", "started_at": 1500,
+            "input_tokens": 1_000, "output_tokens": 100,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "actual_cost_usd": 0.25, "estimated_cost_usd": 0.25,
+            "model": "openrouter/paid", "billing_provider": "openrouter",
+            "cwd": f"/x/kanban/workspaces/{metered_tid}",
+        }])
+
+        report = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
+        assert report["updated"] == 0
+        assert report["classes"]["stampable_with_model_and_price"] == 0
+        assert report["classes"]["null_cost_no_cost_evidence"] == 1
+
+        no_model_meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (no_model_run,)
+        ).fetchone()[0])
+        claude_meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (claude_run,)
+        ).fetchone()[0])
+        metered_meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (metered_run,)
+        ).fetchone()[0])
+        assert "cost_usd_equivalent" not in no_model_meta
+        assert claude_meta["cost_usd_equivalent"] == pytest.approx(0.953664)
+        assert "cost_usd_equivalent" not in metered_meta
+
+
 def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypatch):
     """Opt-in repair: old subscription runs frozen at cost_usd=0.0 with
     tokens but no worker_session_id can still get a bounded API-equivalent
