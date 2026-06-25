@@ -1530,6 +1530,115 @@ def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypa
         assert meta["cost_usd_equivalent"] == pytest.approx(14.25)
 
 
+def test_s1b_audited_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, monkeypatch):
+    """S1b: stamp missing Claude cost_usd_equivalent only from session-log evidence.
+
+    Golden Opus run: 131747 input, 4793 output, 350208 cache-read -> $0.953664.
+    Dry-run reports the candidate but does not mutate; apply writes only metadata.
+    """
+    profile_dir = tmp_path / "profiles" / "premium"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(
+        kb,
+        "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
+        if model == "claude-opus-4-8" else None,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="s1b-golden", assignee="premium")
+        run_id = _insert_run_window(
+            conn,
+            tid,
+            profile="premium",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-golden"},
+        )
+        _write_session_rows(profile_dir / "state.db", [{
+            "id": "S-golden", "source": "claude-cli", "started_at": 1500,
+            "input_tokens": 131_747, "output_tokens": 4_793,
+            "cache_read_tokens": 350_208, "cache_write_tokens": 0,
+            "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+            "model": "claude-opus-4-8", "billing_provider": "anthropic",
+            "cwd": f"/x/kanban/workspaces/{tid}",
+        }])
+        dry = kb.audit_claude_cost_equivalent_backfill(conn, limit=50)
+        assert dry["mode"] == "dry_run"
+        assert dry["classes"]["worker_receipt_without_cost_stamp"] == 1
+        assert dry["classes"]["provider_model_without_equiv"] == 0
+        assert dry["classes"]["null_cost_no_cost_evidence"] == 0
+        assert dry["classes"]["operator_integration"] == 0
+        assert dry["updated"] == 0
+        assert json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()[0]).get("cost_usd_equivalent") is None
+
+        applied = kb.audit_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
+        assert applied["updated"] == 1
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()[0])
+        assert meta["cost_usd_equivalent"] == pytest.approx(0.953664)
+        assert meta["cost_equivalent_model"] == "claude-opus-4-8"
+        assert meta["cost_equivalent_provider"] == "anthropic"
+        assert meta["provider_model_source"] == "session_log"
+        assert meta["cost_equivalent_source"] == "s1b_audited_session_usage"
+        assert meta["billing_mode"] == "subscription_included"
+
+
+def test_s1b_audited_claude_equivalent_requires_model_label(kanban_home, tmp_path, monkeypatch):
+    """S1b: a Claude-like run with tokens but no persisted model label is classified, not stamped."""
+    profile_dir = tmp_path / "profiles" / "premium"
+    monkeypatch.setattr(
+        "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
+    )
+    monkeypatch.setattr(
+        kb,
+        "_lookup_model_price_per_mtok",
+        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
+        if model == "claude-opus-4-8" else None,
+    )
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="s1b-missing-model", assignee="premium")
+        run_id = _insert_run_window(
+            conn,
+            tid,
+            profile="premium",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-no-model"},
+        )
+        _write_session_rows(profile_dir / "state.db", [{
+            "id": "S-no-model", "source": "claude-cli", "started_at": 1500,
+            "input_tokens": 131_747, "output_tokens": 4_793,
+            "cache_read_tokens": 350_208, "actual_cost_usd": None,
+            "estimated_cost_usd": 0.0, "model": None, "billing_provider": "anthropic",
+            "cwd": f"/x/kanban/workspaces/{tid}",
+        }])
+        report = kb.audit_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
+        assert report["updated"] == 0
+        assert report["classes"]["provider_model_without_equiv"] == 1
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()[0])
+        assert "cost_usd_equivalent" not in meta
+
+
+def test_s1b_audited_claude_equivalent_classifies_non_workers(kanban_home):
+    """S1b dry-run includes operator integration and no-evidence classes in its bounded report."""
+    with kb.connect() as conn:
+        op_tid = kb.create_task(conn, title="operator", assignee="operator")
+        null_tid = kb.create_task(conn, title="no evidence", assignee="premium")
+        _insert_run_window(conn, op_tid, profile="operator", started_at=1000, ended_at=2000)
+        _insert_run_window(conn, null_tid, profile="premium", started_at=1000, ended_at=2000)
+        report = kb.audit_claude_cost_equivalent_backfill(conn, limit=50)
+        assert report["classes"]["operator_integration"] == 1
+        assert report["classes"]["null_cost_no_cost_evidence"] == 1
+        assert report["updated"] == 0
+
+
 def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypatch):
     """Opt-in repair: old subscription runs frozen at cost_usd=0.0 with
     tokens but no worker_session_id can still get a bounded API-equivalent
