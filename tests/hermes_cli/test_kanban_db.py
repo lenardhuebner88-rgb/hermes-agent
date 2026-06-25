@@ -3714,6 +3714,55 @@ def test_worker_context_worker_slim_retry_uses_retry_profile(kanban_home):
     assert "[truncated," in ctx
 
 
+def test_worker_context_full_retry_uses_retry_profile_caps(kanban_home):
+    """Continuation workers on full context also use the retry caps.
+
+    Regression: verifier review runs request ``profile='full'``. Continuation
+    review runs must still get the small retry caps, keyed by the context
+    profile parameter rather than by task assignee.
+    """
+    big_body = "BODY-" + ("x" * (kb._CTX_CAP_PROFILES["retry"]["body_bytes"] + 500))
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="retry caps", body=big_body, assignee="verifier")
+        for idx in range(kb._CTX_CAP_PROFILES["retry"]["comments"] + 2):
+            kb.add_comment(conn, t, "worker", f"comment-{idx}")
+        for idx in range(kb._CTX_CAP_PROFILES["retry"]["prior_attempts"] + 2):
+            _seed_completed_run(conn, t, "verifier", 1_800_000_000 + idx, f"summary-{idx}")
+        conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (t,))
+        conn.commit()
+
+        ctx = kb.build_worker_context(conn, t, profile="full")
+
+    retry_caps = kb._CTX_CAP_PROFILES["retry"]
+    full_caps = kb._CTX_CAP_PROFILES["full"]
+    assert retry_caps["prior_attempts"] < full_caps["prior_attempts"]
+    assert retry_caps["comments"] < full_caps["comments"]
+    assert "This is continuation run 1/" in ctx
+    assert f"showing most recent {retry_caps['prior_attempts']}" in ctx
+    assert "summary-0" not in ctx
+    assert "summary-2" in ctx
+    assert f"showing most recent {retry_caps['comments']}" in ctx
+    assert "comment-0" not in ctx
+    assert "comment-5" in ctx
+    assert "[truncated," in ctx
+
+
+def test_worker_context_full_without_continuation_keeps_full_profile_caps(kanban_home):
+    """Non-continuation full contexts must not be downgraded to retry caps."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="full caps", assignee="verifier")
+        for idx in range(kb._CTX_CAP_PROFILES["retry"]["prior_attempts"] + 2):
+            _seed_completed_run(conn, t, "verifier", 1_800_000_000 + idx, f"full-summary-{idx}")
+        conn.commit()
+
+        ctx = kb.build_worker_context(conn, t, profile="full")
+
+    assert "This is continuation run" not in ctx
+    assert f"showing most recent {kb._CTX_CAP_PROFILES['retry']['prior_attempts']}" not in ctx
+    assert "full-summary-0" in ctx
+    assert "full-summary-2" in ctx
+
+
 def test_worker_context_retry_suppresses_recent_work(kanban_home):
     """Continuation workers do not receive cross-task recent-work history."""
     with kb.connect() as conn:
@@ -8982,6 +9031,27 @@ def test_claim_review_task_transitions_to_running(kanban_home):
     assert claimed is not None
     assert claimed.status == "running"
     assert claimed.claim_lock is not None
+
+
+def test_review_claimed_full_context_retry_uses_retry_profile_caps(kanban_home):
+    """review -> running verifier continuations use retry caps with profile='full'."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review continuation", assignee="coder")
+        _set_task_status(conn, t, "review")
+        conn.execute("UPDATE tasks SET continuation_count=1 WHERE id=?", (t,))
+        for idx in range(kb._CTX_CAP_PROFILES["retry"]["prior_attempts"] + 2):
+            _seed_completed_run(conn, t, "verifier", 1_800_000_000 + idx, f"review-summary-{idx}")
+        conn.commit()
+
+        claimed = kb.claim_review_task(conn, t, reviewer_profile="verifier")
+        ctx = kb.build_worker_context(conn, t, profile="full")
+
+    assert claimed is not None
+    assert claimed.assignee == "coder"
+    assert "This is continuation run 1/" in ctx
+    assert f"showing most recent {kb._CTX_CAP_PROFILES['retry']['prior_attempts']}" in ctx
+    assert "review-summary-0" not in ctx
+    assert "review-summary-2" in ctx
 
 
 def test_claim_review_task_clears_inherited_heartbeat(kanban_home):
