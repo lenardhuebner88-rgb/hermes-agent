@@ -112,6 +112,7 @@ describe("Cost schemas", () => {
         cost_usd: 0.12,
         cost_usd_equivalent: 0.75,
         cost_effective_usd: 0.87,
+        unknown_run_count: 0,
         billing_mode: "metered",
         neuralwatt: null,
         runtime_seconds: 60,
@@ -122,6 +123,7 @@ describe("Cost schemas", () => {
           profile: "coder",
           provider: "openrouter",
           model: "nous/hermes",
+          provider_model_source: "run_metadata",
           input_tokens: 1,
           output_tokens: 2,
           cost_usd: 0.12,
@@ -138,6 +140,8 @@ describe("Cost schemas", () => {
 
     expect(parsed.roots[0].billing_mode).toBe("metered");
     expect(parsed.roots[0].runtime_seconds).toBe(60);
+    expect(parsed.roots[0].unknown_run_count).toBe(0);
+    expect(parsed.roots[0].runners[0].provider_model_source).toBe("run_metadata");
     expect(parsed.roots[0].runners[0].billing_mode).toBe("metered");
     expect(parsed.roots[0].runners[0].runtime_seconds).toBe(60);
   });
