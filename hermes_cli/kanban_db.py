@@ -88,7 +88,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod
@@ -5558,6 +5558,218 @@ def _equiv_from_tokens(
         + (cache_read or 0) / 1_000_000.0 * cost_cr
         + (cache_write or 0) / 1_000_000.0 * cost_cw
     )
+
+
+_S1B_CLASS_KEYS = (
+    "worker_receipt_without_cost_stamp",
+    "provider_model_without_equiv",
+    "null_cost_no_cost_evidence",
+    "operator_integration",
+)
+
+
+def _s1b_cache_tokens_from_usage(usage: Mapping[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    read = _coerce_int(usage.get("cache_read_tokens"))
+    write = _coerce_int(usage.get("cache_write_tokens"))
+    details = usage.get("input_token_details")
+    if isinstance(details, Mapping):
+        if read is None:
+            read = _coerce_int(details.get("cache_read"))
+        if write is None:
+            write = _coerce_int(details.get("cache_creation") or details.get("cache_write"))
+    return read, write
+
+
+def _s1b_session_index(rows: Sequence[sqlite3.Row], board: Optional[str]) -> dict[str, Mapping[str, Any]]:
+    profiles = {str(row["profile"]) for row in rows if row["profile"]}
+    paths: set[Path] = set()
+    try:
+        hub = _state_db_path(board=board)
+        if hub is not None:
+            paths.add(hub)
+    except Exception:
+        pass
+    for profile in profiles:
+        try:
+            from hermes_cli.profiles import resolve_profile_env
+            paths.add(Path(resolve_profile_env(profile)) / "state.db")
+        except Exception:
+            continue
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for path in paths:
+        for session in _read_state_sessions(path):
+            sid = session.get("id")
+            if sid:
+                by_id.setdefault(str(sid), session)
+    return by_id
+
+
+def _s1b_usage_for_run(
+    row: sqlite3.Row,
+    metadata: Mapping[str, Any],
+    sessions_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Return audited model/tokens evidence for S1b with explicit provenance."""
+
+    provider, model, source = _provider_model_with_source(metadata, None, None)
+    usage_obj = metadata.get("usage")
+    usage = usage_obj if isinstance(usage_obj, Mapping) else {}
+    if source == "run_metadata" and model:
+        cache_read, cache_write = _s1b_cache_tokens_from_usage(usage)
+        return {
+            "provider": provider,
+            "model": model,
+            "input_tokens": _coerce_int(usage.get("input_tokens")) if usage else _coerce_int(row["input_tokens"]),
+            "output_tokens": _coerce_int(usage.get("output_tokens")) if usage else _coerce_int(row["output_tokens"]),
+            "cache_read": cache_read,
+            "cache_write": cache_write,
+        }, "run_metadata"
+
+    for key_name in ("worker_session_id", "session_id", "claude_session_id"):
+        sid = metadata.get(key_name)
+        if not sid:
+            continue
+        session = sessions_by_id.get(str(sid))
+        if not session:
+            continue
+        if not session.get("model"):
+            return None, "session_log"
+        return {
+            "provider": session.get("provider") or session.get("billing_provider"),
+            "model": session.get("model"),
+            "input_tokens": session.get("input_tokens"),
+            "output_tokens": session.get("output_tokens"),
+            "cache_read": session.get("cache_read"),
+            "cache_write": session.get("cache_write"),
+        }, "session_log"
+    return None, None
+
+
+def audit_claude_cost_equivalent_backfill(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 500,
+    since_seconds: Optional[int] = None,
+    board: Optional[str] = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Dry-run/apply S1b audited Claude ``cost_usd_equivalent`` stamping.
+
+    The scan is bounded and only uses run metadata or persisted session logs as
+    provider/model evidence; current lane fallback is deliberately excluded.
+    """
+
+    scan_limit = max(0, int(limit))
+    classes: dict[str, int] = {key: 0 for key in _S1B_CLASS_KEYS}
+    examples: dict[str, list[dict[str, Any]]] = {key: [] for key in _S1B_CLASS_KEYS}
+    sql = (
+        "SELECT id, task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd, metadata "
+        "FROM task_runs "
+        "WHERE ended_at IS NOT NULL "
+        "AND json_extract(metadata, '$.cost_usd_equivalent') IS NULL "
+        "AND (cost_usd IS NULL OR cost_usd = 0.0)"
+    )
+    params: list[Any] = []
+    if since_seconds is not None:
+        sql += " AND ended_at >= ?"
+        params.append(int(time.time()) - int(since_seconds))
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(scan_limit)
+    rows = conn.execute(sql, params).fetchall()
+    sessions_by_id = _s1b_session_index(rows, board)
+    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
+    stampable: list[tuple[int, str]] = []
+
+    def record(kind: str, row: sqlite3.Row, **extra: Any) -> None:
+        classes[kind] += 1
+        if len(examples[kind]) >= 5:
+            return
+        item = {"run_id": row["id"], "task_id": row["task_id"], "profile": row["profile"]}
+        item.update({k: v for k, v in extra.items() if v is not None})
+        examples[kind].append(item)
+
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        profile = str(row["profile"] or "")
+        if profile in {"", "operator", "hermes", "default"} and not metadata.get("worker_session_id"):
+            record("operator_integration", row)
+            continue
+        usage, provider_model_source = _s1b_usage_for_run(row, metadata, sessions_by_id)
+        if not usage:
+            if (
+                row["input_tokens"] is None
+                and row["output_tokens"] is None
+                and not metadata.get("worker_session_id")
+                and not metadata.get("usage")
+            ):
+                record("null_cost_no_cost_evidence", row)
+            else:
+                record("provider_model_without_equiv", row, provider_model_source=provider_model_source)
+            continue
+        provider = usage.get("provider")
+        model = usage.get("model")
+        provider_l = str(provider or "").lower()
+        model_l = str(model or "").lower()
+        if "claude" not in model_l and "anthropic" not in provider_l:
+            record("provider_model_without_equiv", row, model=model, provider=provider)
+            continue
+        equivalent = _equiv_from_tokens(
+            provider,
+            model,
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            cache_read=usage.get("cache_read"),
+            cache_write=usage.get("cache_write"),
+            cache=price_cache,
+        )
+        if equivalent is None or equivalent <= 0:
+            record(
+                "provider_model_without_equiv",
+                row,
+                model=model,
+                provider=provider,
+                provider_model_source=provider_model_source,
+            )
+            continue
+        record(
+            "worker_receipt_without_cost_stamp",
+            row,
+            equivalent=equivalent,
+            model=model,
+            provider=provider,
+            provider_model_source=provider_model_source,
+        )
+        stamped = dict(metadata)
+        stamped["cost_usd_equivalent"] = equivalent
+        stamped.setdefault("cost_equivalent_model", model)
+        stamped.setdefault("cost_equivalent_provider", provider)
+        stamped["provider_model_source"] = provider_model_source
+        stamped.setdefault("billing_mode", "subscription_included")
+        stamped["cost_equivalent_source"] = "s1b_audited_session_usage"
+        stampable.append((int(row["id"]), json.dumps(stamped, ensure_ascii=False)))
+
+    updated = 0
+    if apply and stampable:
+        with write_txn(conn):
+            for run_id, stamped_json in stampable:
+                conn.execute("UPDATE task_runs SET metadata = ? WHERE id = ?", (stamped_json, run_id))
+                updated += 1
+    return {
+        "mode": "apply" if apply else "dry_run",
+        "scan_limit": scan_limit,
+        "candidates_scanned": len(rows),
+        "classes": classes,
+        "examples": examples,
+        "stampable": classes["worker_receipt_without_cost_stamp"],
+        "updated": updated,
+        "provider_model_sources_allowed": ["run_metadata", "session_log"],
+    }
 
 
 def backfill_run_costs_from_sessions(
