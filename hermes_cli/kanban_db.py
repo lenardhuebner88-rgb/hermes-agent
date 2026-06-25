@@ -7675,9 +7675,83 @@ def _run_originated_from_review(
     return row is not None
 
 
+_VERDICT_NORMALIZE = {
+    "APPROVED": "APPROVED",
+    "APPROVE": "APPROVED",
+    "ACCEPTED": "APPROVED",
+    "PASS": "APPROVED",
+    "PASSED": "APPROVED",
+    "REQUEST_CHANGES": "REQUEST_CHANGES",
+    "REQUEST CHANGES": "REQUEST_CHANGES",
+    "CHANGES_REQUESTED": "REQUEST_CHANGES",
+    "CHANGES REQUESTED": "REQUEST_CHANGES",
+    "NEEDS_REVISION": "REQUEST_CHANGES",
+    "NEEDS REVISION": "REQUEST_CHANGES",
+    "REVISION_REQUIRED": "REQUEST_CHANGES",
+    "REVISION REQUIRED": "REQUEST_CHANGES",
+    "REJECTED": "REQUEST_CHANGES",
+    "FAIL": "REQUEST_CHANGES",
+    "FAILED": "REQUEST_CHANGES",
+}
+
+
+def _normalize_review_verdict(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    token = value.strip().upper().replace("-", "_")
+    token = re.sub(r"\s+", " ", token)
+    normalized = _VERDICT_NORMALIZE.get(token)
+    if normalized is not None:
+        return normalized
+    return _VERDICT_NORMALIZE.get(token.replace(" ", "_"))
+
+
+def _extract_review_verdict(
+    *,
+    result: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: object = None,
+    default: Optional[str] = None,
+) -> Optional[str]:
+    """Extract the verifier verdict without treating free-form metadata as truth.
+
+    ``metadata['verdict']`` remains an ordinary payload field for non-review
+    runs; callers gate this helper with :func:`_run_originated_from_review`
+    before writing the structured ``task_runs.verdict`` column.
+    """
+    if isinstance(metadata, dict):
+        for key in (
+            "review_verdict",
+            "reviewer_verdict",
+            "verdict_status",
+            "decision",
+            "verdict",
+        ):
+            normalized = _normalize_review_verdict(metadata.get(key))
+            if normalized is not None:
+                return normalized
+        review = metadata.get("review")
+        if isinstance(review, dict):
+            for key in ("verdict", "decision", "status"):
+                normalized = _normalize_review_verdict(review.get(key))
+                if normalized is not None:
+                    return normalized
+
+    for text in (summary, result):
+        if not isinstance(text, str):
+            continue
+        normalized_text = text.upper().replace("-", "_")
+        for raw in sorted(_VERDICT_NORMALIZE, key=len, reverse=True):
+            pattern = rf"(?<![A-Z0-9]){re.escape(raw)}(?![A-Z0-9])"
+            if re.search(pattern, normalized_text):
+                return _VERDICT_NORMALIZE[raw]
+
+    return _normalize_review_verdict(default)
+
+
 def _set_run_verdict(
     conn: sqlite3.Connection, run_id: Optional[int], verdict: str
-) -> None:
+) -> bool:
     """Persist the structured review *verdict* on *run_id* (B2).
 
     Fail-soft: a missing column (pre-migration legacy DB) or any SQL error is
@@ -7685,15 +7759,18 @@ def _set_run_verdict(
     inside the caller's write txn so it shares the transaction.
     """
     if run_id is None:
-        return
+        return False
     try:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE task_runs SET verdict = ? WHERE id = ?",
             (verdict, int(run_id)),
         )
     except sqlite3.Error:
-        pass
+        return False
+    if cur.rowcount != 1:
+        return False
     _record_verdict_score(conn, run_id, verdict)
+    return True
 
 
 # F5: verdict → score mapping. Binary on purpose — trends need numbers.
@@ -8584,7 +8661,14 @@ def _maybe_advance_review_chain(
             metadata=metadata,
         )
         if rid is not None:
-            _set_run_verdict(conn, rid, "APPROVED")
+            verdict = _extract_review_verdict(
+                result=result,
+                summary=summary,
+                metadata=metadata,
+                default="APPROVED",
+            )
+            if verdict is not None:
+                _set_run_verdict(conn, rid, verdict)
         advanced_run_id = rid
         _append_event(conn, task_id, "submitted_for_review", {
             "review_tier": tier,
@@ -8917,11 +9001,18 @@ def complete_task(
                 summary=summary if summary is not None else result,
                 metadata=metadata,
             )
-        # B2: an APPROVED verdict is the verifier completing the task it
-        # reviewed. Only the review lane writes it (anti-loop discriminator);
-        # ordinary coder completions leave task_runs.verdict NULL.
+        # B2: only the review lane writes structured verdicts (anti-loop
+        # discriminator); ordinary coder completions leave task_runs.verdict
+        # NULL even when metadata carries a free-form verdict key.
         if _run_originated_from_review(conn, task_id, run_id):
-            _set_run_verdict(conn, run_id, "APPROVED")
+            verdict = _extract_review_verdict(
+                result=result,
+                summary=summary,
+                metadata=metadata,
+                default="APPROVED",
+            )
+            if verdict is not None:
+                _set_run_verdict(conn, run_id, verdict)
         # Carry the handoff summary in the event payload so gateway
         # notifiers and dashboard WS consumers can render it without a
         # second SQL round-trip. First line only, 400 char cap — the
@@ -9773,11 +9864,16 @@ def block_task(
                 summary=reason,
                 metadata=reviewer_metadata,
             )
-        # B2: a REQUEST_CHANGES verdict is the verifier rejecting the task it
-        # reviewed. Only the review lane writes it; ordinary blocks (a coder
-        # hitting a wall) leave task_runs.verdict NULL.
+        # B2: only the review lane writes structured verdicts; ordinary blocks
+        # (a coder hitting a wall) leave task_runs.verdict NULL.
         if _run_originated_from_review(conn, task_id, run_id):
-            _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
+            verdict = _extract_review_verdict(
+                summary=reason,
+                metadata=reviewer_metadata,
+                default="REQUEST_CHANGES",
+            )
+            if verdict is not None:
+                _set_run_verdict(conn, run_id, verdict)
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(

@@ -10604,6 +10604,64 @@ def test_b2_request_changes_verdict_on_review_block(kanban_home):
         assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
 
 
+def test_b2_review_complete_extracts_needs_revision_verdict(kanban_home):
+    """Reviewer verdict strings override the completion default."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ok = kb.complete_task(
+            conn,
+            t,
+            result="reviewed",
+            summary="Verdict: NEEDS_REVISION",
+        )
+        assert ok is True
+        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+
+
+def test_b2_review_complete_extracts_metadata_verdict_synonym(kanban_home):
+    """Structured reviewer metadata is normalized before column write."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ok = kb.complete_task(
+            conn,
+            t,
+            result="reviewed",
+            summary="done",
+            metadata={"review_verdict": "changes-requested"},
+        )
+        assert ok is True
+        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+
+
+def test_b2_review_block_extracts_metadata_verdict_synonym(kanban_home):
+    """Block path uses the same reviewer verdict normalization."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder")
+        _set_task_status(conn, t, "review")
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        ok = kb.block_task(
+            conn,
+            t,
+            reason="blocking after review",
+            reviewer_metadata={"review": {"verdict": "needs revision"}},
+        )
+        assert ok is True
+        assert _latest_run_verdict(conn, t) == "REQUEST_CHANGES"
+
+
+def test_b2_set_run_verdict_requires_existing_run_row(kanban_home):
+    """The verdict update is atomic: exactly one task_runs row must change."""
+    with kb.connect() as conn:
+        assert kb._set_run_verdict(conn, 999_999_999, "APPROVED") is False
+
+
 def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
     """An ordinary coder completion leaves task_runs.verdict NULL."""
     with kb.connect() as conn:

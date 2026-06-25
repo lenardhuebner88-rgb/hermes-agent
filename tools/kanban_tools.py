@@ -1363,7 +1363,10 @@ KANBAN_COMPLETE_SCHEMA = {
                 "description": (
                     "Free-form dict of structured facts about this "
                     "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
-                    "\"findings\": [...]}. Surfaced to downstream "
+                    "\"findings\": [...]}. Reviewer runs may include "
+                    "``review_verdict``/``verdict`` values such as APPROVED "
+                    "or NEEDS_REVISION; the kanban DB normalizes those only "
+                    "for review-originated runs. Surfaced to downstream "
                     "workers alongside ``summary``."
                 ),
             },
@@ -1442,7 +1445,10 @@ KANBAN_BLOCK_SCHEMA = {
                 "description": (
                     "What you need answered, in one or two sentences. "
                     "Don't paste the whole conversation; the human has "
-                    "the board and can ask follow-ups via comments."
+                    "the board and can ask follow-ups via comments. Reviewer "
+                    "runs can put NEEDS_REVISION/REQUEST_CHANGES in the reason; "
+                    "the kanban DB normalizes it into task_runs.verdict only "
+                    "when the run originated from review."
                 ),
             },
             "blocking_findings": {
