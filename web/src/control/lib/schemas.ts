@@ -349,6 +349,8 @@ export type ChainCostsResponse = z.infer<typeof ChainCostsResponseSchema>;
 const WindowedRollupWorkerSchema = ChainCostsLaneSchema.extend({
   provider: z.string().nullable().catch(null),
   model: z.string().nullable().catch(null),
+  provider_model_source: z.enum(["run_metadata", "session_log", "lane_current_fallback", "unknown"]).catch("unknown"),
+  unknown_run_count: z.coerce.number().catch(0),
 });
 
 const WindowedRollupRunnerSchema = z.object({
@@ -357,6 +359,7 @@ const WindowedRollupRunnerSchema = z.object({
   profile: z.string().catch("unbekannt"),
   provider: z.string().nullable().catch(null),
   model: z.string().nullable().catch(null),
+  provider_model_source: z.enum(["run_metadata", "session_log", "lane_current_fallback", "unknown"]).catch("unknown"),
   input_tokens: z.coerce.number().nullable().catch(null),
   output_tokens: z.coerce.number().nullable().catch(null),
   cost_usd: nullableNumber,
@@ -382,6 +385,7 @@ const WindowedRollupRootSchema = z.object({
   cost_usd: nullableNumber,
   cost_usd_equivalent: nullableNumber,
   cost_effective_usd: nullableNumber,
+  unknown_run_count: z.coerce.number().catch(0),
   billing_mode: z.string().nullable().catch(null),
   neuralwatt: z.unknown().nullable().catch(null),
   runtime_seconds: z.coerce.number().nullable().catch(null),

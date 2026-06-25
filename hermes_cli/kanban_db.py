@@ -23498,13 +23498,14 @@ def _profile_provider_model_from_runs(
     lane_lookup: Optional[
         Callable[[Optional[str]], tuple[Optional[str], Optional[str]]]
     ] = None,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], str]:
     if lane_lookup is not None:
-        provider, model = lane_lookup(profile)
+        fallback_provider, fallback_model = lane_lookup(profile)
     else:
-        provider, model = _lane_provider_model_for_profile(profile, board=board)
+        fallback_provider, fallback_model = _lane_provider_model_for_profile(profile, board=board)
     if not member_ids:
-        return provider, model
+        source = "lane_current_fallback" if fallback_provider or fallback_model else "unknown"
+        return fallback_provider, fallback_model, source
     placeholders = ",".join("?" for _ in member_ids)
     try:
         rows = conn.execute(
@@ -23517,24 +23518,34 @@ def _profile_provider_model_from_runs(
             [*member_ids, profile],
         ).fetchall()
     except sqlite3.OperationalError:
-        return provider, model
+        source = "lane_current_fallback" if fallback_provider or fallback_model else "unknown"
+        return fallback_provider, fallback_model, source
     for row in rows:
         meta = _run_meta_dict(row["metadata"])
-        provider = (
-            meta.get("provider")
-            or meta.get("billing_provider")
-            or meta.get("api_provider")
-            or provider
+        provider, model, source = _provider_model_with_source(
+            meta,
+            fallback_provider,
+            fallback_model,
         )
-        model = (
-            meta.get("model")
-            or meta.get("billing_model")
-            or meta.get("api_model")
-            or model
-        )
-        if provider and model:
-            break
-    return provider, model
+        if source in {"run_metadata", "session_log"}:
+            return provider, model, source
+    source = "lane_current_fallback" if fallback_provider or fallback_model else "unknown"
+    return fallback_provider, fallback_model, source
+
+
+def _provider_model_with_source(
+    meta: dict[str, Any],
+    fallback_provider: Optional[str],
+    fallback_model: Optional[str],
+) -> tuple[Optional[str], Optional[str], str]:
+    provider = meta.get("provider") or meta.get("billing_provider") or meta.get("api_provider")
+    model = meta.get("model") or meta.get("billing_model") or meta.get("api_model")
+    if provider or model:
+        source = "session_log" if meta.get("cost_source") == "session_log" else "run_metadata"
+        return provider or fallback_provider, model or fallback_model, source
+    if fallback_provider or fallback_model:
+        return fallback_provider, fallback_model, "lane_current_fallback"
+    return None, None, "unknown"
 
 
 def _run_cost_equivalent_from_meta(meta: dict[str, Any]) -> Optional[float]:
@@ -23600,6 +23611,8 @@ def runs_windowed_rollup(
         runners: list[dict[str, Any]] = []
         cost: Optional[float] = None
         equiv: Optional[float] = None
+        unknown_run_count = 0
+        worker_costs: dict[Optional[str], dict[str, Any]] = {}
         providers: set[str] = set()
         billing_modes: set[str] = set()
         started_at: Optional[int] = None
@@ -23621,17 +23634,10 @@ def runs_windowed_rollup(
             for run in run_rows:
                 meta = _run_meta_dict(run["metadata"])
                 fallback_provider, fallback_model = cached_lane_provider_model(run["profile"])
-                provider = (
-                    meta.get("provider")
-                    or meta.get("billing_provider")
-                    or meta.get("api_provider")
-                    or fallback_provider
-                )
-                model = (
-                    meta.get("model")
-                    or meta.get("billing_model")
-                    or meta.get("api_model")
-                    or fallback_model
+                provider, model, provider_model_source = _provider_model_with_source(
+                    meta,
+                    fallback_provider,
+                    fallback_model,
                 )
                 if provider:
                     providers.add(str(provider))
@@ -23652,6 +23658,34 @@ def runs_windowed_rollup(
                 run_equiv = _run_cost_equivalent_from_meta(meta)
                 if run_equiv is not None:
                     equiv = (equiv or 0.0) + run_equiv
+                worker_stats = worker_costs.setdefault(
+                    run["profile"],
+                    {
+                        "cost_usd": None,
+                        "cost_usd_equivalent": None,
+                        "unknown_run_count": 0,
+                        "evidence_count": 0,
+                    },
+                )
+                if run_cost is not None:
+                    worker_stats["cost_usd"] = (worker_stats["cost_usd"] or 0.0) + run_cost
+                if run_equiv is not None:
+                    worker_stats["cost_usd_equivalent"] = (worker_stats["cost_usd_equivalent"] or 0.0) + run_equiv
+                has_usage_evidence = bool(
+                    (run["input_tokens"] or 0)
+                    or (run["output_tokens"] or 0)
+                    or meta.get("provider")
+                    or meta.get("billing_provider")
+                    or meta.get("api_provider")
+                    or meta.get("model")
+                    or meta.get("billing_model")
+                    or meta.get("api_model")
+                )
+                if run_cost is not None or run_equiv is not None:
+                    worker_stats["evidence_count"] += 1
+                elif has_usage_evidence:
+                    unknown_run_count += 1
+                    worker_stats["unknown_run_count"] += 1
                 runtime_seconds: Optional[int] = None
                 if run["started_at"] is not None and run["ended_at"] is not None:
                     runtime_seconds = max(0, int(run["ended_at"]) - int(run["started_at"]))
@@ -23661,6 +23695,7 @@ def runs_windowed_rollup(
                     "profile": run["profile"],
                     "provider": provider,
                     "model": model,
+                    "provider_model_source": provider_model_source,
                     "input_tokens": run["input_tokens"],
                     "output_tokens": run["output_tokens"],
                     "cost_usd": run_cost,
@@ -23683,7 +23718,7 @@ def runs_windowed_rollup(
         workers: list[dict[str, Any]] = []
         for lane in breakdown.get("by_lane", []):
             worker = dict(lane)
-            provider, model = _profile_provider_model_from_runs(
+            provider, model, provider_model_source = _profile_provider_model_from_runs(
                 conn,
                 member_ids,
                 worker.get("profile"),
@@ -23692,6 +23727,23 @@ def runs_windowed_rollup(
             )
             worker["provider"] = provider
             worker["model"] = model
+            worker["provider_model_source"] = provider_model_source
+            stats = worker_costs.get(worker.get("profile"))
+            if stats is not None:
+                worker["unknown_run_count"] = stats["unknown_run_count"]
+                if stats["evidence_count"]:
+                    worker["cost_usd"] = stats["cost_usd"]
+                    worker["cost_usd_equivalent"] = stats["cost_usd_equivalent"]
+                    worker["cost_effective_usd"] = (
+                        (stats["cost_usd"] or 0.0)
+                        + (stats["cost_usd_equivalent"] or 0.0)
+                    )
+                else:
+                    worker["cost_usd"] = None
+                    worker["cost_usd_equivalent"] = None
+                    worker["cost_effective_usd"] = None
+            else:
+                worker["unknown_run_count"] = 0
             worker["neuralwatt"] = _neuralwatt_detail(
                 kwh=worker.get("billing_neuralwatt_kwh"),
                 cost=worker.get("billing_neuralwatt_cost_usd"),
@@ -23721,6 +23773,7 @@ def runs_windowed_rollup(
             "cost_usd": cost,
             "cost_usd_equivalent": equiv,
             "cost_effective_usd": cost_effective,
+            "unknown_run_count": unknown_run_count,
             "billing_mode": (
                 next(iter(billing_modes))
                 if len(billing_modes) == 1

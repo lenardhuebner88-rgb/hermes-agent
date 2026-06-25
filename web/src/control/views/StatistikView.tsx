@@ -530,7 +530,12 @@ function fmtRuntime(seconds: number | null | undefined): string {
   return remMins ? `${hours}h ${remMins}m` : `${hours}h`;
 }
 
-function estimateSuffix(provider: string | null | undefined, billingMode: string | null | undefined): string {
+function estimateSuffix(
+  provider: string | null | undefined,
+  billingMode: string | null | undefined,
+  providerModelSource?: string | null,
+): string {
+  if (providerModelSource === "lane_current_fallback") return " (gesch.)";
   const source = `${provider ?? ""} ${billingMode ?? ""}`.toLowerCase();
   return source.includes("openrouter") || source.includes("metered") ? " (gesch.)" : "";
 }
@@ -541,6 +546,7 @@ function ledgerDetailTitle(item: {
   provider?: string | null;
   providers?: string[];
   model?: string | null;
+  provider_model_source?: string | null;
   billing_mode?: string | null;
   runtime_seconds?: number | null;
 }): string {
@@ -549,7 +555,7 @@ function ledgerDetailTitle(item: {
   const billingMode = item.billing_mode ?? null;
   return [
     `USD effektiv: ${fmtUsd(item.cost_effective_usd ?? item.cost_usd)}`,
-    `USD echt/metered: ${fmtUsd(item.cost_usd)}${estimateSuffix(provider, billingMode)}`,
+    `USD echt/metered: ${fmtUsd(item.cost_usd)}${estimateSuffix(provider, billingMode, item.provider_model_source)}`,
     `Provider/Model: ${provider ?? "—"}${model ? ` · ${model}` : ""}`,
     `billing_mode: ${billingMode ?? "—"}`,
     `Laufzeit: ${fmtRuntime(item.runtime_seconds)}`,
@@ -599,7 +605,7 @@ export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot
           <span className="sb-mono">#{runner.id}</span>
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
           <b className="sb-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
-          <b className="sb-mono">{fmtUsd(runner.cost_effective_usd ?? runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode)}</b>
+          <b className="sb-mono">{fmtUsd(runner.cost_effective_usd ?? runner.cost_usd)}{estimateSuffix(runner.provider, runner.billing_mode, runner.provider_model_source)}</b>
           <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · Neuralwatt —</small>
         </div>
       ))}

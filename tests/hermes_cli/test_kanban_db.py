@@ -13394,6 +13394,82 @@ def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkey
     assert runners_by_profile["verifier"]["provider"] == "verifier-provider"
 
 
+def test_runs_windowed_rollup_exposes_source_and_unknown_counts(kanban_home, monkeypatch):
+    """S1a contract: provider/model source is explicit and missing price evidence stays null."""
+    monkeypatch.setattr(
+        kb,
+        "_lane_provider_model_for_profile",
+        lambda profile, *, board=None: (f"{profile}-provider", f"{profile}-model"),
+    )
+    with kb.connect() as conn:
+        metered_root = kb.create_task(conn, title="metered root", assignee="orchestrator")
+        zero_root = kb.create_task(conn, title="known zero root", assignee="orchestrator")
+        unknown_root = kb.create_task(conn, title="unknown root", assignee="orchestrator")
+        with kb.write_txn(conn):
+            conn.execute(
+                "DELETE FROM task_runs WHERE task_id IN (?, ?, ?)",
+                (metered_root, zero_root, unknown_root),
+            )
+            _insert_run_cost_with_meta(
+                conn,
+                metered_root,
+                profile="coder",
+                input_tokens=81_750,
+                output_tokens=2_226,
+                cost_usd=0.03760227,
+                metadata={"provider": "openrouter", "model": "deepseek/deepseek-chat-v3.1"},
+            )
+            _insert_run_cost_with_meta(
+                conn,
+                zero_root,
+                profile="free-lane",
+                input_tokens=10,
+                output_tokens=1,
+                cost_usd=0.0,
+                metadata={"provider": "local", "model": "noop"},
+            )
+            _insert_run_cost_with_meta(
+                conn,
+                unknown_root,
+                profile="claude-cli",
+                input_tokens=100,
+                output_tokens=10,
+                cost_usd=None,
+                metadata={},
+            )
+
+        kb.complete_task(conn, metered_root, summary="done")
+        kb.complete_task(conn, zero_root, summary="done")
+        kb.complete_task(conn, unknown_root, summary="done")
+
+    with kb.connect() as conn:
+        result = kb.runs_windowed_rollup(conn, since_hours=24, max_roots=10, board="default")
+
+    roots = [root for root in result["roots"] if root["id"] in {metered_root, zero_root, unknown_root}]
+    assert [root["id"] for root in roots] == [metered_root, zero_root, unknown_root]
+
+    metered = roots[0]
+    assert metered["cost_usd"] == pytest.approx(0.03760227)
+    assert metered["cost_effective_usd"] == pytest.approx(0.03760227)
+    assert metered["unknown_run_count"] == 0
+    assert metered["workers"][0]["provider_model_source"] == "run_metadata"
+    assert metered["runners"][0]["provider_model_source"] == "run_metadata"
+
+    zero = roots[1]
+    assert zero["cost_effective_usd"] == pytest.approx(0.0)
+    assert zero["unknown_run_count"] == 0
+
+    unknown = roots[2]
+    assert unknown["cost_usd"] is None
+    assert unknown["cost_usd_equivalent"] is None
+    assert unknown["cost_effective_usd"] is None
+    assert unknown["unknown_run_count"] == 1
+    assert unknown["workers"][0]["cost_effective_usd"] is None
+    assert unknown["workers"][0]["unknown_run_count"] == 1
+    assert unknown["workers"][0]["provider_model_source"] == "lane_current_fallback"
+    assert unknown["runners"][0]["provider_model_source"] == "lane_current_fallback"
+
+
 def test_runs_windowed_rollup_emits_neuralwatt_request_cost_detail(kanban_home, monkeypatch):
     """NeuralWatt detail is sourced from metadata.cost.request_cost_usd, not kWh × rate."""
     monkeypatch.setattr(

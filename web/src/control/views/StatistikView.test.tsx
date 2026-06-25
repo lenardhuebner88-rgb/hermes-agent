@@ -244,6 +244,8 @@ function rollupWorker(over: Partial<WindowedRollupWorker> = {}): WindowedRollupW
     provider: "anthropic",
     model: "claude-opus-4-8",
     ...over,
+    provider_model_source: over.provider_model_source ?? "run_metadata",
+    unknown_run_count: over.unknown_run_count ?? 0,
   };
 }
 
@@ -262,6 +264,7 @@ function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot 
     cost_usd: 0,
     cost_usd_equivalent: 0.42,
     cost_effective_usd: 0.42,
+    unknown_run_count: 0,
     billing_mode: "subscription_included",
     neuralwatt: null,
     runtime_seconds: 90,
@@ -272,6 +275,7 @@ function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot 
       profile: "coder",
       provider: "anthropic",
       model: "claude-opus-4-8",
+      provider_model_source: "run_metadata",
       input_tokens: 1000,
       output_tokens: 200,
       cost_usd: 0,
