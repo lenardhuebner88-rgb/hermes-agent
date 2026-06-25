@@ -723,11 +723,14 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
 # ---------------------------------------------------------------------------
 
 _RECEIPT_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}\.md$")
-_MAX_RECEIPTS_PER_AGENT = 40
+_RECEIPT_SUBDIRS = ("auto", "mother")
+_MAX_RECEIPTS_FLAT = 40
+_MAX_RECEIPTS_PER_SUBDIR = 40
+_MAX_RECEIPTS_PER_AGENT = _MAX_RECEIPTS_FLAT
 # path → (mtime_ns, size, geparstes Item oder None).
 _receipt_parse_cache: dict[str, tuple[int, int, Optional[_Item]]] = {}
-# receipts_dir → (dir_mtime_ns, newest-N Dateinamen, mtime-absteigend).
-_receipt_dir_cache: dict[str, tuple[int, list[str]]] = {}
+# receipts_dir → ((dir_mtime_ns, subdir_mtimes), newest Dateinamen, mtime-absteigend).
+_receipt_dir_cache: dict[str, tuple[tuple[int, tuple[int | None, ...]], list[str]]] = {}
 
 
 def _receipts_root() -> Path:
@@ -735,28 +738,53 @@ def _receipts_root() -> Path:
 
 
 def _newest_receipt_names(receipts_dir: Path) -> list[str]:
-    """Newest-N per Datei-mtime (Receipt-Namen sind nicht zeitlich sortierbar).
-    Dir-mtime-keyed wie der Cron-Dir-Cache: Anlegen/Löschen invalidiert;
-    eine reine Inhalts-Änderung fängt der Parse-Cache."""
+    """Newest receipts per source (flat + allowlisted subdirs).
+
+    Receipt-Namen sind nicht zeitlich sortierbar. Der Cache hängt am
+    Parent-dir-mtime und an den Subdir-mtimes, damit neue Auto-Receipts in
+    ``receipts/auto`` invalidieren, obwohl der Parent unverändert bleiben kann.
+    Eine reine Inhalts-Änderung fängt weiterhin der Parse-Cache.
+    """
     key = str(receipts_dir)
     try:
         dir_mtime = receipts_dir.stat().st_mtime_ns
     except OSError:
         _receipt_dir_cache.pop(key, None)
         return []
+    subdir_mtimes: list[int | None] = []
+    for sub in _RECEIPT_SUBDIRS:
+        subdir = receipts_dir / sub
+        try:
+            subdir_mtimes.append(subdir.stat().st_mtime_ns if subdir.is_dir() else None)
+        except OSError:
+            subdir_mtimes.append(None)
+    cache_key = (dir_mtime, tuple(subdir_mtimes))
     cached = _receipt_dir_cache.get(key)
-    if cached is not None and cached[0] == dir_mtime:
+    if cached is not None and cached[0] == cache_key:
         return cached[1]
-    entries: list[tuple[int, str]] = []
+    flat_entries: list[tuple[int, str]] = []
     for e in receipts_dir.iterdir():
         if e.is_symlink() or not _RECEIPT_FILE_RE.match(e.name):
             continue
         try:
-            entries.append((e.stat().st_mtime_ns, e.name))
+            flat_entries.append((e.stat().st_mtime_ns, e.name))
         except OSError:
             continue
-    names = [n for _, n in sorted(entries, reverse=True)[:_MAX_RECEIPTS_PER_AGENT]]
-    _receipt_dir_cache[key] = (dir_mtime, names)
+    names = [n for _, n in sorted(flat_entries, reverse=True)[:_MAX_RECEIPTS_FLAT]]
+    for sub in _RECEIPT_SUBDIRS:
+        subdir = receipts_dir / sub
+        if subdir.is_symlink() or not subdir.is_dir():
+            continue
+        sub_entries: list[tuple[int, str]] = []
+        for e in subdir.iterdir():
+            if e.is_symlink() or not _RECEIPT_FILE_RE.match(e.name):
+                continue
+            try:
+                sub_entries.append((e.stat().st_mtime_ns, f"{sub}/{e.name}"))
+            except OSError:
+                continue
+        names.extend(n for _, n in sorted(sub_entries, reverse=True)[:_MAX_RECEIPTS_PER_SUBDIR])
+    _receipt_dir_cache[key] = (cache_key, names)
     return names
 
 
