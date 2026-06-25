@@ -15,7 +15,7 @@
  *
  * Mobil-first: the column is capped at 27rem and reads top-to-bottom at 390px.
  */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import {
@@ -87,6 +87,31 @@ const ERROR_LABEL: Record<string, string> = {
   budget: de.stats.errBudget,
   other: de.stats.errOther,
 };
+
+const LANE_COLORS: Record<string, string> = {
+  coder: "#1e40af",
+  "coder-claude": "#6d28d9",
+  premium: "#6d28d9",
+  reviewer: "#15803d",
+  verifier: "#0e7490",
+  critic: "#b91c1c",
+  scout: "#c2410c",
+  research: "#a16207",
+  admin: "#475569",
+};
+
+function laneStyle(profile: string): CSSProperties {
+  return { "--sb-lane": LANE_COLORS[profile] ?? "#475569" } as CSSProperties;
+}
+
+function LaneLabel({ profile, label = profile }: { profile: string; label?: ReactNode }) {
+  return (
+    <span className="sb-lane-label" style={laneStyle(profile)}>
+      <span className="sb-lane-dot" aria-hidden="true" />
+      <span>{label}</span>
+    </span>
+  );
+}
 
 // ── Masthead ────────────────────────────────────────────────────────────────
 // Acceptance headline + the three supporting KPIs. `profiles`/`baseline` are the
@@ -172,7 +197,7 @@ export function ReliabilitySection({ profiles }: { profiles: ReliabilityProfile[
           <LeaderRow
             key={r.profile}
             rank={i + 1}
-            name={r.label}
+            name={<LaneLabel profile={r.profile} label={r.label} />}
             score={r.rate == null ? "—" : `${Math.round(r.rate * 100)} %`}
             status={r.status}
             latency={de.stats.leaderRuns(r.runs)}
@@ -318,7 +343,7 @@ export function EffizienzSection({
             <LeaderRow
               key={l.profile}
               rank={i + 1}
-              name={l.label}
+              name={<LaneLabel profile={l.profile} label={l.label} />}
               score={fmtTokens(l.tokens)}
               status="neutral"
               latency={
@@ -359,11 +384,11 @@ export function SubscriptionBurnSection({ burn }: { burn: SubscriptionTokenBurnR
             <div>
               <p className="sb-kick">{de.stats.subscriptionBurnTop}</p>
               {detail.topLanes.map((row) => (
-                <div key={`${row.subscription}:${row.profile}`} className="sb-subburn-row">
-                  <span>{row.profile} · {row.subscription}</span>
-                  <i />
+                <div key={`${row.subscription}:${row.profile}`} className="sb-subburn-row" style={laneStyle(row.profile)}>
+                  <span aria-label={`${row.profile} · ${row.subscription}`}><LaneLabel profile={row.profile} /> · {row.subscription}</span>
+                  <i style={{ "--sb-share": `${Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
                   <b className="sb-mono">{fmtTokens(row.total_tokens)}</b>
-                  <small className="sb-mono">{Math.round(row.share * 100)} %</small>
+                  <small>{Math.round(row.share * 100)}%</small>
                 </div>
               ))}
             </div>
@@ -669,7 +694,7 @@ export function MotherLedgerSection() {
                 <div key={key} className="sb-ledger-pair">
                   <button type="button" className="sb-ledger-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open} title={index === 0 ? ledgerDetailTitle(root) : undefined}>
                     <span className="sb-ledger-mother">{index === 0 ? (root.title ?? root.id) : ""}</span>
-                    <span>{worker.profile}</span>
+                    <span><LaneLabel profile={worker.profile} /></span>
                     <span className="sb-mono">{worker.run_count}</span>
                     <span className="sb-mono">{fmtTokens(workerTokens(worker))}</span>
                     <span className="sb-mono sb-ledger-usd"><b>{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b><small>inkl. Cache</small></span>
@@ -690,7 +715,7 @@ export function MotherLedgerSection() {
                   return (
                     <div key={key} className="sb-ledger-worker-card">
                       <button type="button" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={open}>
-                        <span>{worker.profile}</span>
+                        <span><LaneLabel profile={worker.profile} /></span>
                         <b className="sb-mono">{fmtUsd(worker.cost_effective_usd ?? worker.cost_usd)}</b>
                         <small>Runs {worker.run_count} · {fmtTokens(workerTokens(worker))} Tokens · USD inkl. Cache</small>
                       </button>

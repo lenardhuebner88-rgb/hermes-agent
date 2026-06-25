@@ -21,11 +21,13 @@ export type ControlTab = "overview" | "inbox" | "pulse" | "workstreams" | "flow"
 const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
   { id: "flow", label: de.tabs.flow, mobileLabel: "Flow", path: "/control/flow", icon: Columns3 },
-  { id: "ketten", label: "Ketten", mobileLabel: "DAG", path: "/control/ketten", icon: GitBranch },
-  { id: "statistik", label: de.tabs.statistik, mobileLabel: "Stats", path: "/control/statistik", icon: ChartSpline },
+  { id: "ketten", label: "Ketten", mobileLabel: "Ketten", path: "/control/ketten", icon: GitBranch },
+  { id: "statistik", label: de.tabs.statistik, mobileLabel: "Statistik", path: "/control/statistik", icon: ChartSpline },
   { id: "bibliothek", label: "Bibliothek", mobileLabel: "Bibliothek", path: "/control/bibliothek", icon: BookOpen },
   { id: "stratege", label: "Stratege", mobileLabel: "Stratege", path: "/control/stratege", icon: Lightbulb },
 ];
+
+const mobileTabs = tabs.filter((tab) => ["inbox", "flow", "ketten", "statistik"].includes(tab.id));
 
 // Demoted control surfaces — still routed + reachable, just not in the primary
 // rail/bottom-bar. The Command home already surfaces their headline signal.
@@ -118,7 +120,7 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
   // M3 Variante A) — das Header-Dropdown ist dort zu hoch und schloss sich beim
   // Scrollversuch. Aktiv markiert, wenn die aktuelle View keine der 4 Haupt-Tabs ist.
   const [moreOpen, setMoreOpen] = useState(false);
-  const moreActive = !tabs.some((tab) => tab.id === active);
+  const moreActive = !mobileTabs.some((tab) => tab.id === active);
   return (
     <div className="hc-page flex min-h-0 flex-col px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 lg:px-8">
       <header className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -128,8 +130,8 @@ function ShellAiry({ active, children, inbox, openProposals, inboxTotal, inboxTo
       </header>
       <main className="mx-auto w-full max-w-6xl flex-1">{children}</main>
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t lg:hidden border-white/10 bg-black/85 px-2 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-xl">
-        <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length + 1}, minmax(0, 1fr))` }}>
-          {tabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
+        <div className="grid grid-cols-5">
+          {mobileTabs.map((tab) => <TabButton key={tab.id} tab={tab} active={active === tab.id} badge={tabBadge(tab.id, openProposals, inboxTotal, inboxTone, libraryUnread ?? 0, strategistCount ?? 0)} onClick={() => onNavigate(tab.id)} onPrefetch={() => onPrefetch?.(tab.id)} />)}
           <button type="button" onClick={() => setMoreOpen(true)} aria-label="Mehr" aria-expanded={moreOpen} className={cn("hc-tab relative flex flex-col items-center justify-center gap-1 text-xs hc-soft", moreActive && "text-[var(--hc-accent-text)]")}>
             <MoreHorizontal className="h-5 w-5" />
             <span className="max-w-full truncate px-0.5">Mehr</span>
