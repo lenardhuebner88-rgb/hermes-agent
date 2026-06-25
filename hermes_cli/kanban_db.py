@@ -7762,7 +7762,8 @@ def _set_run_verdict(
         return False
     try:
         cur = conn.execute(
-            "UPDATE task_runs SET verdict = ? WHERE id = ?",
+            "UPDATE task_runs SET verdict = ? "
+            "WHERE id = ? AND (verdict IS NULL OR verdict = '')",
             (verdict, int(run_id)),
         )
     except sqlite3.Error:

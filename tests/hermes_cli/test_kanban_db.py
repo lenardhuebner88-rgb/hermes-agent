@@ -10662,6 +10662,53 @@ def test_b2_set_run_verdict_requires_existing_run_row(kanban_home):
         assert kb._set_run_verdict(conn, 999_999_999, "APPROVED") is False
 
 
+def test_b2_auto_approved_not_overwritten_by_metadata_verdict(kanban_home, monkeypatch):
+    """A review-chain auto-APPROVED verdict cannot be clobbered later."""
+    monkeypatch.setattr(
+        kb,
+        "_review_stages_for_tier",
+        lambda tier, cfg: ["verifier", "critic"],
+    )
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="coder", review_tier="critical")
+        assert kb._submit_for_review(
+            conn,
+            t,
+            verified_cards=[],
+            target_profile="verifier",
+            stage=0,
+            effective_tier="critical",
+            result=None,
+            summary=None,
+            metadata=None,
+            expected_run_id=None,
+        )
+        assert kb.claim_review_task(conn, t, reviewer_profile="verifier") is not None
+        run_id = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()["current_run_id"]
+
+        assert kb.complete_task(conn, t, summary="verifier approved") is True
+        assert _latest_run_verdict(conn, t) == "APPROVED"
+
+        # Regression guard: stale/retried completion must not let generic
+        # metadata-verdict extraction overwrite the review-chain auto-APPROVED
+        # verdict already recorded on this run.
+        conn.execute(
+            "UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?",
+            (run_id, t),
+        )
+        assert kb.complete_task(
+            conn,
+            t,
+            summary="late metadata extraction",
+            metadata={"verdict": "NEEDS_REVISION"},
+        ) is True
+
+        assert _latest_run_verdict(conn, t) == "APPROVED"
+
+
 def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
     """An ordinary coder completion leaves task_runs.verdict NULL."""
     with kb.connect() as conn:
