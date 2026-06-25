@@ -1758,6 +1758,122 @@ def test_s1c_audited_non_claude_equivalent_skips_no_model_claude_and_metered(
         assert "cost_usd_equivalent" not in metered_meta
 
 
+def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
+    kanban_home, tmp_path, monkeypatch
+):
+    """S1d: corrected prices, CSI-only lookup, missing models, and S1b guardrails."""
+    profile_dir = tmp_path / "profiles" / "coder"
+    state_db = profile_dir / "state.db"
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
+    with kb.connect() as conn:
+        restamp_tid = kb.create_task(conn, title="s1d-restamp", assignee="coder")
+        mini_tid = kb.create_task(conn, title="s1d-restamp-mini", assignee="coder")
+        csi_tid = kb.create_task(conn, title="s1d-csi", assignee="coder")
+        missing_tid = kb.create_task(conn, title="s1d-missing", assignee="coder")
+        s1b_tid = kb.create_task(conn, title="s1d-s1b-skip", assignee="coder")
+
+        restamp_run = _insert_run_window(
+            conn,
+            restamp_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={
+                "cost_usd_equivalent": 6.011145,
+                "cost_equivalent_model": "gpt-5.4",
+                "cost_equivalent_provider": "openai-codex",
+                "cost_equivalent_input_tokens": 780_435,
+                "cost_equivalent_output_tokens": 70_299,
+                "cost_equivalent_cache_read_tokens": 0,
+                "cost_equivalent_cache_write_tokens": 0,
+            },
+        )
+        mini_run = _insert_run_window(
+            conn,
+            mini_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={
+                "cost_usd_equivalent": 0.008,
+                "cost_equivalent_model": "gpt-5.4-mini",
+                "cost_equivalent_provider": "openai-codex",
+                "cost_equivalent_input_tokens": 1000,
+                "cost_equivalent_output_tokens": 100,
+                "cost_equivalent_cache_read_tokens": 0,
+                "cost_equivalent_cache_write_tokens": 0,
+            },
+        )
+        csi_run = _insert_run_window(
+            conn,
+            csi_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"cost_session_ids": [f"{state_db}::S-csi"]},
+        )
+        missing_run = _insert_run_window(
+            conn,
+            missing_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={"worker_session_id": "S-kimi"},
+        )
+        s1b_run = _insert_run_window(
+            conn,
+            s1b_tid,
+            profile="coder",
+            started_at=1000,
+            ended_at=2000,
+            metadata={
+                "cost_usd_equivalent": 99.0,
+                "cost_equivalent_model": "gpt-5.4",
+                "cost_equivalent_source": "s1b_audited_session_usage",
+            },
+        )
+        _write_session_rows(state_db, [
+            {"id": "S-csi", "source": "cli", "started_at": 1500,
+             "input_tokens": 1000, "output_tokens": 100,
+             "cache_read_tokens": 0, "cache_write_tokens": 0,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "glm-5.2", "billing_provider": "zai",
+             "cwd": f"/x/kanban/workspaces/{csi_tid}"},
+            {"id": "S-kimi", "source": "cli", "started_at": 1500,
+             "input_tokens": 1000, "output_tokens": 100,
+             "cache_read_tokens": 0, "cache_write_tokens": 0,
+             "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+             "model": "kimi-for-coding", "billing_provider": "moonshot",
+             "cwd": f"/x/kanban/workspaces/{missing_tid}"},
+        ])
+
+        dry = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50)
+        assert dry["updated"] == 0
+        assert dry["classes"]["restamp_price_correction"] == 2
+        assert dry["classes"]["new_stamp_csi"] == 1
+        assert dry["classes"]["new_stamp_missing_model"] == 1
+
+        applied = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
+        assert applied["updated"] == 4
+
+        rows = conn.execute(
+            "SELECT id, metadata FROM task_runs WHERE id IN (?, ?, ?, ?, ?)",
+            (restamp_run, mini_run, csi_run, missing_run, s1b_run),
+        ).fetchall()
+        by_id = {row["id"]: json.loads(row["metadata"]) for row in rows}
+        assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(2.6540775)
+        assert by_id[restamp_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(6.011145)
+        assert by_id[restamp_run]["provider_model_source"] == "unknown"
+        assert by_id[mini_run]["cost_usd_equivalent"] == pytest.approx(0.0012)
+        assert by_id[mini_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(0.008)
+        assert by_id[csi_run]["cost_usd_equivalent"] == pytest.approx(0.000098)
+        assert by_id[csi_run]["provider_model_source"] == "session_log"
+        assert by_id[missing_run]["cost_usd_equivalent"] == pytest.approx(0.000829)
+        assert by_id[missing_run]["provider_model_source"] == "session_log"
+        assert by_id[s1b_run]["cost_usd_equivalent"] == pytest.approx(99.0)
+        assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[s1b_run]
+
+
 def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypatch):
     """Opt-in repair: old subscription runs frozen at cost_usd=0.0 with
     tokens but no worker_session_id can still get a bounded API-equivalent
