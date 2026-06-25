@@ -322,6 +322,72 @@ def test_receipt_adapter_cap_and_cache(kanban_home, tmp_path):
     assert lv._receipt_parse_cache[sample][2] is not None
 
 
+def test_library_view_receipts_subdirs(kanban_home, tmp_path):
+    """Receipts: flach + auto/ + mother/ haben je ein eigenes Cap und
+    Subdir-mtime invalidiert den Dir-Cache auch bei unverändertem Parent."""
+    import os
+
+    receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    auto = receipts / "auto"
+    mother = receipts / "mother"
+    auto.mkdir(parents=True)
+    mother.mkdir()
+
+    for n in range(3):
+        p = _write_receipt(tmp_path, "Hermes", f"flat-{n}.md", body=f"# Flat {n}\n")
+        os.utime(p, (1_700_000_000 + n, 1_700_000_000 + n))
+    for n in range(3):
+        p = auto / f"auto-{n}.md"
+        p.write_text(f"# Auto {n}\n", encoding="utf-8")
+        os.utime(p, (1_700_000_100 + n, 1_700_000_100 + n))
+    for n in range(2):
+        p = mother / f"mother-{n}.md"
+        p.write_text(f"# Mother {n}\n", encoding="utf-8")
+        os.utime(p, (1_700_000_200 + n, 1_700_000_200 + n))
+
+    os.utime(receipts, (1_700_001_000, 1_700_001_000))
+    os.utime(auto, (1_700_001_100, 1_700_001_100))
+    os.utime(mother, (1_700_001_200, 1_700_001_200))
+
+    names = lv._newest_receipt_names(receipts)
+    assert len(names) == 8
+    assert {n for n in names if "/" not in n} == {f"flat-{n}.md" for n in range(3)}
+    assert {n for n in names if n.startswith("auto/")} == {f"auto/auto-{n}.md" for n in range(3)}
+    assert {n for n in names if n.startswith("mother/")} == {f"mother/mother-{n}.md" for n in range(2)}
+
+    items = lv._collect_receipt_items(with_bodies=False)
+    assert {i.title for i in items} == {
+        "Flat 0", "Flat 1", "Flat 2",
+        "Auto 0", "Auto 1", "Auto 2",
+        "Mother 0", "Mother 1",
+    }
+
+    lv._receipt_dir_cache.clear()
+    for n in range(50):
+        p = _write_receipt(tmp_path, "Hermes", f"cap-flat-{n:02d}.md", body=f"# Cap Flat {n}\n")
+        os.utime(p, (1_700_010_000 + n, 1_700_010_000 + n))
+        p = auto / f"cap-auto-{n:02d}.md"
+        p.write_text(f"# Cap Auto {n}\n", encoding="utf-8")
+        os.utime(p, (1_700_020_000 + n, 1_700_020_000 + n))
+    os.utime(receipts, (1_700_021_000, 1_700_021_000))
+    os.utime(auto, (1_700_021_100, 1_700_021_100))
+    capped = lv._newest_receipt_names(receipts)
+    assert sum(1 for n in capped if "/" not in n) == lv._MAX_RECEIPTS_FLAT
+    assert sum(1 for n in capped if n.startswith("auto/")) == lv._MAX_RECEIPTS_PER_SUBDIR
+    assert "cap-flat-49.md" in capped and "cap-flat-09.md" not in capped
+    assert "auto/cap-auto-49.md" in capped and "auto/cap-auto-09.md" not in capped
+
+    cached = lv._newest_receipt_names(receipts)
+    assert cached == capped
+    new_auto = auto / "new-auto.md"
+    new_auto.write_text("# New Auto\n", encoding="utf-8")
+    os.utime(new_auto, (1_700_030_000, 1_700_030_000))
+    os.utime(auto, (1_700_030_100, 1_700_030_100))
+    os.utime(receipts, (1_700_021_000, 1_700_021_000))
+    refreshed = lv._newest_receipt_names(receipts)
+    assert "auto/new-auto.md" in refreshed
+
+
 def test_deliverable_adapter_lists_markdown(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="Build X")
