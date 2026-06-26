@@ -9,6 +9,7 @@ engine works on sqlite3.Row objects as well as dataclasses.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -1142,3 +1143,90 @@ class TestOrphanedWorktree:
         )
         diags = kd.compute_task_diagnostics(task, [], [], now=now)
         assert all(d.kind != "orphaned_worktree" for d in diags)
+
+
+def _run_git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc.stdout.strip()
+
+
+def _init_repo_with_stranded_root_branch(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-b", "main")
+    _run_git(repo, "config", "user.email", "test@example.invalid")
+    _run_git(repo, "config", "user.name", "Test User")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _run_git(repo, "add", "README.md")
+    _run_git(repo, "commit", "-m", "base")
+    _run_git(repo, "checkout", "-b", "kanban/t_root")
+    (repo / "work.txt").write_text("recover me\n", encoding="utf-8")
+    _run_git(repo, "add", "work.txt")
+    _run_git(repo, "commit", "-m", "root work")
+    head_sha = _run_git(repo, "rev-parse", "HEAD")
+    return repo, head_sha
+
+
+def _make_blocked_decompose_root(conn, repo: Path, *, status: str = "blocked") -> str:
+    root = kb.create_task(
+        conn,
+        title="decompose root",
+        assignee="coder",
+        workspace_kind="dir",
+        workspace_path=str(repo),
+    )
+    conn.execute(
+        "UPDATE tasks SET status = ?, branch_name = ? WHERE id = ?",
+        (status, "kanban/t_root", root),
+    )
+    kb._append_event(conn, root, "decomposed", {"children": ["t_child"]})
+    conn.commit()
+    return root
+
+
+def test_stranded_decompose_root_branch_reports_unmerged_head_sha(kanban_home, tmp_path):
+    repo, head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    with kb.connect() as conn:
+        root = _make_blocked_decompose_root(conn, repo)
+
+        out = kd.find_stranded_decompose_root_branches(conn, repo_root=repo)
+
+    assert root in out
+    diag = out[root][0]
+    assert diag.kind == "stranded_decompose_root_branch"
+    assert diag.data["branch_name"] == "kanban/t_root"
+    assert diag.data["head_sha"] == head_sha
+    assert head_sha in diag.detail
+    assert "git cherry-pick" in diag.detail
+    assert "git cherry-pick" in diag.data["recovery_hint"]
+
+
+def test_stranded_decompose_root_branch_silent_when_head_reachable_from_main(
+    kanban_home, tmp_path,
+):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    _run_git(repo, "checkout", "main")
+    _run_git(repo, "merge", "--ff-only", "kanban/t_root")
+    with kb.connect() as conn:
+        root = _make_blocked_decompose_root(conn, repo)
+
+        out = kd.find_stranded_decompose_root_branches(conn, repo_root=repo)
+
+    assert root not in out
+
+
+def test_stranded_decompose_root_branch_silent_for_running_root(kanban_home, tmp_path):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    with kb.connect() as conn:
+        root = _make_blocked_decompose_root(conn, repo, status="running")
+
+        out = kd.find_stranded_decompose_root_branches(conn, repo_root=repo)
+
+    assert root not in out

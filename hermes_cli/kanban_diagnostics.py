@@ -30,6 +30,7 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import json
 import re
@@ -1481,6 +1482,7 @@ DIAGNOSTIC_KINDS = (
     "block_unblock_cycling",
     "stranded_in_ready",
     "descendants_blocked_by_stuck_parent",
+    "stranded_decompose_root_branch",
     "orphaned_worktree",
 )
 
@@ -1626,6 +1628,124 @@ def find_descendants_blocked_by_stuck_parent(
                 "max_block_age_hours": round(info["max_age"], 1),
             },
         )]
+    return out
+
+
+def find_stranded_decompose_root_branches(
+    conn,
+    *,
+    repo_root: Optional[str | Path] = None,
+    main_ref: str = "main",
+) -> dict[str, list[Diagnostic]]:
+    """Flag blocked/gave_up decompose roots whose shared root branch is unmerged.
+
+    Decompose children share the root worktree branch (``tasks.branch_name`` on
+    the decompose root). If integration genuinely fails, the root task can be
+    blocked while that branch still contains recoverable commits not reachable
+    from ``main``. This read-only board-level pass surfaces the branch and head
+    SHA before manual branch deletion or GC can make recovery harder.
+    """
+    from hermes_cli import kanban_worktrees as _kwt  # lazy: avoid import cycle
+
+    def _resolve_repo(path_value: Optional[str]) -> Optional[Path]:
+        if repo_root is not None:
+            root = Path(repo_root)
+            return root if root.exists() else None
+        if path_value:
+            root = _kwt.repo_root_for(path_value)
+            if root is not None:
+                return root
+        return _kwt.repo_root_for(Path.cwd())
+
+    def _branch_head(root: Path, branch_name: str) -> Optional[str]:
+        try:
+            return _kwt._git(
+                root,
+                "rev-parse",
+                "--verify",
+                f"{branch_name}^{{commit}}",
+            ).strip()
+        except Exception:
+            return None
+
+    def _is_ancestor(root: Path, ancestor_sha: str, descendant_ref: str) -> Optional[bool]:
+        try:
+            descendant_sha = _kwt._git(
+                root,
+                "rev-parse",
+                "--verify",
+                f"{descendant_ref}^{{commit}}",
+            ).strip()
+        except Exception:
+            return None
+        try:
+            _kwt._git(root, "merge-base", "--is-ancestor", ancestor_sha, descendant_sha)
+            return True
+        except Exception:
+            return False
+
+    out: dict[str, list[Diagnostic]] = {}
+    rows = conn.execute(
+        "SELECT id, title, status, branch_name, workspace_path "
+        "FROM tasks "
+        "WHERE status IN ('blocked', 'gave_up') "
+        "  AND branch_name IS NOT NULL AND branch_name != ''"
+    ).fetchall()
+    for row in rows:
+        task_id = row["id"]
+        try:
+            if not _kwt._is_decompose_root(conn, task_id):
+                continue
+        except Exception:
+            continue
+        branch_name = str(row["branch_name"])
+        root = _resolve_repo(row["workspace_path"])
+        if root is None:
+            continue
+        head_sha = _branch_head(root, branch_name)
+        if not head_sha:
+            continue
+        merged = _is_ancestor(root, head_sha, main_ref)
+        if merged is not False:
+            continue
+        out[task_id] = [
+            Diagnostic(
+                kind="stranded_decompose_root_branch",
+                severity="critical",
+                title=(
+                    f"Decompose root branch {branch_name} has unmerged work "
+                    f"at {head_sha[:12]}"
+                ),
+                detail=(
+                    f"Decompose root {task_id} is {row['status']} but shared "
+                    f"branch {branch_name} points at {head_sha}, which is not "
+                    f"reachable from {main_ref}. Recover the work before "
+                    f"deleting the branch or running git gc; inspect the branch "
+                    f"or run git cherry-pick {head_sha} onto main."
+                ),
+                actions=[
+                    DiagnosticAction(
+                        kind="cli_hint",
+                        label=(
+                            f"Inspect {branch_name} and recover with "
+                            f"git cherry-pick {head_sha}"
+                        ),
+                        payload={
+                            "command": f"git cherry-pick {head_sha}",
+                            "branch": branch_name,
+                            "head_sha": head_sha,
+                        },
+                        suggested=True,
+                    )
+                ],
+                data={
+                    "branch_name": branch_name,
+                    "head_sha": head_sha,
+                    "main_ref": main_ref,
+                    "recovery_hint": f"git cherry-pick {head_sha}",
+                },
+            )
+        ]
     return out
 
 
